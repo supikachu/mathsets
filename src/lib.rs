@@ -5,6 +5,7 @@ pub mod handlers;
 pub mod models;
 
 use axum::{
+    middleware,
     routing::{delete, get, post, put},
     Router,
 };
@@ -23,44 +24,43 @@ pub struct AppState {
 
 /// 构建应用 Router，用于 main 启动和集成测试
 pub fn build_app(state: AppState) -> Router {
-    Router::new()
-        // 健康检查
-        .route("/health", get(handlers::health::health_check))
-        // API v1 认证相关
-        .route("/api/v1/auth/register", post(handlers::auth::register))
-        .route("/api/v1/auth/login", post(handlers::auth::login))
+    // ─── 需要 JWT 认证的保护路由 ───
+    let protected_routes = Router::new()
         // 知识点树
-        .route("/api/v1/knowledge-points", get(handlers::knowledge_points::list_knowledge_points))
-        .route("/api/v1/knowledge-points", post(handlers::knowledge_points::create_knowledge_point))
+        .route("/knowledge-points", get(handlers::knowledge_points::list_knowledge_points))
+        .route("/knowledge-points", post(handlers::knowledge_points::create_knowledge_point))
         .route(
-            "/api/v1/knowledge-points/{id}",
+            "/knowledge-points/{id}",
             put(handlers::knowledge_points::update_knowledge_point),
         )
         .route(
-            "/api/v1/knowledge-points/{id}",
+            "/knowledge-points/{id}",
             delete(handlers::knowledge_points::delete_knowledge_point),
         )
         // 题目 CRUD
-        .route("/api/v1/questions", get(handlers::questions::list_questions))
-        .route("/api/v1/questions", post(handlers::questions::create_question))
-        .route("/api/v1/questions/{id}", get(handlers::questions::get_question))
-        .route(
-            "/api/v1/questions/{id}",
-            put(handlers::questions::update_question),
-        )
-        .route(
-            "/api/v1/questions/{id}",
-            delete(handlers::questions::delete_question),
-        )
+        .route("/questions", get(handlers::questions::list_questions))
+        .route("/questions", post(handlers::questions::create_question))
+        .route("/questions/{id}", get(handlers::questions::get_question))
+        .route("/questions/{id}", put(handlers::questions::update_question))
+        .route("/questions/{id}", delete(handlers::questions::delete_question))
         // 审核
-        .route(
-            "/api/v1/questions/{id}/submit",
-            post(handlers::questions::submit_question),
-        )
-        .route(
-            "/api/v1/questions/{id}/review",
-            post(handlers::questions::review_question),
-        )
+        .route("/questions/{id}/submit", post(handlers::questions::submit_question))
+        .route("/questions/{id}/review", post(handlers::questions::review_question))
+        // 统一应用认证中间件
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::middleware::require_auth,
+        ));
+
+    // ─── 公开路由 + 保护路由合并 ───
+    Router::new()
+        // 健康检查（无需认证）
+        .route("/health", get(handlers::health::health_check))
+        // API v1 认证模块（无需认证）
+        .route("/api/v1/auth/register", post(handlers::auth::register))
+        .route("/api/v1/auth/login", post(handlers::auth::login))
+        // API v1 保护模块（需要 JWT）
+        .nest("/api/v1", protected_routes)
         // 全局中间件
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())

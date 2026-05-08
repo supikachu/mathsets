@@ -1,11 +1,12 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
     http::StatusCode,
     Json,
 };
 use serde_json::json;
 use uuid::Uuid;
 
+use crate::auth::middleware::AuthUser;
 use crate::models::question::{
     CreateQuestionRequest, KnowledgePointSummary, Question, QuestionDetail, QuestionQuery,
     QuestionStatus, QuestionSummary, ReviewActionRequest, SubmitReviewRequest,
@@ -18,7 +19,12 @@ use crate::AppState;
 // ---------------------------------------------------------------------------
 
 /// 保存一个版本快照
-async fn save_version(pool: &sqlx::PgPool, question_id: Uuid, version: i32) -> Result<(), sqlx::Error> {
+async fn save_version(
+    pool: &sqlx::PgPool,
+    question_id: Uuid,
+    version: i32,
+    created_by: Option<Uuid>,
+) -> Result<(), sqlx::Error> {
     let question = sqlx::query_as::<_, Question>(
         "SELECT * FROM questions WHERE id = $1",
     )
@@ -38,7 +44,7 @@ async fn save_version(pool: &sqlx::PgPool, question_id: Uuid, version: i32) -> R
     .bind(question_id)
     .bind(version)
     .bind(&snapshot)
-    .bind(question.creator_id)
+    .bind(created_by)
     .bind(chrono::Utc::now())
     .execute(pool)
     .await?;
@@ -204,11 +210,12 @@ pub async fn list_questions(
 /// POST /api/v1/questions — 创建草稿
 pub async fn create_question(
     State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
     Json(req): Json<CreateQuestionRequest>,
 ) -> Result<(StatusCode, Json<QuestionDetail>), (StatusCode, Json<serde_json::Value>)> {
     let id = Uuid::new_v4();
     let now = chrono::Utc::now();
-    // TODO: 接入 JWT 中间件后从 token 中获取 creator_id
+    let creator_id = auth_user.id;
     let version = 1;
 
     sqlx::query(
@@ -232,7 +239,7 @@ pub async fn create_question(
     .bind(&req.grade)
     .bind(&req.semester)
     .bind(&req.source)
-    .bind(None::<Uuid>) // creator_id (TODO: JWT 中间件)
+    .bind(creator_id)
     .bind(now)
     .bind(now)
     .bind(version)
@@ -256,7 +263,7 @@ pub async fn create_question(
     }
 
     // 保存初始版本
-    save_version(&state.pool, id, version).await.map_err(|e| {
+    save_version(&state.pool, id, version, Some(creator_id)).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("保存版本失败: {}", e)})),
@@ -304,6 +311,7 @@ pub async fn get_question(
 /// PUT /api/v1/questions/:id — 更新题目（仅草稿/驳回状态可编辑）
 pub async fn update_question(
     State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateQuestionRequest>,
 ) -> Result<Json<QuestionDetail>, (StatusCode, Json<serde_json::Value>)> {
@@ -344,9 +352,10 @@ pub async fn update_question(
             semester = COALESCE($9, semester),
             source = COALESCE($10, source),
             status = 'draft'::question_status,
-            updated_at = $11,
-            version = $12
-        WHERE id = $13
+            updated_by = $11,
+            updated_at = $12,
+            version = $13
+        WHERE id = $14
         "#,
     )
     .bind(&req.stem)
@@ -359,6 +368,7 @@ pub async fn update_question(
     .bind(&req.grade)
     .bind(&req.semester)
     .bind(&req.source)
+    .bind(auth_user.id) // updated_by
     .bind(now)
     .bind(new_version)
     .bind(id)
@@ -382,7 +392,7 @@ pub async fn update_question(
     }
 
     // 保存版本
-    save_version(&state.pool, id, new_version).await.map_err(|e| {
+    save_version(&state.pool, id, new_version, Some(auth_user.id)).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("保存版本失败: {}", e)})),
@@ -452,6 +462,7 @@ pub async fn delete_question(
 /// POST /api/v1/questions/:id/submit — 提交审核
 pub async fn submit_question(
     State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
     Path(id): Path<Uuid>,
     Json(_req): Json<SubmitReviewRequest>,
 ) -> Result<Json<QuestionDetail>, (StatusCode, Json<serde_json::Value>)> {
@@ -506,6 +517,7 @@ pub async fn submit_question(
 /// POST /api/v1/questions/:id/review — 审核通过/驳回
 pub async fn review_question(
     State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
     Path(id): Path<Uuid>,
     Json(req): Json<ReviewActionRequest>,
 ) -> Result<Json<QuestionDetail>, (StatusCode, Json<serde_json::Value>)> {
@@ -566,7 +578,7 @@ pub async fn review_question(
     )
     .bind(review_id)
     .bind(id)
-    .bind(None::<Uuid>) // reviewer_id (TODO: JWT 中间件)
+    .bind(auth_user.id) // reviewer_id
     .bind(&req.action)
     .bind(&req.comment)
     .bind(chrono::Utc::now())

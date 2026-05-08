@@ -53,6 +53,37 @@ async fn request(
     (status, json)
 }
 
+async fn request_auth(
+    app: &mut axum::Router,
+    method: Method,
+    uri: &str,
+    body: Option<Value>,
+    token: &str,
+) -> (StatusCode, Value) {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("Authorization", format!("Bearer {}", token));
+    if let Some(ref b) = body {
+        builder = builder.header("Content-Type", "application/json");
+    }
+    let req = builder
+        .body(match body {
+            Some(b) => Body::from(serde_json::to_vec(&b).unwrap()),
+            None => Body::empty(),
+        })
+        .unwrap();
+
+    let response = app.oneshot(req).await.unwrap();
+    let status = response.status();
+    let body_bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: Value =
+        serde_json::from_slice(&body_bytes).unwrap_or(json!({"error": "parse failed"}));
+    (status, json)
+}
+
 async fn get_json(app: &mut axum::Router, uri: &str) -> (StatusCode, Value) {
     request(app, Method::GET, uri, None).await
 }
@@ -67,6 +98,59 @@ async fn put_json(app: &mut axum::Router, uri: &str, body: Value) -> (StatusCode
 
 async fn delete_req(app: &mut axum::Router, uri: &str) -> (StatusCode, Value) {
     request(app, Method::DELETE, uri, None).await
+}
+
+async fn get_auth(app: &mut axum::Router, uri: &str, token: &str) -> (StatusCode, Value) {
+    request_auth(app, Method::GET, uri, None, token).await
+}
+
+async fn post_auth(
+    app: &mut axum::Router,
+    uri: &str,
+    body: Value,
+    token: &str,
+) -> (StatusCode, Value) {
+    request_auth(app, Method::POST, uri, Some(body), token).await
+}
+
+async fn put_auth(
+    app: &mut axum::Router,
+    uri: &str,
+    body: Value,
+    token: &str,
+) -> (StatusCode, Value) {
+    request_auth(app, Method::PUT, uri, Some(body), token).await
+}
+
+async fn delete_auth(app: &mut axum::Router, uri: &str, token: &str) -> (StatusCode, Value) {
+    request_auth(app, Method::DELETE, uri, None, token).await
+}
+
+/// 注册测试用户并返回 token
+async fn register_and_login(app: &mut axum::Router) -> String {
+    let username = format!("test_{}", Uuid::new_v4().to_string().split('-').next().unwrap());
+    let email = format!("{}@test.com", username);
+
+    let (_, _) = post_json(
+        app,
+        "/api/v1/auth/register",
+        json!({
+            "username": username,
+            "email": email,
+            "password": "test123",
+            "display_name": "测试用户"
+        }),
+    )
+    .await;
+
+    let (_, body) = post_json(
+        app,
+        "/api/v1/auth/login",
+        json!({ "username": username, "password": "test123" }),
+    )
+    .await;
+
+    body["token"].as_str().unwrap().to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -186,18 +270,20 @@ async fn test_knowledge_points_crud() {
         Some(app) => app,
         None => return,
     };
+    let token = register_and_login(&mut app).await;
 
     // 获取初始树（可能已有其他测试残留的节点）
-    let (status, body) = get_json(&mut app, "/api/v1/knowledge-points").await;
+    let (status, body) = get_auth(&mut app, "/api/v1/knowledge-points", &token).await;
     assert_eq!(status, StatusCode::OK);
     let tree = body.as_array().unwrap();
     let initial_count = tree.len();
 
     // 创建根节点
-    let (status, body) = post_json(
+    let (status, body) = post_auth(
         &mut app,
         "/api/v1/knowledge-points",
         json!({ "name": "数与代数", "sort_order": 1 }),
+        &token,
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
@@ -205,26 +291,28 @@ async fn test_knowledge_points_crud() {
     assert_eq!(body["name"], "数与代数");
 
     // 创建子节点
-    let (status, body) = post_json(
+    let (status, body) = post_auth(
         &mut app,
         "/api/v1/knowledge-points",
         json!({ "parent_id": kp_id, "name": "有理数", "sort_order": 1 }),
+        &token,
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
     let child_id = body["id"].as_str().unwrap().to_string();
 
     // 再创建一个根节点
-    let (status, body) = post_json(
+    let (status, body) = post_auth(
         &mut app,
         "/api/v1/knowledge-points",
         json!({ "name": "图形与几何", "sort_order": 2 }),
+        &token,
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
 
     // 获取树 — 应包含初始节点 + 两个新根节点
-    let (status, body) = get_json(&mut app, "/api/v1/knowledge-points").await;
+    let (status, body) = get_auth(&mut app, "/api/v1/knowledge-points", &token).await;
     assert_eq!(status, StatusCode::OK);
     let tree = body.as_array().unwrap();
     assert_eq!(tree.len(), initial_count + 2, "新增了两个根节点");
@@ -234,10 +322,11 @@ async fn test_knowledge_points_crud() {
     assert_eq!(shu["children"][0]["name"], "有理数");
 
     // 更新子节点名称
-    let (status, body) = put_json(
+    let (status, body) = put_auth(
         &mut app,
         &format!("/api/v1/knowledge-points/{}", child_id),
         json!({ "name": "有理数（更新）" }),
+        &token,
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -245,18 +334,19 @@ async fn test_knowledge_points_crud() {
 
     // 删除子节点
     let (status, _) =
-        delete_req(&mut app, &format!("/api/v1/knowledge-points/{}", child_id)).await;
+        delete_auth(&mut app, &format!("/api/v1/knowledge-points/{}", child_id), &token).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
     // 删除根节点（不能有子节点时才能删，现在有 0 个子节点，可以删）
     let (status, _) =
-        delete_req(&mut app, &format!("/api/v1/knowledge-points/{}", kp_id)).await;
+        delete_auth(&mut app, &format!("/api/v1/knowledge-points/{}", kp_id), &token).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
     // 删除不存在的节点
-    let (status, _) = delete_req(
+    let (status, _) = delete_auth(
         &mut app,
         &format!("/api/v1/knowledge-points/{}", Uuid::new_v4()),
+        &token,
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -272,18 +362,20 @@ async fn test_question_full_lifecycle() {
         Some(app) => app,
         None => return,
     };
+    let token = register_and_login(&mut app).await;
 
     // 先建一个知识点用于关联
-    let (_, kp) = post_json(
+    let (_, kp) = post_auth(
         &mut app,
         "/api/v1/knowledge-points",
         json!({ "name": "测试知识点", "sort_order": 1 }),
+        &token,
     )
     .await;
     let kp_id = kp["id"].as_str().unwrap();
 
     // 1. 创建题目（选择题，草稿状态）
-    let (status, body) = post_json(
+    let (status, body) = post_auth(
         &mut app,
         "/api/v1/questions",
         json!({
@@ -303,6 +395,7 @@ async fn test_question_full_lifecycle() {
             "semester": "上学期",
             "knowledge_point_ids": [kp_id]
         }),
+        &token,
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "创建题目失败: {:?}", body);
@@ -316,16 +409,17 @@ async fn test_question_full_lifecycle() {
     let question_id = body["id"].as_str().unwrap().to_string();
 
     // 2. 获取题目详情
-    let (status, body) = get_json(&mut app, &format!("/api/v1/questions/{}", question_id)).await;
+    let (status, body) = get_auth(&mut app, &format!("/api/v1/questions/{}", question_id), &token).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["stem"], "1 + 1 = ?");
     assert_eq!(body["status"], "draft");
 
     // 3. 编辑题目
-    let (status, body) = put_json(
+    let (status, body) = put_auth(
         &mut app,
         &format!("/api/v1/questions/{}", question_id),
         json!({ "stem": "1 + 1 = ? (更新版)", "difficulty": "medium" }),
+        &token,
     )
     .await;
     assert_eq!(status, StatusCode::OK, "编辑题目失败: {:?}", body);
@@ -334,36 +428,39 @@ async fn test_question_full_lifecycle() {
     assert_eq!(body["version"], 2); // 版本递增
 
     // 4. 提交审核
-    let (status, body) = post_json(
+    let (status, body) = post_auth(
         &mut app,
         &format!("/api/v1/questions/{}/submit", question_id),
         json!({}),
+        &token,
     )
     .await;
     assert_eq!(status, StatusCode::OK, "提交审核失败: {:?}", body);
     assert_eq!(body["status"], "pending");
 
     // 5. 审核通过
-    let (status, body) = post_json(
+    let (status, body) = post_auth(
         &mut app,
         &format!("/api/v1/questions/{}/review", question_id),
         json!({ "action": "approved", "comment": "审核通过" }),
+        &token,
     )
     .await;
     assert_eq!(status, StatusCode::OK, "审核通过失败: {:?}", body);
     assert_eq!(body["status"], "published");
 
     // 6. 已发布题目不可编辑
-    let (status, _) = put_json(
+    let (status, _) = put_auth(
         &mut app,
         &format!("/api/v1/questions/{}", question_id),
         json!({ "stem": "试图修改" }),
+        &token,
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
 
     // 7. 列选题目列表
-    let (status, body) = get_json(&mut app, "/api/v1/questions?status=published").await;
+    let (status, body) = get_auth(&mut app, "/api/v1/questions?status=published", &token).await;
     assert_eq!(status, StatusCode::OK);
     let list = body.as_array().unwrap();
     assert!(!list.is_empty());
@@ -380,9 +477,10 @@ async fn test_question_search() {
         Some(app) => app,
         None => return,
     };
+    let token = register_and_login(&mut app).await;
 
-    // 创建两道不同题型的题目
-    post_json(
+    // 创建三道不同题型的题目
+    post_auth(
         &mut app,
         "/api/v1/questions",
         json!({
@@ -392,10 +490,11 @@ async fn test_question_search() {
             "correct_answer": ["C"],
             "options": [{"label":"A","content":"3"},{"label":"B","content":"4"},{"label":"C","content":"4"},{"label":"D","content":"5"}]
         }),
+        &token,
     )
     .await;
 
-    post_json(
+    post_auth(
         &mut app,
         "/api/v1/questions",
         json!({
@@ -404,10 +503,11 @@ async fn test_question_search() {
             "difficulty": "hard",
             "correct_answer": [{"position":1, "answer":"6"}]
         }),
+        &token,
     )
     .await;
 
-    post_json(
+    post_auth(
         &mut app,
         "/api/v1/questions",
         json!({
@@ -416,25 +516,26 @@ async fn test_question_search() {
             "difficulty": "medium",
             "correct_answer": ["证明略"]
         }),
+        &token,
     )
     .await;
 
     // 按题型过滤
-    let (status, body) = get_json(&mut app, "/api/v1/questions?question_type=choice").await;
+    let (status, body) = get_auth(&mut app, "/api/v1/questions?question_type=choice", &token).await;
     assert_eq!(status, StatusCode::OK);
     let list = body.as_array().unwrap();
     assert!(!list.is_empty(), "应至少有一道选择题");
     assert_eq!(list[0]["question_type"], "choice");
 
     // 按难度过滤
-    let (status, body) = get_json(&mut app, "/api/v1/questions?difficulty=hard").await;
+    let (status, body) = get_auth(&mut app, "/api/v1/questions?difficulty=hard", &token).await;
     assert_eq!(status, StatusCode::OK);
     let list = body.as_array().unwrap();
     assert!(!list.is_empty(), "应至少有一道困难题");
     assert_eq!(list[0]["difficulty"], "hard");
 
     // 关键词搜索
-    let (status, body) = get_json(&mut app, "/api/v1/questions?keyword=证明").await;
+    let (status, body) = get_auth(&mut app, "/api/v1/questions?keyword=证明", &token).await;
     assert_eq!(status, StatusCode::OK);
     let list = body.as_array().unwrap();
     assert!(!list.is_empty(), "关键词搜索应有结果");
@@ -451,9 +552,10 @@ async fn test_question_delete_draft_only() {
         Some(app) => app,
         None => return,
     };
+    let token = register_and_login(&mut app).await;
 
     // 创建题目
-    let (_, body) = post_json(
+    let (_, body) = post_auth(
         &mut app,
         "/api/v1/questions",
         json!({
@@ -462,20 +564,21 @@ async fn test_question_delete_draft_only() {
             "difficulty": "easy",
             "correct_answer": [true]
         }),
+        &token,
     )
     .await;
     let qid = body["id"].as_str().unwrap().to_string();
 
     // 提交审核
-    post_json(&mut app, &format!("/api/v1/questions/{}/submit", qid), json!({})).await;
+    post_auth(&mut app, &format!("/api/v1/questions/{}/submit", qid), json!({}), &token).await;
 
     // 审核状态不可删除
-    let (status, _) = delete_req(&mut app, &format!("/api/v1/questions/{}", qid)).await;
+    let (status, _) = delete_auth(&mut app, &format!("/api/v1/questions/{}", qid), &token).await;
     assert_eq!(status, StatusCode::CONFLICT);
 
     // 不存在的题目
     let (status, _) =
-        delete_req(&mut app, &format!("/api/v1/questions/{}", Uuid::new_v4())).await;
+        delete_auth(&mut app, &format!("/api/v1/questions/{}", Uuid::new_v4()), &token).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -485,9 +588,10 @@ async fn test_question_review_reject() {
         Some(app) => app,
         None => return,
     };
+    let token = register_and_login(&mut app).await;
 
     // 创建 + 提交
-    let (_, body) = post_json(
+    let (_, body) = post_auth(
         &mut app,
         "/api/v1/questions",
         json!({
@@ -497,26 +601,29 @@ async fn test_question_review_reject() {
             "correct_answer": ["A"],
             "options": [{"label":"A","content":"OK"},{"label":"B","content":"NO"}]
         }),
+        &token,
     )
     .await;
     let qid = body["id"].as_str().unwrap().to_string();
-    post_json(&mut app, &format!("/api/v1/questions/{}/submit", qid), json!({})).await;
+    post_auth(&mut app, &format!("/api/v1/questions/{}/submit", qid), json!({}), &token).await;
 
     // 审核驳回
-    let (status, body) = post_json(
+    let (status, body) = post_auth(
         &mut app,
         &format!("/api/v1/questions/{}/review", qid),
         json!({ "action": "rejected", "comment": "题干不够清晰" }),
+        &token,
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["status"], "rejected");
 
     // 驳回后可重新编辑
-    let (status, body) = put_json(
+    let (status, body) = put_auth(
         &mut app,
         &format!("/api/v1/questions/{}", qid),
         json!({ "stem": "驳回测试题（已修改）" }),
+        &token,
     )
     .await;
     assert_eq!(status, StatusCode::OK, "驳回后应可编辑: {:?}", body);
