@@ -1,0 +1,51 @@
+use std::net::SocketAddr;
+use tracing_subscriber::EnvFilter;
+
+use mathset::build_app;
+use mathset::config::AppConfig;
+use mathset::db;
+
+#[tokio::main]
+async fn main() {
+    // 加载 .env 文件（如果存在）
+    dotenvy::dotenv().ok();
+
+    // 初始化日志 (tracing)
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "mathset=debug,tower_http=debug".into()),
+        )
+        .init();
+
+    // 加载配置
+    let config = AppConfig::from_env();
+
+    // 连接数据库
+    let pool = db::create_pool(&config.database_url).await;
+
+    // 运行迁移
+    db::run_migrations(&pool).await;
+
+    tracing::info!("数据库迁移完成");
+
+    // 构建共享状态
+    let state = mathset::AppState {
+        pool,
+        jwt_secret: config.jwt_secret.clone(),
+        jwt_expiry_hours: config.jwt_expiry_hours,
+    };
+
+    // 构建路由
+    let app = build_app(state);
+
+    // 启动服务器
+    let addr = SocketAddr::new(
+        config.host.parse().expect("HOST 格式错误"),
+        config.port,
+    );
+    tracing::info!("🚀 服务启动于 http://{}", addr);
+
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    axum::serve(listener, app).await.unwrap();
+}
