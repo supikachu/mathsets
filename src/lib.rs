@@ -5,7 +5,7 @@ pub mod handlers;
 pub mod models;
 
 use axum::{
-    routing::{get, post},
+    routing::{delete, get, post, put},
     Router,
 };
 use tower_http::cors::CorsLayer;
@@ -29,6 +29,38 @@ pub fn build_app(state: AppState) -> Router {
         // API v1 认证相关
         .route("/api/v1/auth/register", post(handlers::auth::register))
         .route("/api/v1/auth/login", post(handlers::auth::login))
+        // 知识点树
+        .route("/api/v1/knowledge-points", get(handlers::knowledge_points::list_knowledge_points))
+        .route("/api/v1/knowledge-points", post(handlers::knowledge_points::create_knowledge_point))
+        .route(
+            "/api/v1/knowledge-points/{id}",
+            put(handlers::knowledge_points::update_knowledge_point),
+        )
+        .route(
+            "/api/v1/knowledge-points/{id}",
+            delete(handlers::knowledge_points::delete_knowledge_point),
+        )
+        // 题目 CRUD
+        .route("/api/v1/questions", get(handlers::questions::list_questions))
+        .route("/api/v1/questions", post(handlers::questions::create_question))
+        .route("/api/v1/questions/{id}", get(handlers::questions::get_question))
+        .route(
+            "/api/v1/questions/{id}",
+            put(handlers::questions::update_question),
+        )
+        .route(
+            "/api/v1/questions/{id}",
+            delete(handlers::questions::delete_question),
+        )
+        // 审核
+        .route(
+            "/api/v1/questions/{id}/submit",
+            post(handlers::questions::submit_question),
+        )
+        .route(
+            "/api/v1/questions/{id}/review",
+            post(handlers::questions::review_question),
+        )
         // 全局中间件
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
