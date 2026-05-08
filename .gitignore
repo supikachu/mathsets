@@ -12,3 +12,6 @@
 # Environment
 .env
 .env.*
+
+# Temp SQL files
+.pg_reload.sql

@@ -55,7 +55,7 @@ pub async fn register(
     .bind(&req.email)
     .bind(&password_hash)
     .bind(&req.display_name)
-    .bind("teacher") // 默认角色为教师
+    .bind(crate::models::user::UserRole::Teacher) // 默认角色为教师
     .bind(true)
     .bind(now)
     .bind(now)
