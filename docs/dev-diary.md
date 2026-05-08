@@ -1,0 +1,172 @@
+# 开发日记
+
+> 项目：协同题库系统 (mathset)
+> 技术栈：Rust + Axum 0.8 + PostgreSQL 17 | Vue 3 + Element Plus + Tailwind CSS
+
+---
+
+## 2026-05-08（第一天）
+
+### 今日完成
+
+#### 1. 项目初始化
+- 创建 Rust 项目骨架，选定 **Axum 0.8** 作为 Web 框架
+- 搭建模块结构：`auth/` `handlers/` `models/` `config.rs` `db.rs`
+- 配置 Cargo 依赖：axum / tokio / serde / sqlx / jsonwebtoken / bcrypt 等
+
+#### 2. 业务需求文档
+- 输出 `docs/requirements.md`，覆盖：
+  - 用户角色体系（管理员 / 教研组长 / 教师 / 浏览者）
+  - 题目模型（4 种题型特有结构）
+  - 5 种状态流转（草稿 → 待审核 → 已发布/驳回 → 已停用）
+  - 知识点分类树、组卷功能、搜索与检索
+
+#### 3. 数据库搭建
+- 安装 PostgreSQL 17.9 本地服务
+- 配置 `pg_hba.conf` 为 trust 认证
+- 创建数据库 `mathset`
+- 编写 SQLx 迁移：`users` / `groups` / `group_members` / `questions` / `knowledge_points` 等 8 张表
+
+#### 4. 后端 API 实现
+- `POST /api/v1/auth/register` — 教师注册
+- `POST /api/v1/auth/login` — 登录返回 JWT
+- `GET/POST /api/v1/knowledge-points` — 知识点树 CRUD
+- `PUT/DELETE /api/v1/knowledge-points/:id` — 知识点节点管理
+- `GET/POST /api/v1/questions` — 题目列表（支持多维度搜索过滤）+ 创建
+- `GET/PUT/DELETE /api/v1/questions/:id` — 题目详情/编辑/删除
+- `POST /api/v1/questions/:id/submit` — 提交审核
+- `POST /api/v1/questions/:id/review` — 审核通过/驳回
+
+#### 5. JWT 认证中间件
+- `src/auth/middleware.rs` — `require_auth` 中间件
+- 提取 `Authorization: Bearer <token>` → 验证 → 注入 `AuthUser`
+- 路由分组：公开（health/auth）和保护（questions/knowledge-points）
+- Handler 中使用 `Extension<AuthUser>` 获取当前用户
+
+#### 6. 测试
+- 13 项测试全部通过：
+  - JWT 单元测试 4 项（签发/验证/错误密钥/无效 token）
+  - 认证集成测试 3 项（注册/登录/字段缺失/不存在用户）
+  - 知识点集成测试 1 项（完整 CRUD + 树结构）
+  - 题目集成测试 4 项（完整生命周期/搜索/驳回/异常场景）
+  - 健康检查 1 项
+
+#### 7. 前端 UI/UX 设计
+- 输出 `docs/ui-ux-design.md`，包含：
+  - 8 个核心页面线框图（登录/注册/工作台/题目列表/题目编辑/题目详情/审核队列/知识点管理）
+  - 前端路由规划 + 权限守卫
+  - 14 个全局 UI 组件清单
+- 确认技术栈：Vue 3 + Vite + Element Plus + Tailwind CSS + Pinia + TipTap + KaTeX + Yjs
+
+### 技术债 / 遗留问题
+
+| 问题 | 优先级 | 说明 |
+|------|--------|------|
+| `list_questions` 存在 15 个编译器警告 | 🟡 中 | 动态 SQL 构建中的未使用变量，需重构为 `sqlx::QueryBuilder` |
+| 审核权限未校验 | 🔴 高 | 目前任何人都可以审核，需 JWT 角色判断 + 创建者回避 |
+| `creator_id` 外键临时允许 NULL | 🟡 中 | JWT 中间件已上线，后续可改回 NOT NULL |
+| `user_role` 未附加 `#[serde(rename_all = "lowercase")]` | 🟢 低 | 当前序列化为 "Teacher" 而非 "teacher" |
+
+### 项目结构总览
+
+```
+mathset/
+├── Cargo.toml
+├── .env
+├── .cargo/config.toml       ← PATH 持久化（MinGW + PostgreSQL）
+│
+├── docs/
+│   ├── requirements.md      ← 业务需求文档
+│   └── ui-ux-design.md      ← 前端 UI/UX 设计
+│
+├── migrations/              ← 8 张数据库迁移表
+│
+├── src/
+│   ├── main.rs              ← 启动入口
+│   ├── lib.rs               ← Router 构建 + AppState
+│   ├── config.rs            ← 环境变量配置
+│   ├── db.rs                ← 连接池 + SQLx 迁移
+│   │
+│   ├── auth/                ← 认证模块
+│   │   ├── mod.rs
+│   │   ├── jwt.rs           ← JWT 签发/验证 + 4 项单元测试
+│   │   └── middleware.rs    ← require_auth 中间件
+│   │
+│   ├── handlers/            ← API 处理器
+│   │   ├── mod.rs
+│   │   ├── health.rs
+│   │   ├── auth.rs
+│   │   ├── knowledge_points.rs
+│   │   └── questions.rs
+│   │
+│   └── models/              ← 数据模型
+│       ├── mod.rs
+│       ├── user.rs
+│       └── question.rs      ← 题目/知识点/审核 DTO
+│
+└── tests/
+    └── api.rs               ← 9 项集成测试
+```
+
+### 提交记录（6 次）
+
+```
+85df936 docs: 前端 UI/UX 设计 — 确认技术栈
+047935d docs: 前端 UI/UX 设计规划
+b62f165 feat: JWT 认证中间件 — 保护 API 并传递用户信息
+0aa6901 feat: 题目模块 — CRUD + 知识点树 + 审核状态机
+4248fb6 feat: 集成 PostgreSQL 数据库 & 修复注册流程类型问题
+f342827 feat: 初始化协同题库系统项目骨架
+```
+
+---
+
+## 2026-05-09（明日计划）
+
+### 任务一：修复技术债 🔧
+
+| 任务 | 预估 | 详情 |
+|------|------|------|
+| 重构 `list_questions` 动态查询 | 1h | 用 `sqlx::QueryBuilder` 替换字符串拼接，消除 15 个 warnings |
+| 修复 `list_questions` 的 `QuestionSummary` 缺失字段 | 0.5h | SELECT 漏掉了 `correct_answer` 等字段（虽然不返回但 `FromRow` 需要） |
+| `user_role` 添加 `#[serde(rename_all = "lowercase")]` | 5min | 与 QuestionType/Difficulty 保持一致 |
+
+### 任务二：后端教研组 API 👥
+
+| 任务 | 预估 | 详情 |
+|------|------|------|
+| 教研组 CRUD handler | 1.5h | `groups` 表的增删改查（创建/列表/详情/更新/删除） |
+| 成员管理 handler | 1h | `group_members` 的添加/移除/组长设置 |
+| 集成测试 | 1h | 组创建 → 添加成员 → 设置组长 → 列表查询 |
+
+### 任务三：审核权限 + 创建者回避 🔐
+
+| 任务 | 预估 | 详情 |
+|------|------|------|
+| `submit_question` 校验创建者 | 0.5h | 只能提交自己创建的题目 |
+| `review_question` 校验组长角色 | 0.5h | 仅 `groupleader` / `admin` 可审核 |
+| `review_question` 创建者回避 | 0.5h | 组长不能审核自己的题目 |
+| 更新测试 | 1h | 使用不同角色验证权限 |
+
+### 任务四（可选）：前端脚手架 🚀
+
+| 任务 | 预估 | 详情 |
+|------|------|------|
+| 初始化 Vue 3 + Vite 项目 | 0.5h | `pnpm create vue@latest` |
+| 安装并配置 Element Plus + Tailwind | 0.5h | 全局引入 + 按需加载 |
+| 配置 axios 拦截器 | 0.5h | 自动注入 Bearer token + 401 跳转 |
+| 实现登录页 | 2h | 表单 + 调用 API + 持久化 token + 跳转工作台 |
+
+### 优先级建议
+
+```
+高优先级（核心体验）:
+  审核权限校验 + 创建者回避
+  教研组 API
+
+中优先级（代码质量）:
+  重构 list_questions 消除 warnings
+
+低优先级（业务扩展）:
+  前端脚手架 + 登录页（取决于是否决定开始前端开发）
+```
