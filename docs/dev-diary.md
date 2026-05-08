@@ -121,7 +121,26 @@ f342827 feat: 初始化协同题库系统项目骨架
 
 ---
 
-## 2026-05-09（明日计划）
+## 2026-05-09（计划执行中 · 会话已保存）
+
+### 当前断点
+
+计划已批准，代码尚未改动。明天从以下位置继续：
+
+```
+P0 ── 审核权限校验 ──→ src/handlers/questions.rs
+  │                    submit_question / review_question
+  │
+  └── 教研组 API ──→ src/models/group.rs (新建)
+                     src/handlers/groups.rs (新建)
+                     src/lib.rs (注册路由)
+
+P1 ── 重构 list_questions ──→ src/handlers/questions.rs
+  │                           sqlx::QueryBuilder 替换字符串
+
+P2 ── Vue 3 前端脚手架 ──→ 项目根目录下新建前端目录
+                            pnpm create vue
+```
 
 ### 任务一：修复技术债 🔧
 
