@@ -121,26 +121,37 @@ f342827 feat: 初始化协同题库系统项目骨架
 
 ---
 
-## 2026-05-09（计划执行中 · 会话已保存）
+## 2026-05-09
 
-### 当前断点
+### 今日完成
 
-计划已批准，代码尚未改动。明天从以下位置继续：
+#### P0 — 审核权限校验 ✅
+- `submit_question` 校验仅创建者可提交
+- `review_question` 校验仅 GroupLeader/Admin 可审核
+- 创建者回避：组长不能审核自己的题目
 
-```
-P0 ── 审核权限校验 ──→ src/handlers/questions.rs
-  │                    submit_question / review_question
-  │
-  └── 教研组 API ──→ src/models/group.rs (新建)
-                     src/handlers/groups.rs (新建)
-                     src/lib.rs (注册路由)
+#### P0 — 教研组 API ✅
+- `src/models/group.rs` + `src/handlers/groups.rs`
+- 8 个端点：列表（含成员数）/ 创建 / 详情（含成员列表）/ 更新 / 删除 / 添加成员（UPSERT）/ 移除成员 / 设置组长
+- 2 个集成测试
 
-P1 ── 重构 list_questions ──→ src/handlers/questions.rs
-  │                           sqlx::QueryBuilder 替换字符串
+#### P1 — 重构 list_questions ✅
+- 改用 `sqlx::QueryBuilder` 替代字符串拼接
+- 消除全部 14 个编译器 warnings
+- 后端源码零 warnings
 
-P2 ── Vue 3 前端脚手架 ──→ 项目根目录下新建前端目录
-                            pnpm create vue
-```
+#### P2 — Vue 3 前端脚手架 ✅
+- 初始化 frontend/ 目录
+- Element Plus + Tailwind CSS + Pinia + Vue Router + axios
+- 登录页 + 注册页 + AppLayout 侧边栏
+- 7 个占位页面，路由权限守卫
+- `npm run build` 构建通过
+
+### 项目状态
+- **后端测试**: 11 项全部通过
+- **后端 warnings**: 0（仅测试文件有少量未使用变量）
+- **前端构建**: 通过
+- **Git**: 9 次提交
 
 ### 任务一：修复技术债 🔧
 
