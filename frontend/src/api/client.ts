@@ -53,6 +53,56 @@ export interface RegisterRequest {
   display_name: string
 }
 
+// ─── 题目相关类型 ───
+
+export interface QuestionSummary {
+  id: string
+  stem: string
+  question_type: 'choice' | 'fill' | 'solution' | 'judgment'
+  difficulty: 'easy' | 'medium' | 'hard'
+  default_score: number
+  status: 'draft' | 'pending' | 'rejected' | 'published' | 'disabled'
+  grade: string | null
+  creator_id: string | null
+  created_at: string
+  updated_at: string
+  version: number
+}
+
+export interface QuestionDetail {
+  id: string
+  stem: string
+  question_type: string
+  difficulty: string
+  default_score: number
+  status: string
+  options: { label: string; content: string }[] | null
+  correct_answer: any
+  analysis: string | null
+  grading_criteria: any | null
+  grade: string | null
+  semester: string | null
+  source: string | null
+  creator_id: string | null
+  created_at: string
+  updated_by: string | null
+  updated_at: string
+  version: number
+  knowledge_points: { id: string; name: string }[]
+}
+
+export interface QuestionQuery {
+  status?: string
+  question_type?: string
+  difficulty?: string
+  grade?: string
+  knowledge_point_id?: string
+  creator_id?: string
+  keyword?: string
+  page?: number
+  page_size?: number
+}
+
 // ─── API 函数 ───
 
 export const authApi = {
@@ -61,5 +111,14 @@ export const authApi = {
   },
   register(data: RegisterRequest) {
     return client.post('/auth/register', data)
+  },
+}
+
+export const questionApi = {
+  list(params?: QuestionQuery) {
+    return client.get<QuestionSummary[]>('/questions', { params })
+  },
+  get(id: string) {
+    return client.get<QuestionDetail>(`/questions/${id}`)
   },
 }
