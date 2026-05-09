@@ -403,6 +403,7 @@ async function handleSave(submitAfter: boolean) {
     const res = isNew ? await questionApi.create(data) : await questionApi.update(route.params.id as string, data)
     const qid = res.data.id
     form.hasUnsaved = false
+    clearDraft()
     if (submitAfter) { await questionApi.submit(qid); ElMessage.success('已创建并提交审核') }
     else { ElMessage.success(isNew ? '草稿已保存' : '已更新') }
     router.push(`/questions/${qid}`)
@@ -424,6 +425,44 @@ watch(() => ({ ...form }), () => {
 }, { deep: true })
 
 // ===== 加载 =====
+// ===== 自动草稿恢复 =====
+function getDraftKey() {
+  return isNew ? 'q-draft-new' : `q-draft-${route.params.id}`
+}
+
+function restoreDraft() {
+  const key = getDraftKey()
+  try {
+    const saved = sessionStorage.getItem(key)
+    if (!saved) return
+    const draft = JSON.parse(saved)
+    // 检查是否有内容且是较新的草稿
+    if (draft.stem || draft.analysis || draft.solutionAnswer) {
+      ElMessageBox.confirm(
+        '检测到未保存的草稿，是否恢复？',
+        '恢复草稿',
+        { confirmButtonText: '恢复', cancelButtonText: '丢弃', type: 'info' }
+      ).then(() => {
+        // 复制草稿内容但不覆盖 id/version 等
+        const fields = ['stem', 'question_type', 'difficulty', 'default_score', 'grade', 'semester',
+          'source', 'analysis', 'options', 'correctAnswer', 'blanks', 'solutionAnswer',
+          'gradingSteps', 'judgmentCorrect', 'knowledgePointIds', 'reviewer', 'internal_note']
+        for (const f of fields) {
+          if (draft[f] !== undefined) (form as any)[f] = draft[f]
+        }
+        ElMessage.success('草稿已恢复')
+      }).catch(() => {
+        sessionStorage.removeItem(key)
+      })
+    }
+  } catch { /* ignore */ }
+}
+
+function clearDraft() {
+  try { sessionStorage.removeItem(getDraftKey()) }
+  catch { /* ignore */ }
+}
+
 async function loadKpTree() {
   kpLoading.value = true
   try {
@@ -482,7 +521,11 @@ function handleBeforeUnload(e: BeforeUnloadEvent) {
 onMounted(() => {
   window.addEventListener('beforeunload', handleBeforeUnload)
   loadKpTree()
-  loadQuestion()
+  loadQuestion().then(() => {
+    // 等题目加载完成后检查草稿
+    if (!isNew) restoreDraft()
+  })
+  if (isNew) restoreDraft()
 })
 onBeforeUnmount(() => {
   window.removeEventListener('beforeunload', handleBeforeUnload)
