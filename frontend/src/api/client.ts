@@ -64,6 +64,7 @@ export interface QuestionSummary {
   status: 'draft' | 'pending' | 'rejected' | 'published' | 'disabled'
   grade: string | null
   creator_id: string | null
+  creator_name: string | null
   created_at: string
   updated_at: string
   version: number
@@ -84,6 +85,7 @@ export interface QuestionDetail {
   semester: string | null
   source: string | null
   creator_id: string | null
+  creator_name: string | null
   created_at: string
   updated_by: string | null
   updated_at: string

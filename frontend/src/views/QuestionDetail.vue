@@ -11,11 +11,7 @@
         <template v-if="q?.status === 'draft'">
           <el-button type="primary" @click="$router.push(`/questions/${q!.id}/edit`)">编辑</el-button>
           <el-button type="success" @click="submitReview" :loading="submitting">提交审核</el-button>
-          <el-popconfirm title="确认删除？" @confirm="deleteQ">
-            <template #reference>
-              <el-button type="danger">删除</el-button>
-            </template>
-          </el-popconfirm>
+          <el-button type="danger" @click="confirmDelete">🗑️ 删除</el-button>
         </template>
         <!-- 驳回 → 编辑 -->
         <template v-else-if="q?.status === 'rejected'">
@@ -115,7 +111,7 @@
         <el-card shadow="never" class="mb-4">
           <template #header><span class="font-bold">ℹ️ 元信息</span></template>
           <div class="text-sm space-y-2">
-            <div><span class="text-gray-400">创建者：</span>{{ q?.creator_id || '—' }}</div>
+            <div><span class="text-gray-400">创建者：</span>{{ q?.creator_name || q?.creator_id?.substring(0, 8) || '—' }}</div>
             <div><span class="text-gray-400">版本：</span>v{{ q?.version }}</div>
             <div><span class="text-gray-400">创建时间：</span>{{ formatTime(q?.created_at) }}</div>
             <div><span class="text-gray-400">更新时间：</span>{{ formatTime(q?.updated_at) }}</div>
@@ -173,12 +169,19 @@ async function submitReview() {
   finally { submitting.value = false }
 }
 
-async function deleteQ() {
+async function confirmDelete() {
   try {
+    await ElMessageBox.confirm(
+      '删除后不可恢复，确定要删除这道题吗？',
+      '确认删除',
+      { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }
+    )
     await client.delete(`/questions/${route.params.id}`)
     ElMessage.success('已删除')
     router.push('/questions')
-  } catch { /* handled */ }
+  } catch (e: any) {
+    if (e !== 'cancel') { /* actual error, not cancel */ }
+  }
 }
 
 function handleReview(action: string) {
