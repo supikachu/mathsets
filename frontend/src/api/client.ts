@@ -114,11 +114,35 @@ export const authApi = {
   },
 }
 
+export interface KnowledgePoint {
+  id: string
+  parent_id: string | null
+  name: string
+  grade: string | null
+  sort_order: number
+  children: KnowledgePoint[]
+}
+
 export const questionApi = {
   list(params?: QuestionQuery) {
     return client.get<QuestionSummary[]>('/questions', { params })
   },
   get(id: string) {
     return client.get<QuestionDetail>(`/questions/${id}`)
+  },
+  create(data: any) {
+    return client.post<QuestionDetail>('/questions', data)
+  },
+  update(id: string, data: any) {
+    return client.put<QuestionDetail>(`/questions/${id}`, data)
+  },
+  submit(id: string) {
+    return client.post(`/questions/${id}/submit`, {})
+  },
+}
+
+export const kpApi = {
+  tree() {
+    return client.get<KnowledgePoint[]>('/knowledge-points')
   },
 }
