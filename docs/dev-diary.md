@@ -201,6 +201,23 @@ f342827 feat: 初始化协同题库系统项目骨架
   前端脚手架 + 登录页（取决于是否决定开始前端开发）
 ```
 
+### 当前断点（5/9 下午保存）
+
+#### ✅ 已完成
+- P0: 审核权限校验 + 教研组 API + 统计/me API + creator_name
+- P1: list_questions 重构（0 warnings）+ 404 页面
+- P2: 7 个前端页面全部完成 + KaTeX 渲染
+- 批量导入 10 道题目
+- 三个测试账号（admin/zhanglaoshi/wanglaoshi）
+
+#### ⏳ 待办（P2→P3）
+| 任务 | 预估 | 说明 |
+|------|------|------|
+| 试卷管理（后端） | 3h | papers + paper_questions 表迁移 + CRUD API |
+| 试卷管理（前端） | 3h | 试卷列表/创建/详情/组卷 |
+| Docker 部署 | 1h | docker-compose.yml + 多阶段构建 |
+| 后端测试补全 | 2h | 补齐教研组/审核/统计 API 测试 |
+
 ## 2026-05-09（下午）
 
 ### 上午完成
@@ -234,6 +251,17 @@ f342827 feat: 初始化协同题库系统项目骨架
 - 三个账号已稳定运行：admin(管理员) / zhanglaoshi(组长) / wanglaoshi(教师)
 - 后端 API 运行于 localhost:3000
 - 前端 Vite 运行于 localhost:5173
+
+### 下午完成
+
+#### P0 — 后端补充 ✅
+- `GET /api/v1/questions/stats` — 按状态统计
+- `GET /api/v1/auth/me` — 当前用户信息
+- 题目列表/详情返回 `creator_name`
+- Dashboard 改用 stats API
+
+#### P1 — 前端体验 ✅
+- 404 页面（NotFound.vue + 通配路由）
 
 ###  Git 历史（今日）
 
