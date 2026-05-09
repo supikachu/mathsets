@@ -62,6 +62,16 @@ const router = createRouter({
           name: 'Review',
           component: () => import('@/views/ReviewQueue.vue'),
         },
+        {
+          path: 'papers',
+          name: 'Papers',
+          component: () => import('@/views/PaperList.vue'),
+        },
+        {
+          path: 'papers/:id',
+          name: 'PaperEdit',
+          component: () => import('@/views/PaperEdit.vue'),
+        },
       ],
     },
     {

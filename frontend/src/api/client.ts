@@ -160,3 +160,80 @@ export const kpApi = {
     return client.get<KnowledgePoint[]>('/knowledge-points')
   },
 }
+
+// ─── 试卷相关 ───
+
+export interface PaperSummary {
+  id: string
+  title: string
+  description: string | null
+  subject: string
+  grade: string | null
+  total_score: number
+  duration_minutes: number | null
+  status: string
+  creator_id: string | null
+  creator_name: string | null
+  created_at: string
+  updated_at: string
+  version: number
+  question_count: number
+}
+
+export interface PaperQuestionItem {
+  id: string
+  question_id: string
+  sort_order: number
+  score: number
+  section: string | null
+  stem: string
+  question_type: string
+  difficulty: string
+}
+
+export interface PaperDetail {
+  id: string
+  title: string
+  description: string | null
+  subject: string
+  grade: string | null
+  total_score: number
+  duration_minutes: number | null
+  status: string
+  creator_id: string | null
+  creator_name: string | null
+  created_at: string
+  updated_at: string
+  version: number
+  questions: PaperQuestionItem[]
+}
+
+export const paperApi = {
+  list(params?: { page?: number; page_size?: number; status?: string }) {
+    return client.get<PaperSummary[]>('/papers', { params })
+  },
+  get(id: string) {
+    return client.get<PaperDetail>(`/papers/${id}`)
+  },
+  create(data: { title: string; description?: string; subject?: string; grade?: string }) {
+    return client.post<PaperDetail>('/papers', data)
+  },
+  update(id: string, data: any) {
+    return client.put<PaperDetail>(`/papers/${id}`, data)
+  },
+  delete(id: string) {
+    return client.delete(`/papers/${id}`)
+  },
+  publish(id: string) {
+    return client.post(`/papers/${id}/publish`, {})
+  },
+  addQuestion(paperId: string, data: { question_id: string; score?: number; section?: string }) {
+    return client.post(`/papers/${paperId}/questions`, data)
+  },
+  updateQuestion(paperId: string, questionId: string, data: { score?: number; sort_order?: number }) {
+    return client.put(`/papers/${paperId}/questions/${questionId}`, data)
+  },
+  removeQuestion(paperId: string, questionId: string) {
+    return client.delete(`/papers/${paperId}/questions/${questionId}`)
+  },
+}

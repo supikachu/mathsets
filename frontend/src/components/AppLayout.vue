@@ -29,6 +29,10 @@
           <el-icon><CollectionTag /></el-icon>
           <span>知识点管理</span>
         </el-menu-item>
+        <el-menu-item index="/papers">
+          <el-icon><Document /></el-icon>
+          <span>试卷管理</span>
+        </el-menu-item>
       </el-menu>
     </el-aside>
 
