@@ -123,6 +123,15 @@ export interface KnowledgePoint {
   children: KnowledgePoint[]
 }
 
+export interface QuestionStats {
+  total: number
+  draft: number
+  pending: number
+  rejected: number
+  published: number
+  disabled: number
+}
+
 export const questionApi = {
   list(params?: QuestionQuery) {
     return client.get<QuestionSummary[]>('/questions', { params })
@@ -138,6 +147,9 @@ export const questionApi = {
   },
   submit(id: string) {
     return client.post(`/questions/${id}/submit`, {})
+  },
+  stats() {
+    return client.get<QuestionStats>('/questions/stats')
   },
 }
 

@@ -147,6 +147,19 @@ const statCards = ref([
   { label: '草稿', value: 0 as number | string, color: '#909399', icon: '📝' },
 ])
 
+async function fetchStats() {
+  try {
+    const res = await questionApi.stats()
+    const s = res.data
+    statCards.value = [
+      { label: '总题目', value: s.total, color: '#409eff', icon: '📊' },
+      { label: '已发布', value: s.published, color: '#67c23a', icon: '✅' },
+      { label: '待审核', value: s.pending, color: '#e6a23c', icon: '⏳' },
+      { label: '草稿', value: s.draft, color: '#909399', icon: '📝' },
+    ]
+  } catch { /* handled */ }
+}
+
 const today = new Date().toLocaleDateString('zh-CN', {
   year: 'numeric', month: 'long', day: 'numeric', weekday: 'long',
 })
@@ -154,26 +167,11 @@ const today = new Date().toLocaleDateString('zh-CN', {
 async function fetchData() {
   loading.value = true
   try {
-    const [allRes, pubRes, penRes, draftRes] = await Promise.all([
+    const [allRes] = await Promise.all([
       questionApi.list({ page_size: 20 }),
-      questionApi.list({ status: 'published', page_size: 1 }),
-      questionApi.list({ status: 'pending', page_size: 1 }),
-      questionApi.list({ status: 'draft', page_size: 1 }),
+      fetchStats(),
     ])
-
     recentList.value = allRes.data.slice(0, 10)
-
-    // 用第二个请求获得更精确的已发布数量
-    const [pubFull] = await Promise.all([
-      questionApi.list({ status: 'published', page_size: 100 }),
-    ])
-
-    statCards.value = [
-      { label: '总题目', value: allRes.data.length, color: '#409eff', icon: '📊' },
-      { label: '已发布', value: pubFull.data.length, color: '#67c23a', icon: '✅' },
-      { label: '待审核', value: penRes.data.length, color: '#e6a23c', icon: '⏳' },
-      { label: '草稿', value: draftRes.data.length, color: '#909399', icon: '📝' },
-    ]
   } catch { /* handled */ }
   finally { loading.value = false }
 }

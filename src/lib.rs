@@ -46,6 +46,8 @@ pub fn build_app(state: AppState) -> Router {
             "/knowledge-points/{id}",
             delete(handlers::knowledge_points::delete_knowledge_point),
         )
+        // 题目统计（必须在 {id} 之前注册）
+        .route("/questions/stats", get(handlers::questions::question_stats))
         // 题目 CRUD
         .route("/questions", get(handlers::questions::list_questions))
         .route("/questions", post(handlers::questions::create_question))
@@ -68,6 +70,7 @@ pub fn build_app(state: AppState) -> Router {
         // API v1 认证模块（无需认证）
         .route("/api/v1/auth/register", post(handlers::auth::register))
         .route("/api/v1/auth/login", post(handlers::auth::login))
+        .route("/api/v1/auth/me", get(handlers::auth::me))
         // API v1 保护模块（需要 JWT）
         .nest("/api/v1", protected_routes)
         // 全局中间件

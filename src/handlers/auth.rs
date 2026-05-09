@@ -1,8 +1,9 @@
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{extract::Extension, extract::State, http::StatusCode, Json};
 use serde_json::json;
 use uuid::Uuid;
 
 use crate::auth::jwt::create_token;
+use crate::auth::middleware::AuthUser;
 use crate::models::user::{LoginRequest, LoginResponse, RegisterRequest, User, UserPublic};
 use crate::AppState;
 
@@ -134,4 +135,24 @@ pub async fn login(
             role: user.role,
         }),
     ))
+}
+
+/// GET /api/v1/auth/me — 获取当前登录用户信息
+pub async fn me(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+) -> Result<Json<UserPublic>, (StatusCode, Json<serde_json::Value>)> {
+    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1 AND is_active = true")
+        .bind(auth_user.id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("数据库错误: {}", e)})),
+            )
+        })?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "用户不存在"}))))?;
+
+    Ok(Json(UserPublic::from(user)))
 }

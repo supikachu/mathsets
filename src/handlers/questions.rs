@@ -3,6 +3,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
+use serde::Serialize;
 use serde_json::json;
 use uuid::Uuid;
 
@@ -98,6 +99,61 @@ async fn get_question_knowledge_points(
 }
 
 // ---------------------------------------------------------------------------
+// 统计
+// ---------------------------------------------------------------------------
+
+/// 题目统计
+#[derive(Debug, Serialize)]
+pub struct QuestionStats {
+    pub total: i64,
+    pub draft: i64,
+    pub pending: i64,
+    pub rejected: i64,
+    pub published: i64,
+    pub disabled: i64,
+}
+
+/// GET /api/v1/questions/stats — 题目统计（各状态数量）
+pub async fn question_stats(
+    State(state): State<AppState>,
+) -> Result<Json<QuestionStats>, (StatusCode, Json<serde_json::Value>)> {
+    let rows = sqlx::query_as::<_, (String, i64)>(
+        "SELECT status::text, COUNT(*) FROM questions GROUP BY status",
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("统计失败: {}", e)})),
+        )
+    })?;
+
+    let mut stats = QuestionStats {
+        total: 0,
+        draft: 0,
+        pending: 0,
+        rejected: 0,
+        published: 0,
+        disabled: 0,
+    };
+
+    for (status, count) in rows {
+        stats.total += count;
+        match status.as_str() {
+            "draft" => stats.draft = count,
+            "pending" => stats.pending = count,
+            "rejected" => stats.rejected = count,
+            "published" => stats.published = count,
+            "disabled" => stats.disabled = count,
+            _ => {}
+        }
+    }
+
+    Ok(Json(stats))
+}
+
+// ---------------------------------------------------------------------------
 // 题目 CRUD
 // ---------------------------------------------------------------------------
 
@@ -113,7 +169,7 @@ pub async fn list_questions(
     use sqlx::QueryBuilder;
 
     let mut builder = QueryBuilder::new(
-        "SELECT id, stem, question_type, difficulty, default_score, status, grade, creator_id, created_at, updated_at, version FROM questions WHERE 1=1",
+        "SELECT q.id, q.stem, q.question_type, q.difficulty, q.default_score, q.status, q.grade, q.creator_id, u.display_name AS creator_name, q.created_at, q.updated_at, q.version FROM questions q LEFT JOIN users u ON u.id = q.creator_id WHERE 1=1",
     );
 
     if let Some(ref status) = query.status {
@@ -245,21 +301,73 @@ pub async fn get_question(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<QuestionDetail>, (StatusCode, Json<serde_json::Value>)> {
-    let question = sqlx::query_as::<_, Question>("SELECT * FROM questions WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&state.pool)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("查询题目失败: {}", e)})),
-            )
-        })?
-        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "题目不存在"}))))?;
+    // 带创建者名称的题目
+    #[derive(sqlx::FromRow)]
+    struct QuestionRow {
+        id: Uuid,
+        stem: String,
+        question_type: crate::models::question::QuestionType,
+        difficulty: crate::models::question::Difficulty,
+        default_score: i32,
+        status: crate::models::question::QuestionStatus,
+        options: Option<serde_json::Value>,
+        correct_answer: serde_json::Value,
+        analysis: Option<String>,
+        grading_criteria: Option<serde_json::Value>,
+        grade: Option<String>,
+        semester: Option<String>,
+        source: Option<String>,
+        creator_id: Option<Uuid>,
+        creator_name: Option<String>,
+        created_at: chrono::DateTime<chrono::Utc>,
+        updated_by: Option<Uuid>,
+        updated_at: chrono::DateTime<chrono::Utc>,
+        version: i32,
+    }
+
+    let row = sqlx::query_as::<_, QuestionRow>(
+        r#"
+        SELECT q.*, u.display_name AS creator_name
+        FROM questions q
+        LEFT JOIN users u ON u.id = q.creator_id
+        WHERE q.id = $1
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("查询题目失败: {}", e)})),
+        )
+    })?
+    .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "题目不存在"}))))?;
 
     let kps = get_question_knowledge_points(&state.pool, id).await.unwrap_or_default();
 
-    Ok(Json(QuestionDetail::from((question, kps))))
+    Ok(Json(QuestionDetail {
+        id: row.id,
+        stem: row.stem,
+        question_type: row.question_type,
+        difficulty: row.difficulty,
+        default_score: row.default_score,
+        status: row.status,
+        options: row.options,
+        correct_answer: row.correct_answer,
+        analysis: row.analysis,
+        grading_criteria: row.grading_criteria,
+        grade: row.grade,
+        semester: row.semester,
+        source: row.source,
+        creator_id: row.creator_id,
+        creator_name: row.creator_name,
+        created_at: row.created_at,
+        updated_by: row.updated_by,
+        updated_at: row.updated_at,
+        version: row.version,
+        knowledge_points: kps,
+    }))
 }
 
 /// PUT /api/v1/questions/:id — 更新题目（仅草稿/驳回状态可编辑）
