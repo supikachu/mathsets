@@ -76,10 +76,19 @@
           </div>
         </el-card>
 
-        <!-- 填空题/解答题答案 -->
-        <el-card v-else-if="q?.correct_answer" shadow="never" class="mb-4">
+        <!-- 填空题答案 -->
+        <el-card v-else-if="q?.question_type === 'fill' && q?.correct_answer" shadow="never" class="mb-4">
           <template #header><span class="font-bold">📝 参考答案</span></template>
-          <div class="whitespace-pre-wrap">{{ JSON.stringify(q?.correct_answer, null, 2) }}</div>
+          <div v-for="(item, i) in q!.correct_answer as any[]" :key="i" class="mb-2">
+            <span class="text-gray-500 text-sm">第{{ i+1 }}空：</span>
+            <LatexRender :text="item.answer || item" :inline="true" />
+          </div>
+        </el-card>
+
+        <!-- 解答题答案 -->
+        <el-card v-else-if="q?.question_type === 'solution' && q?.correct_answer" shadow="never" class="mb-4">
+          <template #header><span class="font-bold">📝 参考答案</span></template>
+          <LatexRender v-for="(ans, i) in q!.correct_answer as string[]" :key="i" :text="ans" />
         </el-card>
 
         <!-- 解析 -->
