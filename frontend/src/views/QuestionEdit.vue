@@ -70,8 +70,14 @@
 
           <!-- 题干 -->
           <el-card shadow="never" class="mb-4">
-            <template #header><span class="font-bold">📖 题干</span></template>
-            <el-form-item required>
+            <template #header>
+              <span class="font-bold">📖 题干</span>
+              <el-switch v-model="previewMode" active-text="预览" inactive-text="编辑" size="small" class="ml-3" />
+            </template>
+            <div v-if="previewMode && form.stem" class="text-base p-3 bg-gray-50 rounded">
+              <LatexRender :text="form.stem" />
+            </div>
+            <el-form-item v-show="!previewMode || !form.stem" required>
               <el-input
                 v-model="form.stem"
                 type="textarea"
@@ -224,6 +230,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Loading } from '@element-plus/icons-vue'
 import { questionApi, kpApi, type KnowledgePoint } from '@/api/client'
+import LatexRender from '@/components/LatexRender.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -231,6 +238,7 @@ const isNew = route.path.endsWith('/new')
 const loading = ref(false)
 const saving = ref(false)
 const kpLoading = ref(false)
+const previewMode = ref(true)
 const kpTree = ref<KnowledgePoint[]>([])
 const grades = ['初一', '初二', '初三', '高一', '高二', '高三']
 

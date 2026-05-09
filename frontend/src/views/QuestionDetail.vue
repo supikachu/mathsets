@@ -50,8 +50,16 @@
 
         <!-- 题干 -->
         <el-card shadow="never" class="mb-4">
-          <template #header><span class="font-bold">📖 题干</span></template>
-          <div class="text-base leading-relaxed whitespace-pre-wrap">{{ q?.stem }}</div>
+          <template #header>
+            <span class="font-bold">📖 题干</span>
+            <el-switch v-model="previewMode" active-text="预览" inactive-text="源码" size="small" class="ml-3" />
+          </template>
+          <div v-if="previewMode" class="text-base">
+            <LatexRender :text="q?.stem || ''" />
+          </div>
+          <div v-else class="text-base whitespace-pre-wrap font-mono text-sm bg-gray-50 p-3 rounded">
+            {{ q?.stem }}
+          </div>
         </el-card>
 
         <!-- 选项（选择题） -->
@@ -61,7 +69,7 @@
                class="py-2 px-3 mb-2 rounded border"
                :class="isCorrect(opt.label) ? 'border-green-400 bg-green-50' : 'border-gray-200'">
             <span class="font-mono mr-2">{{ opt.label }}.</span>
-            <span>{{ opt.content }}</span>
+            <LatexRender :text="opt.content" :inline="true" />
             <el-tag v-if="isCorrect(opt.label)" size="small" type="success" class="ml-2">正确答案</el-tag>
           </div>
         </el-card>
@@ -85,7 +93,7 @@
         <!-- 解析 -->
         <el-card v-if="q?.analysis" shadow="never" class="mb-4">
           <template #header><span class="font-bold">💡 解析</span></template>
-          <div class="whitespace-pre-wrap">{{ q.analysis }}</div>
+          <LatexRender :text="q.analysis" />
         </el-card>
       </el-col>
 
@@ -134,6 +142,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { questionApi, type QuestionDetail } from '@/api/client'
 import client from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
+import LatexRender from '@/components/LatexRender.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -143,6 +152,7 @@ const loading = ref(false)
 const submitting = ref(false)
 const rejectDialog = ref(false)
 const rejectComment = ref('')
+const previewMode = ref(true)
 
 async function fetchDetail() {
   loading.value = true
