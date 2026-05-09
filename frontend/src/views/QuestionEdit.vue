@@ -134,21 +134,21 @@
       <!-- ==================== 三组编辑/预览双栏 ==================== -->
       <div class="dual-sections">
         <!-- 题干 -->
-        <div class="dual-row">
-          <div class="dual-edit">
+        <div class="dual-row" ref="rowRefs[0]">
+          <div class="dual-edit" :style="{ flex: `0 0 ${splitRatio * 100}%` }">
             <div class="dual-label">📖 题干 *</div>
             <el-input v-model="form.stem" type="textarea" :rows="5" placeholder="输入题目内容，LaTeX 公式用 $...$ 包裹" class="edit-textarea" />
           </div>
-          <div class="dual-divider" />
-          <div class="dual-preview">
+          <div class="dual-divider" @mousedown.prevent="startResize(0, $event)" />
+          <div class="dual-preview" :style="{ flex: `0 0 ${(1 - splitRatio) * 100}%` }">
             <div class="dual-label">题干预览</div>
             <div class="preview-box"><LatexRender :text="form.stem || '（等待输入…）'" /></div>
           </div>
         </div>
 
         <!-- 答案 -->
-        <div class="dual-row">
-          <div class="dual-edit">
+        <div class="dual-row" ref="rowRefs[1]">
+          <div class="dual-edit" :style="{ flex: `0 0 ${splitRatio * 100}%` }">
             <div class="dual-label">📝 答案</div>
             <!-- 选择题选项 -->
             <div v-if="form.question_type === 'choice'">
@@ -185,8 +185,8 @@
               </el-radio-group>
             </div>
           </div>
-          <div class="dual-divider" />
-          <div class="dual-preview">
+          <div class="dual-divider" @mousedown.prevent="startResize(1, $event)" />
+          <div class="dual-preview" :style="{ flex: `0 0 ${(1 - splitRatio) * 100}%` }">
             <div class="dual-label">答案预览</div>
             <div class="preview-box">
               <!-- 选择题预览 -->
@@ -211,13 +211,13 @@
         </div>
 
         <!-- 解析 -->
-        <div class="dual-row">
-          <div class="dual-edit">
+        <div class="dual-row" ref="rowRefs[2]">
+          <div class="dual-edit" :style="{ flex: `0 0 ${splitRatio * 100}%` }">
             <div class="dual-label">💡 解析</div>
             <el-input v-model="form.analysis" type="textarea" :rows="4" placeholder="解题思路与易错点，支持 $...$ LaTeX" class="edit-textarea" />
           </div>
-          <div class="dual-divider" />
-          <div class="dual-preview">
+          <div class="dual-divider" @mousedown.prevent="startResize(2, $event)" />
+          <div class="dual-preview" :style="{ flex: `0 0 ${(1 - splitRatio) * 100}%` }">
             <div class="dual-label">解析预览</div>
             <div class="preview-box"><LatexRender :text="form.analysis || '（等待输入…）'" /></div>
           </div>
@@ -249,6 +249,43 @@ const kpLoading = ref(false)
 const kpTree = ref<KnowledgePoint[]>([])
 const showHistory = ref(false)
 const grades = ['初一', '初二', '初三', '高一', '高二', '高三']
+
+// 可拖拽分隔条
+const splitRatio = ref(0.55) // 编辑区55% 预览区45%
+const isDragging = ref(false)
+const currentRow = ref(-1)
+const rowRefs = [ref<HTMLElement>(), ref<HTMLElement>(), ref<HTMLElement>()]
+
+function startResize(rowIdx: number, e: MouseEvent) {
+  isDragging.value = true
+  currentRow.value = rowIdx
+  document.body.style.cursor = 'col-resize'
+  document.body.style.userSelect = 'none'
+  document.addEventListener('mousemove', onMouseMove)
+  document.addEventListener('mouseup', stopResize)
+}
+
+function onMouseMove(e: MouseEvent) {
+  if (!isDragging.value) return
+  const idx = currentRow.value
+  if (idx < 0 || idx >= rowRefs.length) return
+  const el = rowRefs[idx]?.value
+  if (!el) return
+  const rect = el.getBoundingClientRect()
+  const x = e.clientX - rect.left
+  let ratio = x / rect.width
+  ratio = Math.max(0.2, Math.min(0.8, ratio)) // 限制 20%~80%
+  splitRatio.value = ratio
+}
+
+function stopResize() {
+  isDragging.value = false
+  currentRow.value = -1
+  document.body.style.cursor = ''
+  document.body.style.userSelect = ''
+  document.removeEventListener('mousemove', onMouseMove)
+  document.removeEventListener('mouseup', stopResize)
+}
 const activeCollapse = ref(['source', 'basic', 'collab'])
 
 // 已选知识点名称映射
