@@ -33,6 +33,10 @@
           <el-icon><Document /></el-icon>
           <span>试卷管理</span>
         </el-menu-item>
+        <el-menu-item index="/users" v-if="auth.isAdmin">
+          <el-icon><UserFilled /></el-icon>
+          <span>用户管理</span>
+        </el-menu-item>
       </el-menu>
     </el-aside>
 

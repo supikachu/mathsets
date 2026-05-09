@@ -48,6 +48,8 @@ pub fn build_app(state: AppState) -> Router {
         )
         // 当前用户信息
         .route("/auth/me", get(handlers::auth::me))
+        // 管理员用户管理
+        .route("/admin/users", get(handlers::auth::list_users))
         // 题目统计（必须在 {id} 之前注册）
         .route("/questions/stats", get(handlers::questions::question_stats))
         // 题目 CRUD

@@ -59,6 +59,7 @@ pub struct UserPublic {
     pub username: String,
     pub display_name: String,
     pub role: UserRole,
+    pub is_active: bool,
     pub created_at: DateTime<Utc>,
 }
 
@@ -69,6 +70,7 @@ impl From<User> for UserPublic {
             username: u.username,
             display_name: u.display_name,
             role: u.role,
+            is_active: u.is_active,
             created_at: u.created_at,
         }
     }

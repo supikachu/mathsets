@@ -72,6 +72,11 @@ const router = createRouter({
           name: 'PaperEdit',
           component: () => import('@/views/PaperEdit.vue'),
         },
+        {
+          path: 'users',
+          name: 'UserManagement',
+          component: () => import('@/views/UserManagement.vue'),
+        },
       ],
     },
     {

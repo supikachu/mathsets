@@ -74,6 +74,7 @@ pub async fn register(
         username: req.username,
         display_name: req.display_name,
         role: crate::models::user::UserRole::Teacher,
+        is_active: true,
         created_at: now,
     };
 
@@ -135,6 +136,32 @@ pub async fn login(
             role: user.role,
         }),
     ))
+}
+
+/// GET /api/v1/admin/users — 管理员查看用户列表
+pub async fn list_users(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+) -> Result<Json<Vec<UserPublic>>, (StatusCode, Json<serde_json::Value>)> {
+    // 仅管理员
+    let role = serde_json::to_value(&auth_user.role)
+        .map(|v| v.as_str().unwrap_or("teacher").to_string())
+        .unwrap_or_else(|_| "teacher".to_string());
+    if role != "admin" {
+        return Err((StatusCode::FORBIDDEN, Json(json!({"error": "无权操作"}))));
+    }
+
+    let users = sqlx::query_as::<_, User>("SELECT * FROM users ORDER BY created_at DESC")
+        .fetch_all(&state.pool)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("查询用户失败: {}", e)})),
+            )
+        })?;
+
+    Ok(Json(users.into_iter().map(|u| u.into()).collect()))
 }
 
 /// GET /api/v1/auth/me — 获取当前登录用户信息
