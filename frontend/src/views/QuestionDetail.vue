@@ -50,16 +50,8 @@
 
         <!-- 题干 -->
         <el-card shadow="never" class="mb-4">
-          <template #header>
-            <span class="font-bold">📖 题干</span>
-            <el-switch v-model="previewMode" active-text="预览" inactive-text="源码" size="small" class="ml-3" />
-          </template>
-          <div v-if="previewMode" class="text-base">
-            <LatexRender :text="q?.stem || ''" />
-          </div>
-          <div v-else class="text-base whitespace-pre-wrap font-mono text-sm bg-gray-50 p-3 rounded">
-            {{ q?.stem }}
-          </div>
+          <template #header><span class="font-bold">📖 题干</span></template>
+          <LatexRender :text="q?.stem || ''" />
         </el-card>
 
         <!-- 选项（选择题） -->
@@ -152,7 +144,6 @@ const loading = ref(false)
 const submitting = ref(false)
 const rejectDialog = ref(false)
 const rejectComment = ref('')
-const previewMode = ref(true)
 
 async function fetchDetail() {
   loading.value = true

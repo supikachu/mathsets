@@ -82,7 +82,9 @@
       >
         <el-table-column label="题干" min-width="300">
           <template #default="{ row }">
-            <span class="line-clamp-1">{{ row.stem }}</span>
+            <div class="line-clamp-1 latex-inline-table">
+              <LatexRender :text="row.stem" :inline="true" />
+            </div>
           </template>
         </el-table-column>
 
@@ -142,6 +144,7 @@
 import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { questionApi, type QuestionSummary, type QuestionQuery } from '@/api/client'
+import LatexRender from '@/components/LatexRender.vue'
 
 const router = useRouter()
 const list = ref<QuestionSummary[]>([])
@@ -219,5 +222,11 @@ onMounted(fetchList)
   -webkit-line-clamp: 1;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+.latex-inline-table {
+  font-size: 13px;
+}
+.latex-inline-table :deep(.katex) {
+  font-size: 1em;
 }
 </style>
