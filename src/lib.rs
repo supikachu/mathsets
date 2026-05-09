@@ -59,6 +59,17 @@ pub fn build_app(state: AppState) -> Router {
         // 审核
         .route("/questions/{id}/submit", post(handlers::questions::submit_question))
         .route("/questions/{id}/review", post(handlers::questions::review_question))
+        // 试卷 CRUD
+        .route("/papers", get(handlers::papers::list_papers))
+        .route("/papers", post(handlers::papers::create_paper))
+        .route("/papers/{id}", get(handlers::papers::get_paper))
+        .route("/papers/{id}", put(handlers::papers::update_paper))
+        .route("/papers/{id}", delete(handlers::papers::delete_paper))
+        .route("/papers/{id}/publish", post(handlers::papers::publish_paper))
+        // 试卷题目管理
+        .route("/papers/{paper_id}/questions", post(handlers::papers::add_question_to_paper))
+        .route("/papers/{paper_id}/questions/{question_id}", put(handlers::papers::update_paper_question))
+        .route("/papers/{paper_id}/questions/{question_id}", delete(handlers::papers::remove_question_from_paper))
         // 统一应用认证中间件
         .layer(middleware::from_fn_with_state(
             state.clone(),
