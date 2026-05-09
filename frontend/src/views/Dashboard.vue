@@ -42,7 +42,9 @@
           <el-table v-else :data="recentList" stripe @row-click="goDetail" style="cursor:pointer">
             <el-table-column label="题干" min-width="200">
               <template #default="{ row }">
-                <span class="line-clamp-1">{{ row.stem }}</span>
+                <div class="line-clamp-1">
+                  <LatexRender :text="row.stem" :inline="true" />
+                </div>
               </template>
             </el-table-column>
             <el-table-column label="题型" width="70" align="center">
@@ -131,6 +133,7 @@ import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { questionApi, type QuestionSummary } from '@/api/client'
+import LatexRender from '@/components/LatexRender.vue'
 
 const router = useRouter()
 const auth = useAuthStore()

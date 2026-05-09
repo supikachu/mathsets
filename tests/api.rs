@@ -858,3 +858,212 @@ async fn test_group_members() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+// ---------------------------------------------------------------------------
+// 8. 统计 API
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_question_stats() {
+    let mut app = match create_test_app().await {
+        Some(app) => app,
+        None => return,
+    };
+    let token = register_and_login(&mut app).await;
+
+    // 创建一道题
+    let (_, body) = post_auth(
+        &mut app,
+        "/api/v1/questions",
+        json!({
+            "stem": "统计测试题",
+            "question_type": "choice",
+            "difficulty": "easy",
+            "correct_answer": ["A"],
+            "options": [{"label":"A","content":"正确"},{"label":"B","content":"错误"}]
+        }),
+        &token,
+    )
+    .await;
+    let qid = body["id"].as_str().unwrap().to_string();
+
+    // 统计应包含 1 条草稿
+    let (status, body) = get_auth(&mut app, "/api/v1/questions/stats", &token).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["total"].as_i64().unwrap_or(0) >= 1);
+    assert!(body["draft"].as_i64().unwrap_or(0) >= 1);
+
+    // 提交审核后，待审核 +1
+    post_auth(&mut app, &format!("/api/v1/questions/{}/submit", qid), json!({}), &token).await;
+    let (status, body) = get_auth(&mut app, "/api/v1/questions/stats", &token).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["pending"].as_i64().unwrap_or(0) >= 1);
+}
+
+// ---------------------------------------------------------------------------
+// 9. /auth/me 端点
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_auth_me() {
+    let mut app = match create_test_app().await {
+        Some(app) => app,
+        None => return,
+    };
+    let token = register_and_login(&mut app).await;
+
+    // 获取当前用户信息
+    let (status, body) = get_auth(&mut app, "/api/v1/auth/me", &token).await;
+    assert_eq!(status, StatusCode::OK, "获取用户信息失败: {:?}", body);
+    assert!(body["id"].as_str().unwrap().len() > 0);
+    assert!(body["username"].as_str().unwrap().len() > 0);
+    assert!(body["display_name"].as_str().unwrap().len() > 0);
+
+    // 无 token 时应返回 401
+    let (status, _) = get_json(&mut app, "/api/v1/auth/me").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+// ---------------------------------------------------------------------------
+// 10. creator_name 在题目列表中返回
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_question_creator_name() {
+    let mut app = match create_test_app().await {
+        Some(app) => app,
+        None => return,
+    };
+    let token = register_and_login(&mut app).await;
+
+    // 创建题目
+    let (_, body) = post_auth(
+        &mut app,
+        "/api/v1/questions",
+        json!({
+            "stem": "创建者名称测试",
+            "question_type": "judgment",
+            "difficulty": "easy",
+            "correct_answer": [true]
+        }),
+        &token,
+    )
+    .await;
+    let qid = body["id"].as_str().unwrap().to_string();
+
+    // 列表应包含 creator_name
+    let (status, body) = get_auth(&mut app, "/api/v1/questions", &token).await;
+    assert_eq!(status, StatusCode::OK);
+    let list = body.as_array().unwrap();
+    let found = list.iter().find(|q| q["id"] == qid).expect("题目应在列表中");
+    // creator_name 可能是 null（未登录用户创建的）或有值
+    // 我们的 register_and_login 创建的题目由于 creator_id 来自 JWT，
+    // 但 JWT 的用户不一定存在于 DB，所以可能是 null
+    // 仅验证字段存在
+    assert!(found.get("creator_name").is_some(), "列表应返回 creator_name 字段");
+
+    // 详情应包含 creator_name
+    let (status, body) = get_auth(&mut app, &format!("/api/v1/questions/{}", qid), &token).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.get("creator_name").is_some(), "详情应返回 creator_name 字段");
+}
+
+// ---------------------------------------------------------------------------
+// 11. 权限校验（负面测试）
+// ---------------------------------------------------------------------------
+
+/// 普通教师不能审核题目
+#[tokio::test]
+async fn test_teacher_cannot_review() {
+    let mut app = match create_test_app().await {
+        Some(app) => app,
+        None => return,
+    };
+    let teacher_token = register_and_login(&mut app).await; // 默认角色 Teacher
+
+    // 注册一个组长用户用于审核提交
+    let leader_token = register_leader_and_login(&mut app).await;
+
+    // 教师创建题目并提交
+    let (_, body) = post_auth(
+        &mut app,
+        "/api/v1/questions",
+        json!({
+            "stem": "权限测试题",
+            "question_type": "choice",
+            "difficulty": "easy",
+            "correct_answer": ["A"],
+            "options": [{"label":"A","content":"正确"},{"label":"B","content":"错误"}]
+        }),
+        &teacher_token,
+    )
+    .await;
+    let qid = body["id"].as_str().unwrap().to_string();
+    post_auth(&mut app, &format!("/api/v1/questions/{}/submit", qid), json!({}), &teacher_token).await;
+
+    // 普通教师尝试审核 → 403
+    let (status, _) = post_auth(
+        &mut app,
+        &format!("/api/v1/questions/{}/review", qid),
+        json!({"action": "approved"}),
+        &teacher_token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "普通教师审核应返回 403");
+
+    // 组长可以正常审核
+    let (status, _) = post_auth(
+        &mut app,
+        &format!("/api/v1/questions/{}/review", qid),
+        json!({"action": "approved"}),
+        &leader_token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "组长审核应成功");
+}
+
+/// 非创建者不能提交他人的题目
+#[tokio::test]
+async fn test_non_creator_cannot_submit() {
+    let mut app = match create_test_app().await {
+        Some(app) => app,
+        None => return,
+    };
+    let token_a = register_and_login(&mut app).await;
+    let token_b = register_and_login(&mut app).await;
+
+    // 用户 A 创建题目
+    let (_, body) = post_auth(
+        &mut app,
+        "/api/v1/questions",
+        json!({
+            "stem": "提交权限测试",
+            "question_type": "judgment",
+            "difficulty": "easy",
+            "correct_answer": [true]
+        }),
+        &token_a,
+    )
+    .await;
+    let qid = body["id"].as_str().unwrap().to_string();
+
+    // 用户 B 尝试提交 → 403
+    let (status, _) = post_auth(
+        &mut app,
+        &format!("/api/v1/questions/{}/submit", qid),
+        json!({}),
+        &token_b,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "非创建者提交应返回 403");
+
+    // 用户 A 可以正常提交
+    let (status, _) = post_auth(
+        &mut app,
+        &format!("/api/v1/questions/{}/submit", qid),
+        json!({}),
+        &token_a,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "创建者提交应成功");
+}
