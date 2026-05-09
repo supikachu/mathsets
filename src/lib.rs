@@ -26,6 +26,15 @@ pub struct AppState {
 pub fn build_app(state: AppState) -> Router {
     // ─── 需要 JWT 认证的保护路由 ───
     let protected_routes = Router::new()
+        // 教研组
+        .route("/groups", get(handlers::groups::list_groups))
+        .route("/groups", post(handlers::groups::create_group))
+        .route("/groups/{id}", get(handlers::groups::get_group))
+        .route("/groups/{id}", put(handlers::groups::update_group))
+        .route("/groups/{id}", delete(handlers::groups::delete_group))
+        .route("/groups/{id}/members", post(handlers::groups::add_member))
+        .route("/groups/{id}/members/{user_id}", delete(handlers::groups::remove_member))
+        .route("/groups/{id}/members/{user_id}", put(handlers::groups::set_leader))
         // 知识点树
         .route("/knowledge-points", get(handlers::knowledge_points::list_knowledge_points))
         .route("/knowledge-points", post(handlers::knowledge_points::create_knowledge_point))

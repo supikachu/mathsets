@@ -153,6 +153,57 @@ async fn register_and_login(app: &mut axum::Router) -> String {
     body["token"].as_str().unwrap().to_string()
 }
 
+/// 注册一个组长用户并返回 token（用于审核测试）
+async fn register_leader_and_login(app: &mut axum::Router) -> String {
+    let username = format!("leader_{}", Uuid::new_v4().to_string().split('-').next().unwrap());
+    let email = format!("{}@test.com", username);
+
+    let (_, _) = post_json(
+        app,
+        "/api/v1/auth/register",
+        json!({
+            "username": username,
+            "email": email,
+            "password": "test123",
+            "display_name": "组长用户"
+        }),
+    )
+    .await;
+
+    let (_, login_body) = post_json(
+        app,
+        "/api/v1/auth/login",
+        json!({ "username": username, "password": "test123" }),
+    )
+    .await;
+    let token = login_body["token"].as_str().unwrap().to_string();
+
+    // 解码 token 获取 user_id
+    let claims = mathset::auth::jwt::verify_token(
+        &token,
+        "test-secret-for-integration-tests",
+    )
+    .unwrap();
+
+    // 用独立连接池更新角色
+    let pool = mathset::db::create_pool(&std::env::var("DATABASE_URL").unwrap()).await;
+    sqlx::query("UPDATE users SET role = 'groupleader' WHERE id = $1")
+        .bind(claims.sub)
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+
+    // 重新登录获取带新角色的 token
+    let (_, body) = post_json(
+        app,
+        "/api/v1/auth/login",
+        json!({ "username": username, "password": "test123" }),
+    )
+    .await;
+    body["token"].as_str().unwrap().to_string()
+}
+
 // ---------------------------------------------------------------------------
 // 1. 健康检查
 // ---------------------------------------------------------------------------
@@ -274,7 +325,7 @@ async fn test_knowledge_points_crud() {
 
     // 获取初始树（可能已有其他测试残留的节点）
     let (status, body) = get_auth(&mut app, "/api/v1/knowledge-points", &token).await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::OK, "获取知识点树失败: {} {:?}", status, body);
     let tree = body.as_array().unwrap();
     let initial_count = tree.len();
 
@@ -362,7 +413,8 @@ async fn test_question_full_lifecycle() {
         Some(app) => app,
         None => return,
     };
-    let token = register_and_login(&mut app).await;
+    let token = register_and_login(&mut app).await;       // 教师用户（创建题目）
+    let leader_token = register_leader_and_login(&mut app).await; // 组长用户（审核）
 
     // 先建一个知识点用于关联
     let (_, kp) = post_auth(
@@ -438,12 +490,12 @@ async fn test_question_full_lifecycle() {
     assert_eq!(status, StatusCode::OK, "提交审核失败: {:?}", body);
     assert_eq!(body["status"], "pending");
 
-    // 5. 审核通过
+    // 5. 审核通过（组长操作）
     let (status, body) = post_auth(
         &mut app,
         &format!("/api/v1/questions/{}/review", question_id),
         json!({ "action": "approved", "comment": "审核通过" }),
-        &token,
+        &leader_token,
     )
     .await;
     assert_eq!(status, StatusCode::OK, "审核通过失败: {:?}", body);
@@ -589,6 +641,7 @@ async fn test_question_review_reject() {
         None => return,
     };
     let token = register_and_login(&mut app).await;
+    let leader_token = register_leader_and_login(&mut app).await;
 
     // 创建 + 提交
     let (_, body) = post_auth(
@@ -607,12 +660,12 @@ async fn test_question_review_reject() {
     let qid = body["id"].as_str().unwrap().to_string();
     post_auth(&mut app, &format!("/api/v1/questions/{}/submit", qid), json!({}), &token).await;
 
-    // 审核驳回
+    // 审核驳回（组长操作）
     let (status, body) = post_auth(
         &mut app,
         &format!("/api/v1/questions/{}/review", qid),
         json!({ "action": "rejected", "comment": "题干不够清晰" }),
-        &token,
+        &leader_token,
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -628,4 +681,180 @@ async fn test_question_review_reject() {
     .await;
     assert_eq!(status, StatusCode::OK, "驳回后应可编辑: {:?}", body);
     assert_eq!(body["status"], "draft"); // 编辑后回到草稿
+}
+
+// ---------------------------------------------------------------------------
+// 7. 教研组 CRUD + 成员管理
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_groups_crud() {
+    let mut app = match create_test_app().await {
+        Some(app) => app,
+        None => return,
+    };
+    let token = register_and_login(&mut app).await;
+
+    // 获取初始列表（可能已有其他测试残留）
+    let (status, body) = get_auth(&mut app, "/api/v1/groups", &token).await;
+    assert_eq!(status, StatusCode::OK);
+    let initial_count = body.as_array().unwrap().len();
+
+    // 创建教研组
+    let (status, body) = post_auth(
+        &mut app,
+        "/api/v1/groups",
+        json!({"name": "初一数学组", "description": "初一数学教师团队"}),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "创建失败: {:?}", body);
+    let group_id = body["id"].as_str().unwrap().to_string();
+    assert_eq!(body["name"], "初一数学组");
+
+    // 创建第二个组
+    let (status, _) = post_auth(
+        &mut app,
+        "/api/v1/groups",
+        json!({"name": "初三几何组"}),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // 列表应包含初始 + 2 个新组
+    let (status, body) = get_auth(&mut app, "/api/v1/groups", &token).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_array().unwrap().len(), initial_count + 2);
+
+    // 获取详情
+    let (status, body) =
+        get_auth(&mut app, &format!("/api/v1/groups/{}", group_id), &token).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["name"], "初一数学组");
+    assert_eq!(body["members"].as_array().unwrap().len(), 0);
+
+    // 更新组名
+    let (status, body) = put_auth(
+        &mut app,
+        &format!("/api/v1/groups/{}", group_id),
+        json!({"name": "初一数学组（更新）"}),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["name"], "初一数学组（更新）");
+
+    // 删除组
+    let (status, _) =
+        delete_auth(&mut app, &format!("/api/v1/groups/{}", group_id), &token).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, _) =
+        get_auth(&mut app, &format!("/api/v1/groups/{}", group_id), &token).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // 删除不存在的组
+    let (status, _) =
+        delete_auth(&mut app, &format!("/api/v1/groups/{}", Uuid::new_v4()), &token).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_group_members() {
+    let mut app = match create_test_app().await {
+        Some(app) => app,
+        None => return,
+    };
+
+    // 注册两个用户
+    let token1 = register_and_login(&mut app).await;
+    let token2 = register_and_login(&mut app).await;
+
+    // 获取两个用户的 ID（从登录响应中提取）
+    // 由于 login 不返回 user_id，我们创建一个组来测试成员管理流程
+
+    // 创建组
+    let (_, body) = post_auth(
+        &mut app,
+        "/api/v1/groups",
+        json!({"name": "测试组"}),
+        &token1,
+    )
+    .await;
+    let group_id = body["id"].as_str().unwrap().to_string();
+
+    // 从 token1 中解码获取 user_id
+    let claims = mathset::auth::jwt::verify_token(
+        &token1,
+        "test-secret-for-integration-tests",
+    )
+    .expect("token 应可解码");
+    let my_user_id = claims.sub;
+
+    // 添加自己为成员
+    let (status, _) = post_auth(
+        &mut app,
+        &format!("/api/v1/groups/{}/members", group_id),
+        json!({"user_id": my_user_id, "is_leader": true}),
+        &token1,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "添加成员失败");
+
+    // 查看组成员
+    let (status, body) =
+        get_auth(&mut app, &format!("/api/v1/groups/{}", group_id), &token1).await;
+    assert_eq!(status, StatusCode::OK);
+    let members = body["members"].as_array().unwrap();
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0]["is_leader"], true);
+
+    // 重复添加（幂等）
+    let (status, _) = post_auth(
+        &mut app,
+        &format!("/api/v1/groups/{}/members", group_id),
+        json!({"user_id": my_user_id, "is_leader": true}),
+        &token1,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // 取消组长
+    let (status, _) = put_auth(
+        &mut app,
+        &format!("/api/v1/groups/{}/members/{}", group_id, my_user_id),
+        json!({"is_leader": false}),
+        &token1,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) =
+        get_auth(&mut app, &format!("/api/v1/groups/{}", group_id), &token1).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["members"][0]["is_leader"], false);
+
+    // 移除成员
+    let (status, _) = delete_auth(
+        &mut app,
+        &format!("/api/v1/groups/{}/members/{}", group_id, my_user_id),
+        &token1,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, body) =
+        get_auth(&mut app, &format!("/api/v1/groups/{}", group_id), &token1).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["members"].as_array().unwrap().len(), 0);
+
+    // 移除不存在的成员
+    let (status, _) = delete_auth(
+        &mut app,
+        &format!("/api/v1/groups/{}/members/{}", group_id, Uuid::new_v4()),
+        &token1,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }

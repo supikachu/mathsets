@@ -15,3 +15,7 @@
 
 # Temp SQL files
 .pg_reload.sql
+
+# Frontend
+frontend/node_modules/
+frontend/dist/

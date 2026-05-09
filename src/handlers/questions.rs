@@ -110,94 +110,48 @@ pub async fn list_questions(
     let page_size = query.page_size.unwrap_or(20).min(100);
     let offset = (page - 1) * page_size;
 
-    // 构建动态查询
-    let mut sql = String::from(
+    use sqlx::QueryBuilder;
+
+    let mut builder = QueryBuilder::new(
         "SELECT id, stem, question_type, difficulty, default_score, status, grade, creator_id, created_at, updated_at, version FROM questions WHERE 1=1",
     );
-    let mut param_idx = 1u32;
 
-    // 用简单的方式逐个拼接条件（生产环境建议用 sqlx::QueryBuilder）
     if let Some(ref status) = query.status {
-        let s = format!(" AND status = ${}", param_idx);
-        sql.push_str(&s);
-        param_idx += 1;
+        builder.push(" AND status = ");
+        builder.push_bind(status);
     }
     if let Some(ref qt) = query.question_type {
-        let s = format!(" AND question_type = ${}", param_idx);
-        sql.push_str(&s);
-        param_idx += 1;
+        builder.push(" AND question_type = ");
+        builder.push_bind(qt);
     }
     if let Some(ref diff) = query.difficulty {
-        let s = format!(" AND difficulty = ${}", param_idx);
-        sql.push_str(&s);
-        param_idx += 1;
+        builder.push(" AND difficulty = ");
+        builder.push_bind(diff);
     }
     if let Some(ref grade) = query.grade {
-        let s = format!(" AND grade = ${}", param_idx);
-        sql.push_str(&s);
-        param_idx += 1;
-    }
-    if let Some(ref _kp_id) = query.knowledge_point_id {
-        // 通过知识点过滤需要 JOIN 子查询
-        sql.push_str(&format!(
-            " AND id IN (SELECT question_id FROM question_knowledge_points WHERE knowledge_point_id = ${})",
-            param_idx
-        ));
-        param_idx += 1;
-    }
-    if let Some(ref creator) = query.creator_id {
-        let s = format!(" AND creator_id = ${}", param_idx);
-        sql.push_str(&s);
-        param_idx += 1;
-    }
-    if let Some(ref keyword) = query.keyword {
-        let s = format!(" AND stem ILIKE ${}", param_idx);
-        sql.push_str(&s);
-        param_idx += 1;
-    }
-
-    sql.push_str(&format!(
-        " ORDER BY updated_at DESC LIMIT ${} OFFSET ${}",
-        param_idx,
-        param_idx + 1
-    ));
-
-    // 构建查询
-    let mut db_query = sqlx::query_as::<_, QuestionSummary>(&sql);
-
-    let mut idx = 1u32;
-    if let Some(ref status) = query.status {
-        db_query = db_query.bind(status);
-        idx += 1;
-    }
-    if let Some(ref qt) = query.question_type {
-        db_query = db_query.bind(qt);
-        idx += 1;
-    }
-    if let Some(ref diff) = query.difficulty {
-        db_query = db_query.bind(diff);
-        idx += 1;
-    }
-    if let Some(ref grade) = query.grade {
-        db_query = db_query.bind(grade);
-        idx += 1;
+        builder.push(" AND grade = ");
+        builder.push_bind(grade);
     }
     if let Some(ref kp_id) = query.knowledge_point_id {
-        db_query = db_query.bind(kp_id);
-        idx += 1;
+        builder.push(" AND id IN (SELECT question_id FROM question_knowledge_points WHERE knowledge_point_id = ");
+        builder.push_bind(kp_id);
+        builder.push(")");
     }
     if let Some(ref creator) = query.creator_id {
-        db_query = db_query.bind(creator);
-        idx += 1;
+        builder.push(" AND creator_id = ");
+        builder.push_bind(creator);
     }
     if let Some(ref keyword) = query.keyword {
-        db_query = db_query.bind(format!("%{}%", keyword));
-        idx += 1;
+        builder.push(" AND stem ILIKE ");
+        builder.push_bind(format!("%{}%", keyword));
     }
 
-    db_query = db_query.bind(page_size as i64).bind(offset as i64);
+    builder.push(" ORDER BY updated_at DESC LIMIT ");
+    builder.push_bind(page_size as i64);
+    builder.push(" OFFSET ");
+    builder.push_bind(offset as i64);
 
-    let questions = db_query.fetch_all(&state.pool).await.map_err(|e| {
+    let questions = builder.build_query_as::<QuestionSummary>().fetch_all(&state.pool).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("查询题目失败: {}", e)})),
@@ -478,6 +432,14 @@ pub async fn submit_question(
         })?
         .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "题目不存在"}))))?;
 
+    // 仅创建者可提交审核
+    if existing.creator_id.map(|uid| uid != auth_user.id).unwrap_or(true) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "只有题目的创建者可以提交审核"})),
+        ));
+    }
+
     // 仅草稿/驳回状态可提交审核
     if existing.status != QuestionStatus::Draft && existing.status != QuestionStatus::Rejected {
         return Err((
@@ -532,6 +494,22 @@ pub async fn review_question(
             )
         })?
         .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "题目不存在"}))))?;
+
+    // 仅组长/管理员可审核
+    if auth_user.role != "GroupLeader" && auth_user.role != "Admin" {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "仅教研组长或管理员可以审核题目"})),
+        ));
+    }
+
+    // 创建者回避：组长不能审核自己的题目
+    if existing.creator_id.map(|uid| uid == auth_user.id).unwrap_or(false) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "教研组长不能审核自己创建的题目"})),
+        ));
+    }
 
     if existing.status != QuestionStatus::Pending {
         return Err((
