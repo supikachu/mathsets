@@ -1,98 +1,107 @@
 <template>
   <div class="ql-page">
-    <!-- ===== 固定顶栏（不随列表滚动） ===== -->
-    <div class="ql-fixed-header">
-      <!-- 顶栏：题库空间 + 标题 + 新建按钮 -->
-      <div class="ql-topbar">
-        <h1 class="page-title ql-title"><AppIcon name="file-text" :size="20" /> 题目管理</h1>
-        <div class="header-actions">
-          <button
-            v-if="basket.count.value > 0"
-            class="basket-btn"
-            @click="toast.info(`试题篮中有 ${basket.count.value} 道题目`)"
+    <!-- ===== Apple风格吸顶工具栏 ===== -->
+    <div class="ql-sticky-bar">
+      <div class="ql-toolbar">
+        <!-- 左侧：题库空间切换 -->
+        <div class="ql-space-switcher">
+          <AppIcon name="folder" :size="15" class="ql-space-icon" />
+          <select
+            class="ql-space-select"
+            :value="space.currentSpaceId"
+            @change="onSpaceChange(($event.target as HTMLSelectElement).value)"
           >
-            <AppIcon name="shopping-cart" :size="16" />
-            <span>试题篮</span>
-            <span class="basket-count">{{ basket.count.value }}</span>
-          </button>
-          <AppButton variant="primary" @click="$router.push('/questions/new')">
-            <AppIcon name="plus" :size="17" /> 新建题目
-          </AppButton>
+            <option v-for="s in space.spaces" :key="s.id" :value="s.id">
+              {{ spaceKindLabel(s.kind) }} · {{ s.name }}
+            </option>
+          </select>
+          <AppIcon name="chevron-down" :size="13" class="ql-space-chevron" />
         </div>
-      </div>
 
-      <!-- 搜索框 + 蓝色搜索按钮 -->
-      <div class="ql-search-row">
-        <div class="ql-search-box">
-          <AppIcon name="search" :size="16" class="ql-search-icon" />
+        <!-- 中间：搜索框 -->
+        <div class="ql-search-wrap">
+          <AppIcon name="search" :size="15" class="ql-search-icon" />
           <input
             v-model="query.keyword"
             class="ql-search-input"
-            placeholder="请输入您的搜索词"
-            @keydown.enter="onSearchSubmit"
+            placeholder="搜索题目"
+            @keydown.enter="toggleFilter"
           />
+          <button class="ql-search-go" @click="toggleFilter">
+            <AppIcon name="filter" :size="14" />
+            筛选
+          </button>
         </div>
-        <button class="ql-search-btn" @click="onSearchSubmit">搜索</button>
+
+        <!-- 右侧：新建题目 + 主题切换 -->
+        <button
+          v-if="basket.count.value > 0"
+          class="ql-basket-btn"
+          @click="toast.info(`试题篮中有 ${basket.count.value} 道题目`)"
+        >
+          <AppIcon name="shopping-cart" :size="16" />
+          <span class="ql-basket-count">{{ basket.count.value }}</span>
+        </button>
+        <button class="ql-new-btn" @click="$router.push('/questions/new')">
+          <AppIcon name="plus" :size="16" />
+          新建题目
+        </button>
+        <ThemeToggle />
       </div>
 
-      <!-- 标签平铺筛选面板 -->
-      <div class="ql-filter-panel">
-        <!-- 年级 -->
-        <div class="ql-filter-row">
-          <span class="ql-filter-label">年级</span>
-          <div class="ql-filter-tags">
-            <button
-              v-for="opt in gradeOptions"
-              :key="opt.value"
-              class="ql-tag"
-              :class="{ active: !query.grade && opt.value === '__all' || query.grade === opt.value }"
-              @click="selectTag('grade', opt.value)"
-            >{{ opt.label }}</button>
+      <!-- 筛选面板（点击搜索/筛选按钮时展开，紧贴搜索框下方） -->
+      <Transition name="ql-filter-pop">
+        <div v-if="showFilter" class="ql-filter-panel">
+          <div class="ql-filter-row">
+            <span class="ql-filter-label">年级</span>
+            <div class="ql-filter-tags">
+              <button
+                v-for="opt in gradeOptions"
+                :key="opt.value"
+                class="ql-tag"
+                :class="{ active: !query.grade && opt.value === '__all' || query.grade === opt.value }"
+                @click="selectTag('grade', opt.value)"
+              >{{ opt.label }}</button>
+            </div>
+          </div>
+          <div class="ql-filter-row">
+            <span class="ql-filter-label">题型</span>
+            <div class="ql-filter-tags">
+              <button
+                v-for="opt in typeOptions"
+                :key="opt.value"
+                class="ql-tag"
+                :class="{ active: !query.question_type && opt.value === '__all' || query.question_type === opt.value }"
+                @click="selectTag('question_type', opt.value)"
+              >{{ opt.label }}</button>
+            </div>
+          </div>
+          <div class="ql-filter-row">
+            <span class="ql-filter-label">难度</span>
+            <div class="ql-filter-tags">
+              <button
+                v-for="opt in difficultyOptions"
+                :key="opt.value"
+                class="ql-tag"
+                :class="{ active: !query.difficulty && opt.value === '__all' || query.difficulty === opt.value }"
+                @click="selectTag('difficulty', opt.value)"
+              >{{ opt.label }}</button>
+            </div>
+          </div>
+          <div class="ql-filter-row">
+            <span class="ql-filter-label">状态</span>
+            <div class="ql-filter-tags">
+              <button
+                v-for="opt in statusOptions"
+                :key="opt.value"
+                class="ql-tag"
+                :class="{ active: !query.status && opt.value === '__all' || query.status === opt.value }"
+                @click="selectTag('status', opt.value)"
+              >{{ opt.label }}</button>
+            </div>
           </div>
         </div>
-
-        <!-- 题型 -->
-        <div class="ql-filter-row">
-          <span class="ql-filter-label">题型</span>
-          <div class="ql-filter-tags">
-            <button
-              v-for="opt in typeOptions"
-              :key="opt.value"
-              class="ql-tag"
-              :class="{ active: !query.question_type && opt.value === '__all' || query.question_type === opt.value }"
-              @click="selectTag('question_type', opt.value)"
-            >{{ opt.label }}</button>
-          </div>
-        </div>
-
-        <!-- 难度 -->
-        <div class="ql-filter-row">
-          <span class="ql-filter-label">难度</span>
-          <div class="ql-filter-tags">
-            <button
-              v-for="opt in difficultyOptions"
-              :key="opt.value"
-              class="ql-tag"
-              :class="{ active: !query.difficulty && opt.value === '__all' || query.difficulty === opt.value }"
-              @click="selectTag('difficulty', opt.value)"
-            >{{ opt.label }}</button>
-          </div>
-        </div>
-
-        <!-- 状态 -->
-        <div class="ql-filter-row">
-          <span class="ql-filter-label">状态</span>
-          <div class="ql-filter-tags">
-            <button
-              v-for="opt in statusOptions"
-              :key="opt.value"
-              class="ql-tag"
-              :class="{ active: !query.status && opt.value === '__all' || query.status === opt.value }"
-              @click="selectTag('status', opt.value)"
-            >{{ opt.label }}</button>
-          </div>
-        </div>
-      </div>
+      </Transition>
 
       <!-- 知识点筛选 chip -->
       <div v-if="selectedKpId" class="kp-filter-chip">
@@ -255,6 +264,7 @@ import { ref, reactive, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { questionApi, type QuestionSummary, type QuestionDetail, type QuestionQuery } from '@/api/client'
 import LatexRender from '@/components/LatexRender.vue'
+import ThemeToggle from '@/components/ThemeToggle.vue'
 import { AppButton, AppSelect, AppEmpty, AppPagination, AppIcon } from '@/components/ui'
 import { useSelectedKp } from '@/composables/useSelectedKp'
 import { useQuestionBasket } from '@/composables/useQuestionBasket'
@@ -273,6 +283,32 @@ const toast = useToast()
 const space = useSpaceStore()
 const { selectedKpId, selectedKpName, clear } = useSelectedKp()
 const basket = useQuestionBasket()
+
+// ---- 筛选面板展开状态 ----
+const showFilter = ref(false)
+
+function toggleFilter() {
+  showFilter.value = !showFilter.value
+  if (!showFilter.value) {
+    // 收起时执行搜索
+    page.value = 1
+    fetchList()
+  }
+}
+
+function spaceKindLabel(kind: string) {
+  if (kind === 'personal') return '个人'
+  if (kind === 'public') return '公共'
+  if (kind === 'shared') return '共享'
+  return kind
+}
+
+function onSpaceChange(id: string) {
+  space.setCurrentSpace(id)
+  query.space_id = id
+  page.value = 1
+  fetchList()
+}
 
 // ---- 卡片数据类型 ----
 interface QuestionCard {
@@ -517,52 +553,91 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-/* ===== Page Layout: fixed header + scroll area ===== */
+/* ===== Apple风格吸顶工具栏 ===== */
 .ql-page {
   display: flex;
   flex-direction: column;
   height: 100%;
 }
 
-.ql-fixed-header {
+.ql-sticky-bar {
+  position: sticky;
+  top: 0;
+  z-index: 100;
   flex-shrink: 0;
-  padding-bottom: 12px;
-  border-bottom: 1px solid var(--border-color);
   background: var(--bg-primary);
-  z-index: 10;
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  border-bottom: 1px solid var(--border-color);
 }
 
-.ql-topbar {
+/* ===== 工具栏单行布局 ===== */
+.ql-toolbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  margin-bottom: 14px;
+  gap: 10px;
+  padding: 12px 20px;
 }
 
-.ql-title {
-  margin-bottom: 0;
-}
-
-/* ===== Search Row ===== */
-.ql-search-row {
+/* 题库空间切换 */
+.ql-space-switcher {
+  position: relative;
   display: flex;
-  gap: 8px;
-  margin-bottom: 12px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  height: 36px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  transition: var(--transition-fast);
+  flex-shrink: 0;
 }
 
-.ql-search-box {
+.ql-space-switcher:hover {
+  border-color: var(--text-muted);
+}
+
+.ql-space-icon {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.ql-space-select {
+  appearance: none;
+  -webkit-appearance: none;
+  border: none;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  padding: 0 18px 0 0;
+  outline: none;
+  cursor: pointer;
+}
+
+.ql-space-chevron {
+  position: absolute;
+  right: 10px;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+/* 搜索框 */
+.ql-search-wrap {
   flex: 1;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 0 14px;
+  gap: 0;
+  height: 36px;
   background: var(--bg-input);
   border: 1px solid var(--border-color);
-  border-radius: var(--radius-sm);
+  border-radius: 10px;
   transition: var(--transition-fast);
+  overflow: hidden;
 }
 
-.ql-search-box:focus-within {
+.ql-search-wrap:focus-within {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-light);
 }
@@ -570,6 +645,7 @@ onBeforeUnmount(() => {
 .ql-search-icon {
   color: var(--text-muted);
   flex-shrink: 0;
+  margin-left: 12px;
 }
 
 .ql-search-input {
@@ -579,48 +655,134 @@ onBeforeUnmount(() => {
   background: transparent;
   font-size: 14px;
   color: var(--text-primary);
-  padding: 9px 0;
+  padding: 0 10px;
+  height: 100%;
 }
 
 .ql-search-input::placeholder {
   color: var(--text-muted);
 }
 
-.ql-search-btn {
-  padding: 9px 24px;
-  border-radius: var(--radius-sm);
+.ql-search-go {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 100%;
+  padding: 0 16px;
   background: var(--accent);
   color: #fff;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
   transition: var(--transition-fast);
   white-space: nowrap;
+  flex-shrink: 0;
 }
 
-.ql-search-btn:hover {
+.ql-search-go:hover {
   background: var(--accent-hover);
 }
 
-.ql-search-btn:active {
-  transform: scale(0.97);
+.ql-search-go:active {
+  transform: scale(0.96);
 }
 
-/* ===== Filter Panel (tag style) ===== */
+/* 新建题目按钮 */
+.ql-new-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 36px;
+  padding: 0 16px;
+  border-radius: 10px;
+  background: var(--text-primary);
+  color: var(--bg-primary);
+  font-size: 13px;
+  font-weight: 600;
+  transition: var(--transition-fast);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.ql-new-btn:hover {
+  opacity: 0.85;
+}
+
+.ql-new-btn:active {
+  transform: scale(0.96);
+}
+
+/* 试题篮按钮 */
+.ql-basket-btn {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 36px;
+  padding: 0 12px;
+  border-radius: 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  transition: var(--transition-fast);
+  flex-shrink: 0;
+}
+
+.ql-basket-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.ql-basket-count {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 18px;
+  height: 18px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+}
+
+/* ===== 筛选面板弹出动画 ===== */
+.ql-filter-pop-enter-active,
+.ql-filter-pop-leave-active {
+  transition: all 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+  overflow: hidden;
+}
+
+.ql-filter-pop-enter-from,
+.ql-filter-pop-leave-to {
+  opacity: 0;
+  max-height: 0;
+  transform: translateY(-8px);
+}
+
+.ql-filter-pop-enter-to,
+.ql-filter-pop-leave-from {
+  opacity: 1;
+  max-height: 320px;
+}
+
+/* 筛选面板 */
 .ql-filter-panel {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 10px 14px;
+  gap: 4px;
+  padding: 12px 20px 14px;
   background: var(--bg-card);
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-sm);
+  border-top: 1px solid var(--border-color);
 }
 
 .ql-filter-row {
   display: flex;
   align-items: flex-start;
   gap: 12px;
-  padding: 3px 0;
+  padding: 2px 0;
 }
 
 .ql-filter-label {
@@ -629,7 +791,7 @@ onBeforeUnmount(() => {
   color: var(--text-secondary);
   flex-shrink: 0;
   min-width: 36px;
-  padding-top: 4px;
+  padding-top: 5px;
 }
 
 .ql-filter-tags {
@@ -639,8 +801,8 @@ onBeforeUnmount(() => {
 }
 
 .ql-tag {
-  padding: 3px 12px;
-  border-radius: var(--radius-full);
+  padding: 4px 13px;
+  border-radius: 980px;
   font-size: 13px;
   font-weight: 500;
   color: var(--text-secondary);
@@ -660,11 +822,11 @@ onBeforeUnmount(() => {
   font-weight: 600;
 }
 
-/* ===== Scroll Area ===== */
+/* ===== 可滚动列表区域 ===== */
 .ql-scroll-area {
   flex: 1;
   overflow-y: auto;
-  padding-top: 14px;
+  padding: 16px 20px;
 }
 
 /* ===== Header Actions ===== */

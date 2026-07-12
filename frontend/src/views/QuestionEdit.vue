@@ -672,10 +672,11 @@ watch(() => form.question_type, () => {
 
 <style scoped>
 .edit-page {
-  height: calc(100vh - 100px);
+  height: 100vh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  padding: 20px 24px;
 }
 
 .edit-title {

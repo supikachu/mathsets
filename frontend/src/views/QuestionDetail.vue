@@ -1,5 +1,5 @@
 <template>
-  <div>
+  <div style="padding: 20px 24px; height: 100%; overflow-y: auto;">
     <div v-if="loading" class="loading-hint">加载中…</div>
 
     <template v-else>

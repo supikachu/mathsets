@@ -504,6 +504,9 @@ async function fetchDashboardData() {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  padding: 20px 24px;
+  height: 100%;
+  overflow-y: auto;
 }
 
 /* ===== Welcome ===== */

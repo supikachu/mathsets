@@ -55,28 +55,6 @@
 
       <!-- 主内容区 -->
       <div class="main-content">
-        <header class="top-bar">
-          <button v-if="showKpTree" class="tree-toggle" @click="showTreeMobile = true">
-            <AppIcon name="tag" :size="18" /><span>知识点</span>
-          </button>
-          <div class="space-switcher" v-if="space.spaces.length">
-            <label class="space-label">题库空间</label>
-            <select
-              class="space-select"
-              :value="space.currentSpaceId"
-              @change="onSpaceChange(($event.target as HTMLSelectElement).value)"
-            >
-              <option v-for="s in space.spaces" :key="s.id" :value="s.id">
-                {{ spaceKindLabel(s.kind) }} · {{ s.name }}
-              </option>
-            </select>
-          </div>
-          <div class="top-bar-spacer" />
-          <div class="top-bar-actions">
-            <ThemeToggle />
-          </div>
-        </header>
-
         <div class="view active">
           <router-view />
         </div>
