@@ -26,15 +26,18 @@ pub struct AppState {
 pub fn build_app(state: AppState) -> Router {
     // ─── 需要 JWT 认证的保护路由 ───
     let protected_routes = Router::new()
-        // 教研组
-        .route("/groups", get(handlers::groups::list_groups))
-        .route("/groups", post(handlers::groups::create_group))
-        .route("/groups/{id}", get(handlers::groups::get_group))
-        .route("/groups/{id}", put(handlers::groups::update_group))
-        .route("/groups/{id}", delete(handlers::groups::delete_group))
-        .route("/groups/{id}/members", post(handlers::groups::add_member))
-        .route("/groups/{id}/members/{user_id}", delete(handlers::groups::remove_member))
-        .route("/groups/{id}/members/{user_id}", put(handlers::groups::set_leader))
+        // 题库空间
+        .route("/spaces", get(handlers::spaces::list_spaces))
+        .route("/spaces", post(handlers::spaces::create_team_space))
+        .route("/spaces/{id}", get(handlers::spaces::get_space_detail))
+        .route("/spaces/{id}", put(handlers::spaces::update_space))
+        .route("/spaces/{id}", delete(handlers::spaces::delete_space))
+        .route("/spaces/{id}/members", post(handlers::spaces::add_member))
+        .route("/spaces/{id}/members/{user_id}", put(handlers::spaces::update_member))
+        .route(
+            "/spaces/{id}/members/{user_id}",
+            delete(handlers::spaces::remove_member),
+        )
         // 知识点树
         .route("/knowledge-points", get(handlers::knowledge_points::list_knowledge_points))
         .route("/knowledge-points", post(handlers::knowledge_points::create_knowledge_point))
@@ -61,6 +64,15 @@ pub fn build_app(state: AppState) -> Router {
         // 审核
         .route("/questions/{id}/submit", post(handlers::questions::submit_question))
         .route("/questions/{id}/review", post(handlers::questions::review_question))
+        // 公共库流通
+        .route(
+            "/questions/{id}/contribute",
+            post(handlers::questions::contribute_to_public),
+        )
+        .route(
+            "/questions/{id}/import",
+            post(handlers::questions::import_question),
+        )
         // 试卷 CRUD
         .route("/papers", get(handlers::papers::list_papers))
         .route("/papers", post(handlers::papers::create_paper))

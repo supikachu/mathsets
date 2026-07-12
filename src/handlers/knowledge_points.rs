@@ -1,11 +1,12 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Extension, Path, State},
     http::StatusCode,
     Json,
 };
 use serde_json::json;
 use uuid::Uuid;
 
+use crate::auth::middleware::AuthUser;
 use crate::models::question::{
     CreateKnowledgePointRequest, KnowledgePoint, KnowledgePointTreeNode,
     UpdateKnowledgePointRequest,
@@ -50,8 +51,12 @@ pub async fn list_knowledge_points(
 /// POST /api/v1/knowledge-points — 新增知识点
 pub async fn create_knowledge_point(
     State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
     Json(req): Json<CreateKnowledgePointRequest>,
 ) -> Result<(StatusCode, Json<KnowledgePoint>), (StatusCode, Json<serde_json::Value>)> {
+    // 任意登录用户可维护知识点（全局树，首期不按空间隔离）
+    let _ = auth_user;
+
     let id = Uuid::new_v4();
     let now = chrono::Utc::now();
 
@@ -91,9 +96,12 @@ pub async fn create_knowledge_point(
 /// PUT /api/v1/knowledge-points/:id — 更新知识点
 pub async fn update_knowledge_point(
     State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateKnowledgePointRequest>,
 ) -> Result<Json<KnowledgePoint>, (StatusCode, Json<serde_json::Value>)> {
+    let _ = auth_user;
+
     let existing = sqlx::query_as::<_, KnowledgePoint>(
         "SELECT * FROM knowledge_points WHERE id = $1",
     )
@@ -153,8 +161,11 @@ pub async fn update_knowledge_point(
 /// DELETE /api/v1/knowledge-points/:id — 删除知识点
 pub async fn delete_knowledge_point(
     State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
+    let _ = auth_user;
+
     // 检查是否有子节点
     let child_count = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM knowledge_points WHERE parent_id = $1",

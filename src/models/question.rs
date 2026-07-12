@@ -64,6 +64,8 @@ pub struct Question {
     pub updated_by: Option<Uuid>,
     pub updated_at: DateTime<Utc>,
     pub version: i32,
+    pub space_id: Uuid,
+    pub origin_question_id: Option<Uuid>,
 }
 
 /// 创建题目请求
@@ -81,12 +83,15 @@ pub struct CreateQuestionRequest {
     pub semester: Option<String>,
     pub source: Option<String>,
     pub knowledge_point_ids: Option<Vec<Uuid>>,
+    /// 所属空间；缺省为当前用户个人空间
+    pub space_id: Option<Uuid>,
 }
 
 /// 更新题目请求
 #[derive(Debug, Deserialize)]
 pub struct UpdateQuestionRequest {
     pub stem: Option<String>,
+    pub question_type: Option<QuestionType>,
     pub difficulty: Option<Difficulty>,
     pub default_score: Option<i32>,
     pub options: Option<serde_json::Value>,
@@ -111,6 +116,10 @@ pub struct QuestionQuery {
     pub keyword: Option<String>,
     pub page: Option<u32>,
     pub page_size: Option<u32>,
+    /// 按空间过滤
+    pub space_id: Option<Uuid>,
+    /// 仅返回当前用户可审核的待审题
+    pub reviewable_by_me: Option<bool>,
 }
 
 /// 题目列表响应项
@@ -128,6 +137,7 @@ pub struct QuestionSummary {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub version: i32,
+    pub space_id: Uuid,
 }
 
 impl From<Question> for QuestionSummary {
@@ -145,6 +155,7 @@ impl From<Question> for QuestionSummary {
             created_at: q.created_at,
             updated_at: q.updated_at,
             version: q.version,
+            space_id: q.space_id,
         }
     }
 }
@@ -171,7 +182,11 @@ pub struct QuestionDetail {
     pub updated_by: Option<Uuid>,
     pub updated_at: DateTime<Utc>,
     pub version: i32,
+    pub space_id: Uuid,
+    pub origin_question_id: Option<Uuid>,
     pub knowledge_points: Vec<KnowledgePointSummary>,
+    pub reviewer_ids: Vec<Uuid>,
+    pub can_review: bool,
 }
 
 impl From<(Question, Vec<KnowledgePointSummary>)> for QuestionDetail {
@@ -196,7 +211,11 @@ impl From<(Question, Vec<KnowledgePointSummary>)> for QuestionDetail {
             updated_by: q.updated_by,
             updated_at: q.updated_at,
             version: q.version,
+            space_id: q.space_id,
+            origin_question_id: q.origin_question_id,
             knowledge_points: kps,
+            reviewer_ids: vec![],
+            can_review: false,
         }
     }
 }
@@ -205,6 +224,15 @@ impl From<(Question, Vec<KnowledgePointSummary>)> for QuestionDetail {
 #[derive(Debug, Deserialize)]
 pub struct SubmitReviewRequest {
     pub comment: Option<String>,
+    /// 指定审题人（可多人）；空或省略则走空间默认规则
+    pub reviewer_ids: Option<Vec<Uuid>>,
+}
+
+/// 贡献到公共库 / 从公共导入
+#[derive(Debug, Deserialize)]
+pub struct TransferQuestionRequest {
+    /// 导入时的目标空间；贡献到公共时可省略
+    pub target_space_id: Option<Uuid>,
 }
 
 /// 审核请求

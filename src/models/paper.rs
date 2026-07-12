@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 /// 试卷状态
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq)]
-#[sqlx(type_name = "varchar")]
+#[sqlx(type_name = "varchar", rename_all = "lowercase")]
 pub enum PaperStatus {
     #[serde(rename = "draft")]
     Draft,

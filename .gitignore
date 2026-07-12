@@ -19,3 +19,12 @@
 # Frontend
 frontend/node_modules/
 frontend/dist/
+frontend/*.tsbuildinfo
+
+# Root node_modules (if any)
+/node_modules/
+
+# IDE / Tooling workspace
+.trae/
+.vscode/
+.idea/

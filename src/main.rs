@@ -29,6 +29,11 @@ async fn main() {
 
     tracing::info!("数据库迁移完成");
 
+    // 确保公共空间存在
+    if let Err(e) = mathset::auth::permissions::ensure_public_space(&pool).await {
+        tracing::warn!("初始化公共空间失败: {}", e);
+    }
+
     // 构建共享状态
     let state = mathset::AppState {
         pool,

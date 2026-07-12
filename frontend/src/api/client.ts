@@ -1,17 +1,19 @@
 import axios from 'axios'
-import { ElMessage } from 'element-plus'
-import router from '@/router'
+import { useToast } from '@/composables/useToast'
 
 const client = axios.create({
   baseURL: '/api/v1',
   timeout: 10000,
 })
 
-// 请求拦截器：自动注入 Bearer token
+// 请求拦截器：自动注入 Bearer token（login/register 不带）
 client.interceptors.request.use((config) => {
-  const token = localStorage.getItem('token')
-  if (token) {
-    config.headers.Authorization = `Bearer ${token}`
+  const isAuthRoute = config.url === '/auth/login' || config.url === '/auth/register'
+  if (!isAuthRoute) {
+    const token = localStorage.getItem('token')
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`
+    }
   }
   return config
 })
@@ -19,12 +21,18 @@ client.interceptors.request.use((config) => {
 // 响应拦截器：401 → 跳转登录
 client.interceptors.response.use(
   (resp) => resp,
-  (error) => {
+  async (error) => {
     if (error.response?.status === 401) {
       localStorage.removeItem('token')
       localStorage.removeItem('user')
+      // 动态导入避免循环依赖
+      const { useAuthStore } = await import('@/stores/auth')
+      const auth = useAuthStore()
+      auth.token = ''
+      auth.user = null
+      const { default: router } = await import('@/router')
       router.push('/login')
-      ElMessage.error('登录已过期，请重新登录')
+      useToast().error('登录已过期，请重新登录')
     }
     return Promise.reject(error)
   },
@@ -68,6 +76,7 @@ export interface QuestionSummary {
   created_at: string
   updated_at: string
   version: number
+  space_id?: string
 }
 
 export interface QuestionDetail {
@@ -90,7 +99,18 @@ export interface QuestionDetail {
   updated_by: string | null
   updated_at: string
   version: number
+  space_id: string
+  origin_question_id?: string | null
   knowledge_points: { id: string; name: string }[]
+  reviewer_ids?: string[]
+  can_review?: boolean
+}
+
+export interface PageResult<T> {
+  items: T[]
+  total: number
+  page: number
+  page_size: number
 }
 
 export interface QuestionQuery {
@@ -103,6 +123,37 @@ export interface QuestionQuery {
   keyword?: string
   page?: number
   page_size?: number
+  space_id?: string
+  reviewable_by_me?: boolean
+}
+
+export interface SpaceSummary {
+  id: string
+  kind: 'personal' | 'team' | 'public'
+  name: string
+  owner_user_id: string | null
+  member_count: number | null
+  my_role: string | null
+  created_at: string
+}
+
+export interface SpaceMemberInfo {
+  user_id: string
+  username: string
+  display_name: string
+  role: string
+  duties: string[]
+  joined_at: string
+}
+
+export interface SpaceDetail {
+  id: string
+  kind: 'personal' | 'team' | 'public'
+  name: string
+  owner_user_id: string | null
+  settings: Record<string, any>
+  members: SpaceMemberInfo[]
+  created_at: string
 }
 
 // ─── API 函数 ───
@@ -134,9 +185,15 @@ export interface QuestionStats {
   disabled: number
 }
 
+function unwrapQuestionList(data: PageResult<QuestionSummary> | QuestionSummary[]): QuestionSummary[] {
+  if (Array.isArray(data)) return data
+  return data?.items ?? []
+}
+
 export const questionApi = {
-  list(params?: QuestionQuery) {
-    return client.get<QuestionSummary[]>('/questions', { params })
+  async list(params?: QuestionQuery) {
+    const res = await client.get<PageResult<QuestionSummary> | QuestionSummary[]>('/questions', { params })
+    return { ...res, data: unwrapQuestionList(res.data as any) }
   },
   get(id: string) {
     return client.get<QuestionDetail>(`/questions/${id}`)
@@ -147,11 +204,35 @@ export const questionApi = {
   update(id: string, data: any) {
     return client.put<QuestionDetail>(`/questions/${id}`, data)
   },
-  submit(id: string) {
-    return client.post(`/questions/${id}/submit`, {})
+  submit(id: string, body?: { reviewer_ids?: string[]; comment?: string }) {
+    return client.post(`/questions/${id}/submit`, body || {})
   },
-  stats() {
-    return client.get<QuestionStats>('/questions/stats')
+  review(id: string, body: { action: string; comment?: string }) {
+    return client.post(`/questions/${id}/review`, body)
+  },
+  contribute(id: string) {
+    return client.post<QuestionDetail>(`/questions/${id}/contribute`)
+  },
+  importTo(id: string, target_space_id?: string) {
+    return client.post<QuestionDetail>(`/questions/${id}/import`, { target_space_id })
+  },
+  stats(params?: { space_id?: string }) {
+    return client.get<QuestionStats>('/questions/stats', { params })
+  },
+}
+
+export const spaceApi = {
+  list() {
+    return client.get<SpaceSummary[]>('/spaces')
+  },
+  createTeam(name: string) {
+    return client.post('/spaces', { name })
+  },
+  get(id: string) {
+    return client.get<SpaceDetail>(`/spaces/${id}`)
+  },
+  addMember(spaceId: string, userId: string, duties?: string[]) {
+    return client.post(`/spaces/${spaceId}/members`, { user_id: userId, duties })
   },
 }
 
@@ -161,79 +242,4 @@ export const kpApi = {
   },
 }
 
-// ─── 试卷相关 ───
 
-export interface PaperSummary {
-  id: string
-  title: string
-  description: string | null
-  subject: string
-  grade: string | null
-  total_score: number
-  duration_minutes: number | null
-  status: string
-  creator_id: string | null
-  creator_name: string | null
-  created_at: string
-  updated_at: string
-  version: number
-  question_count: number
-}
-
-export interface PaperQuestionItem {
-  id: string
-  question_id: string
-  sort_order: number
-  score: number
-  section: string | null
-  stem: string
-  question_type: string
-  difficulty: string
-}
-
-export interface PaperDetail {
-  id: string
-  title: string
-  description: string | null
-  subject: string
-  grade: string | null
-  total_score: number
-  duration_minutes: number | null
-  status: string
-  creator_id: string | null
-  creator_name: string | null
-  created_at: string
-  updated_at: string
-  version: number
-  questions: PaperQuestionItem[]
-}
-
-export const paperApi = {
-  list(params?: { page?: number; page_size?: number; status?: string }) {
-    return client.get<PaperSummary[]>('/papers', { params })
-  },
-  get(id: string) {
-    return client.get<PaperDetail>(`/papers/${id}`)
-  },
-  create(data: { title: string; description?: string; subject?: string; grade?: string }) {
-    return client.post<PaperDetail>('/papers', data)
-  },
-  update(id: string, data: any) {
-    return client.put<PaperDetail>(`/papers/${id}`, data)
-  },
-  delete(id: string) {
-    return client.delete(`/papers/${id}`)
-  },
-  publish(id: string) {
-    return client.post(`/papers/${id}/publish`, {})
-  },
-  addQuestion(paperId: string, data: { question_id: string; score?: number; section?: string }) {
-    return client.post(`/papers/${paperId}/questions`, data)
-  },
-  updateQuestion(paperId: string, questionId: string, data: { score?: number; sort_order?: number }) {
-    return client.put(`/papers/${paperId}/questions/${questionId}`, data)
-  },
-  removeQuestion(paperId: string, questionId: string) {
-    return client.delete(`/papers/${paperId}/questions/${questionId}`)
-  },
-}

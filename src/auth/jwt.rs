@@ -63,21 +63,21 @@ mod tests {
     #[test]
     fn test_create_and_verify_token() {
         let user_id = Uuid::new_v4();
-        let token = create_token(user_id, "testuser", "teacher", TEST_SECRET, 24)
+        let token = create_token(user_id, "testuser", "User", TEST_SECRET, 24)
             .expect("签发 token 失败");
 
         let claims = verify_token(&token, TEST_SECRET).expect("验证 token 失败");
 
         assert_eq!(claims.sub, user_id);
         assert_eq!(claims.username, "testuser");
-        assert_eq!(claims.role, "teacher");
+        assert_eq!(claims.role, "User");
         assert!(claims.exp > claims.iat);
     }
 
     #[test]
     fn test_verify_token_wrong_secret() {
         let user_id = Uuid::new_v4();
-        let token = create_token(user_id, "testuser", "teacher", TEST_SECRET, 24)
+        let token = create_token(user_id, "testuser", "User", TEST_SECRET, 24)
             .expect("签发 token 失败");
 
         let result = verify_token(&token, "wrong-secret");

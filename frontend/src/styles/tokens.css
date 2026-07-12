@@ -1,0 +1,134 @@
+/* ============================================================
+   Apple-inspired Design Tokens
+   Refined color harmony · layered shadows · frosted surfaces
+   ============================================================ */
+:root {
+  /* ---- Surfaces (light) ---- */
+  --bg-primary: #f5f5f7;
+  --bg-canvas: #ffffff;
+  --bg-card: #ffffff;
+  --bg-input: #f5f5f7;
+  --bg-hover: rgba(0, 0, 0, 0.04);
+  --bg-active: rgba(0, 0, 0, 0.07);
+  --bg-elevated: #ffffff;
+  --bg-nav: rgba(255, 255, 255, 0.72);
+  --bg-modal: rgba(0, 0, 0, 0.32);
+
+  /* ---- Text ---- */
+  --text-primary: #1d1d1f;
+  --text-secondary: #6e6e73;
+  --text-muted: #86868b;
+  --text-inverse: #ffffff;
+
+  /* ---- Borders ---- */
+  --border-color: rgba(0, 0, 0, 0.08);
+  --border-strong: rgba(0, 0, 0, 0.14);
+  --divider: rgba(0, 0, 0, 0.06);
+
+  /* ---- Accent (Apple Blue) ---- */
+  --accent: #0071e3;
+  --accent-hover: #0077ed;
+  --accent-pressed: #006edb;
+  --accent-light: rgba(0, 113, 227, 0.1);
+  --accent-gradient: linear-gradient(135deg, #0a84ff 0%, #0071e3 100%);
+
+  /* ---- Semantic ---- */
+  --success: #34c759;
+  --success-hover: #2db84e;
+  --success-light: rgba(52, 199, 89, 0.12);
+  --warning: #ff9f0a;
+  --warning-light: rgba(255, 159, 10, 0.12);
+  --danger: #ff3b30;
+  --danger-hover: #ff453a;
+  --danger-light: rgba(255, 59, 48, 0.1);
+  --purple: #af52de;
+  --purple-light: rgba(175, 82, 222, 0.1);
+  --teal: #5ac8fa;
+  --teal-light: rgba(90, 200, 250, 0.1);
+  --pink: #ff2d92;
+  --pink-light: rgba(255, 45, 146, 0.1);
+  --star-color: #ff9f0a;
+
+  /* ---- Layered shadows (subtle, Apple-style) ---- */
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.04), 0 4px 12px rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.06), 0 8px 24px rgba(0, 0, 0, 0.06);
+  --shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.08), 0 16px 48px rgba(0, 0, 0, 0.1);
+  --shadow-focus: 0 0 0 4px var(--accent-light);
+  --shadow-card-hover: 0 4px 12px rgba(0, 0, 0, 0.06), 0 12px 32px rgba(0, 0, 0, 0.08);
+
+  /* ---- Radii ---- */
+  --radius-xs: 6px;
+  --radius-sm: 10px;
+  --radius-md: 14px;
+  --radius-lg: 18px;
+  --radius-xl: 22px;
+  --radius-full: 9999px;
+
+  /* ---- Layout ---- */
+  --nav-height: 56px;
+  --sidebar-width: 220px;
+  --kp-tree-width: 264px;
+  --max-width: 1360px;
+  --spacing-unit: 24px;
+
+  /* ---- Motion ---- */
+  --transition: all 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-fast: all 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-spring: all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+  --transition-bounce: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  /* ---- Misc ---- */
+  --card-opacity: 1;
+  --bg-wallpaper: none;
+  --blur-nav: saturate(180%) blur(20px);
+  --blur-modal: saturate(180%) blur(8px);
+}
+
+/* ---- Dark mode (Apple system dark) ---- */
+[data-theme='dark'] {
+  --bg-primary: #000000;
+  --bg-canvas: #1c1c1e;
+  --bg-card: #1c1c1e;
+  --bg-input: #2c2c2e;
+  --bg-hover: rgba(255, 255, 255, 0.06);
+  --bg-active: rgba(255, 255, 255, 0.1);
+  --bg-elevated: #2c2c2e;
+  --bg-nav: rgba(28, 28, 30, 0.72);
+  --bg-modal: rgba(0, 0, 0, 0.6);
+
+  --text-primary: #f5f5f7;
+  --text-secondary: #a1a1a6;
+  --text-muted: #6e6e73;
+  --text-inverse: #1d1d1f;
+
+  --border-color: rgba(255, 255, 255, 0.1);
+  --border-strong: rgba(255, 255, 255, 0.18);
+  --divider: rgba(255, 255, 255, 0.08);
+
+  --accent: #0a84ff;
+  --accent-hover: #1a8cff;
+  --accent-pressed: #0072e3;
+  --accent-light: rgba(10, 132, 255, 0.18);
+  --accent-gradient: linear-gradient(135deg, #2a9dff 0%, #0a84ff 100%);
+
+  --success: #30d158;
+  --success-light: rgba(48, 209, 88, 0.18);
+  --warning: #ffd60a;
+  --warning-light: rgba(255, 214, 10, 0.16);
+  --danger: #ff453a;
+  --danger-light: rgba(255, 69, 58, 0.16);
+  --purple: #bf5af2;
+  --purple-light: rgba(191, 90, 242, 0.18);
+  --teal: #64d2ff;
+  --teal-light: rgba(100, 210, 255, 0.16);
+  --pink: #ff375f;
+  --pink-light: rgba(255, 55, 95, 0.16);
+
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4), 0 4px 12px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.35);
+  --shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.5), 0 16px 48px rgba(0, 0, 0, 0.5);
+  --shadow-card-hover: 0 4px 12px rgba(0, 0, 0, 0.4), 0 12px 32px rgba(0, 0, 0, 0.4);
+  --shadow-focus: 0 0 0 4px var(--accent-light);
+}

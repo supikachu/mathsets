@@ -13,35 +13,61 @@ const props = defineProps<{
 
 const container = ref<HTMLElement>()
 
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
 function render() {
   if (!container.value) return
   const text = props.text || ''
 
-  // 将文本中的 $...$ 或 $$...$$ 替换为 KaTeX 渲染
-  // 先处理块级公式 $$...$$
-  let html = text.replace(/\$\$(.+?)\$\$/gs, (_, formula) => {
+  // 1. 先转义整个文本，防止 XSS
+  let html = escapeHtml(text)
+
+  // 2. 处理换行（在 KaTeX 渲染之前，此时文本已转义，不会破坏 KaTeX 输出）
+  html = html.replace(/\n/g, '<br>')
+
+  // 3. 处理块级公式 $$...$$
+  html = html.replace(/\$\$(.+?)\$\$/gs, (_, formula) => {
     try {
-      return katex.renderToString(formula.trim(), { displayMode: true, throwOnError: false })
+      // 反转义公式内容中的 HTML 实体，让 KaTeX 正确解析
+      const raw = formula
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+      return katex.renderToString(raw.trim(), { displayMode: true, throwOnError: false })
     } catch {
       return `<span class="katex-error">${formula}</span>`
     }
   })
-  // 再处理行内公式 $...$
+
+  // 4. 处理行内公式 $...$
   html = html.replace(/\$(.+?)\$/g, (_, formula) => {
     try {
-      return katex.renderToString(formula.trim(), { displayMode: false, throwOnError: false })
+      const raw = formula
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+      return katex.renderToString(raw.trim(), { displayMode: false, throwOnError: false })
     } catch {
       return `<span class="katex-error">${formula}</span>`
     }
   })
-  // 处理换行
-  html = html.replace(/\n/g, '<br>')
 
   container.value.innerHTML = html
 }
 
 onMounted(render)
-watch(() => props.text, render)
+watch(() => [props.text, props.inline], render)
 </script>
 
 <style>

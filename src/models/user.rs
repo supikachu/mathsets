@@ -2,14 +2,12 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// 用户角色
+/// 系统级角色（空间内协作不再依赖全局多角色）
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq)]
 #[sqlx(type_name = "user_role", rename_all = "lowercase")]
 pub enum UserRole {
     Admin,
-    GroupLeader,
-    Teacher,
-    Viewer,
+    User,
 }
 
 /// 用户

@@ -1,7 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import { useAuthStore } from '@/stores/auth'
 import Login from '@/views/Login.vue'
-import Dashboard from '@/views/Dashboard.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -25,12 +23,7 @@ const router = createRouter({
       children: [
         {
           path: '',
-          redirect: '/dashboard',
-        },
-        {
-          path: 'dashboard',
-          name: 'Dashboard',
-          component: Dashboard,
+          redirect: '/questions',
         },
         {
           path: 'questions',
@@ -53,29 +46,15 @@ const router = createRouter({
           component: () => import('@/views/QuestionEdit.vue'),
         },
         {
-          path: 'knowledge-points',
-          name: 'KnowledgePoints',
-          component: () => import('@/views/KnowledgePoints.vue'),
-        },
-        {
           path: 'review',
           name: 'Review',
           component: () => import('@/views/ReviewQueue.vue'),
         },
         {
-          path: 'papers',
-          name: 'Papers',
-          component: () => import('@/views/PaperList.vue'),
-        },
-        {
-          path: 'papers/:id',
-          name: 'PaperEdit',
-          component: () => import('@/views/PaperEdit.vue'),
-        },
-        {
           path: 'users',
           name: 'UserManagement',
           component: () => import('@/views/UserManagement.vue'),
+          meta: { requiresAdmin: true },
         },
       ],
     },
@@ -88,15 +67,20 @@ const router = createRouter({
 })
 
 // 路由守卫
-router.beforeEach((to, _from) => {
+router.beforeEach(async (to, _from) => {
+  const { useAuthStore } = await import('@/stores/auth')
   const auth = useAuthStore()
 
   if (to.meta.requiresAuth && !auth.isLoggedIn) {
-    return '/login'
+    return { path: '/login', query: { redirect: to.fullPath } }
   }
 
   if (to.meta.guest && auth.isLoggedIn) {
-    return '/dashboard'
+    return '/questions'
+  }
+
+  if (to.meta.requiresAdmin && !auth.isAdmin) {
+    return '/questions'
   }
 })
 

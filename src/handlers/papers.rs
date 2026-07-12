@@ -7,10 +7,12 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::auth::middleware::AuthUser;
+use crate::auth::permissions::is_admin;
 use crate::models::paper::{
     AddQuestionRequest, CreatePaperRequest, PaperDetail, PaperQuestionItem, PaperStatus,
     PaperSummary, UpdatePaperQuestionRequest, UpdatePaperRequest,
 };
+use crate::models::PageResult;
 use crate::AppState;
 
 // ---------------------------------------------------------------------------
@@ -22,12 +24,43 @@ pub async fn list_papers(
     State(state): State<AppState>,
     Extension(_auth): Extension<AuthUser>,
     Query(query): Query<PaperListQuery>,
-) -> Result<Json<Vec<PaperSummary>>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<PageResult<PaperSummary>>, (StatusCode, Json<serde_json::Value>)> {
     let page = query.page.unwrap_or(1).max(1);
     let page_size = query.page_size.unwrap_or(20).min(100);
     let offset = (page - 1) * page_size;
 
-    let mut sql = String::from(
+    // 统计总数（参数绑定，避免 SQL 注入）
+    let mut count_sql = String::from("SELECT COUNT(*) FROM papers p WHERE 1=1");
+    let mut count_bind_status: Option<String> = None;
+    let mut count_bind_subject: Option<String> = None;
+    if let Some(ref status) = query.status {
+        count_sql.push_str(" AND p.status = $1");
+        count_bind_status = Some(status.clone());
+    }
+    if let Some(ref subject) = query.subject {
+        let idx = if count_bind_status.is_some() { 2 } else { 1 };
+        count_sql.push_str(&format!(" AND p.subject = ${}", idx));
+        count_bind_subject = Some(subject.clone());
+    }
+
+    let mut count_query = sqlx::query_scalar::<_, i64>(&count_sql);
+    if let Some(s) = count_bind_status {
+        count_query = count_query.bind(s);
+    }
+    if let Some(s) = count_bind_subject {
+        count_query = count_query.bind(s);
+    }
+    let total: i64 = count_query
+        .fetch_one(&state.pool)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("统计试卷总数失败: {}", e)})),
+            )
+        })?;
+
+    let mut query_builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
         r#"
         SELECT p.*, u.display_name AS creator_name,
                (SELECT COUNT(*) FROM paper_questions pq WHERE pq.paper_id = p.id) AS question_count
@@ -37,19 +70,22 @@ pub async fn list_papers(
         "#,
     );
 
-    // 筛选
+    // 筛选（使用参数绑定，避免 SQL 注入）
     if let Some(ref status) = query.status {
-        sql.push_str(&format!(" AND p.status = '{}'", status));
+        query_builder.push(" AND p.status = ").push_bind(status.clone());
     }
     if let Some(ref subject) = query.subject {
-        sql.push_str(&format!(" AND p.subject = '{}'", subject));
+        query_builder.push(" AND p.subject = ").push_bind(subject.clone());
     }
 
-    sql.push_str(" ORDER BY p.updated_at DESC LIMIT $1 OFFSET $2");
+    query_builder
+        .push(" ORDER BY p.updated_at DESC LIMIT ")
+        .push_bind(page_size)
+        .push(" OFFSET ")
+        .push_bind(offset);
 
-    let papers = sqlx::query_as::<_, PaperSummary>(&sql)
-        .bind(page_size)
-        .bind(offset)
+    let papers = query_builder
+        .build_query_as::<PaperSummary>()
         .fetch_all(&state.pool)
         .await
         .map_err(|e| {
@@ -59,7 +95,12 @@ pub async fn list_papers(
             )
         })?;
 
-    Ok(Json(papers))
+    Ok(Json(PageResult {
+        items: papers,
+        total,
+        page: page as u32,
+        page_size: page_size as u32,
+    }))
 }
 
 /// GET /api/v1/papers/:id — 试卷详情
@@ -192,24 +233,26 @@ pub async fn create_paper(
 /// PUT /api/v1/papers/:id — 更新试卷
 pub async fn update_paper(
     State(state): State<AppState>,
-    Extension(_auth): Extension<AuthUser>,
+    Extension(auth): Extension<AuthUser>,
     Path(id): Path<Uuid>,
     Json(req): Json<UpdatePaperRequest>,
 ) -> Result<Json<PaperDetail>, (StatusCode, Json<serde_json::Value>)> {
-    // 检查是否存在
-    let existing = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM papers WHERE id = $1")
+    // 检查是否存在并获取创建者
+    let creator_id: Option<Uuid> = sqlx::query_scalar("SELECT creator_id FROM papers WHERE id = $1")
         .bind(id)
-        .fetch_one(&state.pool)
+        .fetch_optional(&state.pool)
         .await
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("查询试卷失败: {}", e)})),
             )
-        })?;
+        })?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "试卷不存在"}))))?;
 
-    if existing == 0 {
-        return Err((StatusCode::NOT_FOUND, Json(json!({"error": "试卷不存在"}))));
+    // 所有权检查：Admin 可操作所有试卷，其他用户仅能操作自己创建的
+    if !is_admin(&auth.role) && creator_id != Some(auth.id) {
+        return Err((StatusCode::FORBIDDEN, Json(json!({"error": "无权操作该试卷"}))));
     }
 
     let now = chrono::Utc::now();
@@ -252,10 +295,28 @@ pub async fn update_paper(
 /// DELETE /api/v1/papers/:id — 删除试卷
 pub async fn delete_paper(
     State(state): State<AppState>,
-    Extension(_auth): Extension<AuthUser>,
+    Extension(auth): Extension<AuthUser>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
-    let result = sqlx::query("DELETE FROM papers WHERE id = $1")
+    // 检查是否存在并获取创建者
+    let creator_id: Option<Uuid> = sqlx::query_scalar("SELECT creator_id FROM papers WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("查询试卷失败: {}", e)})),
+            )
+        })?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "试卷不存在"}))))?;
+
+    // 所有权检查：Admin 可操作所有试卷，其他用户仅能操作自己创建的
+    if !is_admin(&auth.role) && creator_id != Some(auth.id) {
+        return Err((StatusCode::FORBIDDEN, Json(json!({"error": "无权操作该试卷"}))));
+    }
+
+    sqlx::query("DELETE FROM papers WHERE id = $1")
         .bind(id)
         .execute(&state.pool)
         .await
@@ -265,10 +326,6 @@ pub async fn delete_paper(
                 Json(json!({"error": format!("删除试卷失败: {}", e)})),
             )
         })?;
-
-    if result.rows_affected() == 0 {
-        return Err((StatusCode::NOT_FOUND, Json(json!({"error": "试卷不存在"}))));
-    }
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -280,20 +337,26 @@ pub async fn delete_paper(
 /// POST /api/v1/papers/:id/questions — 添加题目到试卷
 pub async fn add_question_to_paper(
     State(state): State<AppState>,
-    Extension(_auth): Extension<AuthUser>,
+    Extension(auth): Extension<AuthUser>,
     Path(paper_id): Path<Uuid>,
     Json(req): Json<AddQuestionRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<serde_json::Value>)> {
-    // 检查试卷存在
-    let paper_exists = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM papers WHERE id = $1")
+    // 检查试卷存在并获取创建者
+    let creator_id: Option<Uuid> = sqlx::query_scalar("SELECT creator_id FROM papers WHERE id = $1")
         .bind(paper_id)
-        .fetch_one(&state.pool)
+        .fetch_optional(&state.pool)
         .await
-        .unwrap_or(0)
-        > 0;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("查询试卷失败: {}", e)})),
+            )
+        })?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "试卷不存在"}))))?;
 
-    if !paper_exists {
-        return Err((StatusCode::NOT_FOUND, Json(json!({"error": "试卷不存在"}))));
+    // 所有权检查：Admin 可操作所有试卷，其他用户仅能操作自己创建的
+    if !is_admin(&auth.role) && creator_id != Some(auth.id) {
+        return Err((StatusCode::FORBIDDEN, Json(json!({"error": "无权操作该试卷"}))));
     }
 
     // 检查题目存在
@@ -364,10 +427,28 @@ pub async fn add_question_to_paper(
 /// PUT /api/v1/papers/:paper_id/questions/:question_id — 更新试卷题目
 pub async fn update_paper_question(
     State(state): State<AppState>,
-    Extension(_auth): Extension<AuthUser>,
+    Extension(auth): Extension<AuthUser>,
     Path((paper_id, question_id)): Path<(Uuid, Uuid)>,
     Json(req): Json<UpdatePaperQuestionRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    // 检查试卷存在并获取创建者
+    let creator_id: Option<Uuid> = sqlx::query_scalar("SELECT creator_id FROM papers WHERE id = $1")
+        .bind(paper_id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("查询试卷失败: {}", e)})),
+            )
+        })?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "试卷不存在"}))))?;
+
+    // 所有权检查：Admin 可操作所有试卷，其他用户仅能操作自己创建的
+    if !is_admin(&auth.role) && creator_id != Some(auth.id) {
+        return Err((StatusCode::FORBIDDEN, Json(json!({"error": "无权操作该试卷"}))));
+    }
+
     let result = sqlx::query(
         r#"
         UPDATE paper_questions SET
@@ -403,9 +484,27 @@ pub async fn update_paper_question(
 /// DELETE /api/v1/papers/:paper_id/questions/:question_id — 从试卷移除题目
 pub async fn remove_question_from_paper(
     State(state): State<AppState>,
-    Extension(_auth): Extension<AuthUser>,
+    Extension(auth): Extension<AuthUser>,
     Path((paper_id, question_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    // 检查试卷存在并获取创建者
+    let creator_id: Option<Uuid> = sqlx::query_scalar("SELECT creator_id FROM papers WHERE id = $1")
+        .bind(paper_id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("查询试卷失败: {}", e)})),
+            )
+        })?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "试卷不存在"}))))?;
+
+    // 所有权检查：Admin 可操作所有试卷，其他用户仅能操作自己创建的
+    if !is_admin(&auth.role) && creator_id != Some(auth.id) {
+        return Err((StatusCode::FORBIDDEN, Json(json!({"error": "无权操作该试卷"}))));
+    }
+
     let result = sqlx::query("DELETE FROM paper_questions WHERE paper_id = $1 AND question_id = $2")
         .bind(paper_id)
         .bind(question_id)
@@ -430,9 +529,27 @@ pub async fn remove_question_from_paper(
 /// POST /api/v1/papers/:id/publish — 发布试卷
 pub async fn publish_paper(
     State(state): State<AppState>,
-    Extension(_auth): Extension<AuthUser>,
+    Extension(auth): Extension<AuthUser>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    // 检查试卷存在并获取创建者
+    let creator_id: Option<Uuid> = sqlx::query_scalar("SELECT creator_id FROM papers WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("查询失败: {}", e)})),
+            )
+        })?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "试卷不存在"}))))?;
+
+    // 所有权检查：Admin 可操作所有试卷，其他用户仅能操作自己创建的
+    if !is_admin(&auth.role) && creator_id != Some(auth.id) {
+        return Err((StatusCode::FORBIDDEN, Json(json!({"error": "无权操作该试卷"}))));
+    }
+
     let count = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM paper_questions WHERE paper_id = $1",
     )
@@ -454,9 +571,10 @@ pub async fn publish_paper(
     }
 
     let now = chrono::Utc::now();
-    sqlx::query("UPDATE papers SET status = 'published', updated_at = $1, version = version + 1 WHERE id = $2")
+    sqlx::query("UPDATE papers SET status = $3, updated_at = $1, version = version + 1 WHERE id = $2")
         .bind(now)
         .bind(id)
+        .bind(PaperStatus::Published)
         .execute(&state.pool)
         .await
         .map_err(|e| {

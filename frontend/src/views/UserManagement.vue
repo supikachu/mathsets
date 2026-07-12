@@ -1,38 +1,39 @@
 <template>
   <div>
-    <h1 class="text-2xl font-bold mb-4">👥 用户管理</h1>
+    <h1 class="page-title mb-12"><AppIcon name="users" :size="24" /> 用户管理</h1>
 
-    <el-card shadow="never" v-loading="loading">
-      <el-table :data="list" stripe>
-        <el-table-column label="用户名" min-width="120">
-          <template #default="{ row }">{{ row.username }}</template>
-        </el-table-column>
-        <el-table-column label="显示名" min-width="100">
-          <template #default="{ row }">{{ row.display_name }}</template>
-        </el-table-column>
-        <el-table-column label="角色" width="110" align="center">
-          <template #default="{ row }">
-            <el-tag :type="roleTag(row.role)" size="small">{{ roleLabel(row.role) }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="状态" width="80" align="center">
-          <template #default="{ row }">
-            <el-tag :type="row.is_active ? 'success' : 'danger'" size="small">
+    <div v-if="loading" class="loading-hint">加载中…</div>
+
+    <AppEmpty v-else-if="list.length === 0" description="暂无用户" />
+
+    <template v-else>
+      <div
+        v-for="row in list"
+        :key="row.id"
+        class="q-item"
+      >
+        <div class="q-item-header">
+          <div class="q-item-meta">
+            <span class="user-display-name">{{ row.display_name }}</span>
+            <AppBadge :color="roleBadgeColor(row.role)">{{ roleLabel(row.role) }}</AppBadge>
+            <AppBadge :color="row.is_active ? 'green' : 'red'">
               {{ row.is_active ? '正常' : '禁用' }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="注册时间" width="170">
-          <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
-        </el-table-column>
-      </el-table>
-    </el-card>
+            </AppBadge>
+          </div>
+          <span class="text-sm text-muted">{{ formatTime(row.created_at) }}</span>
+        </div>
+        <div class="user-info">
+          <span class="text-sm text-muted">@{{ row.username }}</span>
+        </div>
+      </div>
+    </template>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import client from '@/api/client'
+import { AppBadge, AppEmpty, AppIcon } from '@/components/ui'
 
 interface UserInfo {
   id: string
@@ -56,12 +57,12 @@ async function fetchUsers() {
 }
 
 function roleLabel(r: string) {
-  const map: Record<string, string> = { admin: '管理员', groupleader: '组长', teacher: '教师', viewer: '访客' }
+  const map: Record<string, string> = { Admin: '管理员', User: '普通用户' }
   return map[r] || r
 }
-function roleTag(r: string) {
-  const map: Record<string, string> = { admin: 'danger', groupleader: 'warning', teacher: 'info', viewer: '' }
-  return map[r] || ''
+function roleBadgeColor(r: string): 'red' | 'blue' | 'gray' {
+  const map: Record<string, 'red' | 'blue' | 'gray'> = { Admin: 'red', User: 'blue' }
+  return map[r] || 'gray'
 }
 function formatTime(t: string) {
   return t ? t.replace('T', ' ').substring(0, 16) : ''
@@ -69,3 +70,21 @@ function formatTime(t: string) {
 
 onMounted(fetchUsers)
 </script>
+
+<style scoped>
+.loading-hint {
+  text-align: center;
+  padding: 48px 20px;
+  color: var(--text-muted);
+}
+
+.user-display-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.user-info {
+  font-size: 13px;
+}
+</style>
