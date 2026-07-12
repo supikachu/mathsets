@@ -148,12 +148,12 @@
             </div>
 
             <!-- Row 2: Body — 题干 + 选项 -->
-            <div class="q-card-body" @click="goDetail(card)">
+            <div class="q-card-body" :ref="setCardBodyRef(card.id)" @click="goDetail(card)">
               <div class="q-stem">
                 <LatexRender :text="card.stem" />
               </div>
               <!-- 选择题选项（列表页不标注正确答案） -->
-              <div v-if="card.question_type === 'choice' && card.parsedOptions.length > 0" class="q-options" :class="optionLayout(card.parsedOptions)">
+              <div v-if="card.question_type === 'choice' && card.parsedOptions.length > 0" class="q-options" :class="optionLayoutClass(card.id)">
                 <div
                   v-for="opt in card.parsedOptions"
                   :key="opt.label"
@@ -260,7 +260,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, onBeforeUnmount, watch } from 'vue'
+import { ref, reactive, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { questionApi, type QuestionSummary, type QuestionDetail, type QuestionQuery } from '@/api/client'
 import LatexRender from '@/components/LatexRender.vue'
@@ -431,22 +431,107 @@ function parseOptions(raw: any): { label: string; content: string }[] {
   })
 }
 
-// ---- 工具函数：根据选项内容长度计算布局列数 ----
-// 短选项(≤8字符) → 4列一行; 中等(≤30字符) → 2列两行; 长选项 → 1列四行
-function optionLayout(opts: { label: string; content: string }[]): string {
-  if (!opts || opts.length === 0) return 'cols-1'
-  // 去除 LaTeX 标记后估算纯文本长度
-  const stripLatex = (s: string) =>
-    s.replace(/\$+/g, '')
-     .replace(/\\frac\{([^}]*)\}\{([^}]*)\}/g, '$1/$2')
-     .replace(/\\[a-zA-Z]+/g, '')
-     .replace(/[{}]/g, '')
-     .trim()
-  const maxLen = Math.max(...opts.map(o => stripLatex(o.content).length))
-  if (maxLen <= 25) return 'cols-4'
-  if (maxLen <= 60) return 'cols-2'
-  return 'cols-1'
+// ---- 选项自适应布局：基于 KaTeX 渲染后真实宽度测量 ----
+const OPTION_GAP = 16 // 选项间距 (px)
+const OPTION_PADDING = 44 // 选项内 label 圆 + padding 估算 (px)
+const optionLayoutMap = reactive<Record<string, 'grid-4' | 'grid-2' | 'grid-1'>>({})
+const cardBodyRefs = reactive<Record<string, HTMLElement | null>>({})
+const resizeObservers: ResizeObserver[] = []
+let layoutDebounce: ReturnType<typeof setTimeout> | null = null
+
+/** 为某张卡片计算选项布局 */
+function computeOptionLayout(cardId: string) {
+  const container = cardBodyRefs[cardId]
+  if (!container) return
+  const containerWidth = container.clientWidth
+  if (containerWidth === 0) return
+
+  // 获取该卡片内选项容器
+  const optionsEl = container.querySelector<HTMLElement>('.q-options')
+  if (!optionsEl) return
+
+  const optionEls = optionsEl.querySelectorAll<HTMLElement>('.q-option')
+  if (optionEls.length === 0) return
+
+  // 临时切换为非Grid布局以测量选项内容真实宽度
+  const prevDisplay = optionsEl.style.display
+  const prevCols = optionsEl.style.gridTemplateColumns
+  optionsEl.style.display = 'block'
+  optionsEl.style.gridTemplateColumns = ''
+
+  let maxWidth = 0
+  const prevStyles: { el: HTMLElement; display: string; width: string }[] = []
+  optionEls.forEach(el => {
+    prevStyles.push({ el, display: el.style.display, width: el.style.width })
+    el.style.display = 'inline-flex'
+    el.style.width = 'auto'
+    el.style.whiteSpace = 'nowrap'
+    const w = el.scrollWidth
+    if (w > maxWidth) maxWidth = w
+    el.style.whiteSpace = ''
+  })
+
+  // 恢复选项元素样式
+  prevStyles.forEach(({ el, display, width }) => {
+    el.style.display = display
+    el.style.width = width
+  })
+
+  // 恢复选项容器布局
+  optionsEl.style.display = prevDisplay
+  optionsEl.style.gridTemplateColumns = prevCols
+
+  if (maxWidth === 0) return
+
+  // 布局判定
+  const slot = maxWidth + OPTION_GAP
+  let layout: 'grid-4' | 'grid-2' | 'grid-1'
+  if (slot * 4 <= containerWidth) {
+    layout = 'grid-4'
+  } else if (slot * 2 <= containerWidth) {
+    layout = 'grid-2'
+  } else {
+    layout = 'grid-1'
+  }
+  optionLayoutMap[cardId] = layout
 }
+
+/** 对所有卡片重新计算布局（防抖） */
+function recomputeAllLayouts() {
+  if (layoutDebounce) clearTimeout(layoutDebounce)
+  layoutDebounce = setTimeout(() => {
+    Object.keys(cardBodyRefs).forEach(id => computeOptionLayout(id))
+  }, 150)
+}
+
+/** 设置卡片 body 的 ref，并注册 ResizeObserver */
+function setCardBodyRef(cardId: string) {
+  return (el: Element | null) => {
+    if (el instanceof HTMLElement) {
+      cardBodyRefs[cardId] = el
+      // 注册 ResizeObserver 监听容器宽度变化
+      const ro = new ResizeObserver(() => recomputeAllLayouts())
+      ro.observe(el)
+      resizeObservers.push(ro)
+    } else {
+      delete cardBodyRefs[cardId]
+    }
+  }
+}
+
+/** 获取某张卡片的选项布局类名 */
+function optionLayoutClass(cardId: string): string {
+  return optionLayoutMap[cardId] || 'grid-2'
+}
+
+// 监听 cardList 变化，在 DOM 更新后触发首次布局计算
+watch(cardList, () => {
+  nextTick(() => {
+    setTimeout(() => {
+      Object.keys(cardBodyRefs).forEach(id => computeOptionLayout(id))
+    }, 100)
+  })
+})
 
 // ---- 工具函数：解析正确答案 ----
 function extractAnswerItem(item: any): string {
@@ -566,6 +651,8 @@ watch(() => space.currentSpaceId, (newId) => {
 onMounted(fetchList)
 onBeforeUnmount(() => {
   if (searchTimer) clearTimeout(searchTimer)
+  if (layoutDebounce) clearTimeout(layoutDebounce)
+  resizeObservers.forEach(ro => ro.disconnect())
 })
 </script>
 
@@ -1066,32 +1153,26 @@ onBeforeUnmount(() => {
 }
 
 /* ---- Options (choice question — no correct marking in list view) ---- */
-/* 选择题选项布局: 根据内容长度自动 4列/2列/1列 */
+/* 选择题选项布局: 基于KaTeX真实宽度测量的自适应Grid */
 .q-options {
   display: grid;
-  gap: 8px;
+  gap: 16px;
   margin-top: 14px;
 }
 
-/* 短选项 → 一行四列 */
-.q-options.cols-4 {
+/* 一行四列 */
+.q-options.grid-4 {
   grid-template-columns: repeat(4, 1fr);
 }
 
-/* 中等选项 → 两行两列 */
-.q-options.cols-2 {
+/* 两行两列 */
+.q-options.grid-2 {
   grid-template-columns: repeat(2, 1fr);
 }
 
-/* 长选项 → 四行一列 */
-.q-options.cols-1 {
+/* 四行一列 */
+.q-options.grid-1 {
   grid-template-columns: 1fr;
-}
-
-@media (max-width: 640px) {
-  .q-options.cols-4 {
-    grid-template-columns: repeat(2, 1fr);
-  }
 }
 
 .q-option {
