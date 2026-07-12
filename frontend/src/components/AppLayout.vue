@@ -1,9 +1,10 @@
 <template>
   <div class="layout-root">
     <div class="app-container">
-      <!-- 桌面侧边栏 -->
+      <!-- 桌面侧边栏（导航卡片 + 用户卡片，两个独立卡片透出背景色） -->
       <nav class="sidebar">
-        <div class="sidebar-top">
+        <!-- 上方：导航卡片 -->
+        <div class="sidebar-nav-card">
           <div class="sidebar-brand">
             <AppIcon name="logo" :size="24" class="brand-icon" />
             <span>协同题库</span>
@@ -20,7 +21,7 @@
           </router-link>
         </div>
 
-        <!-- 用户信息独立模块（不与上方导航连接） -->
+        <!-- 下方：用户信息卡片（独立，与导航卡片之间透出背景色） -->
         <div class="sidebar-user-card" ref="userMenuRef">
           <button
             type="button"
@@ -178,12 +179,13 @@ onUnmounted(() => document.removeEventListener('click', onDocumentClick))
 
 <style scoped>
 .layout-root {
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
   background: var(--bg-primary);
 }
 
-/* ===== Sidebar ===== */
-.sidebar-top {
+/* ===== Sidebar nav card ===== */
+.sidebar-nav-card {
   display: flex;
   flex-direction: column;
 }
@@ -203,14 +205,9 @@ onUnmounted(() => document.removeEventListener('click', onDocumentClick))
   color: var(--accent);
 }
 
-/* ===== Sidebar user card (independent module) ===== */
+/* ===== Sidebar user card ===== */
 .sidebar-user-card {
   position: relative;
-  flex-shrink: 0;
-  padding: 6px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-input);
-  border: 1px solid var(--border-color);
 }
 
 .sidebar-user-trigger {
@@ -339,6 +336,11 @@ onUnmounted(() => document.removeEventListener('click', onDocumentClick))
 }
 
 @media (max-width: 768px) {
+  .layout-root {
+    height: auto;
+    overflow: visible;
+  }
+
   .sidebar {
     display: none;
   }
@@ -346,6 +348,8 @@ onUnmounted(() => document.removeEventListener('click', onDocumentClick))
   .app-container {
     padding: 16px;
     padding-bottom: calc(var(--nav-height) + 16px);
+    height: auto;
+    overflow: visible;
   }
 
   .tree-toggle {

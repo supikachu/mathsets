@@ -72,18 +72,26 @@
     flex-wrap: nowrap;
     gap: 28px;
     padding: 28px;
-    min-height: 100vh;
+    height: 100vh;
+    overflow: hidden;
   }
 
+  /* 侧边栏容器：透明背景，内部两张独立卡片用 space-between 撑开 */
   .sidebar {
     display: flex;
     flex-direction: column;
+    justify-content: space-between;
     width: var(--sidebar-width);
     flex-shrink: 0;
-    position: sticky;
-    top: 28px;
-    align-self: flex-start;
     height: calc(100vh - 56px);
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    padding: 0;
+  }
+
+  /* 上方导航卡片 */
+  .sidebar-nav-card {
     background: var(--bg-card);
     border-radius: var(--radius-lg);
     padding: 14px;
@@ -91,19 +99,20 @@
     border: 1px solid var(--border-color);
   }
 
-  .sidebar .sidebar-top {
-    flex: 1;
-    overflow-y: auto;
-    min-height: 0;
+  /* 下方用户信息卡片 */
+  .sidebar-user-card {
+    background: var(--bg-card);
+    border-radius: var(--radius-lg);
+    padding: 10px;
+    box-shadow: var(--shadow-sm);
+    border: 1px solid var(--border-color);
+    flex-shrink: 0;
   }
 
   .kp-tree-panel {
     width: var(--kp-tree-width);
     flex-shrink: 0;
-    position: sticky;
-    top: 28px;
-    align-self: flex-start;
-    max-height: calc(100vh - 56px);
+    height: calc(100vh - 56px);
     overflow-y: auto;
     background: var(--bg-card);
     border-radius: var(--radius-lg);
@@ -139,6 +148,8 @@
   .main-content {
     flex: 1;
     min-width: 0;
+    height: calc(100vh - 56px);
+    overflow-y: auto;
   }
 }
 
