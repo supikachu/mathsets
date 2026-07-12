@@ -137,7 +137,7 @@ defineProps<{ mobileOpen?: boolean }>()
 const emit = defineEmits<{ 'update:mobileOpen': [value: boolean] }>()
 
 const toast = useToast()
-const { selectedKpId, select } = useSelectedKp()
+const { selectedKpId, select, kpLevel, setLevel } = useSelectedKp()
 const space = useSpaceStore()
 
 const loading = ref(true)
@@ -145,7 +145,7 @@ const saving = ref(false)
 const adding = ref(false)
 const tree = ref<KnowledgePoint[]>([])
 const expanded = ref<Record<string, boolean>>({})
-const level = ref<'junior' | 'senior'>('junior')
+const level = kpLevel
 const grades = ['初一', '初二', '初三', '高一', '高二', '高三']
 const gradeOptions = grades.map((g) => ({ label: g, value: g }))
 
@@ -223,7 +223,7 @@ async function fetchTree() {
 
 function switchLevel(lv: 'junior' | 'senior') {
   if (level.value === lv) return
-  level.value = lv
+  setLevel(lv)
   // 切换学段时清除知识点选中并重置展开状态
   select(null)
   const targetName = lv === 'junior' ? '初中' : '高中'

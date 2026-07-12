@@ -86,6 +86,13 @@
             <section class="edit-section">
               <div class="section-label"><AppIcon name="book-open" :size="16" /> <span>题干</span><span class="required">*</span></div>
               <textarea v-model="form.stem" rows="5" class="edit-textarea" placeholder="输入题目内容，LaTeX 公式用 $...$ 包裹"></textarea>
+              <!-- 题目图片占位 -->
+              <div class="stem-image-area">
+                <div class="image-placeholder">
+                  <AppIcon name="image" :size="24" class="placeholder-icon" />
+                  <span class="placeholder-text">题目图片（预留位置）</span>
+                </div>
+              </div>
             </section>
 
             <!-- 答案 -->
@@ -228,30 +235,58 @@
 
     <!-- 知识点选择弹窗 -->
     <AppModal v-model="showKpDialog" title="选择知识点">
-      <div class="kp-dialog-tree">
-        <div v-for="node in kpTree" :key="node.id" class="mb-8">
-          <label class="checkbox-label">
-            <input
-              type="checkbox"
-              :value="node.id"
-              :checked="form.knowledgePointIds.includes(node.id)"
-              @change="toggleKp(node.id)"
-            />
-            <b>{{ node.name }}</b>
-          </label>
-          <div v-if="node.children?.length" class="kp-dialog-children">
-            <label v-for="c in node.children" :key="c.id" class="checkbox-label">
+      <div class="kp-dialog-body">
+        <!-- 学段切换 -->
+        <div class="kp-dialog-level">
+          <button
+            v-for="lv in [{ v: 'junior', l: '初中' }, { v: 'senior', l: '高中' }]"
+            :key="lv.v"
+            class="kp-level-btn"
+            :class="{ active: kpDialogLevel === lv.v }"
+            @click="kpDialogLevel = lv.v as 'junior' | 'senior'"
+          >
+            {{ lv.l }}
+          </button>
+        </div>
+        <!-- 知识点树 -->
+        <div class="kp-dialog-tree">
+          <template v-for="node in filteredKpTree" :key="node.id">
+            <label class="checkbox-label kp-root">
               <input
                 type="checkbox"
-                :value="c.id"
-                :checked="form.knowledgePointIds.includes(c.id)"
-                @change="toggleKp(c.id)"
+                :value="node.id"
+                :checked="form.knowledgePointIds.includes(node.id)"
+                @change="toggleKp(node.id)"
               />
-              {{ c.name }}
+              <b>{{ node.name }}</b>
             </label>
-          </div>
+            <div v-if="node.children?.length" class="kp-dialog-children">
+              <template v-for="c in node.children" :key="c.id">
+                <label class="checkbox-label kp-child">
+                  <input
+                    type="checkbox"
+                    :value="c.id"
+                    :checked="form.knowledgePointIds.includes(c.id)"
+                    @change="toggleKp(c.id)"
+                  />
+                  {{ c.name }}
+                </label>
+                <div v-if="c.children?.length" class="kp-dialog-grandchildren">
+                  <label v-for="gc in c.children" :key="gc.id" class="checkbox-label kp-grandchild">
+                    <input
+                      type="checkbox"
+                      :value="gc.id"
+                      :checked="form.knowledgePointIds.includes(gc.id)"
+                      @change="toggleKp(gc.id)"
+                    />
+                    {{ gc.name }}
+                  </label>
+                </div>
+              </template>
+            </div>
+          </template>
+          <AppEmpty v-if="!kpLoading && filteredKpTree.length === 0" description="暂无知识点" />
         </div>
-        <AppEmpty v-if="!kpLoading && kpTree.length === 0" description="暂无知识点" />
       </div>
       <div class="form-actions">
         <AppButton variant="primary" @click="showKpDialog = false">完成</AppButton>
@@ -305,7 +340,26 @@ const kpLoading = ref(false)
 const kpTree = ref<KnowledgePoint[]>([])
 const showHistory = ref(false)
 const showKpDialog = ref(false)
+const kpDialogLevel = ref<'junior' | 'senior'>('junior')
 const grades = ['初一', '初二', '初三', '高一', '高二', '高三']
+
+// 知识点弹窗中按学段过滤的树
+function findNodeByName(nodes: KnowledgePoint[], name: string): KnowledgePoint | null {
+  for (const node of nodes) {
+    if (node.name === name) return node
+    if (node.children?.length) {
+      const found = findNodeByName(node.children, name)
+      if (found) return found
+    }
+  }
+  return null
+}
+
+const filteredKpTree = computed(() => {
+  const target = kpDialogLevel.value === 'junior' ? '初中' : '高中'
+  const lvNode = findNodeByName(kpTree.value, target)
+  return lvNode?.children ?? kpTree.value
+})
 
 const gradeOptions = grades.map((g) => ({ label: g, value: g }))
 const sourceOptions = [
@@ -968,6 +1022,41 @@ watch(() => form.question_type, () => {
   background: var(--bg-card);
 }
 
+/* 题目图片占位 */
+.stem-image-area {
+  margin-top: 10px;
+}
+
+.image-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 80px;
+  border: 2px dashed var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: var(--transition-fast);
+}
+
+.image-placeholder:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-light);
+}
+
+.placeholder-icon {
+  opacity: 0.5;
+}
+
+.placeholder-text {
+  font-size: 12px;
+  font-weight: 500;
+}
+
 /* 选项行 */
 .opt-row {
   display: flex;
@@ -1240,14 +1329,62 @@ watch(() => form.question_type, () => {
   color: var(--text-secondary);
 }
 
-/* ============ 弹窗 ============ */
+/* 知识点弹窗 */
+.kp-dialog-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.kp-dialog-level {
+  display: inline-flex;
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  border-radius: 9px;
+  padding: 2px;
+  gap: 2px;
+  align-self: flex-start;
+}
+
+.kp-level-btn {
+  padding: 5px 16px;
+  border: none;
+  background: transparent;
+  border-radius: 7px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: var(--transition-fast);
+}
+
+.kp-level-btn:hover:not(.active) {
+  color: var(--text-primary);
+}
+
+.kp-level-btn.active {
+  background: var(--bg-elevated, var(--bg-card));
+  color: var(--text-primary);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+[data-theme='dark'] .kp-level-btn.active {
+  background: #3a3a3c;
+}
+
 .kp-dialog-tree {
-  max-height: 320px;
+  max-height: 360px;
   overflow-y: auto;
+  padding: 4px 0;
 }
 
 .kp-dialog-children {
   margin-left: 24px;
+}
+
+.kp-dialog-grandchildren {
+  margin-left: 22px;
 }
 
 .checkbox-label {
@@ -1257,7 +1394,28 @@ watch(() => form.question_type, () => {
   font-size: 14px;
   padding: 5px 0;
   cursor: pointer;
-  color: var(--text-primary);
+  transition: var(--transition-fast);
+  border-radius: 6px;
+}
+
+.checkbox-label:hover {
+  background: var(--bg-hover);
+}
+
+.checkbox-label.kp-root {
+  font-size: 15px;
+  padding: 6px 8px;
+}
+
+.checkbox-label.kp-child {
+  padding: 5px 8px;
+  color: var(--text-secondary);
+}
+
+.checkbox-label.kp-grandchild {
+  padding: 4px 8px;
+  font-size: 13px;
+  color: var(--text-muted);
 }
 
 .checkbox-label input {

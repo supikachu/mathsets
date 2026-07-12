@@ -308,3 +308,89 @@ d342c1c feat: 实现审核队列 + 知识点管理页面
 | 4 | **题目批量导入增强** | 🟡 P2 | 1h | Web 端上传文件解析导入，支持 Word/LaTeX |
 | 5 | **前端性能优化** | 🟢 P3 | 1h | chunk 拆分、路由懒加载、按需导入 |
 | 6 | **用户管理增强** | 🟡 P2 | 1h | 禁用/启用用户、角色修改 |
+
+---
+
+## 2026-07-12（UI/UX 优化迭代）
+
+### 今日完成
+
+#### 1. 选择题选项自适应布局（Ghost Rendering）
+- 实现 `computeOptionLayout()` 函数，通过预渲染测量 KaTeX 渲染后的选项真实宽度
+- 临时切换 `display: block` + `inline-flex` + `white-space: nowrap` 测量 `scrollWidth`
+- 根据测量结果动态选择布局：`grid-4`（一行四列）/ `grid-2`（两行两列）/ `grid-1`（四行一列）
+- `ResizeObserver` + 防抖（150ms）实现响应式重算
+- 阈值：`slot * 4 <= containerWidth` → grid-4；`slot * 2 <= containerWidth` → grid-2
+
+#### 2. 答案解析区 KaTeX 渲染
+- 题目卡片展开后，正确答案通过 `<LatexRender>` 组件渲染
+- 覆盖选择题、填空题、解答题三种题型的答案显示
+
+#### 3. 深色模式修复
+- 统一 `localStorage` 主题键为 `mathset_theme`（原 `theme` 不一致）
+- `ThemeToggle.vue` 改用 `useTheme` composable，移除独立主题逻辑
+- `index.html` 添加 `theme-color` meta 标签
+- 修复原生 `<select>` 在深色模式下 option 白底问题（`color-scheme: dark`）
+
+#### 4. 题目编辑页（QuestionEdit）重构
+- Apple 简约风格双栏布局：左栏编辑 + 右栏实时预览
+- 题型分段控件（选择题/填空题/解答题/判断题）+ 3 星难度评级
+- 元数据工具栏：年级/学期/分值/耗时/来源/知识点 水平排列
+- 题干下方预留题目图片占位区域（虚线边框 + 图标 + 提示文字）
+- 知识点选择弹窗：学段切换 + 递归 `findNodeByName` 三级树
+- 高级设置折叠区：指定审题人 + 内部备注
+
+#### 5. 个人/公共题库切换 → Apple 分段控件
+- 替代原生 `<select>`，pill 背景 + 白色激活态 + 阴影
+- 图标 + 文字组合（user 图标→个人，users 图标→公共）
+
+#### 6. 筛选面板 Apple 简约风格
+- 大写标签、圆角标签按钮、激活态阴影
+- `grid-template-rows: 0fr → 1fr` 展开动画 + opacity 过渡
+
+#### 7. 知识点树 ↔ 筛选菜单年级联动
+- 创建 `useSelectedKp` singleton composable，共享 `kpLevel` 状态
+- `KpTreePanel` 切换学段时通过 `setLevel()` 更新共享状态
+- `QuestionList` 的 `gradeOptions` 改为 `computed`，根据 `kpLevel` 动态返回年级选项
+- `watch(kpLevel)` 监听学段变化，自动重置无效的年级筛选
+
+### 技术要点
+
+- **Singleton Composable 模式**：`useSelectedKp.ts` 在模块级别声明 `ref`，实现跨组件状态共享
+- **Ghost Rendering 测量法**：临时修改 DOM 样式测量真实渲染宽度，测量后恢复原样式
+- **CSS Grid 动画**：`grid-template-rows: 0fr → 1fr` 实现高度自适应的展开动画
+- **递归树遍历**：`findNodeByName` 递归查找知识点树中的学段节点
+
+### 已知 Bug（待明天处理）
+
+| BUG ID | 描述 | 优先级 |
+|--------|------|--------|
+| BUG-001 | 新建题目页「添加标签」知识点弹窗内容不正确 | 🔴 高 |
+| BUG-002 | 录题页面题目必要属性（年级/学期/分值等）布局和联动需优化 | 🟡 中 |
+| BUG-003 | 知识点弹窗业务逻辑需重新梳理（学段同步、数据源、回显） | 🔴 高 |
+
+> 详细描述见 `docs/requirements.md` 第 14 节。
+
+### Git 历史（本次迭代）
+
+```
+（待提交）feat: 个人/公共分段控件 + 筛选联动 + QuestionEdit优化
+e405629 feat: 深色模式空间切换器修复 + 新建题目界面重构
+6f5333e fix: 统一主题键名 + 添加theme-color meta标签
+b821376 feat: 选项自适应布局 - 基于KaTeX真实宽度测量(Ghost Rendering)
+9ba6178 fix: 选择题选项自适应阈值调整, 短选项正确显示为一行四列
+29f37cc feat: 选择题选项自动布局 + 答案KaTeX渲染
+e680b33 fix: 优化筛选动画平滑度 + 工作台全屏布局比例调整
+d0c0db9 feat: Apple风格吸顶工具栏 + 筛选面板弹出式
+3459155 fix: 内容区域铺满全屏, 覆盖 base.css 的 max-width 居中限制
+1cf6851 feat: 全屏铺满布局 + 固定顶栏 + 标签式筛选面板
+6a46c51 refactor: 侧边栏拆分为双卡片, 三栏布局滚动锁定
+```
+
+### 明日待办
+
+| # | 任务 | 优先级 | 说明 |
+|---|------|--------|------|
+| 1 | 修复 BUG-001 + BUG-003：知识点弹窗业务逻辑重新梳理 | 🔴 高 | 确保弹窗内容与知识树一致，学段同步、数据源统一、已选回显 |
+| 2 | 修复 BUG-002：录题页必要属性优化 | 🟡 中 | 年级联动、学期关联、视觉层级、交互优化 |
+| 3 | 题目图片上传功能实现 | 🟡 中 | 将占位区域替换为实际图片上传组件 |

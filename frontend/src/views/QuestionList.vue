@@ -3,19 +3,18 @@
     <!-- ===== Apple风格吸顶工具栏 ===== -->
     <div class="ql-sticky-bar">
       <div class="ql-toolbar">
-        <!-- 左侧：题库空间切换 -->
-        <div class="ql-space-switcher">
-          <AppIcon name="folder" :size="15" class="ql-space-icon" />
-          <select
-            class="ql-space-select"
-            :value="space.currentSpaceId"
-            @change="onSpaceChange(($event.target as HTMLSelectElement).value)"
+        <!-- 左侧：题库空间切换 — Apple分段控件风格 -->
+        <div class="ql-space-segmented">
+          <button
+            v-for="s in space.spaces"
+            :key="s.id"
+            class="ql-space-seg"
+            :class="{ active: space.currentSpaceId === s.id }"
+            @click="onSpaceChange(s.id)"
           >
-            <option v-for="s in space.spaces" :key="s.id" :value="s.id">
-              {{ spaceKindLabel(s.kind) }} · {{ s.name }}
-            </option>
-          </select>
-          <AppIcon name="chevron-down" :size="13" class="ql-space-chevron" />
+            <AppIcon :name="s.kind === 'personal' ? 'user' : 'users'" :size="14" />
+            <span>{{ spaceKindLabel(s.kind) }}</span>
+          </button>
         </div>
 
         <!-- 中间：搜索框 -->
@@ -260,7 +259,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { questionApi, type QuestionSummary, type QuestionDetail, type QuestionQuery } from '@/api/client'
 import LatexRender from '@/components/LatexRender.vue'
@@ -281,7 +280,7 @@ import {
 const router = useRouter()
 const toast = useToast()
 const space = useSpaceStore()
-const { selectedKpId, selectedKpName, clear } = useSelectedKp()
+const { selectedKpId, selectedKpName, clear, kpLevel } = useSelectedKp()
 const basket = useQuestionBasket()
 
 // ---- 筛选面板展开状态 ----
@@ -370,10 +369,15 @@ const statusOptions = [
   { label: '已停用', value: 'disabled' },
 ]
 
-const gradeOptions = [
-  { label: '不限', value: '__all' },
-  ...['初一', '初二', '初三', '高一', '高二', '高三'].map((g) => ({ label: g, value: g })),
-]
+const gradeOptions = computed(() => {
+  const juniorGrades = ['初一', '初二', '初三']
+  const seniorGrades = ['高一', '高二', '高三']
+  const grades = kpLevel.value === 'junior' ? juniorGrades : seniorGrades
+  return [
+    { label: '不限', value: '__all' },
+    ...grades.map((g) => ({ label: g, value: g })),
+  ]
+})
 
 let searchTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -642,6 +646,16 @@ watch(selectedKpId, (id) => {
   fetchList()
 })
 
+// 学段切换时重置年级筛选，避免选了不存在的年级
+watch(kpLevel, (lv) => {
+  const validGrades = lv === 'junior' ? ['初一', '初二', '初三'] : ['高一', '高二', '高三']
+  if (query.grade && query.grade !== '__all' && !validGrades.includes(query.grade)) {
+    query.grade = '__all'
+    page.value = 1
+    fetchList()
+  }
+})
+
 watch(() => space.currentSpaceId, (newId) => {
   query.space_id = newId || undefined
   page.value = 1
@@ -684,62 +698,49 @@ onBeforeUnmount(() => {
 }
 
 /* 题库空间切换 */
-.ql-space-switcher {
-  position: relative;
-  display: flex;
+/* 空间切换 — Apple分段控件 */
+.ql-space-segmented {
+  display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 0 12px;
-  height: 36px;
   background: var(--bg-input);
   border: 1px solid var(--border-color);
   border-radius: 10px;
-  transition: var(--transition-fast);
+  padding: 3px;
+  gap: 2px;
   flex-shrink: 0;
 }
 
-.ql-space-switcher:hover {
-  border-color: var(--text-muted);
-}
-
-.ql-space-switcher:focus-within {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-light);
-}
-
-.ql-space-icon {
-  color: var(--text-muted);
-  flex-shrink: 0;
-}
-
-.ql-space-select {
-  appearance: none;
-  -webkit-appearance: none;
+.ql-space-seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 14px;
   border: none;
   background: transparent;
+  border-radius: 7px;
   font-size: 13px;
-  font-weight: 600;
-  color: var(--text-primary);
-  padding: 0 18px 0 0;
-  outline: none;
+  font-weight: 500;
+  color: var(--text-secondary);
   cursor: pointer;
-  color-scheme: light dark;
+  transition: var(--transition-fast);
+  white-space: nowrap;
 }
 
-[data-theme='dark'] .ql-space-select {
-  color-scheme: dark;
+.ql-space-seg:hover:not(.active) {
+  color: var(--text-primary);
+  background: var(--bg-hover);
 }
 
-[data-theme='dark'] .ql-space-select option {
-  background: #2c2c2e;
-  color: #f5f5f7;
+.ql-space-seg.active {
+  background: var(--bg-elevated, var(--bg-card));
+  color: var(--text-primary);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
 }
 
-.ql-space-chevron {
-  position: absolute;
-  right: 10px;
-  color: var(--text-muted);
-  pointer-events: none;
+[data-theme='dark'] .ql-space-seg.active {
+  background: #3a3a3c;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 
 /* 搜索框 */
@@ -887,45 +888,47 @@ onBeforeUnmount(() => {
   min-height: 0;
 }
 
-/* 筛选面板 */
+/* 筛选面板 — Apple简约风格 */
 .ql-filter-panel {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: 12px 20px 14px;
+  gap: 2px;
+  padding: 14px 20px 16px;
   background: var(--bg-card);
   border-top: 1px solid var(--border-color);
 }
 
 .ql-filter-row {
   display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 2px 0;
+  align-items: center;
+  gap: 16px;
+  padding: 5px 0;
 }
 
 .ql-filter-label {
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
-  color: var(--text-secondary);
+  color: var(--text-muted);
+  letter-spacing: 0.03em;
   flex-shrink: 0;
-  min-width: 36px;
-  padding-top: 5px;
+  min-width: 40px;
+  text-transform: uppercase;
 }
 
 .ql-filter-tags {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 7px;
 }
 
 .ql-tag {
-  padding: 4px 13px;
+  padding: 5px 14px;
   border-radius: 980px;
   font-size: 13px;
   font-weight: 500;
   color: var(--text-secondary);
-  background: transparent;
+  background: var(--bg-input);
+  border: 1px solid transparent;
   transition: var(--transition-fast);
   white-space: nowrap;
 }
@@ -939,6 +942,7 @@ onBeforeUnmount(() => {
   background: var(--accent);
   color: #fff;
   font-weight: 600;
+  box-shadow: 0 1px 4px rgba(0, 122, 255, 0.2);
 }
 
 /* ===== 可滚动列表区域 ===== */
