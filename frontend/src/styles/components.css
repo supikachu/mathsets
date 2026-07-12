@@ -83,7 +83,7 @@
     position: sticky;
     top: 28px;
     align-self: flex-start;
-    max-height: calc(100vh - 56px);
+    height: calc(100vh - 56px);
     background: var(--bg-card);
     border-radius: var(--radius-lg);
     padding: 14px;

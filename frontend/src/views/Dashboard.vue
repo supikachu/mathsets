@@ -208,39 +208,36 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useAuthStore } from '@/stores/auth'
+import { useSpaceStore } from '@/stores/space'
+import { questionApi, type QuestionSummary, type QuestionQuery } from '@/api/client'
+import client from '@/api/client'
 
 const auth = useAuthStore()
+const space = useSpaceStore()
 
 // ===== 唯一 ID 用于 SVG gradient =====
 const uid = Math.random().toString(36).slice(2, 8)
 
-// ===== Mock 数据（预留 API 接口位置）=====
-// TODO: 替换为真实 API: await dashboardApi.getStats()
+// ===== 真实统计数据 =====
 const stats = ref({
-  total: 3,
-  draft: 3,
+  total: 0,
+  draft: 0,
   pending: 0,
+  rejected: 0,
   published: 0,
+  disabled: 0,
 })
 
 // 注册天数
 const daysSince = computed(() => {
-  // TODO: 从用户注册时间计算
+  // TODO: 从用户注册时间计算，暂返回 1
   return 1
 })
 
-// ===== 趋势折线图数据 =====
-const trendData = ref([
-  { label: '7/6', value: 0 },
-  { label: '7/7', value: 0 },
-  { label: '7/8', value: 0 },
-  { label: '7/9', value: 0 },
-  { label: '7/10', value: 0 },
-  { label: '7/11', value: 0 },
-  { label: '7/12', value: 3 },
-])
+// ===== 趋势折线图数据（最近7天） =====
+const trendData = ref<{ label: string; value: number }[]>([])
 
 const chartW = 300
 const chartH = 80
@@ -338,58 +335,28 @@ function generateHeatmap() {
   heatmapStats.value = { activeDays: activeCount }
 }
 
-// ===== 知识点分类 =====
+// ===== 知识点分类（根据当前空间题目动态计算） =====
 const kpCategories = ref([
-  {
-    name: '集合',
-    count: 3,
-    color: '#0071e3',
-    iconPath: '<circle cx="8" cy="8" r="5" /><circle cx="16" cy="16" r="5" />',
-  },
-  {
-    name: '函数',
-    count: 0,
-    color: '#af52de',
-    iconPath: '<path d="M4 20 C 4 16, 8 12, 12 12 S 20 8, 20 4" /><circle cx="4" cy="20" r="1.5" fill="currentColor" stroke="none" /><circle cx="20" cy="4" r="1.5" fill="currentColor" stroke="none" />',
-  },
-  {
-    name: '几何',
-    count: 0,
-    color: '#ff9f0a',
-    iconPath: '<path d="M12 3 L21 19 L3 19 Z" />',
-  },
-  {
-    name: '数列',
-    count: 0,
-    color: '#34c759',
-    iconPath: '<rect x="3" y="14" width="4" height="7" rx="0.5" /><rect x="10" y="10" width="4" height="11" rx="0.5" /><rect x="17" y="6" width="4" height="15" rx="0.5" />',
-  },
-  {
-    name: '概率',
-    count: 0,
-    color: '#ff3b30',
-    iconPath: '<circle cx="12" cy="12" r="8" /><path d="M12 4 L12 12 L18 12" />',
-  },
-  {
-    name: '向量',
-    count: 0,
-    color: '#5ac8fa',
-    iconPath: '<path d="M5 19 L19 5" /><path d="M14 5 L19 5 L19 10" />',
-  },
+  { name: '集合', count: 0, color: '#0071e3', iconPath: '<circle cx="8" cy="8" r="5" /><circle cx="16" cy="16" r="5" />' },
+  { name: '函数', count: 0, color: '#af52de', iconPath: '<path d="M4 20 C 4 16, 8 12, 12 12 S 20 8, 20 4" /><circle cx="4" cy="20" r="1.5" fill="currentColor" stroke="none" /><circle cx="20" cy="4" r="1.5" fill="currentColor" stroke="none" />' },
+  { name: '几何', count: 0, color: '#ff9f0a', iconPath: '<path d="M12 3 L21 19 L3 19 Z" />' },
+  { name: '数列', count: 0, color: '#34c759', iconPath: '<rect x="3" y="14" width="4" height="7" rx="0.5" /><rect x="10" y="10" width="4" height="11" rx="0.5" /><rect x="17" y="6" width="4" height="15" rx="0.5" />' },
+  { name: '概率', count: 0, color: '#ff3b30', iconPath: '<circle cx="12" cy="12" r="8" /><path d="M12 4 L12 12 L18 12" />' },
+  { name: '向量', count: 0, color: '#5ac8fa', iconPath: '<path d="M5 19 L19 5" /><path d="M14 5 L19 5 L19 10" />' },
 ])
 
-// ===== 题目标签分布 =====
+// ===== 题目标签分布（动态计算） =====
 const tagDistribution = ref([
-  { name: '真题', count: 1, percent: 33, color: '#0071e3' },
+  { name: '真题', count: 0, percent: 0, color: '#0071e3' },
   { name: '创新题', count: 0, percent: 0, color: '#af52de' },
-  { name: '易错题', count: 2, percent: 67, color: '#ff9f0a' },
+  { name: '易错题', count: 0, percent: 0, color: '#ff9f0a' },
 ])
 
-// ===== 题型分布（环形图）=====
+// ===== 题型分布（动态计算） =====
 const typeDistribution = ref([
-  { label: '选择题', count: 1, color: '#0071e3' },
-  { label: '填空题', count: 1, color: '#34c759' },
-  { label: '解答题', count: 1, color: '#ff9f0a' },
+  { label: '选择题', count: 0, color: '#0071e3' },
+  { label: '填空题', count: 0, color: '#34c759' },
+  { label: '解答题', count: 0, color: '#ff9f0a' },
 ])
 
 const donutSegments = computed(() => {
@@ -413,20 +380,123 @@ const donutSegments = computed(() => {
   })
 })
 
-// ===== 难度分布 =====
+// ===== 难度分布（动态计算） =====
 const difficultyDist = ref([
   { level: 1, count: 0, color: 'rgba(52, 199, 89, 0.12)', textColor: '#34c759' },
   { level: 2, count: 0, color: 'rgba(90, 200, 250, 0.12)', textColor: '#5ac8fa' },
-  { level: 3, count: 2, color: 'rgba(255, 159, 10, 0.12)', textColor: '#ff9f0a' },
+  { level: 3, count: 0, color: 'rgba(255, 159, 10, 0.12)', textColor: '#ff9f0a' },
   { level: 4, count: 0, color: 'rgba(255, 159, 10, 0.18)', textColor: '#ff9f0a' },
-  { level: 5, count: 1, color: 'rgba(255, 59, 48, 0.12)', textColor: '#ff3b30' },
+  { level: 5, count: 0, color: 'rgba(255, 59, 48, 0.12)', textColor: '#ff3b30' },
 ])
 
 onMounted(() => {
   generateHeatmap()
-  // TODO: 调用 API 获取真实数据
-  // fetchDashboardData()
+  fetchDashboardData()
 })
+
+watch(() => space.currentSpaceId, () => {
+  fetchDashboardData()
+})
+
+// ===== 获取真实数据 =====
+async function fetchDashboardData() {
+  const spaceId = space.currentSpaceId || undefined
+
+  // 1. 获取题目统计（按状态）
+  try {
+    const res = await questionApi.stats({ space_id: spaceId })
+    stats.value = {
+      total: res.data.total,
+      draft: res.data.draft,
+      pending: res.data.pending,
+      rejected: res.data.rejected || 0,
+      published: res.data.published,
+      disabled: res.data.disabled || 0,
+    }
+  } catch {
+    // 静默失败
+  }
+
+  // 2. 获取题目列表（分页拉取所有题目用于分类统计）
+  try {
+    const query: QuestionQuery = {
+      space_id: spaceId,
+      page: 1,
+      page_size: 200,
+    }
+    const res = await questionApi.list(query)
+    const questions = res.data.items || []
+
+    // 按题型统计
+    typeDistribution.value[0].count = questions.filter(q => q.question_type === 'choice').length
+    typeDistribution.value[1].count = questions.filter(q => q.question_type === 'fill').length
+    typeDistribution.value[2].count = questions.filter(q => q.question_type === 'solution').length
+
+    // 按难度统计
+    const diffMap: Record<string, number> = { easy: 1, medium: 3, hard: 5 }
+    for (const diff of difficultyDist.value) {
+      diff.count = 0
+    }
+    for (const q of questions) {
+      const level = diffMap[q.difficulty] || 3
+      const idx = difficultyDist.value.findIndex(d => d.level === level)
+      if (idx >= 0) difficultyDist.value[idx].count++
+    }
+
+    // 按标签统计（从 tags 字段提取）
+    const tagCounts = { 真题: 0, 创新题: 0, 易错题: 0 }
+    for (const q of questions) {
+      const tags = (q as any).tags as string[] | undefined
+      if (tags) {
+        for (const t of tags) {
+          if (t in tagCounts) tagCounts[t as keyof typeof tagCounts]++
+        }
+      }
+    }
+    const maxTag = Math.max(...Object.values(tagCounts), 1)
+    tagDistribution.value[0].count = tagCounts.真题
+    tagDistribution.value[0].percent = Math.round(tagCounts.真题 / maxTag * 100)
+    tagDistribution.value[1].count = tagCounts.创新题
+    tagDistribution.value[1].percent = Math.round(tagCounts.创新题 / maxTag * 100)
+    tagDistribution.value[2].count = tagCounts.易错题
+    tagDistribution.value[2].percent = Math.round(tagCounts.易错题 / maxTag * 100)
+
+    // 按知识点分类统计（通过 knowledge_point_names 匹配）
+    for (const cat of kpCategories.value) {
+      cat.count = 0
+    }
+    for (const q of questions) {
+      const kpNames = (q as any).knowledge_point_names as string[] | undefined
+      if (kpNames) {
+        for (const cat of kpCategories.value) {
+          if (kpNames.some(n => n.includes(cat.name))) {
+            cat.count++
+          }
+        }
+      }
+    }
+
+    // 生成最近7天趋势数据
+    const today = new Date()
+    const dayLabels: { label: string; value: number }[] = []
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date(today)
+      d.setDate(d.getDate() - i)
+      const label = `${d.getMonth() + 1}/${d.getDate()}`
+      const count = questions.filter(q => {
+        if (!q.created_at) return false
+        const qd = new Date(q.created_at)
+        return qd.getFullYear() === d.getFullYear() &&
+               qd.getMonth() === d.getMonth() &&
+               qd.getDate() === d.getDate()
+      }).length
+      dayLabels.push({ label, value: count })
+    }
+    trendData.value = dayLabels
+  } catch {
+    // 静默失败
+  }
+}
 </script>
 
 <style scoped>
