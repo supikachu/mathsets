@@ -153,7 +153,7 @@
                 <LatexRender :text="card.stem" />
               </div>
               <!-- 选择题选项（列表页不标注正确答案） -->
-              <div v-if="card.question_type === 'choice' && card.parsedOptions.length > 0" class="q-options">
+              <div v-if="card.question_type === 'choice' && card.parsedOptions.length > 0" class="q-options" :class="optionLayout(card.parsedOptions)">
                 <div
                   v-for="opt in card.parsedOptions"
                   :key="opt.label"
@@ -180,7 +180,7 @@
                   :class="`q-answer-card--${card.question_type}`"
                 >
                   <span class="q-answer-card-label">正确答案</span>
-                  <span class="q-answer-card-value">{{ card.correctAnswer }}</span>
+                  <span class="q-answer-card-value"><LatexRender :text="card.correctAnswer" :inline="true" /></span>
                   <AppIcon
                     name="check-circle"
                     :size="16"
@@ -195,7 +195,7 @@
                   class="q-answer-inline"
                 >
                   <span class="q-answer-inline-label">参考答案</span>
-                  <span class="q-answer-inline-value">{{ card.correctAnswer }}</span>
+                  <span class="q-answer-inline-value"><LatexRender :text="card.correctAnswer" :inline="true" /></span>
                 </div>
 
                 <div v-if="card.analysis" class="q-analysis-body">
@@ -429,6 +429,18 @@ function parseOptions(raw: any): { label: string; content: string }[] {
     }
     return { label: '', content: String(opt) }
   })
+}
+
+// ---- 工具函数：根据选项内容长度计算布局列数 ----
+// 短选项(≤8字符) → 4列一行; 中等(≤30字符) → 2列两行; 长选项 → 1列四行
+function optionLayout(opts: { label: string; content: string }[]): string {
+  if (!opts || opts.length === 0) return 'cols-1'
+  // 去除 LaTeX 标记后估算纯文本长度
+  const stripLatex = (s: string) => s.replace(/\$+/g, '').replace(/\\[a-zA-Z]+/g, 'x').replace(/[{}]/g, '')
+  const maxLen = Math.max(...opts.map(o => stripLatex(o.content).length))
+  if (maxLen <= 8) return 'cols-4'
+  if (maxLen <= 30) return 'cols-2'
+  return 'cols-1'
 }
 
 // ---- 工具函数：解析正确答案 ----
@@ -1049,16 +1061,31 @@ onBeforeUnmount(() => {
 }
 
 /* ---- Options (choice question — no correct marking in list view) ---- */
+/* 选择题选项布局: 根据内容长度自动 4列/2列/1列 */
 .q-options {
   display: grid;
-  grid-template-columns: 1fr 1fr;
   gap: 8px;
   margin-top: 14px;
 }
 
+/* 短选项 → 一行四列 */
+.q-options.cols-4 {
+  grid-template-columns: repeat(4, 1fr);
+}
+
+/* 中等选项 → 两行两列 */
+.q-options.cols-2 {
+  grid-template-columns: repeat(2, 1fr);
+}
+
+/* 长选项 → 四行一列 */
+.q-options.cols-1 {
+  grid-template-columns: 1fr;
+}
+
 @media (max-width: 640px) {
-  .q-options {
-    grid-template-columns: 1fr;
+  .q-options.cols-4 {
+    grid-template-columns: repeat(2, 1fr);
   }
 }
 
