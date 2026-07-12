@@ -13,6 +13,7 @@ export function useNavItems() {
 
   const items = computed<NavItem[]>(() => {
     const list: NavItem[] = [
+      { path: '/dashboard', label: '工作台', icon: 'grid', shortLabel: '工作台' },
       { path: '/questions', label: '题库', icon: 'file-text', shortLabel: '题库' },
       { path: '/review', label: '审核队列', icon: 'shield-check', shortLabel: '审核' },
     ]

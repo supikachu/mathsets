@@ -3,20 +3,47 @@
     <div class="app-container">
       <!-- 桌面侧边栏 -->
       <nav class="sidebar">
-        <div class="sidebar-brand">
-          <AppIcon name="logo" :size="24" class="brand-icon" />
-          <span>协同题库</span>
+        <div class="sidebar-top">
+          <div class="sidebar-brand">
+            <AppIcon name="logo" :size="24" class="brand-icon" />
+            <span>协同题库</span>
+          </div>
+          <router-link
+            v-for="item in items"
+            :key="item.path"
+            :to="item.path"
+            class="nav-item"
+            :class="{ active: isActive(item.path) }"
+          >
+            <AppIcon :name="item.icon" :size="19" />
+            <span>{{ item.label }}</span>
+          </router-link>
         </div>
-        <router-link
-          v-for="item in items"
-          :key="item.path"
-          :to="item.path"
-          class="nav-item"
-          :class="{ active: isActive(item.path) }"
-        >
-          <AppIcon :name="item.icon" :size="19" />
-          <span>{{ item.label }}</span>
-        </router-link>
+
+        <!-- 用户信息下沉到底部 -->
+        <div class="sidebar-user" ref="userMenuRef">
+          <button
+            type="button"
+            class="sidebar-user-trigger"
+            @click="showUserMenu = !showUserMenu"
+          >
+            <span class="user-avatar">{{ avatarLetter }}</span>
+            <div class="sidebar-user-info">
+              <span class="sidebar-user-name">{{ auth.displayName }}</span>
+              <span class="sidebar-user-role">{{ roleLabel }}</span>
+            </div>
+            <AppIcon name="chevron-down" :size="14" class="sidebar-user-chevron" :class="{ rotated: showUserMenu }" />
+          </button>
+
+          <Transition name="user-pop">
+            <div v-if="showUserMenu" class="sidebar-user-dropdown">
+              <button type="button" class="user-menu-item" @click="handleLogout">
+                <AppIcon name="logout" :size="16" />
+                退出登录
+              </button>
+            </div>
+          </Transition>
+        </div>
       </nav>
 
       <!-- 知识点树（中间栏） -->
@@ -44,27 +71,6 @@
           <div class="top-bar-spacer" />
           <div class="top-bar-actions">
             <ThemeToggle />
-            <div class="user-menu" ref="userMenuRef">
-              <button
-                type="button"
-                class="user-menu-trigger"
-                @click="showUserMenu = !showUserMenu"
-              >
-                <span class="user-avatar">{{ avatarLetter }}</span>
-                <span class="user-name">{{ auth.displayName }}</span>
-                <AppIcon name="chevron-down" :size="15" class="user-chevron" />
-              </button>
-              <div v-if="showUserMenu" class="user-menu-dropdown">
-                <div class="user-menu-info">
-                  <div class="user-menu-name">{{ auth.displayName }}</div>
-                  <div class="user-menu-role">{{ roleLabel }}</div>
-                </div>
-                <button type="button" class="user-menu-item" @click="handleLogout">
-                  <AppIcon name="logout" :size="17" />
-                  退出登录
-                </button>
-              </div>
-            </div>
           </div>
         </header>
 
@@ -126,7 +132,6 @@ function spaceKindLabel(kind: string) {
 function onSpaceChange(id: string) {
   space.setCurrentSpace(id)
   clearSelectedKp()
-  // 切换空间后刷新当前列表类页面
   if (route.path.startsWith('/questions') || route.path === '/review') {
     router.replace({ path: route.path, query: { ...route.query, _sp: id.slice(0, 8) } })
   }
@@ -170,6 +175,18 @@ onUnmounted(() => document.removeEventListener('click', onDocumentClick))
   background: var(--bg-primary);
 }
 
+/* ===== Sidebar ===== */
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.sidebar-top {
+  display: flex;
+  flex-direction: column;
+}
+
 .sidebar-brand {
   display: flex;
   align-items: center;
@@ -185,6 +202,121 @@ onUnmounted(() => document.removeEventListener('click', onDocumentClick))
   color: var(--accent);
 }
 
+/* ===== Sidebar user (bottom) ===== */
+.sidebar-user {
+  position: relative;
+  padding: 8px;
+  border-top: 1px solid var(--divider);
+  margin-top: auto;
+}
+
+.sidebar-user-trigger {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  transition: var(--transition-fast);
+}
+
+.sidebar-user-trigger:hover {
+  background: var(--bg-hover);
+}
+
+.user-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--accent-gradient);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.sidebar-user-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  overflow: hidden;
+}
+
+.sidebar-user-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.sidebar-user-role {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.sidebar-user-chevron {
+  color: var(--text-muted);
+  flex-shrink: 0;
+  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.sidebar-user-chevron.rotated {
+  transform: rotate(180deg);
+}
+
+.sidebar-user-dropdown {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 8px;
+  right: 8px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-md);
+  padding: 6px;
+  z-index: 150;
+}
+
+.user-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  padding: 9px 12px;
+  border-radius: var(--radius-xs);
+  font-size: 13px;
+  color: var(--danger);
+  transition: var(--transition-fast);
+}
+
+.user-menu-item:hover {
+  background: var(--danger-light);
+}
+
+/* ===== User menu transitions ===== */
+.user-pop-enter-active {
+  transition: opacity 0.2s ease, transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.user-pop-leave-active {
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+.user-pop-enter-from,
+.user-pop-leave-to {
+  opacity: 0;
+  transform: translateY(6px);
+}
+
+/* ===== Top bar ===== */
 .top-bar {
   display: flex;
   align-items: center;
@@ -201,105 +333,6 @@ onUnmounted(() => document.removeEventListener('click', onDocumentClick))
   display: flex;
   align-items: center;
   gap: 10px;
-}
-
-.user-menu {
-  position: relative;
-}
-
-.user-menu-trigger {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 5px 12px 5px 5px;
-  border-radius: var(--radius-full);
-  background: var(--bg-card);
-  border: 1px solid var(--border-color);
-  box-shadow: var(--shadow-xs);
-  color: var(--text-primary);
-  font-size: 14px;
-  font-weight: 500;
-  transition: var(--transition-fast);
-}
-
-.user-menu-trigger:hover {
-  background: var(--bg-hover);
-  box-shadow: var(--shadow-sm);
-}
-
-.user-avatar {
-  width: 30px;
-  height: 30px;
-  border-radius: 50%;
-  background: var(--accent-gradient);
-  color: #fff;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 13px;
-  font-weight: 700;
-  flex-shrink: 0;
-}
-
-.user-name {
-  max-width: 120px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.user-chevron {
-  color: var(--text-muted);
-}
-
-.user-menu-dropdown {
-  position: absolute;
-  top: calc(100% + 8px);
-  right: 0;
-  min-width: 200px;
-  background: var(--bg-card);
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-lg);
-  padding: 8px;
-  z-index: 150;
-  animation: scaleIn 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
-  transform-origin: top right;
-}
-
-.user-menu-info {
-  padding: 8px 12px 12px;
-  border-bottom: 1px solid var(--divider);
-  margin-bottom: 4px;
-}
-
-.user-menu-name {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-.user-menu-role {
-  font-size: 12px;
-  color: var(--text-secondary);
-  margin-top: 2px;
-}
-
-.user-menu-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  text-align: left;
-  padding: 9px 12px;
-  border-radius: var(--radius-sm);
-  font-size: 14px;
-  color: var(--danger);
-  transition: var(--transition-fast);
-}
-
-.user-menu-item:hover {
-  background: var(--danger-light);
 }
 
 @media (max-width: 768px) {
@@ -340,14 +373,6 @@ onUnmounted(() => document.removeEventListener('click', onDocumentClick))
     -webkit-backdrop-filter: var(--blur-modal);
     z-index: 170;
     animation: fadeIn 0.2s ease;
-  }
-
-  .user-name {
-    display: none;
-  }
-
-  .user-menu-trigger {
-    padding: 4px;
   }
 }
 

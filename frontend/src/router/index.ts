@@ -23,7 +23,12 @@ const router = createRouter({
       children: [
         {
           path: '',
-          redirect: '/questions',
+          redirect: '/dashboard',
+        },
+        {
+          path: 'dashboard',
+          name: 'Dashboard',
+          component: () => import('@/views/Dashboard.vue'),
         },
         {
           path: 'questions',
@@ -76,11 +81,11 @@ router.beforeEach(async (to, _from) => {
   }
 
   if (to.meta.guest && auth.isLoggedIn) {
-    return '/questions'
+    return '/dashboard'
   }
 
   if (to.meta.requiresAdmin && !auth.isAdmin) {
-    return '/questions'
+    return '/dashboard'
   }
 })
 
