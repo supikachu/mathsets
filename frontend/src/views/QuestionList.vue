@@ -1,208 +1,252 @@
 <template>
-  <div>
-    <div class="flex items-center justify-between mb-12">
-      <h1 class="page-title" style="margin-bottom: 0"><AppIcon name="file-text" :size="20" /> 题目管理</h1>
-      <div class="header-actions">
-        <button
-          v-if="basket.count.value > 0"
-          class="basket-btn"
-          @click="toast.info(`试题篮中有 ${basket.count.value} 道题目`)"
-        >
-          <AppIcon name="shopping-cart" :size="16" />
-          <span>试题篮</span>
-          <span class="basket-count">{{ basket.count.value }}</span>
-        </button>
-        <AppButton variant="primary" @click="$router.push('/questions/new')">
-          <AppIcon name="plus" :size="17" /> 新建题目
-        </AppButton>
+  <div class="ql-page">
+    <!-- ===== 固定顶栏（不随列表滚动） ===== -->
+    <div class="ql-fixed-header">
+      <!-- 顶栏：题库空间 + 标题 + 新建按钮 -->
+      <div class="ql-topbar">
+        <h1 class="page-title ql-title"><AppIcon name="file-text" :size="20" /> 题目管理</h1>
+        <div class="header-actions">
+          <button
+            v-if="basket.count.value > 0"
+            class="basket-btn"
+            @click="toast.info(`试题篮中有 ${basket.count.value} 道题目`)"
+          >
+            <AppIcon name="shopping-cart" :size="16" />
+            <span>试题篮</span>
+            <span class="basket-count">{{ basket.count.value }}</span>
+          </button>
+          <AppButton variant="primary" @click="$router.push('/questions/new')">
+            <AppIcon name="plus" :size="17" /> 新建题目
+          </AppButton>
+        </div>
       </div>
-    </div>
 
-    <div class="filter-bar">
-      <input
-        v-model="query.keyword"
-        class="search-input"
-        placeholder="搜索题干关键词..."
-        @input="onSearchInput"
-      />
-      <AppSelect
-        v-model="query.question_type"
-        placeholder="题型"
-        clearable
-        :options="typeOptions"
-        @update:model-value="onFilterChange"
-      />
-      <AppSelect
-        v-model="query.difficulty"
-        placeholder="难度"
-        clearable
-        :options="difficultyOptions"
-        @update:model-value="onFilterChange"
-      />
-      <AppSelect
-        v-model="query.status"
-        placeholder="状态"
-        clearable
-        :options="statusOptions"
-        @update:model-value="onFilterChange"
-      />
-      <AppSelect
-        v-model="query.grade"
-        placeholder="年级"
-        clearable
-        :options="gradeOptions"
-        @update:model-value="onFilterChange"
-      />
-    </div>
+      <!-- 搜索框 + 蓝色搜索按钮 -->
+      <div class="ql-search-row">
+        <div class="ql-search-box">
+          <AppIcon name="search" :size="16" class="ql-search-icon" />
+          <input
+            v-model="query.keyword"
+            class="ql-search-input"
+            placeholder="请输入您的搜索词"
+            @keydown.enter="onSearchSubmit"
+          />
+        </div>
+        <button class="ql-search-btn" @click="onSearchSubmit">搜索</button>
+      </div>
 
-    <div v-if="selectedKpId" class="kp-filter-chip">
-      <AppIcon name="tag" :size="14" />
-      <span>{{ selectedKpName }}</span>
-      <button class="chip-clear" @click="clearKp"><AppIcon name="x" :size="13" /></button>
-    </div>
-
-    <div v-if="loading" class="loading-hint">加载中…</div>
-
-    <template v-else>
-      <AppEmpty v-if="cardList.length === 0" description="没有找到匹配的题目" />
-
-      <!-- ===== 题目卡片列表 ===== -->
-      <div class="q-card-list">
-        <div
-          v-for="card in cardList"
-          :key="card.id"
-          class="q-card"
-          :class="{ 'is-expanded': expandedIds.has(card.id) }"
-        >
-          <!-- Row 1: Header — 来源 / 题型 / 难度 / 状态 -->
-          <div class="q-card-header">
-            <div class="q-card-tags">
-              <span v-if="card.source" class="q-source">
-                <AppIcon name="bookmark" :size="12" :stroke="2" />
-                {{ card.source }}
-              </span>
-              <span class="q-tag" :class="`q-tag--${card.question_type}`">
-                {{ typeLabel(card.question_type) }}
-              </span>
-              <span class="q-tag" :class="`q-tag--${card.difficulty}`">
-                {{ diffLabel(card.difficulty) }}
-              </span>
-              <span class="q-tag q-tag--neutral">
-                <AppIcon :name="statusIcon(card.status)" :size="11" :stroke="2" />
-                {{ statusLabel(card.status) }}
-              </span>
-            </div>
-            <span class="q-card-time">{{ formatTime(card.updated_at) }}</span>
+      <!-- 标签平铺筛选面板 -->
+      <div class="ql-filter-panel">
+        <!-- 年级 -->
+        <div class="ql-filter-row">
+          <span class="ql-filter-label">年级</span>
+          <div class="ql-filter-tags">
+            <button
+              v-for="opt in gradeOptions"
+              :key="opt.value"
+              class="ql-tag"
+              :class="{ active: !query.grade && opt.value === '__all' || query.grade === opt.value }"
+              @click="selectTag('grade', opt.value)"
+            >{{ opt.label }}</button>
           </div>
+        </div>
 
-          <!-- Row 2: Body — 题干 + 选项 -->
-          <div class="q-card-body" @click="goDetail(card)">
-            <div class="q-stem">
-              <LatexRender :text="card.stem" />
-            </div>
-            <!-- 选择题选项（列表页不标注正确答案） -->
-            <div v-if="card.question_type === 'choice' && card.parsedOptions.length > 0" class="q-options">
-              <div
-                v-for="opt in card.parsedOptions"
-                :key="opt.label"
-                class="q-option"
-              >
-                <span class="q-option-label">{{ opt.label }}</span>
-                <LatexRender :text="opt.content" :inline="true" />
-              </div>
-            </div>
+        <!-- 题型 -->
+        <div class="ql-filter-row">
+          <span class="ql-filter-label">题型</span>
+          <div class="ql-filter-tags">
+            <button
+              v-for="opt in typeOptions"
+              :key="opt.value"
+              class="ql-tag"
+              :class="{ active: !query.question_type && opt.value === '__all' || query.question_type === opt.value }"
+              @click="selectTag('question_type', opt.value)"
+            >{{ opt.label }}</button>
           </div>
+        </div>
 
-          <!-- 展开解析区域 -->
-          <Transition name="q-analysis">
-            <div v-if="expandedIds.has(card.id)" class="q-analysis-section">
-              <div class="q-analysis-title">
-                <AppIcon name="lightbulb" :size="14" :stroke="2" />
-                <span>答案解析</span>
-              </div>
+        <!-- 难度 -->
+        <div class="ql-filter-row">
+          <span class="ql-filter-label">难度</span>
+          <div class="ql-filter-tags">
+            <button
+              v-for="opt in difficultyOptions"
+              :key="opt.value"
+              class="ql-tag"
+              :class="{ active: !query.difficulty && opt.value === '__all' || query.difficulty === opt.value }"
+              @click="selectTag('difficulty', opt.value)"
+            >{{ opt.label }}</button>
+          </div>
+        </div>
 
-              <!-- 正确答案高亮卡片（选择题 / 填空题） -->
-              <div
-                v-if="card.correctAnswer && (card.question_type === 'choice' || card.question_type === 'fill')"
-                class="q-answer-card"
-                :class="`q-answer-card--${card.question_type}`"
-              >
-                <span class="q-answer-card-label">正确答案</span>
-                <span class="q-answer-card-value">{{ card.correctAnswer }}</span>
-                <AppIcon
-                  name="check-circle"
-                  :size="16"
-                  :stroke="2.2"
-                  class="q-answer-card-icon"
-                />
-              </div>
-
-              <!-- 解答题正确答案 -->
-              <div
-                v-if="card.correctAnswer && card.question_type === 'solution'"
-                class="q-answer-inline"
-              >
-                <span class="q-answer-inline-label">参考答案</span>
-                <span class="q-answer-inline-value">{{ card.correctAnswer }}</span>
-              </div>
-
-              <div v-if="card.analysis" class="q-analysis-body">
-                <LatexRender :text="card.analysis" />
-              </div>
-              <div v-else class="q-analysis-empty">暂无解析内容</div>
-            </div>
-          </Transition>
-
-          <!-- Row 3: Footer — 知识点 + 操作按钮 -->
-          <div class="q-card-footer">
-            <div class="q-kps">
-              <span class="q-kps-label">
-                <AppIcon name="tag" :size="12" :stroke="2" />
-                知识点
-              </span>
-              <span
-                v-for="kp in card.knowledgePoints"
-                :key="kp.id"
-                class="q-kp-chip"
-              >
-                {{ kp.name }}
-              </span>
-              <span v-if="card.knowledgePoints.length === 0" class="q-kp-empty">未关联</span>
-              <span v-if="card.grade" class="q-grade-chip">{{ card.grade }}</span>
-            </div>
-            <div class="q-actions">
-              <button class="q-action-btn q-action--ghost" @click="toggleAnalysis(card.id)">
-                <AppIcon
-                  :name="expandedIds.has(card.id) ? 'chevron-up' : 'lightbulb'"
-                  :size="14"
-                  :stroke="2"
-                />
-                {{ expandedIds.has(card.id) ? '收起解析' : '答案解析' }}
-              </button>
-              <button
-                class="q-action-btn"
-                :class="{ 'q-action--active': basket.isInBasket(card.id) }"
-                @click="toggleBasket(card.id)"
-              >
-                <AppIcon
-                  :name="basket.isInBasket(card.id) ? 'check' : 'plus'"
-                  :size="14"
-                  :stroke="2.5"
-                />
-                {{ basket.isInBasket(card.id) ? '已加入' : '加入试题篮' }}
-              </button>
-            </div>
+        <!-- 状态 -->
+        <div class="ql-filter-row">
+          <span class="ql-filter-label">状态</span>
+          <div class="ql-filter-tags">
+            <button
+              v-for="opt in statusOptions"
+              :key="opt.value"
+              class="ql-tag"
+              :class="{ active: !query.status && opt.value === '__all' || query.status === opt.value }"
+              @click="selectTag('status', opt.value)"
+            >{{ opt.label }}</button>
           </div>
         </div>
       </div>
 
-      <AppPagination
-        v-if="cardList.length > 0"
-        :page="page"
-        :has-more="hasMore"
-        @update:page="onPageChange"
-      />
-    </template>
+      <!-- 知识点筛选 chip -->
+      <div v-if="selectedKpId" class="kp-filter-chip">
+        <AppIcon name="tag" :size="14" />
+        <span>{{ selectedKpName }}</span>
+        <button class="chip-clear" @click="clearKp"><AppIcon name="x" :size="13" /></button>
+      </div>
+    </div>
+
+    <!-- ===== 可滚动列表区域 ===== -->
+    <div class="ql-scroll-area">
+      <div v-if="loading" class="loading-hint">加载中…</div>
+
+      <template v-else>
+        <AppEmpty v-if="cardList.length === 0" description="没有找到匹配的题目" />
+
+        <!-- ===== 题目卡片列表 ===== -->
+        <div class="q-card-list">
+          <div
+            v-for="card in cardList"
+            :key="card.id"
+            class="q-card"
+            :class="{ 'is-expanded': expandedIds.has(card.id) }"
+          >
+            <!-- Row 1: Header — 来源 / 题型 / 难度 / 状态 -->
+            <div class="q-card-header">
+              <div class="q-card-tags">
+                <span v-if="card.source" class="q-source">
+                  <AppIcon name="bookmark" :size="12" :stroke="2" />
+                  {{ card.source }}
+                </span>
+                <span class="q-tag" :class="`q-tag--${card.question_type}`">
+                  {{ typeLabel(card.question_type) }}
+                </span>
+                <span class="q-tag" :class="`q-tag--${card.difficulty}`">
+                  {{ diffLabel(card.difficulty) }}
+                </span>
+                <span class="q-tag q-tag--neutral">
+                  <AppIcon :name="statusIcon(card.status)" :size="11" :stroke="2" />
+                  {{ statusLabel(card.status) }}
+                </span>
+              </div>
+              <span class="q-card-time">{{ formatTime(card.updated_at) }}</span>
+            </div>
+
+            <!-- Row 2: Body — 题干 + 选项 -->
+            <div class="q-card-body" @click="goDetail(card)">
+              <div class="q-stem">
+                <LatexRender :text="card.stem" />
+              </div>
+              <!-- 选择题选项（列表页不标注正确答案） -->
+              <div v-if="card.question_type === 'choice' && card.parsedOptions.length > 0" class="q-options">
+                <div
+                  v-for="opt in card.parsedOptions"
+                  :key="opt.label"
+                  class="q-option"
+                >
+                  <span class="q-option-label">{{ opt.label }}</span>
+                  <LatexRender :text="opt.content" :inline="true" />
+                </div>
+              </div>
+            </div>
+
+            <!-- 展开解析区域 -->
+            <Transition name="q-analysis">
+              <div v-if="expandedIds.has(card.id)" class="q-analysis-section">
+                <div class="q-analysis-title">
+                  <AppIcon name="lightbulb" :size="14" :stroke="2" />
+                  <span>答案解析</span>
+                </div>
+
+                <!-- 正确答案高亮卡片（选择题 / 填空题） -->
+                <div
+                  v-if="card.correctAnswer && (card.question_type === 'choice' || card.question_type === 'fill')"
+                  class="q-answer-card"
+                  :class="`q-answer-card--${card.question_type}`"
+                >
+                  <span class="q-answer-card-label">正确答案</span>
+                  <span class="q-answer-card-value">{{ card.correctAnswer }}</span>
+                  <AppIcon
+                    name="check-circle"
+                    :size="16"
+                    :stroke="2.2"
+                    class="q-answer-card-icon"
+                  />
+                </div>
+
+                <!-- 解答题正确答案 -->
+                <div
+                  v-if="card.correctAnswer && card.question_type === 'solution'"
+                  class="q-answer-inline"
+                >
+                  <span class="q-answer-inline-label">参考答案</span>
+                  <span class="q-answer-inline-value">{{ card.correctAnswer }}</span>
+                </div>
+
+                <div v-if="card.analysis" class="q-analysis-body">
+                  <LatexRender :text="card.analysis" />
+                </div>
+                <div v-else class="q-analysis-empty">暂无解析内容</div>
+              </div>
+            </Transition>
+
+            <!-- Row 3: Footer — 知识点 + 操作按钮 -->
+            <div class="q-card-footer">
+              <div class="q-kps">
+                <span class="q-kps-label">
+                  <AppIcon name="tag" :size="12" :stroke="2" />
+                  知识点
+                </span>
+                <span
+                  v-for="kp in card.knowledgePoints"
+                  :key="kp.id"
+                  class="q-kp-chip"
+                >
+                  {{ kp.name }}
+                </span>
+                <span v-if="card.knowledgePoints.length === 0" class="q-kp-empty">未关联</span>
+                <span v-if="card.grade" class="q-grade-chip">{{ card.grade }}</span>
+              </div>
+              <div class="q-actions">
+                <button class="q-action-btn q-action--ghost" @click="toggleAnalysis(card.id)">
+                  <AppIcon
+                    :name="expandedIds.has(card.id) ? 'chevron-up' : 'lightbulb'"
+                    :size="14"
+                    :stroke="2"
+                  />
+                  {{ expandedIds.has(card.id) ? '收起解析' : '答案解析' }}
+                </button>
+                <button
+                  class="q-action-btn"
+                  :class="{ 'q-action--active': basket.isInBasket(card.id) }"
+                  @click="toggleBasket(card.id)"
+                >
+                  <AppIcon
+                    :name="basket.isInBasket(card.id) ? 'check' : 'plus'"
+                    :size="14"
+                    :stroke="2.5"
+                  />
+                  {{ basket.isInBasket(card.id) ? '已加入' : '加入试题篮' }}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <AppPagination
+          v-if="cardList.length > 0"
+          :page="page"
+          :has-more="hasMore"
+          @update:page="onPageChange"
+        />
+      </template>
+    </div>
   </div>
 </template>
 
@@ -267,6 +311,7 @@ const query = reactive<QuestionQuery>({
 })
 
 const typeOptions = [
+  { label: '不限', value: '__all' },
   { label: '选择题', value: 'choice' },
   { label: '填空题', value: 'fill' },
   { label: '解答题', value: 'solution' },
@@ -274,12 +319,14 @@ const typeOptions = [
 ]
 
 const difficultyOptions = [
+  { label: '不限', value: '__all' },
   { label: '简单', value: 'easy' },
   { label: '中等', value: 'medium' },
   { label: '困难', value: 'hard' },
 ]
 
 const statusOptions = [
+  { label: '不限', value: '__all' },
   { label: '草稿', value: 'draft' },
   { label: '待审核', value: 'pending' },
   { label: '驳回', value: 'rejected' },
@@ -287,10 +334,10 @@ const statusOptions = [
   { label: '已停用', value: 'disabled' },
 ]
 
-const gradeOptions = ['初一', '初二', '初三', '高一', '高二', '高三'].map((g) => ({
-  label: g,
-  value: g,
-}))
+const gradeOptions = [
+  { label: '不限', value: '__all' },
+  ...['初一', '初二', '初三', '高一', '高二', '高三'].map((g) => ({ label: g, value: g })),
+]
 
 let searchTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -300,6 +347,21 @@ function onSearchInput() {
     page.value = 1
     fetchList()
   }, 300)
+}
+
+function onSearchSubmit() {
+  page.value = 1
+  fetchList()
+}
+
+function selectTag(field: 'grade' | 'question_type' | 'difficulty' | 'status', value: string) {
+  if (value === '__all') {
+    ;(query as any)[field] = undefined
+  } else {
+    ;(query as any)[field] = value
+  }
+  page.value = 1
+  fetchList()
 }
 
 function onFilterChange() {
@@ -455,6 +517,156 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+/* ===== Page Layout: fixed header + scroll area ===== */
+.ql-page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.ql-fixed-header {
+  flex-shrink: 0;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  z-index: 10;
+}
+
+.ql-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.ql-title {
+  margin-bottom: 0;
+}
+
+/* ===== Search Row ===== */
+.ql-search-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.ql-search-box {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  transition: var(--transition-fast);
+}
+
+.ql-search-box:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-light);
+}
+
+.ql-search-icon {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.ql-search-input {
+  flex: 1;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-size: 14px;
+  color: var(--text-primary);
+  padding: 9px 0;
+}
+
+.ql-search-input::placeholder {
+  color: var(--text-muted);
+}
+
+.ql-search-btn {
+  padding: 9px 24px;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  transition: var(--transition-fast);
+  white-space: nowrap;
+}
+
+.ql-search-btn:hover {
+  background: var(--accent-hover);
+}
+
+.ql-search-btn:active {
+  transform: scale(0.97);
+}
+
+/* ===== Filter Panel (tag style) ===== */
+.ql-filter-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 14px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+}
+
+.ql-filter-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 3px 0;
+}
+
+.ql-filter-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  min-width: 36px;
+  padding-top: 4px;
+}
+
+.ql-filter-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ql-tag {
+  padding: 3px 12px;
+  border-radius: var(--radius-full);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: transparent;
+  transition: var(--transition-fast);
+  white-space: nowrap;
+}
+
+.ql-tag:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.ql-tag.active {
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+/* ===== Scroll Area ===== */
+.ql-scroll-area {
+  flex: 1;
+  overflow-y: auto;
+  padding-top: 14px;
+}
+
 /* ===== Header Actions ===== */
 .header-actions {
   display: flex;

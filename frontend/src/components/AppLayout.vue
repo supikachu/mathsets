@@ -179,6 +179,7 @@ onUnmounted(() => document.removeEventListener('click', onDocumentClick))
 
 <style scoped>
 .layout-root {
+  width: 100vw;
   height: 100vh;
   overflow: hidden;
   background: var(--bg-primary);
@@ -337,6 +338,7 @@ onUnmounted(() => document.removeEventListener('click', onDocumentClick))
 
 @media (max-width: 768px) {
   .layout-root {
+    width: 100%;
     height: auto;
     overflow: visible;
   }
@@ -348,6 +350,7 @@ onUnmounted(() => document.removeEventListener('click', onDocumentClick))
   .app-container {
     padding: 16px;
     padding-bottom: calc(var(--nav-height) + 16px);
+    width: 100%;
     height: auto;
     overflow: visible;
   }

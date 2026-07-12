@@ -70,8 +70,9 @@
   .app-container {
     display: flex;
     flex-wrap: nowrap;
-    gap: 28px;
-    padding: 28px;
+    gap: 0;
+    padding: 0;
+    width: 100vw;
     height: 100vh;
     overflow: hidden;
   }
@@ -83,11 +84,11 @@
     justify-content: space-between;
     width: var(--sidebar-width);
     flex-shrink: 0;
-    height: calc(100vh - 56px);
-    background: transparent;
+    height: 100vh;
+    background: var(--bg-primary);
     border: none;
     box-shadow: none;
-    padding: 0;
+    padding: 16px 12px;
   }
 
   /* 上方导航卡片 */
@@ -112,13 +113,14 @@
   .kp-tree-panel {
     width: var(--kp-tree-width);
     flex-shrink: 0;
-    height: calc(100vh - 56px);
+    height: 100vh;
     overflow-y: auto;
     background: var(--bg-card);
-    border-radius: var(--radius-lg);
-    padding: 14px;
-    box-shadow: var(--shadow-sm);
-    border: 1px solid var(--border-color);
+    border-radius: 0;
+    padding: 16px 14px;
+    box-shadow: none;
+    border-right: 1px solid var(--border-color);
+    border-left: 1px solid var(--border-color);
   }
 
   .sidebar .nav-item {
@@ -148,8 +150,9 @@
   .main-content {
     flex: 1;
     min-width: 0;
-    height: calc(100vh - 56px);
+    height: 100vh;
     overflow-y: auto;
+    padding: 20px 24px;
   }
 }
 
