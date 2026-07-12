@@ -237,8 +237,9 @@ export const spaceApi = {
 }
 
 export const kpApi = {
-  tree() {
-    return client.get<KnowledgePoint[]>('/knowledge-points')
+  tree(spaceId?: string) {
+    const params = spaceId ? { space_id: spaceId } : {}
+    return client.get<KnowledgePoint[]>('/knowledge-points', { params })
   },
 }
 

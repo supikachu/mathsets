@@ -124,19 +124,21 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { kpApi, type KnowledgePoint } from '@/api/client'
 import client from '@/api/client'
 import { AppButton, AppSelect, AppEmpty, AppModal, AppConfirm, AppIcon } from '@/components/ui'
 import KpTreeNode from '@/components/KpTreeNode.vue'
 import { useToast } from '@/composables/useToast'
 import { useSelectedKp } from '@/composables/useSelectedKp'
+import { useSpaceStore } from '@/stores/space'
 
 defineProps<{ mobileOpen?: boolean }>()
 const emit = defineEmits<{ 'update:mobileOpen': [value: boolean] }>()
 
 const toast = useToast()
 const { selectedKpId, select } = useSelectedKp()
+const space = useSpaceStore()
 
 const loading = ref(true)
 const saving = ref(false)
@@ -206,7 +208,7 @@ const addDialogTitle = computed(() => {
 async function fetchTree() {
   loading.value = true
   try {
-    const res = await kpApi.tree()
+    const res = await kpApi.tree(space.currentSpaceId || undefined)
     tree.value = res.data
     // 设置默认展开状态
     const targetName = level.value === 'junior' ? '初中' : '高中'
@@ -328,6 +330,7 @@ async function confirmAdd() {
       name: addForm.name.trim(),
       grade: addForm.grade || null,
       sort_order: addForm.sort_order,
+      space_id: space.currentSpaceId || null,
     })
     toast.success('添加成功')
     addDialog.value = false
@@ -374,6 +377,10 @@ async function deleteNode() {
     toast.error(e.response?.data?.error || '删除失败')
   }
 }
+
+watch(() => space.currentSpaceId, () => {
+  fetchTree()
+})
 
 onMounted(fetchTree)
 </script>

@@ -215,6 +215,7 @@ import { AppButton, AppSelect, AppEmpty, AppPagination, AppIcon } from '@/compon
 import { useSelectedKp } from '@/composables/useSelectedKp'
 import { useQuestionBasket } from '@/composables/useQuestionBasket'
 import { useToast } from '@/composables/useToast'
+import { useSpaceStore } from '@/stores/space'
 import {
   typeLabel,
   diffLabel,
@@ -225,6 +226,7 @@ import {
 
 const router = useRouter()
 const toast = useToast()
+const space = useSpaceStore()
 const { selectedKpId, selectedKpName, clear } = useSelectedKp()
 const basket = useQuestionBasket()
 
@@ -259,6 +261,7 @@ const query = reactive<QuestionQuery>({
   status: undefined,
   grade: undefined,
   knowledge_point_id: selectedKpId.value ?? undefined,
+  space_id: space.currentSpaceId || undefined,
   page: 1,
   page_size: pageSize,
 })
@@ -435,6 +438,12 @@ function toggleBasket(id: string) {
 
 watch(selectedKpId, (id) => {
   query.knowledge_point_id = id ?? undefined
+  page.value = 1
+  fetchList()
+})
+
+watch(() => space.currentSpaceId, (newId) => {
+  query.space_id = newId || undefined
   page.value = 1
   fetchList()
 })

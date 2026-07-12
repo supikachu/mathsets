@@ -255,6 +255,7 @@ pub struct KnowledgePoint {
     pub grade: Option<String>,
     pub sort_order: i32,
     pub created_at: DateTime<Utc>,
+    pub space_id: Option<Uuid>,
 }
 
 /// 知识点树节点（带 children）
@@ -295,6 +296,7 @@ pub struct CreateKnowledgePointRequest {
     pub name: String,
     pub grade: Option<String>,
     pub sort_order: Option<i32>,
+    pub space_id: Option<Uuid>,
 }
 
 /// 更新知识点请求

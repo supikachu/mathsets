@@ -1,8 +1,9 @@
 use axum::{
-    extract::{Extension, Path, State},
+    extract::{Extension, Path, Query, State},
     http::StatusCode,
     Json,
 };
+use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
@@ -12,6 +13,12 @@ use crate::models::question::{
     UpdateKnowledgePointRequest,
 };
 use crate::AppState;
+
+/// 知识点树查询参数
+#[derive(Debug, Deserialize)]
+pub struct KpQuery {
+    pub space_id: Option<Uuid>,
+}
 
 /// 构建知识点树（递归）
 fn build_tree(points: &[KnowledgePoint], parent_id: Option<Uuid>) -> Vec<KnowledgePointTreeNode> {
@@ -29,14 +36,29 @@ fn build_tree(points: &[KnowledgePoint], parent_id: Option<Uuid>) -> Vec<Knowled
 }
 
 /// GET /api/v1/knowledge-points — 获取知识点树
+/// 返回全局知识点（space_id = NULL）+ 指定空间的专属知识点
 pub async fn list_knowledge_points(
     State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Query(query): Query<KpQuery>,
 ) -> Result<Json<Vec<KnowledgePointTreeNode>>, (StatusCode, Json<serde_json::Value>)> {
-    let points = sqlx::query_as::<_, KnowledgePoint>(
-        "SELECT * FROM knowledge_points ORDER BY sort_order, name",
-    )
-    .fetch_all(&state.pool)
-    .await
+    let _ = auth_user;
+
+    let points = if let Some(space_id) = query.space_id {
+        sqlx::query_as::<_, KnowledgePoint>(
+            "SELECT * FROM knowledge_points WHERE space_id IS NULL OR space_id = $1 ORDER BY sort_order, name",
+        )
+        .bind(space_id)
+        .fetch_all(&state.pool)
+        .await
+    } else {
+        // 未指定空间：仅返回全局知识点
+        sqlx::query_as::<_, KnowledgePoint>(
+            "SELECT * FROM knowledge_points WHERE space_id IS NULL ORDER BY sort_order, name",
+        )
+        .fetch_all(&state.pool)
+        .await
+    }
     .map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -62,8 +84,8 @@ pub async fn create_knowledge_point(
 
     sqlx::query(
         r#"
-        INSERT INTO knowledge_points (id, parent_id, name, grade, sort_order, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        INSERT INTO knowledge_points (id, parent_id, name, grade, sort_order, created_at, space_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
     )
     .bind(id)
@@ -72,6 +94,7 @@ pub async fn create_knowledge_point(
     .bind(&req.grade)
     .bind(req.sort_order.unwrap_or(0))
     .bind(now)
+    .bind(req.space_id)
     .execute(&state.pool)
     .await
     .map_err(|e| {
@@ -88,6 +111,7 @@ pub async fn create_knowledge_point(
         grade: req.grade,
         sort_order: req.sort_order.unwrap_or(0),
         created_at: now,
+        space_id: req.space_id,
     };
 
     Ok((StatusCode::CREATED, Json(kp)))

@@ -37,7 +37,7 @@ export const useAuthStore = defineStore('auth', () => {
     }
     const { default: router } = await import('@/router')
     const redirect = router.currentRoute.value.query.redirect as string
-    router.push(redirect || '/questions')
+    router.push(redirect || '/dashboard')
   }
 
   async function logout() {

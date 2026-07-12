@@ -46,14 +46,16 @@
         </div>
       </nav>
 
-      <!-- 知识点树（中间栏） -->
-      <KpTreePanel v-model:mobile-open="showTreeMobile" />
-      <div v-if="showTreeMobile" class="tree-scrim" @click="showTreeMobile = false" />
+      <!-- 知识点树（中间栏）— 仅在题库/审核页面显示 -->
+      <template v-if="showKpTree">
+        <KpTreePanel v-model:mobile-open="showTreeMobile" />
+        <div v-if="showTreeMobile" class="tree-scrim" @click="showTreeMobile = false" />
+      </template>
 
       <!-- 主内容区 -->
       <div class="main-content">
         <header class="top-bar">
-          <button class="tree-toggle" @click="showTreeMobile = true">
+          <button v-if="showKpTree" class="tree-toggle" @click="showTreeMobile = true">
             <AppIcon name="tag" :size="18" /><span>知识点</span>
           </button>
           <div class="space-switcher" v-if="space.spaces.length">
@@ -107,6 +109,11 @@ const { clear: clearSelectedKp } = useSelectedKp()
 const showUserMenu = ref(false)
 const showTreeMobile = ref(false)
 const userMenuRef = ref<HTMLElement | null>(null)
+
+// 知识点树仅在题库和审核页面显示，工作台隐藏
+const showKpTree = computed(() => {
+  return route.path.startsWith('/questions') || route.path.startsWith('/review')
+})
 
 const avatarLetter = computed(() =>
   (auth.displayName || '?').charAt(0).toUpperCase(),
@@ -176,12 +183,6 @@ onUnmounted(() => document.removeEventListener('click', onDocumentClick))
 }
 
 /* ===== Sidebar ===== */
-.sidebar {
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-}
-
 .sidebar-top {
   display: flex;
   flex-direction: column;
@@ -205,7 +206,7 @@ onUnmounted(() => document.removeEventListener('click', onDocumentClick))
 /* ===== Sidebar user card (independent module) ===== */
 .sidebar-user-card {
   position: relative;
-  margin-top: 14px;
+  flex-shrink: 0;
   padding: 6px;
   border-radius: var(--radius-sm);
   background: var(--bg-input);
