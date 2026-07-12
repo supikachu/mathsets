@@ -107,7 +107,9 @@
             :key="cat.name"
             class="kp-cell"
           >
-            <span class="kp-emoji">{{ cat.emoji }}</span>
+            <span class="kp-icon" :style="{ '--icon-color': cat.color }">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" v-html="cat.iconPath" />
+            </span>
             <span class="kp-name">{{ cat.name }}</span>
             <span class="kp-count">{{ cat.count }}</span>
           </div>
@@ -338,12 +340,42 @@ function generateHeatmap() {
 
 // ===== 知识点分类 =====
 const kpCategories = ref([
-  { emoji: '📐', name: '集合', count: 3 },
-  { emoji: '📊', name: '函数', count: 0 },
-  { emoji: '📐', name: '几何', count: 0 },
-  { emoji: '🔢', name: '数列', count: 0 },
-  { emoji: '🎲', name: '概率', count: 0 },
-  { emoji: '➗', name: '向量', count: 0 },
+  {
+    name: '集合',
+    count: 3,
+    color: '#0071e3',
+    iconPath: '<circle cx="8" cy="8" r="5" /><circle cx="16" cy="16" r="5" />',
+  },
+  {
+    name: '函数',
+    count: 0,
+    color: '#af52de',
+    iconPath: '<path d="M4 20 C 4 16, 8 12, 12 12 S 20 8, 20 4" /><circle cx="4" cy="20" r="1.5" fill="currentColor" stroke="none" /><circle cx="20" cy="4" r="1.5" fill="currentColor" stroke="none" />',
+  },
+  {
+    name: '几何',
+    count: 0,
+    color: '#ff9f0a',
+    iconPath: '<path d="M12 3 L21 19 L3 19 Z" />',
+  },
+  {
+    name: '数列',
+    count: 0,
+    color: '#34c759',
+    iconPath: '<rect x="3" y="14" width="4" height="7" rx="0.5" /><rect x="10" y="10" width="4" height="11" rx="0.5" /><rect x="17" y="6" width="4" height="15" rx="0.5" />',
+  },
+  {
+    name: '概率',
+    count: 0,
+    color: '#ff3b30',
+    iconPath: '<circle cx="12" cy="12" r="8" /><path d="M12 4 L12 12 L18 12" />',
+  },
+  {
+    name: '向量',
+    count: 0,
+    color: '#5ac8fa',
+    iconPath: '<path d="M5 19 L19 5" /><path d="M14 5 L19 5 L19 10" />',
+  },
 ])
 
 // ===== 题目标签分布 =====
@@ -609,9 +641,15 @@ onMounted(() => {
   transform: translateY(-1px);
 }
 
-.kp-emoji {
-  font-size: 24px;
-  line-height: 1;
+.kp-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--icon-color) 10%, transparent);
+  color: var(--icon-color);
 }
 
 .kp-name {

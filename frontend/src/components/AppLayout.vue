@@ -20,8 +20,8 @@
           </router-link>
         </div>
 
-        <!-- 用户信息下沉到底部 -->
-        <div class="sidebar-user" ref="userMenuRef">
+        <!-- 用户信息独立模块（不与上方导航连接） -->
+        <div class="sidebar-user-card" ref="userMenuRef">
           <button
             type="button"
             class="sidebar-user-trigger"
@@ -202,12 +202,14 @@ onUnmounted(() => document.removeEventListener('click', onDocumentClick))
   color: var(--accent);
 }
 
-/* ===== Sidebar user (bottom) ===== */
-.sidebar-user {
+/* ===== Sidebar user card (independent module) ===== */
+.sidebar-user-card {
   position: relative;
-  padding: 8px;
-  border-top: 1px solid var(--divider);
-  margin-top: auto;
+  margin-top: 14px;
+  padding: 6px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
 }
 
 .sidebar-user-trigger {
@@ -215,8 +217,8 @@ onUnmounted(() => document.removeEventListener('click', onDocumentClick))
   align-items: center;
   gap: 10px;
   width: 100%;
-  padding: 8px 10px;
-  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  border-radius: var(--radius-xs);
   background: transparent;
   transition: var(--transition-fast);
 }
@@ -276,8 +278,8 @@ onUnmounted(() => document.removeEventListener('click', onDocumentClick))
 .sidebar-user-dropdown {
   position: absolute;
   bottom: calc(100% + 6px);
-  left: 8px;
-  right: 8px;
+  left: 0;
+  right: 0;
   background: var(--bg-card);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-sm);
