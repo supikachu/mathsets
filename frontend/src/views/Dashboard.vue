@@ -539,11 +539,20 @@ async function fetchDashboardData() {
 }
 
 .dash-row--top {
-  grid-template-columns: 300px 1fr;
+  grid-template-columns: 1fr 1.8fr;
 }
 
 .dash-row--bottom {
-  grid-template-columns: 1fr 300px;
+  grid-template-columns: 1.8fr 1fr;
+}
+
+@media (max-width: 1100px) {
+  .dash-row--top {
+    grid-template-columns: 1fr 1.4fr;
+  }
+  .dash-row--bottom {
+    grid-template-columns: 1.4fr 1fr;
+  }
 }
 
 @media (max-width: 900px) {
@@ -694,8 +703,14 @@ async function fetchDashboardData() {
 /* ===== Knowledge point grid ===== */
 .kp-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, 1fr);
   gap: 12px;
+}
+
+@media (max-width: 1100px) {
+  .kp-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
 }
 
 .kp-cell {
@@ -743,6 +758,10 @@ async function fetchDashboardData() {
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+.dash-right-stack > .dash-card {
+  flex: 1;
 }
 
 .dash-card--mini {

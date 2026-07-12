@@ -50,8 +50,8 @@
       </div>
 
       <!-- 筛选面板（点击搜索/筛选按钮时展开，紧贴搜索框下方） -->
-      <Transition name="ql-filter-pop">
-        <div v-if="showFilter" class="ql-filter-panel">
+      <div class="ql-filter-collapse" :class="{ 'is-open': showFilter }">
+        <div class="ql-filter-panel">
           <div class="ql-filter-row">
             <span class="ql-filter-label">年级</span>
             <div class="ql-filter-tags">
@@ -101,7 +101,7 @@
             </div>
           </div>
         </div>
-      </Transition>
+      </div>
 
       <!-- 知识点筛选 chip -->
       <div v-if="selectedKpId" class="kp-filter-chip">
@@ -748,24 +748,24 @@ onBeforeUnmount(() => {
   padding: 0 4px;
 }
 
-/* ===== 筛选面板弹出动画 ===== */
-.ql-filter-pop-enter-active,
-.ql-filter-pop-leave-active {
-  transition: all 0.28s cubic-bezier(0.4, 0, 0.2, 1);
-  overflow: hidden;
-}
-
-.ql-filter-pop-enter-from,
-.ql-filter-pop-leave-to {
+/* ===== 筛选面板展开/折叠动画 (grid 0fr→1fr 技术, 最平滑) ===== */
+.ql-filter-collapse {
+  display: grid;
+  grid-template-rows: 0fr;
   opacity: 0;
-  max-height: 0;
-  transform: translateY(-8px);
+  transition:
+    grid-template-rows 0.4s cubic-bezier(0.32, 0.72, 0, 1),
+    opacity 0.3s cubic-bezier(0.32, 0.72, 0, 1);
 }
 
-.ql-filter-pop-enter-to,
-.ql-filter-pop-leave-from {
+.ql-filter-collapse.is-open {
+  grid-template-rows: 1fr;
   opacity: 1;
-  max-height: 320px;
+}
+
+.ql-filter-collapse > .ql-filter-panel {
+  overflow: hidden;
+  min-height: 0;
 }
 
 /* 筛选面板 */
