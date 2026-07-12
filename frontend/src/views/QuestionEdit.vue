@@ -7,225 +7,215 @@
 
     <template v-else>
       <!-- ==================== 顶部操作栏 ==================== -->
-      <div class="flex items-center justify-between mb-3 flex-shrink-0">
-        <div class="flex items-center gap-2">
+      <header class="top-bar">
+        <div class="top-bar-left">
           <AppButton variant="ghost" size="sm" @click="handleBack"><AppIcon name="chevron-left" :size="17" /> 返回</AppButton>
           <AppButton variant="ghost" size="sm" @click="handleAi"><AppIcon name="sparkles" :size="17" /> AI 智能识别</AppButton>
           <h1 class="edit-title">{{ isNew ? '录入新题' : '编辑题目' }}</h1>
           <AppBadge v-if="!isNew" color="gray">v{{ form.version }}</AppBadge>
         </div>
-        <div class="flex items-center gap-2">
+        <div class="top-bar-right">
           <AppButton v-if="!isNew" variant="ghost" size="sm" @click="showHistory = true"><AppIcon name="history" :size="17" /> 历史版本</AppButton>
           <AppButton variant="outline" size="sm" :loading="saving" :disabled="saving || submitting" @click="handleSave(false)"><AppIcon name="save" :size="17" /> 保存</AppButton>
           <AppButton variant="success" size="sm" :loading="submitting" :disabled="saving || submitting" @click="handleSave(true)"><AppIcon name="send" :size="17" /> 提交审核</AppButton>
         </div>
-      </div>
+      </header>
 
-      <!-- ==================== 可折叠属性面板 ==================== -->
-      <div class="mb-3 flex-shrink-0">
-        <!-- 题目来源 & 知识点 -->
-        <div class="collapse-section">
-          <button class="collapse-header" @click="toggleCollapse('source')">
-            <span><AppIcon name="pin" :size="20" /> 题目来源 & 知识点标签</span>
-            <span class="collapse-arrow" :class="{ open: collapse.source }"><AppIcon name="chevron-down" :size="16" /></span>
-          </button>
-          <div v-show="collapse.source" class="collapse-body">
-            <div class="form-grid-2">
-              <div>
-                <label class="field-label">来源类型</label>
-                <AppSelect v-model="form.source" :options="sourceOptions" />
-              </div>
-              <div>
-                <label class="field-label">知识点</label>
-                <div class="kp-tags">
-                  <AppBadge v-for="kp in selectedKps" :key="kp.id" color="blue">
-                    {{ kp.name }}
-                    <span class="kp-remove" @click="removeKp(kp.id)"><AppIcon name="x" :size="13" /></span>
-                  </AppBadge>
-                  <button class="kp-add-btn" @click="showKpDialog = true"><AppIcon name="plus" :size="17" /> 添加标签</button>
-                </div>
-              </div>
-            </div>
-          </div>
+      <!-- ==================== 题型分段控件 + 难度 ==================== -->
+      <div class="type-row">
+        <div class="segmented">
+          <button
+            v-for="t in typeOptions"
+            :key="t.value"
+            type="button"
+            class="segmented-item"
+            :class="{ active: form.question_type === t.value }"
+            @click="form.question_type = t.value"
+          >{{ t.label }}</button>
         </div>
-
-        <!-- 基础属性 -->
-        <div class="collapse-section">
-          <button class="collapse-header" @click="toggleCollapse('basic')">
-            <span><AppIcon name="settings" :size="20" /> 基础属性</span>
-            <span class="collapse-arrow" :class="{ open: collapse.basic }"><AppIcon name="chevron-down" :size="16" /></span>
-          </button>
-          <div v-show="collapse.basic" class="collapse-body">
-            <div class="form-grid-multi">
-              <div>
-                <label class="field-label">题型</label>
-                <AppSelect v-model="form.question_type" :options="typeOptions" :disabled="!isNew" />
-              </div>
-              <div>
-                <label class="field-label">难度</label>
-                <div class="star-rating">
-                  <button
-                    v-for="n in 3"
-                    :key="n"
-                    type="button"
-                    class="star"
-                    :class="{ active: difficultyStars >= n }"
-                    @click="difficultyStars = n"
-                  ><AppIcon name="star" :size="20" /></button>
-                  <span class="star-text">{{ ['简单', '中等', '困难'][difficultyStars - 1] || '' }}</span>
-                </div>
-              </div>
-              <div>
-                <label class="field-label">年级</label>
-                <AppSelect v-model="form.grade" :options="gradeOptions" clearable />
-              </div>
-              <div>
-                <label class="field-label">学期</label>
-                <AppSelect v-model="form.semester" :options="semesterOptions" clearable />
-              </div>
-              <div>
-                <label class="field-label">分值</label>
-                <input type="number" v-model.number="form.default_score" min="1" max="100" class="num-input" />
-              </div>
-              <div>
-                <label class="field-label">耗时(分)</label>
-                <input type="number" v-model.number="form.estimated_time" min="1" max="60" class="num-input" />
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- 协作设置 -->
-        <div class="collapse-section">
-          <button class="collapse-header" @click="toggleCollapse('collab')">
-            <span><AppIcon name="users" :size="20" /> 协作设置</span>
-            <span class="collapse-arrow" :class="{ open: collapse.collab }"><AppIcon name="chevron-down" :size="16" /></span>
-          </button>
-          <div v-show="collapse.collab" class="collapse-body">
-            <div class="form-grid-2">
-              <div>
-                <label class="field-label">指定审题人</label>
-                <template v-if="isTeamSpace">
-                  <div v-if="spaceMembers.length === 0" class="text-sm text-muted">暂无其他团队成员</div>
-                  <div v-else class="reviewer-checkboxes">
-                    <label v-for="m in spaceMembers.filter(m => m.user_id !== auth.userId)" :key="m.user_id" class="reviewer-item">
-                      <input type="checkbox" :value="m.user_id" v-model="form.reviewer_ids" />
-                      <span>{{ m.display_name }} ({{ m.username }})</span>
-                    </label>
-                  </div>
-                  <div class="text-sm text-muted" style="margin-top: 4px">不选则由团队其他成员审题</div>
-                </template>
-                <div v-else class="text-sm text-muted">个人空间默认自审，无需指定</div>
-              </div>
-              <div>
-                <label class="field-label">内部备注（仅审核员可见）</label>
-                <input v-model="form.internal_note" placeholder="记录命题意图或讨论要点…" />
-              </div>
-            </div>
-          </div>
+        <div class="difficulty">
+          <button
+            v-for="n in 3"
+            :key="n"
+            type="button"
+            class="star"
+            :class="{ active: difficultyStars >= n }"
+            @click="difficultyStars = n"
+          ><AppIcon name="star" :size="18" /></button>
+          <span class="star-text">{{ ['简单', '中等', '困难'][difficultyStars - 1] || '' }}</span>
         </div>
       </div>
 
-      <!-- ==================== 三组编辑/预览双栏 ==================== -->
-      <div class="dual-sections">
-        <!-- 题干 -->
-        <div class="dual-row" ref="rowRefs[0]">
-          <div class="dual-edit" :style="{ flex: `0 0 ${splitRatio * 100}%` }">
-            <div class="dual-label"><AppIcon name="book-open" :size="20" /> 题干 *</div>
-            <textarea v-model="form.stem" rows="5" class="edit-textarea" placeholder="输入题目内容，LaTeX 公式用 $...$ 包裹"></textarea>
-          </div>
-          <div class="dual-divider" @mousedown.prevent="startResize(0, $event)" />
-          <div class="dual-preview" :style="{ flex: `0 0 ${(1 - splitRatio) * 100}%` }">
-            <div class="dual-label">题干预览</div>
-            <div class="preview-box"><LatexRender :text="form.stem || '（等待输入…）'" /></div>
-          </div>
+      <!-- ==================== 元数据工具栏 ==================== -->
+      <div class="meta-row">
+        <div class="meta-field">
+          <label class="field-label">年级</label>
+          <AppSelect v-model="form.grade" :options="gradeOptions" clearable />
         </div>
+        <div class="meta-field">
+          <label class="field-label">学期</label>
+          <AppSelect v-model="form.semester" :options="semesterOptions" clearable />
+        </div>
+        <div class="meta-field meta-field-sm">
+          <label class="field-label">分值</label>
+          <input type="number" v-model.number="form.default_score" min="1" max="100" class="num-input" />
+        </div>
+        <div class="meta-field meta-field-sm">
+          <label class="field-label">耗时(分)</label>
+          <input type="number" v-model.number="form.estimated_time" min="1" max="60" class="num-input" />
+        </div>
+        <div class="meta-field">
+          <label class="field-label">来源</label>
+          <AppSelect v-model="form.source" :options="sourceOptions" />
+        </div>
+        <div class="meta-field">
+          <label class="field-label">知识点</label>
+          <button type="button" class="kp-btn" @click="showKpDialog = true">
+            <AppIcon name="tag" :size="15" />
+            <span>{{ form.knowledgePointIds.length ? `已选 ${form.knowledgePointIds.length} 个` : '添加标签' }}</span>
+          </button>
+        </div>
+      </div>
 
-        <!-- 答案 -->
-        <div class="dual-row" ref="rowRefs[1]">
-          <div class="dual-edit" :style="{ flex: `0 0 ${splitRatio * 100}%` }">
-            <div class="dual-label"><AppIcon name="file-text" :size="20" /> 答案</div>
-            <!-- 选择题选项 -->
-            <div v-if="form.question_type === 'choice'">
-              <div v-for="(opt, i) in form.options" :key="i" class="opt-row">
-                <label class="radio-label" :class="{ checked: form.correctAnswer === opt.label }">
-                  <input type="radio" :value="opt.label" v-model="form.correctAnswer" />
-                  {{ opt.label }}
-                </label>
-                <input v-model="opt.content" :placeholder="`选项 ${opt.label}`" class="opt-input" />
-                <AppButton v-if="form.options.length > 2" variant="ghost" size="sm" @click="form.options.splice(i, 1)"><AppIcon name="x" :size="17" /></AppButton>
-              </div>
-              <AppButton variant="outline" size="sm" @click="addOption"><AppIcon name="plus" :size="17" /> 添加选项</AppButton>
-            </div>
-            <div v-else-if="form.question_type === 'fill'">
-              <div v-for="(blank, i) in form.blanks" :key="i" class="opt-row">
-                <span class="blank-label">第{{ i+1 }}空</span>
-                <input v-model="blank.answer" placeholder="填入答案" class="opt-input" />
-                <AppButton v-if="form.blanks.length > 1" variant="ghost" size="sm" @click="form.blanks.splice(i, 1)"><AppIcon name="x" :size="17" /></AppButton>
-              </div>
-              <AppButton variant="outline" size="sm" @click="form.blanks.push({ position: Math.max(...form.blanks.map(b => b.position), 0) + 1, answer: '' })"><AppIcon name="plus" :size="17" /> 添加填空位</AppButton>
-            </div>
-            <div v-else-if="form.question_type === 'solution'">
-              <textarea v-model="form.solutionAnswer" rows="3" class="edit-textarea" placeholder="完整解答过程，支持 $...$ LaTeX"></textarea>
-              <div class="grading-label">分步评分</div>
-              <div v-for="(step, i) in form.gradingSteps" :key="i" class="opt-row">
-                <input v-model="step.label" placeholder="步骤名" class="step-input" />
-                <input type="number" v-model.number="step.points" min="0" max="20" class="num-input" />
-                <span class="text-muted text-sm">分</span>
-                <AppButton v-if="form.gradingSteps.length > 1" variant="ghost" size="sm" @click="form.gradingSteps.splice(i, 1)"><AppIcon name="x" :size="17" /></AppButton>
-              </div>
-              <AppButton variant="outline" size="sm" @click="form.gradingSteps.push({ label: '', points: 1, description: '' })"><AppIcon name="plus" :size="17" /> 添加评分步骤</AppButton>
-            </div>
-            <div v-else-if="form.question_type === 'judgment'">
-              <div class="radio-group">
-                <label class="radio-label" :class="{ checked: form.judgmentCorrect === true }">
-                  <input type="radio" :value="true" v-model="form.judgmentCorrect" />
-                  正确
-                </label>
-                <label class="radio-label" :class="{ checked: form.judgmentCorrect === false }">
-                  <input type="radio" :value="false" v-model="form.judgmentCorrect" />
-                  错误
-                </label>
-              </div>
-            </div>
-          </div>
-          <div class="dual-divider" @mousedown.prevent="startResize(1, $event)" />
-          <div class="dual-preview" :style="{ flex: `0 0 ${(1 - splitRatio) * 100}%` }">
-            <div class="dual-label">答案预览</div>
-            <div class="preview-box">
+      <!-- ==================== 主内容 双栏 ==================== -->
+      <div class="main-content">
+        <!-- 左栏：编辑 -->
+        <div class="edit-col">
+          <div class="edit-col-inner">
+            <!-- 题干 -->
+            <section class="edit-section">
+              <div class="section-label"><AppIcon name="book-open" :size="16" /> <span>题干</span><span class="required">*</span></div>
+              <textarea v-model="form.stem" rows="5" class="edit-textarea" placeholder="输入题目内容，LaTeX 公式用 $...$ 包裹"></textarea>
+            </section>
+
+            <!-- 答案 -->
+            <section class="edit-section">
+              <div class="section-label"><AppIcon name="file-text" :size="16" /> <span>答案</span></div>
+              <!-- 选择题选项 -->
               <div v-if="form.question_type === 'choice'">
-                <div
-                  v-for="opt in form.options.filter(o => o.content)"
-                  :key="opt.label"
-                  class="preview-opt"
-                  :class="{ correct: form.correctAnswer === opt.label }"
-                >
-                  <span class="opt-letter">{{ opt.label }}.</span>
-                  <LatexRender :text="opt.content" :inline="true" />
-                  <AppBadge v-if="form.correctAnswer === opt.label" color="green"><AppIcon name="check" :size="13" /></AppBadge>
+                <div v-for="(opt, i) in form.options" :key="i" class="opt-row">
+                  <label class="radio-label" :class="{ checked: form.correctAnswer === opt.label }">
+                    <input type="radio" :value="opt.label" v-model="form.correctAnswer" />
+                    {{ opt.label }}
+                  </label>
+                  <input v-model="opt.content" :placeholder="`选项 ${opt.label}`" class="opt-input" />
+                  <button v-if="form.options.length > 2" type="button" class="icon-btn" @click="form.options.splice(i, 1)"><AppIcon name="x" :size="16" /></button>
+                </div>
+                <button type="button" class="add-btn" @click="addOption"><AppIcon name="plus" :size="16" /> 添加选项</button>
+              </div>
+              <!-- 填空题 -->
+              <div v-else-if="form.question_type === 'fill'">
+                <div v-for="(blank, i) in form.blanks" :key="i" class="opt-row">
+                  <span class="blank-label">第{{ i+1 }}空</span>
+                  <input v-model="blank.answer" placeholder="填入答案" class="opt-input" />
+                  <button v-if="form.blanks.length > 1" type="button" class="icon-btn" @click="form.blanks.splice(i, 1)"><AppIcon name="x" :size="16" /></button>
+                </div>
+                <button type="button" class="add-btn" @click="form.blanks.push({ position: Math.max(...form.blanks.map(b => b.position), 0) + 1, answer: '' })"><AppIcon name="plus" :size="16" /> 添加填空位</button>
+              </div>
+              <!-- 解答题 -->
+              <div v-else-if="form.question_type === 'solution'">
+                <textarea v-model="form.solutionAnswer" rows="4" class="edit-textarea" placeholder="完整解答过程，支持 $...$ LaTeX"></textarea>
+                <div class="grading-label">分步评分</div>
+                <div v-for="(step, i) in form.gradingSteps" :key="i" class="opt-row">
+                  <input v-model="step.label" placeholder="步骤名" class="step-input" />
+                  <input type="number" v-model.number="step.points" min="0" max="20" class="num-input num-input-sm" />
+                  <span class="text-muted text-sm">分</span>
+                  <button v-if="form.gradingSteps.length > 1" type="button" class="icon-btn" @click="form.gradingSteps.splice(i, 1)"><AppIcon name="x" :size="16" /></button>
+                </div>
+                <button type="button" class="add-btn" @click="form.gradingSteps.push({ label: '', points: 1, description: '' })"><AppIcon name="plus" :size="16" /> 添加评分步骤</button>
+              </div>
+              <!-- 判断题 -->
+              <div v-else-if="form.question_type === 'judgment'">
+                <div class="radio-group">
+                  <label class="radio-label" :class="{ checked: form.judgmentCorrect === true }">
+                    <input type="radio" :value="true" v-model="form.judgmentCorrect" />
+                    正确
+                  </label>
+                  <label class="radio-label" :class="{ checked: form.judgmentCorrect === false }">
+                    <input type="radio" :value="false" v-model="form.judgmentCorrect" />
+                    错误
+                  </label>
                 </div>
               </div>
-              <div v-else-if="form.question_type === 'judgment'">
-                <AppBadge :color="form.judgmentCorrect ? 'green' : 'red'">
-                  {{ form.judgmentCorrect ? '正确' : '错误' }}
-                </AppBadge>
+            </section>
+
+            <!-- 解析 -->
+            <section class="edit-section">
+              <div class="section-label"><AppIcon name="lightbulb" :size="16" /> <span>解析</span></div>
+              <textarea v-model="form.analysis" rows="4" class="edit-textarea" placeholder="解题思路与易错点，支持 $...$ LaTeX"></textarea>
+            </section>
+
+            <!-- 高级设置（默认折叠） -->
+            <!-- 说明：collapse.collab 初值为 true（原语义=展开）；此处取反以实现"默认折叠"，脚本不可修改 -->
+            <section class="advanced-section">
+              <button class="advanced-header" @click="toggleCollapse('collab')">
+                <span class="advanced-title"><AppIcon name="users" :size="16" /> 高级设置 · 协作</span>
+                <span class="collapse-arrow" :class="{ open: !collapse.collab }"><AppIcon name="chevron-down" :size="16" /></span>
+              </button>
+              <div v-show="!collapse.collab" class="advanced-body">
+                <div class="form-grid-2">
+                  <div>
+                    <label class="field-label">指定审题人</label>
+                    <template v-if="isTeamSpace">
+                      <div v-if="spaceMembers.length === 0" class="text-sm text-muted">暂无其他团队成员</div>
+                      <div v-else class="reviewer-checkboxes">
+                        <label v-for="m in spaceMembers.filter(m => m.user_id !== auth.userId)" :key="m.user_id" class="reviewer-item">
+                          <input type="checkbox" :value="m.user_id" v-model="form.reviewer_ids" />
+                          <span>{{ m.display_name }} ({{ m.username }})</span>
+                        </label>
+                      </div>
+                      <div class="text-sm text-muted hint-line">不选则由团队其他成员审题</div>
+                    </template>
+                    <div v-else class="text-sm text-muted">个人空间默认自审，无需指定</div>
+                  </div>
+                  <div>
+                    <label class="field-label">内部备注（仅审核员可见）</label>
+                    <input v-model="form.internal_note" placeholder="记录命题意图或讨论要点…" class="text-input" />
+                  </div>
+                </div>
               </div>
-              <LatexRender v-else-if="form.solutionAnswer" :text="form.solutionAnswer" />
-              <span v-else class="text-muted">（等待输入…）</span>
-            </div>
+            </section>
           </div>
         </div>
 
-        <!-- 解析 -->
-        <div class="dual-row" ref="rowRefs[2]">
-          <div class="dual-edit" :style="{ flex: `0 0 ${splitRatio * 100}%` }">
-            <div class="dual-label"><AppIcon name="lightbulb" :size="20" /> 解析</div>
-            <textarea v-model="form.analysis" rows="4" class="edit-textarea" placeholder="解题思路与易错点，支持 $...$ LaTeX"></textarea>
-          </div>
-          <div class="dual-divider" @mousedown.prevent="startResize(2, $event)" />
-          <div class="dual-preview" :style="{ flex: `0 0 ${(1 - splitRatio) * 100}%` }">
-            <div class="dual-label">解析预览</div>
-            <div class="preview-box"><LatexRender :text="form.analysis || '（等待输入…）'" /></div>
+        <!-- 右栏：预览 -->
+        <div class="preview-col">
+          <div class="preview-col-inner">
+            <div class="preview-section">
+              <div class="section-label"><AppIcon name="eye" :size="16" /> <span>题目预览</span></div>
+              <div class="preview-box"><LatexRender :text="form.stem || '（等待输入…）'" /></div>
+            </div>
+            <div class="preview-section">
+              <div class="section-label"><AppIcon name="check-circle" :size="16" /> <span>答案预览</span></div>
+              <div class="preview-box">
+                <div v-if="form.question_type === 'choice'">
+                  <div v-if="form.options.filter(o => o.content).length === 0" class="text-muted">（等待输入…）</div>
+                  <div
+                    v-for="opt in form.options.filter(o => o.content)"
+                    :key="opt.label"
+                    class="preview-opt"
+                    :class="{ correct: form.correctAnswer === opt.label }"
+                  >
+                    <span class="opt-letter">{{ opt.label }}.</span>
+                    <LatexRender :text="opt.content" :inline="true" />
+                    <AppBadge v-if="form.correctAnswer === opt.label" color="green"><AppIcon name="check" :size="13" /></AppBadge>
+                  </div>
+                </div>
+                <div v-else-if="form.question_type === 'judgment'">
+                  <AppBadge :color="form.judgmentCorrect ? 'green' : 'red'">
+                    {{ form.judgmentCorrect ? '正确' : '错误' }}
+                  </AppBadge>
+                </div>
+                <template v-else>
+                  <LatexRender v-if="form.solutionAnswer" :text="form.solutionAnswer" />
+                  <span v-else class="text-muted">（等待输入…）</span>
+                </template>
+              </div>
+            </div>
+            <div class="preview-section">
+              <div class="section-label"><AppIcon name="lightbulb" :size="16" /> <span>解析预览</span></div>
+              <div class="preview-box"><LatexRender :text="form.analysis || '（等待输入…）'" /></div>
+            </div>
           </div>
         </div>
       </div>
@@ -676,33 +666,466 @@ watch(() => form.question_type, () => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  padding: 20px 24px;
+  padding: 16px 24px;
+  gap: 12px;
+  background: var(--bg-primary);
 }
 
 .edit-title {
-  font-size: 18px;
-  font-weight: 700;
-  margin-left: 4px;
+  font-size: 17px;
+  font-weight: 650;
+  margin: 0 0 0 2px;
   color: var(--text-primary);
+  letter-spacing: -0.01em;
 }
 
 .loading-hint {
   text-align: center;
   padding: 48px 20px;
   color: var(--text-muted);
+  font-size: 14px;
 }
 
-/* 折叠面板 */
-.collapse-section {
-  background: var(--bg-card);
-  border-radius: var(--radius-md);
-  margin-bottom: 8px;
-  box-shadow: var(--shadow-sm);
+/* ============ 顶部操作栏 ============ */
+.top-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  gap: 12px;
+}
+
+.top-bar-left,
+.top-bar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ============ 题型分段控件 + 难度 ============ */
+.type-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  gap: 16px;
+}
+
+.segmented {
+  display: inline-flex;
+  background: var(--bg-input);
+  border-radius: var(--radius-sm);
+  padding: 3px;
+  gap: 2px;
   border: 1px solid var(--border-color);
+}
+
+.segmented-item {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 550;
+  padding: 6px 18px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: var(--transition-fast);
+  white-space: nowrap;
+}
+
+.segmented-item:hover:not(.active) {
+  color: var(--text-primary);
+}
+
+.segmented-item.active {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-xs);
+  font-weight: 600;
+}
+
+.difficulty {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.star {
+  color: var(--border-strong);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  display: inline-flex;
+  transition: var(--transition-fast);
+}
+
+.star:hover {
+  transform: scale(1.12);
+}
+
+.star.active {
+  color: var(--star-color);
+}
+
+.star-text {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-left: 8px;
+  font-weight: 500;
+}
+
+/* ============ 元数据工具栏 ============ */
+.meta-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 14px;
+  flex-shrink: 0;
+  padding: 12px 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-xs);
+}
+
+.meta-field {
+  flex: 1;
+  min-width: 0;
+}
+
+.meta-field-sm {
+  flex: 0 0 92px;
+}
+
+.field-label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  margin-bottom: 5px;
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+}
+
+.num-input,
+.text-input {
+  width: 100%;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.4;
+  transition: var(--transition-fast);
+  font-family: inherit;
+  box-sizing: border-box;
+}
+
+.num-input:focus,
+.text-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-light);
+  background: var(--bg-card);
+}
+
+.num-input-sm {
+  flex: 0 0 76px;
+  width: auto;
+}
+
+/* 让元数据栏内的下拉与输入框尺寸统一 */
+.meta-field :deep(.app-select-wrapper) {
+  width: 100%;
+}
+
+.meta-field :deep(.app-select-wrapper select) {
+  padding: 8px 36px 8px 12px;
+  font-size: 13px;
+  border-radius: 8px;
+  line-height: 1.4;
+}
+
+.meta-field :deep(.app-select-wrapper select:focus) {
+  box-shadow: 0 0 0 3px var(--accent-light);
+  background: var(--bg-card);
+}
+
+.kp-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  transition: var(--transition-fast);
+  font-family: inherit;
+  box-sizing: border-box;
+}
+
+.kp-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-light);
+}
+
+/* ============ 主内容双栏 ============ */
+.main-content {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  gap: 14px;
+  min-height: 0;
+}
+
+.edit-col {
+  flex: 0 0 55%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-xs);
   overflow: hidden;
 }
 
-.collapse-header {
+.edit-col-inner {
+  flex: 1;
+  overflow-y: auto;
+  padding: 18px 20px;
+}
+
+.preview-col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.preview-col-inner {
+  flex: 1;
+  overflow-y: auto;
+  padding: 18px 20px;
+}
+
+/* ============ 编辑区段 ============ */
+.edit-section {
+  margin-bottom: 18px;
+}
+
+.edit-section:last-child {
+  margin-bottom: 0;
+}
+
+.section-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  margin-bottom: 10px;
+}
+
+.section-label .required {
+  color: var(--danger);
+  margin-left: 2px;
+}
+
+.edit-textarea {
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.7;
+  font-family: 'SF Mono', 'Menlo', 'Consolas', 'Courier New', monospace;
+  resize: vertical;
+  transition: var(--transition-fast);
+  box-sizing: border-box;
+}
+
+.edit-textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-light);
+  background: var(--bg-card);
+}
+
+/* 选项行 */
+.opt-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.opt-input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.4;
+  transition: var(--transition-fast);
+  font-family: inherit;
+}
+
+.opt-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-light);
+  background: var(--bg-card);
+}
+
+.step-input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.4;
+  transition: var(--transition-fast);
+  font-family: inherit;
+}
+
+.step-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-light);
+  background: var(--bg-card);
+}
+
+.blank-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  width: 44px;
+  flex-shrink: 0;
+  font-weight: 550;
+}
+
+.grading-label {
+  font-size: 12px;
+  font-weight: 600;
+  margin-top: 10px;
+  margin-bottom: 8px;
+  color: var(--text-secondary);
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border: 1px solid var(--border-color);
+  background: var(--bg-card);
+  color: var(--text-muted);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: var(--transition-fast);
+}
+
+.icon-btn:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: var(--danger-light);
+}
+
+.add-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 7px 14px;
+  border: 1px dashed var(--border-strong);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: var(--transition-fast);
+  font-family: inherit;
+}
+
+.add-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  border-style: solid;
+  background: var(--accent-light);
+}
+
+/* Radio */
+.radio-group {
+  display: flex;
+  gap: 12px;
+}
+
+.radio-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  cursor: pointer;
+  padding: 8px 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  transition: var(--transition-fast);
+  user-select: none;
+}
+
+.radio-label:hover {
+  border-color: var(--border-strong);
+}
+
+.radio-label.checked {
+  border-color: var(--accent);
+  background: var(--accent-light);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.radio-label input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+/* ============ 高级设置折叠 ============ */
+.advanced-section {
+  margin-top: 6px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--bg-input);
+}
+
+.advanced-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -710,44 +1133,45 @@ watch(() => form.question_type, () => {
   padding: 12px 16px;
   background: none;
   border: none;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
-  color: var(--text-primary);
+  color: var(--text-secondary);
   cursor: pointer;
-  transition: var(--transition);
+  transition: var(--transition-fast);
+  font-family: inherit;
 }
 
-.collapse-header:hover {
+.advanced-header:hover {
   background: var(--bg-hover);
 }
 
+.advanced-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .collapse-arrow {
-  transition: transform 0.2s;
+  transition: transform 0.2s ease;
   transform: rotate(-90deg);
   color: var(--text-muted);
-  font-size: 12px;
+  display: inline-flex;
 }
 
 .collapse-arrow.open {
   transform: rotate(0deg);
 }
 
-.collapse-body {
-  padding: 0 16px 16px;
-}
-
-.field-label {
-  display: block;
-  font-size: 12px;
-  font-weight: 600;
-  margin-bottom: 4px;
-  color: var(--text-muted);
+.advanced-body {
+  padding: 4px 16px 16px;
+  border-top: 1px solid var(--border-color);
 }
 
 .form-grid-2 {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 16px;
+  margin-top: 12px;
 }
 
 .reviewer-checkboxes {
@@ -764,267 +1188,44 @@ watch(() => form.question_type, () => {
   gap: 6px;
   font-size: 13px;
   cursor: pointer;
+  color: var(--text-secondary);
 }
 
 .reviewer-item input[type="checkbox"] {
   width: auto;
+  accent-color: var(--accent);
 }
 
-.form-grid-multi {
-  display: grid;
-  grid-template-columns: repeat(6, 1fr);
-  gap: 12px;
+.hint-line {
+  margin-top: 6px;
 }
 
-@media (max-width: 768px) {
-  .form-grid-2,
-  .form-grid-multi {
-    grid-template-columns: 1fr;
-  }
+/* ============ 预览区段 ============ */
+.preview-section {
+  margin-bottom: 22px;
 }
 
-.num-input {
-  width: 100%;
-  padding: 6px 10px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-input);
-  border: 1px solid var(--border-color);
-  color: var(--text-primary);
-  font-size: 13px;
-}
-
-.num-input:focus {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-light);
-}
-
-/* 星级评分 */
-.star-rating {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.star {
-  font-size: 20px;
-  color: var(--border-color);
-  background: none;
-  border: none;
-  cursor: pointer;
-  padding: 0;
-  transition: var(--transition);
-}
-
-.star.active {
-  color: var(--star-color);
-}
-
-.star-text {
-  font-size: 12px;
-  color: var(--text-muted);
-  margin-left: 6px;
-}
-
-/* 知识点标签 */
-.kp-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  align-items: center;
-}
-
-.kp-remove {
-  margin-left: 4px;
-  cursor: pointer;
-  opacity: 0.6;
-}
-
-.kp-remove:hover {
-  opacity: 1;
-}
-
-.kp-add-btn {
-  background: none;
-  border: 1px dashed var(--border-color);
-  border-radius: 20px;
-  padding: 3px 10px;
-  font-size: 12px;
-  color: var(--text-secondary);
-  cursor: pointer;
-  transition: var(--transition);
-}
-
-.kp-add-btn:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-}
-
-/* 双栏区域滚动 */
-.dual-sections {
-  flex: 1;
-  overflow-y: auto;
-  padding-right: 4px;
-}
-
-.dual-row {
-  display: flex;
-  gap: 0;
-  margin-bottom: 12px;
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-md);
-  overflow: hidden;
-  background: var(--bg-card);
-}
-
-.dual-edit {
-  flex: 1;
-  padding: 12px;
-  min-width: 30%;
-}
-
-.dual-preview {
-  flex: 1;
-  padding: 12px;
-  min-width: 30%;
-  background: var(--bg-input);
-  border-left: 1px solid var(--border-color);
-}
-
-.dual-divider {
-  width: 4px;
-  cursor: col-resize;
-  background: var(--bg-hover);
-  flex-shrink: 0;
-  transition: background 0.15s;
-}
-
-.dual-divider:hover {
-  background: var(--accent);
-}
-
-.dual-label {
-  font-size: 13px;
-  font-weight: 600;
-  margin-bottom: 8px;
-  color: var(--text-primary);
+.preview-section:last-child {
+  margin-bottom: 0;
 }
 
 .preview-box {
   font-size: 14px;
   line-height: 1.8;
-  min-height: 60px;
-}
-
-.edit-textarea {
-  width: 100%;
-  padding: 10px 12px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-input);
-  border: 1px solid var(--border-color);
+  min-height: 40px;
   color: var(--text-primary);
-  font-size: 13px;
-  font-family: 'Courier New', monospace;
-  resize: vertical;
+  word-break: break-word;
 }
 
-.edit-textarea:focus {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-light);
-}
-
-/* 选项行 */
-.opt-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
-.opt-input {
-  flex: 1;
-  padding: 6px 10px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-input);
-  border: 1px solid var(--border-color);
-  color: var(--text-primary);
-  font-size: 13px;
-}
-
-.opt-input:focus {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-light);
-}
-
-.step-input {
-  width: 130px;
-  padding: 6px 10px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-input);
-  border: 1px solid var(--border-color);
-  color: var(--text-primary);
-  font-size: 13px;
-}
-
-.step-input:focus {
-  outline: none;
-  border-color: var(--accent);
-}
-
-.blank-label {
-  font-size: 12px;
-  color: var(--text-muted);
-  width: 40px;
-  flex-shrink: 0;
-}
-
-.grading-label {
-  font-size: 12px;
-  font-weight: 600;
-  margin-top: 8px;
-  margin-bottom: 6px;
-  color: var(--text-secondary);
-}
-
-/* Radio */
-.radio-group {
-  display: flex;
-  gap: 16px;
-}
-
-.radio-label {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 14px;
-  cursor: pointer;
-  padding: 4px 12px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border-color);
-  transition: var(--transition);
-}
-
-.radio-label.checked {
-  border-color: var(--accent);
-  background: var(--accent-light);
-  color: var(--accent);
-}
-
-.radio-label input {
-  margin: 0;
-}
-
-/* 预览选项 */
 .preview-opt {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 10px;
+  gap: 8px;
+  padding: 8px 12px;
   margin-bottom: 6px;
-  border-radius: var(--radius-sm);
+  border-radius: 8px;
   border: 1px solid var(--border-color);
+  background: var(--bg-card);
   font-size: 14px;
 }
 
@@ -1034,13 +1235,14 @@ watch(() => form.question_type, () => {
 }
 
 .opt-letter {
-  font-family: monospace;
-  font-weight: 600;
+  font-family: 'SF Mono', 'Menlo', monospace;
+  font-weight: 650;
+  color: var(--text-secondary);
 }
 
-/* 知识点弹窗树 */
+/* ============ 弹窗 ============ */
 .kp-dialog-tree {
-  max-height: 300px;
+  max-height: 320px;
   overflow-y: auto;
 }
 
@@ -1053,11 +1255,73 @@ watch(() => form.question_type, () => {
   align-items: center;
   gap: 6px;
   font-size: 14px;
-  padding: 4px 0;
+  padding: 5px 0;
   cursor: pointer;
+  color: var(--text-primary);
 }
 
 .checkbox-label input {
   margin: 0;
+  accent-color: var(--accent);
+}
+
+.form-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+/* ============ 工具类（局部兜底，全局已存在） ============ */
+.text-sm {
+  font-size: 13px;
+}
+
+.text-muted {
+  color: var(--text-muted);
+}
+
+/* ============ 响应式 ============ */
+@media (max-width: 960px) {
+  .main-content {
+    flex-direction: column;
+  }
+  .edit-col {
+    flex: none;
+  }
+  .meta-row {
+    flex-wrap: wrap;
+  }
+  .meta-field,
+  .meta-field-sm {
+    flex: 1 1 calc(33.33% - 14px);
+  }
+}
+
+@media (max-width: 640px) {
+  .edit-page {
+    padding: 12px;
+  }
+  .type-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .segmented {
+    justify-content: space-between;
+  }
+  .segmented-item {
+    flex: 1;
+    text-align: center;
+  }
+  .form-grid-2 {
+    grid-template-columns: 1fr;
+  }
+  .meta-field,
+  .meta-field-sm {
+    flex: 1 1 100%;
+  }
+  .top-bar-left,
+  .top-bar-right {
+    flex-wrap: wrap;
+  }
 }
 </style>

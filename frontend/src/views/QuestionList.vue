@@ -702,6 +702,11 @@ onBeforeUnmount(() => {
   border-color: var(--text-muted);
 }
 
+.ql-space-switcher:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-light);
+}
+
 .ql-space-icon {
   color: var(--text-muted);
   flex-shrink: 0;
@@ -718,6 +723,16 @@ onBeforeUnmount(() => {
   padding: 0 18px 0 0;
   outline: none;
   cursor: pointer;
+  color-scheme: light dark;
+}
+
+[data-theme='dark'] .ql-space-select {
+  color-scheme: dark;
+}
+
+[data-theme='dark'] .ql-space-select option {
+  background: #2c2c2e;
+  color: #f5f5f7;
 }
 
 .ql-space-chevron {
