@@ -436,10 +436,15 @@ function parseOptions(raw: any): { label: string; content: string }[] {
 function optionLayout(opts: { label: string; content: string }[]): string {
   if (!opts || opts.length === 0) return 'cols-1'
   // 去除 LaTeX 标记后估算纯文本长度
-  const stripLatex = (s: string) => s.replace(/\$+/g, '').replace(/\\[a-zA-Z]+/g, 'x').replace(/[{}]/g, '')
+  const stripLatex = (s: string) =>
+    s.replace(/\$+/g, '')
+     .replace(/\\frac\{([^}]*)\}\{([^}]*)\}/g, '$1/$2')
+     .replace(/\\[a-zA-Z]+/g, '')
+     .replace(/[{}]/g, '')
+     .trim()
   const maxLen = Math.max(...opts.map(o => stripLatex(o.content).length))
-  if (maxLen <= 8) return 'cols-4'
-  if (maxLen <= 30) return 'cols-2'
+  if (maxLen <= 25) return 'cols-4'
+  if (maxLen <= 60) return 'cols-2'
   return 'cols-1'
 }
 
