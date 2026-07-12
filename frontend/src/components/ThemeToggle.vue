@@ -4,7 +4,7 @@
     class="theme-toggle"
     :class="{ dark: isDark }"
     :title="isDark ? '切换到浅色模式' : '切换到深色模式'"
-    @click="toggle"
+    @click="toggleTheme"
   >
     <span class="theme-toggle-track">
       <AppIcon :name="isDark ? 'moon' : 'sun'" :size="16" class="theme-toggle-icon" />
@@ -13,33 +13,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, onMounted } from 'vue'
 import { AppIcon } from '@/components/ui'
+import { useTheme } from '@/composables/useTheme'
 
-const isDark = ref(false)
-
-function applyTheme(dark: boolean) {
-  document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light')
-  isDark.value = dark
-  localStorage.setItem('theme', dark ? 'dark' : 'light')
-}
-
-function toggle() {
-  applyTheme(!isDark.value)
-}
-
-onMounted(() => {
-  const saved = localStorage.getItem('theme')
-  const prefersDark =
-    window.matchMedia &&
-    window.matchMedia('(prefers-color-scheme: dark)').matches
-  applyTheme(saved ? saved === 'dark' : prefersDark)
-})
-
-watch(
-  () => window.matchMedia('(prefers-color-scheme: dark)'),
-  () => {},
-)
+const { isDark, toggleTheme } = useTheme()
 </script>
 
 <style scoped>
@@ -55,6 +32,7 @@ watch(
   box-shadow: var(--shadow-xs);
   color: var(--text-secondary);
   transition: var(--transition-fast);
+  flex-shrink: 0;
 }
 
 .theme-toggle:hover {
