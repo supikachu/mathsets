@@ -874,12 +874,11 @@ watch(() => form.question_type, () => {
 /* 题型字段宽度 */
 .meta-field-type {
   min-width: 90px;
-  flex-shrink: 0;
 }
 
 /* 难度字段 */
 .meta-field-diff {
-  flex-shrink: 0;
+  min-width: 120px;
 }
 
 .diff-row {
@@ -930,8 +929,9 @@ watch(() => form.question_type, () => {
 /* ============ 元数据工具栏 ============ */
 .meta-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-end;
-  gap: 10px;
+  gap: 12px 8px;
   flex-shrink: 0;
   padding: 10px 14px;
   background: var(--bg-card);
@@ -946,7 +946,8 @@ watch(() => form.question_type, () => {
 }
 
 .meta-field-sm {
-  flex: 0 0 92px;
+  flex: 1;
+  min-width: 92px;
 }
 
 .field-label {
@@ -1709,12 +1710,18 @@ watch(() => form.question_type, () => {
 }
 
 /* ============ 响应式 ============ */
-@media (max-width: 960px) {
+@media (max-width: 1200px) {
   .main-content {
     flex-direction: column;
   }
   .edit-col {
     flex: none;
+    width: 100%;
+  }
+  .preview-col {
+    flex: none;
+    width: 100%;
+    min-height: 400px;
   }
   .meta-row {
     flex-wrap: wrap;
@@ -1722,6 +1729,19 @@ watch(() => form.question_type, () => {
   .meta-field,
   .meta-field-sm {
     flex: 1 1 calc(33.33% - 14px);
+  }
+}
+
+@media (max-width: 768px) {
+  .choice-grid {
+    grid-template-columns: 1fr;
+  }
+  .blank-wrap {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .blank-input {
+    width: 100% !important;
   }
 }
 
