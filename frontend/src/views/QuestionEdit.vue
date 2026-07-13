@@ -80,18 +80,6 @@
           <label class="field-label">考试类型</label>
           <AppSelect v-model="form.exam_type" :options="examTypeOptions" clearable />
         </div>
-        <div class="meta-field meta-field-sm">
-          <label class="field-label">分值</label>
-          <input type="number" v-model.number="form.default_score" min="1" max="100" class="num-input" />
-        </div>
-        <div class="meta-field meta-field-sm">
-          <label class="field-label">耗时(分)</label>
-          <input type="number" v-model.number="form.estimated_time" min="1" max="60" class="num-input" />
-        </div>
-        <div class="meta-field">
-          <label class="field-label">来源</label>
-          <AppSelect v-model="form.source" :options="sourceOptions" />
-        </div>
       </div>
 
       <!-- ==================== 维度4: 知识点与素养 + 维度5: 解题方法 ==================== -->
@@ -1041,13 +1029,22 @@ watch(() => form.question_type, () => {
 }
 
 .meta-field :deep(.app-select-wrapper select) {
-  padding: 8px 36px 8px 12px;
+  padding: 7px 36px 7px 12px;
   font-size: 13px;
   border-radius: 8px;
   line-height: 1.4;
+  border: 1px solid var(--border-color);
+  background-color: var(--bg-input);
+  color: var(--text-primary);
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.meta-field :deep(.app-select-wrapper select:hover) {
+  border-color: var(--text-muted);
 }
 
 .meta-field :deep(.app-select-wrapper select:focus) {
+  border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-light);
   background: var(--bg-card);
 }
@@ -1179,7 +1176,7 @@ watch(() => form.question_type, () => {
   align-items: center;
   justify-content: center;
   gap: 6px;
-  min-height: 80px;
+  aspect-ratio: 16 / 5;
   border: 2px dashed var(--border-color);
   border-radius: var(--radius-sm);
   background: var(--bg-input);

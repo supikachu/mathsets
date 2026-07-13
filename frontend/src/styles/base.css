@@ -120,6 +120,20 @@ select {
   background-repeat: no-repeat;
   background-position: right 12px center;
   padding-right: 36px;
+  color-scheme: light dark;
+  cursor: pointer;
+}
+
+select option {
+  background: var(--bg-card);
+  color: var(--text-primary);
+  padding: 8px 12px;
+  border-radius: 6px;
+}
+
+[data-theme='dark'] select option {
+  background: #2c2c2e;
+  color: #f5f5f7;
 }
 
 ::-webkit-scrollbar {
