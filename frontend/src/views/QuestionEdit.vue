@@ -873,12 +873,12 @@ watch(() => form.question_type, () => {
 /* ============ 题型分段控件 + 难度 ============ */
 /* 题型字段宽度 */
 .meta-field-type {
-  min-width: 90px;
+  min-width: 80px;
 }
 
 /* 难度字段 */
 .meta-field-diff {
-  min-width: 120px;
+  min-width: 100px;
 }
 
 .diff-row {
@@ -947,7 +947,7 @@ watch(() => form.question_type, () => {
 
 .meta-field-sm {
   flex: 1;
-  min-width: 92px;
+  min-width: 80px;
 }
 
 .field-label {
@@ -1710,7 +1710,7 @@ watch(() => form.question_type, () => {
 }
 
 /* ============ 响应式 ============ */
-@media (max-width: 1200px) {
+@media (max-width: 1500px) {
   .main-content {
     flex-direction: column;
   }
