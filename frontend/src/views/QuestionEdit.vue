@@ -62,7 +62,7 @@
         </div>
       </div>
 
-      <!-- ==================== 维度1: 试源/考试属性 ==================== -->
+      <!-- ==================== 维度1+4+5: 所有属性同一行 ==================== -->
       <div class="meta-row">
         <div class="meta-field">
           <label class="field-label">学年</label>
@@ -80,30 +80,26 @@
           <label class="field-label">考试类型</label>
           <AppSelect v-model="form.exam_type" :options="examTypeOptions" clearable />
         </div>
-      </div>
-
-      <!-- ==================== 维度4: 知识点与素养 + 维度5: 解题方法 ==================== -->
-      <div class="meta-row">
         <div class="meta-field">
           <label class="field-label">知识点</label>
           <div class="kp-display">
             <AppIcon name="tag" :size="15" />
             <span v-if="selectedKpName">{{ selectedKpName }}</span>
-            <span v-else class="kp-empty">在左侧知识树中选择</span>
+            <span v-else class="kp-empty">左侧选择</span>
           </div>
         </div>
         <div class="meta-field">
           <label class="field-label">核心素养</label>
           <button type="button" class="kp-btn" @click="showLiteracyDialog = true">
             <AppIcon name="award" :size="15" />
-            <span>{{ form.literacy_tags.length ? `已选 ${form.literacy_tags.length} 个` : '添加素养' }}</span>
+            <span>{{ form.literacy_tags.length ? `${form.literacy_tags.length}个` : '添加' }}</span>
           </button>
         </div>
         <div class="meta-field">
-          <label class="field-label">解题方法/思想</label>
+          <label class="field-label">解题方法</label>
           <button type="button" class="kp-btn" @click="showTagDialog = true">
             <AppIcon name="bookmark" :size="15" />
-            <span>{{ form.tags.length ? `已选 ${form.tags.length} 个` : '添加标签' }}</span>
+            <span>{{ form.tags.length ? `${form.tags.length}个` : '添加' }}</span>
           </button>
         </div>
       </div>
@@ -968,9 +964,9 @@ watch(() => form.question_type, () => {
 .meta-row {
   display: flex;
   align-items: flex-end;
-  gap: 14px;
+  gap: 10px;
   flex-shrink: 0;
-  padding: 12px 16px;
+  padding: 10px 14px;
   background: var(--bg-card);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
@@ -1026,27 +1022,6 @@ watch(() => form.question_type, () => {
 /* 让元数据栏内的下拉与输入框尺寸统一 */
 .meta-field :deep(.app-select-wrapper) {
   width: 100%;
-}
-
-.meta-field :deep(.app-select-wrapper select) {
-  padding: 7px 36px 7px 12px;
-  font-size: 13px;
-  border-radius: 8px;
-  line-height: 1.4;
-  border: 1px solid var(--border-color);
-  background-color: var(--bg-input);
-  color: var(--text-primary);
-  transition: border-color 0.2s, box-shadow 0.2s;
-}
-
-.meta-field :deep(.app-select-wrapper select:hover) {
-  border-color: var(--text-muted);
-}
-
-.meta-field :deep(.app-select-wrapper select:focus) {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-light);
-  background: var(--bg-card);
 }
 
 .kp-btn {
