@@ -47,16 +47,21 @@
               <LatexRender :text="q?.stem || ''" />
             </div>
             <!-- 选择题选项 -->
-            <div v-if="q?.question_type === 'choice' && optionList.length" class="q-options">
+            <div
+              v-if="q?.question_type === 'choice' && optionList.length"
+              ref="optionsContainer"
+              class="q-options"
+              :class="optionLayoutClass"
+            >
               <div
                 v-for="opt in optionList"
                 :key="opt.label"
-                class="q-opt"
+                class="q-option"
                 :class="{ correct: isCorrect(opt.label) }"
               >
-                <span class="q-opt-letter">{{ opt.label }}</span>
+                <span class="q-option-label" :class="{ 'label-correct': isCorrect(opt.label) }">{{ opt.label }}</span>
                 <LatexRender :text="opt.content" :inline="true" />
-                <AppIcon v-if="isCorrect(opt.label)" name="check-circle" :size="16" class="q-opt-check" />
+                <AppIcon v-if="isCorrect(opt.label)" name="check-circle" :size="16" class="q-option-check" />
               </div>
             </div>
           </div>
@@ -158,7 +163,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { questionApi, type QuestionDetail } from '@/api/client'
 import client from '@/api/client'
@@ -221,6 +226,71 @@ const hasAnswer = computed(() => {
 const hasGrading = computed(() => {
   const g = q.value?.grading_criteria
   return !!(g && Array.isArray(g) && g.length)
+})
+
+// ---- 选择题选项自适应网格布局（与列表页逻辑一致）----
+const OPTION_GAP = 16
+const optionsContainer = ref<HTMLElement | null>(null)
+const optionLayout = ref<'grid-4' | 'grid-2' | 'grid-1'>('grid-2')
+let resizeObserver: ResizeObserver | null = null
+let layoutTimer: ReturnType<typeof setTimeout> | null = null
+
+const optionLayoutClass = computed(() => optionLayout.value)
+
+function computeOptionLayout() {
+  const container = optionsContainer.value
+  if (!container) return
+  const containerWidth = container.clientWidth
+  if (containerWidth === 0) return
+
+  const optionEls = container.querySelectorAll<HTMLElement>('.q-option')
+  if (optionEls.length === 0) return
+
+  // 临时切换为 block 布局测量真实宽度
+  const prevDisplay = container.style.display
+  const prevCols = container.style.gridTemplateColumns
+  container.style.display = 'block'
+  container.style.gridTemplateColumns = ''
+
+  let maxWidth = 0
+  const prevStyles: { el: HTMLElement; display: string; width: string }[] = []
+  optionEls.forEach(el => {
+    prevStyles.push({ el, display: el.style.display, width: el.style.width })
+    el.style.display = 'inline-flex'
+    el.style.width = 'auto'
+    el.style.whiteSpace = 'nowrap'
+    const w = el.scrollWidth
+    if (w > maxWidth) maxWidth = w
+    el.style.whiteSpace = ''
+  })
+
+  prevStyles.forEach(({ el, display, width }) => {
+    el.style.display = display
+    el.style.width = width
+  })
+  container.style.display = prevDisplay
+  container.style.gridTemplateColumns = prevCols
+
+  if (maxWidth === 0) return
+
+  const slot = maxWidth + OPTION_GAP
+  if (slot * 4 <= containerWidth) {
+    optionLayout.value = 'grid-4'
+  } else if (slot * 2 <= containerWidth) {
+    optionLayout.value = 'grid-2'
+  } else {
+    optionLayout.value = 'grid-1'
+  }
+}
+
+function scheduleCompute() {
+  if (layoutTimer) clearTimeout(layoutTimer)
+  layoutTimer = setTimeout(() => computeOptionLayout(), 50)
+}
+
+// 题目数据变化后计算布局
+watch([q, optionList], () => {
+  nextTick(() => setTimeout(() => computeOptionLayout(), 120))
 })
 
 async function fetchDetail() {
@@ -289,7 +359,24 @@ function isCorrect(label: string): boolean {
   return String(ans) === label
 }
 
-onMounted(fetchDetail)
+onMounted(async () => {
+  await fetchDetail()
+  nextTick(() => {
+    setTimeout(() => computeOptionLayout(), 150)
+    if (optionsContainer.value) {
+      resizeObserver = new ResizeObserver(() => scheduleCompute())
+      resizeObserver.observe(optionsContainer.value)
+    }
+  })
+})
+
+onBeforeUnmount(() => {
+  if (resizeObserver) {
+    resizeObserver.disconnect()
+    resizeObserver = null
+  }
+  if (layoutTimer) clearTimeout(layoutTimer)
+})
 </script>
 
 <style scoped>
@@ -347,15 +434,16 @@ onMounted(fetchDetail)
 .section-card {
   background: var(--bg-card);
   border: 1px solid var(--border-color);
-  border-radius: 10px;
-  padding: 24px 28px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
-  margin-bottom: 16px;
+  border-radius: 12px;
+  padding: 22px 26px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.04);
+  margin-bottom: 14px;
 }
 
 .section-card.answer-section {
   border-color: var(--success);
   background: var(--success-light);
+  box-shadow: 0 1px 6px rgba(16, 185, 129, 0.1);
 }
 
 .section-title {
@@ -393,9 +481,10 @@ onMounted(fetchDetail)
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  padding-bottom: 16px;
-  margin-bottom: 20px;
-  border-bottom: 1px solid var(--border-light, rgba(0, 0, 0, 0.06));
+  padding: 8px 12px;
+  margin-bottom: 18px;
+  background: var(--bg-input);
+  border-radius: 8px;
 }
 
 .q-info-item {
@@ -417,52 +506,64 @@ onMounted(fetchDetail)
   margin: 0 0 8px;
 }
 
-/* 选项 */
+/* 选项 — 自适应网格布局（与列表页一致） */
 .q-options {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  margin-top: 8px;
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
 }
 
-.q-opt {
+.q-options.grid-4 {
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.q-options.grid-2 {
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.q-options.grid-1 {
+  grid-template-columns: 1fr;
+}
+
+.q-option {
   display: flex;
   align-items: flex-start;
-  gap: 12px;
-  padding: 12px 16px;
-  border: 1px solid var(--border-color);
+  gap: 8px;
+  padding: 10px 14px;
   border-radius: 8px;
+  background: var(--bg-input);
+  border: 1px solid transparent;
   font-size: 14px;
   line-height: 1.6;
   color: var(--text-primary);
-  transition: border-color 0.2s, background 0.2s;
+  transition: var(--transition-fast);
 }
 
-.q-opt.correct {
+.q-option.correct {
   border-color: var(--success);
   background: var(--success-light);
 }
 
-.q-opt-letter {
+.q-option-label {
   flex-shrink: 0;
-  width: 24px;
-  height: 24px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--bg-active, rgba(0, 0, 0, 0.05));
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 50%;
-  background: var(--bg-input);
+  font-size: 11px;
   font-weight: 700;
-  font-size: 13px;
   color: var(--text-secondary);
 }
 
-.q-opt.correct .q-opt-letter {
+.q-option-label.label-correct {
   background: var(--success);
   color: #fff;
 }
 
-.q-opt-check {
+.q-option-check {
   margin-left: auto;
   color: var(--success);
   flex-shrink: 0;
