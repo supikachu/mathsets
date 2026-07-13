@@ -96,11 +96,13 @@
             <!-- 题干 -->
             <section class="edit-section">
               <div class="section-label"><AppIcon name="book-open" :size="16" /> <span>题干</span><span class="required">*</span></div>
-              <textarea v-model="form.stem" rows="4" class="edit-textarea" placeholder="输入题目内容，LaTeX 公式用 $...$ 包裹。例如：已知集合 $A = \{x | x^2 - 2x = 0\}$..."></textarea>
-              <button type="button" class="img-upload-btn" @click="handleImageUpload">
-                <AppIcon name="paperclip" :size="13" />
-                <span>上传题干配图</span>
-              </button>
+              <div class="stem-wrap">
+                <textarea v-model="form.stem" rows="4" class="edit-textarea" placeholder="输入题目内容，LaTeX 公式用 $...$ 包裹。例如：已知集合 $A = \{x | x^2 - 2x = 0\}$..."></textarea>
+                <button type="button" class="img-upload-btn" @click="handleImageUpload">
+                  <AppIcon name="paperclip" :size="13" />
+                  <span>上传配图</span>
+                </button>
+              </div>
             </section>
 
             <!-- 答案 -->
@@ -1047,7 +1049,10 @@ watch(() => form.question_type, () => {
 .preview-col-inner {
   flex: 1;
   overflow-y: auto;
-  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  padding: 20px;
+  box-sizing: border-box;
 }
 
 /* ============ 编辑区段 ============ */
@@ -1098,22 +1103,38 @@ watch(() => form.question_type, () => {
   background: var(--bg-card);
 }
 
-/* 图片上传按钮 - 虚线轻量短按钮紧贴题干 */
+/* 题干容器 - 图片按钮挂载在右下角 */
+.stem-wrap {
+  position: relative;
+}
+
+.stem-wrap .edit-textarea {
+  padding-bottom: 28px;
+}
+
+/* 图片上传按钮 - 挂载在题干右下角内部 */
 .img-upload-btn {
+  position: absolute;
+  bottom: 5px;
+  right: 8px;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  margin-top: 4px;
-  padding: 2px 10px;
+  gap: 3px;
+  padding: 1px 8px;
   border: 1px dashed var(--border-strong);
-  border-radius: 5px;
-  background: transparent;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.8);
   color: var(--text-muted);
   font-size: 11px;
   font-family: inherit;
   cursor: pointer;
   transition: var(--transition-fast);
-  line-height: 1.6;
+  line-height: 1.5;
+  z-index: 1;
+}
+
+[data-theme='dark'] .img-upload-btn {
+  background: rgba(28, 28, 30, 0.8);
 }
 
 .img-upload-btn:hover {
@@ -1127,6 +1148,13 @@ watch(() => form.question_type, () => {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 6px;
+}
+
+.choice-grid .add-btn-sm {
+  grid-column: 1;
+  justify-self: start;
+  width: fit-content;
+  max-width: 200px;
 }
 
 /* 填空题紧凑布局 */
@@ -1159,7 +1187,7 @@ watch(() => form.question_type, () => {
 .opt-input {
   flex: 1;
   min-width: 0;
-  padding: 6px 30px 6px 10px;
+  padding: 6px 32px 6px 10px;
   border-radius: 8px;
   background: var(--bg-input);
   border: 1px solid var(--border-color);
@@ -1394,7 +1422,6 @@ watch(() => form.question_type, () => {
   background: #ffffff;
   border-radius: 8px;
   padding: 32px 28px;
-  margin: 20px;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.06);
   border: 1px solid rgba(0, 0, 0, 0.04);
 }
@@ -1431,7 +1458,6 @@ watch(() => form.question_type, () => {
   background: #ffffff;
   border-radius: 8px;
   padding: 24px 28px;
-  margin: 20px;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.06);
   border: 1px solid rgba(0, 0, 0, 0.04);
 }
