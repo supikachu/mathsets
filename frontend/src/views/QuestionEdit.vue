@@ -96,14 +96,11 @@
             <!-- 题干 -->
             <section class="edit-section">
               <div class="section-label"><AppIcon name="book-open" :size="16" /> <span>题干</span><span class="required">*</span></div>
-              <textarea v-model="form.stem" rows="4" class="edit-textarea" placeholder="输入题目内容，LaTeX 公式用 $...$ 包裹"></textarea>
-              <!-- 图片上传按钮 -->
-              <div class="stem-image-bar">
-                <button type="button" class="img-upload-btn" @click="handleImageUpload">
-                  <AppIcon name="image" :size="15" />
-                  <span>上传题干配图</span>
-                </button>
-              </div>
+              <textarea v-model="form.stem" rows="4" class="edit-textarea" placeholder="输入题目内容，LaTeX 公式用 $...$ 包裹。例如：已知集合 $A = \{x | x^2 - 2x = 0\}$..."></textarea>
+              <button type="button" class="img-upload-btn" @click="handleImageUpload">
+                <AppIcon name="image" :size="14" />
+                <span>上传题干配图</span>
+              </button>
             </section>
 
             <!-- 答案 -->
@@ -1101,19 +1098,16 @@ watch(() => form.question_type, () => {
   background: var(--bg-card);
 }
 
-/* 图片上传按钮 */
-.stem-image-bar {
-  margin-top: 6px;
-}
-
+/* 图片上传按钮 - 虚线样式紧贴题干 */
 .img-upload-btn {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  margin-top: 6px;
   padding: 4px 12px;
-  border: 1px solid var(--border-color);
+  border: 1px dashed var(--border-strong);
   border-radius: 6px;
-  background: var(--bg-input);
+  background: transparent;
   color: var(--text-muted);
   font-size: 12px;
   font-family: inherit;
@@ -1123,6 +1117,7 @@ watch(() => form.question_type, () => {
 
 .img-upload-btn:hover {
   border-color: var(--accent);
+  border-style: dashed;
   color: var(--accent);
   background: var(--accent-light);
 }
@@ -1309,6 +1304,7 @@ watch(() => form.question_type, () => {
 
 /* ============ 高级设置折叠 ============ */
 .advanced-section {
+  width: 100%;
   margin-top: 6px;
   border: 1px solid var(--border-color);
   border-radius: var(--radius-sm);
@@ -1419,14 +1415,15 @@ watch(() => form.question_type, () => {
   100% { background-position: -200% 0; }
 }
 
-/* 试卷卡片 */
+/* 试卷卡片 - 悬浮纸张效果 */
 .paper-card {
   background: #ffffff;
-  border-radius: 12px;
+  border-radius: 8px;
   padding: 24px 28px;
+  margin: 16px;
   box-shadow:
-    0 1px 3px rgba(0, 0, 0, 0.04),
-    0 8px 32px rgba(0, 0, 0, 0.06);
+    0 1px 4px rgba(0, 0, 0, 0.05),
+    0 4px 16px rgba(0, 0, 0, 0.04);
   border: 1px solid rgba(0, 0, 0, 0.04);
 }
 
@@ -1434,8 +1431,8 @@ watch(() => form.question_type, () => {
   background: #1c1c1e;
   border-color: rgba(255, 255, 255, 0.06);
   box-shadow:
-    0 1px 3px rgba(0, 0, 0, 0.2),
-    0 8px 32px rgba(0, 0, 0, 0.3);
+    0 1px 4px rgba(0, 0, 0, 0.2),
+    0 4px 16px rgba(0, 0, 0, 0.2);
 }
 
 .paper-card-header {
