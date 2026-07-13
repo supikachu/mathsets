@@ -21,7 +21,7 @@
         </div>
       </header>
 
-      <!-- ==================== 题型分段控件 + 难度 ==================== -->
+      <!-- ==================== 维度2: 题型 + 子题型 + 维度3: 难度系数 ==================== -->
       <div class="type-row">
         <div class="segmented">
           <button
@@ -33,6 +33,13 @@
             @click="form.question_type = t.value"
           >{{ t.label }}</button>
         </div>
+        <AppSelect
+          v-if="subTypeOptions.length > 0"
+          v-model="form.sub_type"
+          :options="subTypeOptions"
+          placeholder="子题型"
+          class="subtype-select"
+        />
         <div class="difficulty">
           <button
             v-for="n in 3"
@@ -43,18 +50,35 @@
             @click="difficultyStars = n"
           ><AppIcon name="star" :size="18" /></button>
           <span class="star-text">{{ ['简单', '中等', '困难'][difficultyStars - 1] || '' }}</span>
+          <input
+            type="number"
+            v-model.number="form.difficulty_coefficient"
+            min="0"
+            max="1"
+            step="0.05"
+            class="diff-coef-input"
+          />
+          <span class="diff-coef-label">难度系数</span>
         </div>
       </div>
 
-      <!-- ==================== 元数据工具栏 ==================== -->
+      <!-- ==================== 维度1: 试源/考试属性 ==================== -->
       <div class="meta-row">
         <div class="meta-field">
-          <label class="field-label">年级</label>
-          <AppSelect v-model="form.grade" :options="gradeOptions" clearable />
+          <label class="field-label">学年</label>
+          <AppSelect v-model="form.academic_year" :options="academicYearOptions" clearable />
         </div>
         <div class="meta-field">
-          <label class="field-label">学期</label>
-          <AppSelect v-model="form.semester" :options="semesterOptions" clearable />
+          <label class="field-label">年级学期</label>
+          <AppSelect v-model="form.grade_semester" :options="gradeSemesterOptions" clearable />
+        </div>
+        <div class="meta-field">
+          <label class="field-label">地区/学校</label>
+          <input v-model="form.region" placeholder="如 湖北襄阳" class="text-input" />
+        </div>
+        <div class="meta-field">
+          <label class="field-label">考试类型</label>
+          <AppSelect v-model="form.exam_type" :options="examTypeOptions" clearable />
         </div>
         <div class="meta-field meta-field-sm">
           <label class="field-label">分值</label>
@@ -68,6 +92,10 @@
           <label class="field-label">来源</label>
           <AppSelect v-model="form.source" :options="sourceOptions" />
         </div>
+      </div>
+
+      <!-- ==================== 维度4: 知识点与素养 + 维度5: 解题方法 ==================== -->
+      <div class="meta-row">
         <div class="meta-field">
           <label class="field-label">知识点</label>
           <div class="kp-display">
@@ -77,7 +105,14 @@
           </div>
         </div>
         <div class="meta-field">
-          <label class="field-label">标签</label>
+          <label class="field-label">核心素养</label>
+          <button type="button" class="kp-btn" @click="showLiteracyDialog = true">
+            <AppIcon name="award" :size="15" />
+            <span>{{ form.literacy_tags.length ? `已选 ${form.literacy_tags.length} 个` : '添加素养' }}</span>
+          </button>
+        </div>
+        <div class="meta-field">
+          <label class="field-label">解题方法/思想</label>
           <button type="button" class="kp-btn" @click="showTagDialog = true">
             <AppIcon name="bookmark" :size="15" />
             <span>{{ form.tags.length ? `已选 ${form.tags.length} 个` : '添加标签' }}</span>
@@ -242,7 +277,7 @@
     </AppModal>
 
     <!-- 标签选择弹窗 -->
-    <AppModal v-model="showTagDialog" title="选择标签">
+    <AppModal v-model="showTagDialog" title="选择解题方法/思想标签">
       <div class="tag-dialog-body">
         <p class="tag-dialog-hint">选择题目涉及的解题方法与数学思想标签</p>
         <div v-for="cat in tagCategories" :key="cat.name" class="tag-category">
@@ -262,6 +297,30 @@
       <div class="form-actions">
         <AppButton variant="ghost" @click="showTagDialog = false">取消</AppButton>
         <AppButton variant="primary" @click="showTagDialog = false">完成（{{ form.tags.length }}）</AppButton>
+      </div>
+    </AppModal>
+
+    <!-- 核心素养标签弹窗 -->
+    <AppModal v-model="showLiteracyDialog" title="选择核心素养标签">
+      <div class="tag-dialog-body">
+        <p class="tag-dialog-hint">选择题目考查的数学核心素养</p>
+        <div class="tag-category">
+          <div class="tag-category-title">数学核心素养</div>
+          <div class="tag-chips">
+            <button
+              v-for="lit in literacyTags"
+              :key="lit"
+              type="button"
+              class="tag-chip"
+              :class="{ active: form.literacy_tags.includes(lit) }"
+              @click="toggleLiteracy(lit)"
+            >{{ lit }}</button>
+          </div>
+        </div>
+      </div>
+      <div class="form-actions">
+        <AppButton variant="ghost" @click="showLiteracyDialog = false">取消</AppButton>
+        <AppButton variant="primary" @click="showLiteracyDialog = false">完成（{{ form.literacy_tags.length }}）</AppButton>
       </div>
     </AppModal>
 
@@ -314,10 +373,8 @@ const kpLoading = ref(false)
 const kpTree = ref<KnowledgePoint[]>([])
 const showHistory = ref(false)
 const showTagDialog = ref(false)
+const showLiteracyDialog = ref(false)
 const grades = ['初一', '初二', '初三', '高一', '高二', '高三']
-
-// 已选知识点名称映射（用于编辑题目时回显已关联的知识点）
-const kpMap = ref<Record<string, string>>({})
 
 // 标签分类数据：解题方法与数学思想
 const tagCategories = [
@@ -339,16 +396,64 @@ const tagCategories = [
   },
 ]
 
+// 核心素养标签
+const literacyTags = [
+  '数学抽象', '逻辑推理', '数学建模', '直观想象', '数学运算', '数据分析',
+]
+
 function toggleTag(tag: string) {
   const idx = form.tags.indexOf(tag)
-  if (idx >= 0) {
-    form.tags.splice(idx, 1)
-  } else {
-    form.tags.push(tag)
-  }
+  if (idx >= 0) { form.tags.splice(idx, 1) } else { form.tags.push(tag) }
+}
+
+function toggleLiteracy(lit: string) {
+  const idx = form.literacy_tags.indexOf(lit)
+  if (idx >= 0) { form.literacy_tags.splice(idx, 1) } else { form.literacy_tags.push(lit) }
 }
 
 const gradeOptions = grades.map((g) => ({ label: g, value: g }))
+
+// 子题型选项（根据大题型动态变化）
+const subTypeMap: Record<string, { label: string; value: string }[]> = {
+  choice: [{ label: '单选题', value: 'single' }, { label: '多选题', value: 'multiple' }],
+  fill: [{ label: '单空题', value: 'single' }, { label: '多空题', value: 'multiple' }],
+  solution: [{ label: '证明题', value: 'proof' }, { label: '计算题', value: 'calc' }, { label: '应用题', value: 'applied' }, { label: '综合题', value: 'comprehensive' }],
+  judgment: [],
+}
+const subTypeOptions = computed(() => subTypeMap[form.question_type] ?? [])
+
+// 学年选项
+const currentYear = new Date().getFullYear()
+const academicYearOptions = [
+  { label: `${currentYear - 1}-${String(currentYear).slice(2)}`, value: `${currentYear - 1}-${String(currentYear).slice(2)}` },
+  { label: `${currentYear}-${String(currentYear + 1).slice(2)}`, value: `${currentYear}-${String(currentYear + 1).slice(2)}` },
+  { label: `${currentYear + 1}-${String(currentYear + 2).slice(2)}`, value: `${currentYear + 1}-${String(currentYear + 2).slice(2)}` },
+]
+
+// 年级学期选项（合并年级+学期）
+const gradeSemesterOptions = [
+  ...['初一', '初二', '初三'].flatMap(g => [
+    { label: `${g}上`, value: `${g}上` },
+    { label: `${g}下`, value: `${g}下` },
+  ]),
+  ...['高一', '高二', '高三'].flatMap(g => [
+    { label: `${g}上`, value: `${g}上` },
+    { label: `${g}下`, value: `${g}下` },
+  ]),
+]
+
+// 考试类型选项
+const examTypeOptions = [
+  { label: '期末', value: '期末' },
+  { label: '期中', value: '期中' },
+  { label: '月考', value: '月考' },
+  { label: '周测', value: '周测' },
+  { label: '模拟', value: '模拟' },
+  { label: '高考', value: '高考' },
+  { label: '中考', value: '中考' },
+  { label: '竞赛', value: '竞赛' },
+]
+
 const sourceOptions = [
   { label: '原创', value: '原创' },
   { label: '改编', value: '改编' },
@@ -433,16 +538,31 @@ const diffMap: Record<string, number> = { easy: 1, medium: 2, hard: 3 }
 const starMap: Record<number, string> = { 1: 'easy', 2: 'medium', 3: 'hard' }
 const difficultyStars = computed({
   get: () => diffMap[form.difficulty] || 2,
-  set: (v: number) => { form.difficulty = starMap[v] || 'medium' },
+  set: (v: number) => {
+    form.difficulty = starMap[v] || 'medium'
+    // 联动难度系数：简单→0.85, 中等→0.55, 困难→0.3
+    form.difficulty_coefficient = v === 1 ? 0.85 : v === 2 ? 0.55 : 0.3
+  },
+})
+
+// 切换题型时重置子题型
+watch(() => form.question_type, () => {
+  form.sub_type = ''
 })
 
 const form = reactive({
   stem: '',
   question_type: 'choice',
+  sub_type: '' as string,
   difficulty: 'medium',
+  difficulty_coefficient: 0.5 as number,
   default_score: 5,
   grade: undefined as string | undefined,
   semester: undefined as string | undefined,
+  academic_year: '' as string,
+  grade_semester: '' as string,
+  region: '' as string,
+  exam_type: '' as string,
   source: '原创',
   estimated_time: 5,
   analysis: '',
@@ -459,6 +579,7 @@ const form = reactive({
   judgmentCorrect: true,
   knowledgePointIds: [] as string[],
   tags: [] as string[],
+  literacy_tags: [] as string[],
   reviewer: '' as string,
   reviewer_ids: [] as string[],
   internal_note: '',
@@ -500,14 +621,21 @@ function buildPayload() {
   const payload: any = {
     stem: form.stem,
     question_type: form.question_type,
+    sub_type: form.sub_type || null,
     difficulty: form.difficulty,
+    difficulty_coefficient: form.difficulty_coefficient,
     default_score: form.default_score,
     grade: form.grade || null,
     semester: form.semester || null,
+    academic_year: form.academic_year || null,
+    grade_semester: form.grade_semester || null,
+    region: form.region || null,
+    exam_type: form.exam_type || null,
     source: form.source,
     analysis: form.analysis || null,
     knowledge_point_ids: kpIds.length > 0 ? kpIds : null,
     tags: form.tags.length > 0 ? form.tags : null,
+    literacy_tags: form.literacy_tags.length > 0 ? form.literacy_tags : null,
   }
   switch (form.question_type) {
     case 'choice':
@@ -589,7 +717,7 @@ function doRestoreDraft() {
   if (!pendingDraft) return
   const fields = ['stem', 'question_type', 'difficulty', 'default_score', 'grade', 'semester',
     'source', 'analysis', 'options', 'correctAnswer', 'blanks', 'solutionAnswer',
-    'gradingSteps', 'judgmentCorrect', 'knowledgePointIds', 'tags', 'reviewer', 'reviewer_ids', 'internal_note']
+    'gradingSteps', 'judgmentCorrect', 'knowledgePointIds', 'tags', 'literacy_tags', 'sub_type', 'difficulty_coefficient', 'academic_year', 'grade_semester', 'region', 'exam_type', 'reviewer', 'reviewer_ids', 'internal_note']
   for (const f of fields) {
     if (pendingDraft[f] !== undefined) (form as any)[f] = pendingDraft[f]
   }
@@ -636,12 +764,19 @@ async function loadQuestion() {
     form.default_score = d.default_score
     form.grade = d.grade || undefined
     form.semester = d.semester || undefined
+    form.sub_type = (d as any).sub_type || ''
+    form.difficulty_coefficient = (d as any).difficulty_coefficient ?? 0.5
+    form.academic_year = (d as any).academic_year || ''
+    form.grade_semester = (d as any).grade_semester || ''
+    form.region = (d as any).region || ''
+    form.exam_type = (d as any).exam_type || ''
     form.source = d.source || '原创'
     form.analysis = d.analysis || ''
     form.status = d.status
     form.version = d.version
     form.knowledgePointIds = d.knowledge_points?.map(k => k.id) || []
     form.tags = (d as any).tags || []
+    form.literacy_tags = (d as any).literacy_tags || []
     form.correctAnswer = ''
     form.blanks = [{ position: 1, answer: '' }]
     form.solutionAnswer = ''
@@ -807,6 +942,38 @@ watch(() => form.question_type, () => {
   color: var(--text-muted);
   margin-left: 8px;
   font-weight: 500;
+}
+
+/* 子题型选择器 */
+.subtype-select {
+  width: 120px;
+}
+
+/* 难度系数输入 */
+.diff-coef-input {
+  width: 56px;
+  padding: 3px 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 12px;
+  text-align: center;
+  margin-left: 10px;
+  font-family: inherit;
+}
+
+.diff-coef-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-light);
+}
+
+.diff-coef-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-left: 4px;
+  white-space: nowrap;
 }
 
 /* ============ 元数据工具栏 ============ */
