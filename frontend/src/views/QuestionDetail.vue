@@ -31,9 +31,9 @@
       <div class="detail-layout">
         <!-- 主内容区 -->
         <div class="detail-main">
-          <!-- 题目卡片 -->
-          <div class="question-card">
-            <!-- 题目信息条 -->
+          <!-- 一、题干 -->
+          <div class="section-card">
+            <div class="section-title"><span class="section-num">1</span> 题干</div>
             <div class="q-info-bar">
               <AppBadge :color="statusBadgeColor(q?.status || '')"><AppIcon :name="statusIcon(q?.status || '')" :size="13" /> {{ statusLabel(q?.status || '') }}</AppBadge>
               <AppBadge :color="typeBadgeColor(q?.question_type || '')">{{ typeLabel(q?.question_type || '') }}</AppBadge>
@@ -43,13 +43,10 @@
               <span v-if="q?.semester" class="q-info-item">{{ q.semester }}</span>
               <span v-if="q?.source" class="q-info-item">{{ q.source }}</span>
             </div>
-
-            <!-- 题干 -->
             <div class="q-stem">
               <LatexRender :text="q?.stem || ''" />
             </div>
-
-            <!-- 选项（选择题） -->
+            <!-- 选择题选项 -->
             <div v-if="q?.question_type === 'choice' && optionList.length" class="q-options">
               <div
                 v-for="opt in optionList"
@@ -62,49 +59,43 @@
                 <AppIcon v-if="isCorrect(opt.label)" name="check-circle" :size="16" class="q-opt-check" />
               </div>
             </div>
+          </div>
 
+          <!-- 二、参考答案 -->
+          <div v-if="hasAnswer" class="section-card answer-section">
+            <div class="section-title"><span class="section-num">2</span> 参考答案</div>
+            <!-- 选择题 -->
+            <div v-if="q?.question_type === 'choice'" class="answer-content">
+              <span class="answer-letter" v-for="a in correctLabels" :key="a">{{ a }}</span>
+            </div>
             <!-- 判断题 -->
-            <div v-else-if="q?.question_type === 'judgment'" class="q-answer-inline">
-              <span class="q-answer-tag" :class="q?.correct_answer?.[0] === true ? 'tag-correct' : 'tag-wrong'">
+            <div v-else-if="q?.question_type === 'judgment'" class="answer-inline">
+              <span class="answer-tag" :class="q?.correct_answer?.[0] === true ? 'tag-correct' : 'tag-wrong'">
                 {{ q?.correct_answer?.[0] === true ? '正确' : '错误' }}
               </span>
             </div>
-
-            <!-- 填空题答案 -->
+            <!-- 填空题 -->
             <div v-else-if="q?.question_type === 'fill' && q?.correct_answer" class="q-blanks">
               <div v-for="(item, i) in (q!.correct_answer as any[])" :key="i" class="q-blank">
                 <span class="q-blank-num">{{ i + 1 }}</span>
                 <LatexRender :text="item.answer || String(item)" :inline="true" />
               </div>
             </div>
-
-            <!-- 解答题答案 -->
+            <!-- 解答题 -->
             <div v-else-if="q?.question_type === 'solution' && q?.correct_answer" class="q-solution-answer">
-              <LatexRender v-for="(ans, i) in (q!.correct_answer as string[])" :key="i" :text="ans" />
+              <LatexRender v-for="(ans, i) in (q!.correct_answer as string[])" :key="i" :text="ans" :inline="true" />
             </div>
           </div>
 
-          <!-- 参考答案 -->
-          <div v-if="q?.question_type === 'choice' && optionList.length" class="answer-block">
-            <div class="block-title"><AppIcon name="check-circle" :size="18" /> 参考答案</div>
-            <div class="answer-content">
-              <span class="answer-letter" v-for="a in correctLabels" :key="a">{{ a }}</span>
-            </div>
-          </div>
-
-          <!-- 解析 -->
-          <div v-if="q?.analysis" class="analysis-block">
-            <div class="block-title"><AppIcon name="lightbulb" :size="18" /> 解析</div>
-            <div class="analysis-content">
+          <!-- 三、解析 -->
+          <div v-if="q?.analysis || hasGrading" class="section-card">
+            <div class="section-title"><span class="section-num">3</span> 解析</div>
+            <div v-if="q?.analysis" class="analysis-content">
               <LatexRender :text="q.analysis" />
             </div>
-          </div>
-
-          <!-- 评分标准（解答题） -->
-          <div v-if="q?.grading_criteria && Array.isArray(q.grading_criteria) && q.grading_criteria.length" class="grading-block">
-            <div class="block-title"><AppIcon name="list" :size="18" /> 评分标准</div>
-            <div class="grading-list">
-              <div v-for="(step, i) in (q.grading_criteria as any[])" :key="i" class="grading-step">
+            <!-- 评分标准（解答题） -->
+            <div v-if="hasGrading" class="grading-list">
+              <div v-for="(step, i) in (q!.grading_criteria as any[])" :key="i" class="grading-step">
                 <span class="grading-step-label">{{ step.label || `步骤${i + 1}` }}</span>
                 <span class="grading-step-score">{{ step.score || 0 }}分</span>
                 <span v-if="step.desc" class="grading-step-desc">{{ step.desc }}</span>
@@ -188,12 +179,26 @@ const rejectDialog = ref(false)
 const rejectComment = ref('')
 const deleteDialog = ref(false)
 
-// 安全提取选项列表（兼容数组/对象/字符串）
+// 安全提取选项列表（兼容数组/对象/JSON字符串）
 const optionList = computed(() => {
   const opts = q.value?.options
   if (!opts) return []
-  if (Array.isArray(opts)) return opts as { label: string; content: string }[]
-  return []
+  let parsed = opts
+  if (typeof parsed === 'string') {
+    try { parsed = JSON.parse(parsed) } catch { return [] }
+  }
+  if (!Array.isArray(parsed)) return []
+  return parsed.map((opt: any) => {
+    if (typeof opt === 'string') {
+      const match = opt.match(/^([A-Z])[.、．]\s*(.*)$/)
+      if (match) return { label: match[1], content: match[2] }
+      return { label: '', content: opt }
+    }
+    if (opt && typeof opt === 'object' && opt.label) {
+      return { label: opt.label, content: opt.content || '' }
+    }
+    return { label: '', content: String(opt) }
+  })
 })
 
 // 正确答案标签列表
@@ -202,6 +207,20 @@ const correctLabels = computed(() => {
   if (!ans) return []
   if (Array.isArray(ans)) return ans.map(String)
   return [String(ans)]
+})
+
+// 是否有参考答案
+const hasAnswer = computed(() => {
+  const ans = q.value?.correct_answer
+  if (!ans) return false
+  if (Array.isArray(ans)) return ans.length > 0
+  return !!ans
+})
+
+// 是否有评分标准
+const hasGrading = computed(() => {
+  const g = q.value?.grading_criteria
+  return !!(g && Array.isArray(g) && g.length)
 })
 
 async function fetchDetail() {
@@ -324,13 +343,49 @@ onMounted(fetchDetail)
   }
 }
 
-/* 题目卡片 */
-.question-card {
+/* 分区卡片 */
+.section-card {
   background: var(--bg-card);
   border: 1px solid var(--border-color);
   border-radius: 10px;
   padding: 24px 28px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+  margin-bottom: 16px;
+}
+
+.section-card.answer-section {
+  border-color: var(--success);
+  background: var(--success-light);
+}
+
+.section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-light, rgba(0, 0, 0, 0.06));
+}
+
+.section-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.answer-section .section-num {
+  background: var(--success);
 }
 
 .q-info-bar {
@@ -414,11 +469,11 @@ onMounted(fetchDetail)
 }
 
 /* 判断题 */
-.q-answer-inline {
-  margin-top: 12px;
+.answer-inline {
+  margin-top: 4px;
 }
 
-.q-answer-tag {
+.answer-tag {
   display: inline-block;
   padding: 4px 16px;
   border-radius: 6px;
@@ -478,25 +533,7 @@ onMounted(fetchDetail)
   line-height: 1.7;
 }
 
-/* 参考答案块 */
-.answer-block {
-  margin-top: 16px;
-  padding: 16px 20px;
-  background: var(--success-light);
-  border: 1px solid var(--success);
-  border-radius: 8px;
-}
-
-.block-title {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 14px;
-  font-weight: 700;
-  color: var(--text-primary);
-  margin-bottom: 10px;
-}
-
+/* 参考答案内容 */
 .answer-content {
   display: flex;
   gap: 8px;
@@ -515,15 +552,7 @@ onMounted(fetchDetail)
   font-size: 16px;
 }
 
-/* 解析块 */
-.analysis-block {
-  margin-top: 16px;
-  padding: 20px 24px;
-  background: var(--bg-card);
-  border: 1px solid var(--border-color);
-  border-radius: 10px;
-}
-
+/* 解析内容 */
 .analysis-content {
   font-size: 14px;
   line-height: 1.8;
@@ -535,18 +564,11 @@ onMounted(fetchDetail)
 }
 
 /* 评分标准 */
-.grading-block {
-  margin-top: 16px;
-  padding: 20px 24px;
-  background: var(--bg-card);
-  border: 1px solid var(--border-color);
-  border-radius: 10px;
-}
-
 .grading-list {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  margin-top: 12px;
 }
 
 .grading-step {
