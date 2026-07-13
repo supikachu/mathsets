@@ -37,7 +37,7 @@ export const useAuthStore = defineStore('auth', () => {
     }
     const { default: router } = await import('@/router')
     const redirect = router.currentRoute.value.query.redirect as string
-    router.push(redirect || '/dashboard')
+    router.replace(redirect || '/dashboard')
   }
 
   async function logout() {
@@ -47,7 +47,7 @@ export const useAuthStore = defineStore('auth', () => {
     localStorage.removeItem('user')
     localStorage.removeItem('currentSpaceId')
     const { default: router } = await import('@/router')
-    router.push('/login')
+    router.replace('/login')
   }
 
   return {

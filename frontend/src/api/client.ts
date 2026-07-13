@@ -31,7 +31,7 @@ client.interceptors.response.use(
       auth.token = ''
       auth.user = null
       const { default: router } = await import('@/router')
-      router.push('/login')
+      router.replace('/login')
       useToast().error('登录已过期，请重新登录')
     }
     return Promise.reject(error)

@@ -6,7 +6,7 @@
       <!-- 头部导航 -->
       <div class="detail-header">
         <div class="header-left">
-          <AppButton variant="ghost" size="sm" @click="$router.push('/questions')"><AppIcon name="chevron-left" :size="17" /> 返回列表</AppButton>
+          <AppButton variant="ghost" size="sm" @click="$router.replace('/questions')"><AppIcon name="chevron-left" :size="17" /> 返回列表</AppButton>
           <h1 class="page-title">题目详情</h1>
         </div>
         <div class="flex gap-2">
@@ -320,7 +320,7 @@ async function doDelete() {
   try {
     await client.delete(`/questions/${route.params.id}`)
     toast.success('已删除')
-    router.push('/questions')
+    router.replace('/questions')
   } catch { /* handled */ }
 }
 

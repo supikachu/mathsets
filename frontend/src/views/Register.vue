@@ -91,7 +91,7 @@ async function handleRegister() {
   try {
     await authApi.register(form)
     toast.success('注册成功，请登录')
-    router.push('/login')
+    router.replace('/login')
   } catch (e: any) {
     toast.error(e.response?.data?.error || '注册失败')
   } finally {

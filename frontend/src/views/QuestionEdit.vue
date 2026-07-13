@@ -564,8 +564,8 @@ function handleBack() {
   }
 }
 function goBack() {
-  if (isNew) router.push('/questions')
-  else router.push(`/questions/${route.params.id}`)
+  if (isNew) router.replace('/questions')
+  else router.replace(`/questions/${route.params.id}`)
 }
 
 // ===== AI 识别（预留） =====
@@ -651,7 +651,7 @@ async function handleSave(submitAfter: boolean) {
       toast.success('已创建并提交审核')
     }
     else { toast.success(isNew ? '草稿已保存' : '已更新') }
-    router.push(`/questions/${qid}`)
+    router.replace(`/questions/${qid}`)
   } catch (e: any) { toast.error(e.response?.data?.error || '操作失败') }
   finally { flag.value = false }
 }

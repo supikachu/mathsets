@@ -5,7 +5,7 @@
       <div class="not-found-code">404</div>
       <h1 class="page-title">页面不存在</h1>
       <p class="text-muted mb-12">你访问的页面可能已被删除或地址有误</p>
-      <AppButton variant="primary" @click="$router.push('/questions')">
+      <AppButton variant="primary" @click="$router.replace('/questions')">
         <AppIcon name="chevron-left" :size="17" /> 返回题库
       </AppButton>
     </div>
