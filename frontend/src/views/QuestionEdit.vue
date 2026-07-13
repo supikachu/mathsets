@@ -96,13 +96,13 @@
             <!-- 题干 -->
             <section class="edit-section">
               <div class="section-label"><AppIcon name="book-open" :size="16" /> <span>题干</span><span class="required">*</span></div>
-              <textarea v-model="form.stem" rows="5" class="edit-textarea" placeholder="输入题目内容，LaTeX 公式用 $...$ 包裹"></textarea>
-              <!-- 题目图片占位 -->
-              <div class="stem-image-area">
-                <div class="image-placeholder">
-                  <AppIcon name="image" :size="24" class="placeholder-icon" />
-                  <span class="placeholder-text">题目图片（预留位置）</span>
-                </div>
+              <textarea v-model="form.stem" rows="4" class="edit-textarea" placeholder="输入题目内容，LaTeX 公式用 $...$ 包裹"></textarea>
+              <!-- 图片上传按钮 -->
+              <div class="stem-image-bar">
+                <button type="button" class="img-upload-btn" @click="handleImageUpload">
+                  <AppIcon name="image" :size="15" />
+                  <span>上传题干配图</span>
+                </button>
               </div>
             </section>
 
@@ -110,61 +110,47 @@
             <section class="edit-section">
               <div class="section-label"><AppIcon name="file-text" :size="16" /> <span>答案</span></div>
               <!-- 选择题选项 -->
-              <div v-if="form.question_type === 'choice'">
+              <div v-if="form.question_type === 'choice'" class="choice-grid">
                 <div v-for="(opt, i) in form.options" :key="i" class="opt-row">
                   <label class="radio-label" :class="{ checked: form.correctAnswer === opt.label }">
                     <input type="radio" :value="opt.label" v-model="form.correctAnswer" />
                     {{ opt.label }}
                   </label>
                   <input v-model="opt.content" :placeholder="`选项 ${opt.label}`" class="opt-input" />
-                  <button v-if="form.options.length > 2" type="button" class="icon-btn" @click="form.options.splice(i, 1)"><AppIcon name="x" :size="16" /></button>
+                  <button v-if="form.options.length > 2" type="button" class="icon-btn" @click="form.options.splice(i, 1)"><AppIcon name="x" :size="15" /></button>
                 </div>
-                <button type="button" class="add-btn" @click="addOption"><AppIcon name="plus" :size="16" /> 添加选项</button>
+                <button type="button" class="add-btn add-btn-sm" @click="addOption"><AppIcon name="plus" :size="14" /> 添加选项</button>
               </div>
               <!-- 填空题 -->
-              <div v-else-if="form.question_type === 'fill'">
-                <div v-for="(blank, i) in form.blanks" :key="i" class="opt-row">
+              <div v-else-if="form.question_type === 'fill'" class="blank-wrap">
+                <div v-for="(blank, i) in form.blanks" :key="i" class="blank-item">
                   <span class="blank-label">第{{ i+1 }}空</span>
-                  <input v-model="blank.answer" placeholder="填入答案" class="opt-input" />
-                  <button v-if="form.blanks.length > 1" type="button" class="icon-btn" @click="form.blanks.splice(i, 1)"><AppIcon name="x" :size="16" /></button>
+                  <input v-model="blank.answer" placeholder="答案" class="opt-input blank-input" />
+                  <button v-if="form.blanks.length > 1" type="button" class="icon-btn" @click="form.blanks.splice(i, 1)"><AppIcon name="x" :size="15" /></button>
                 </div>
-                <button type="button" class="add-btn" @click="form.blanks.push({ position: Math.max(...form.blanks.map(b => b.position), 0) + 1, answer: '' })"><AppIcon name="plus" :size="16" /> 添加填空位</button>
+                <button type="button" class="add-btn add-btn-sm" @click="form.blanks.push({ position: Math.max(...form.blanks.map(b => b.position), 0) + 1, answer: '' })"><AppIcon name="plus" :size="14" /> 添加填空位</button>
               </div>
               <!-- 解答题 -->
               <div v-else-if="form.question_type === 'solution'">
-                <textarea v-model="form.solutionAnswer" rows="4" class="edit-textarea" placeholder="完整解答过程，支持 $...$ LaTeX"></textarea>
+                <textarea v-model="form.solutionAnswer" rows="3" class="edit-textarea" placeholder="完整解答过程，支持 $...$ LaTeX"></textarea>
                 <div class="grading-label">分步评分</div>
                 <div v-for="(step, i) in form.gradingSteps" :key="i" class="opt-row">
                   <input v-model="step.label" placeholder="步骤名" class="step-input" />
                   <input type="number" v-model.number="step.points" min="0" max="20" class="num-input num-input-sm" />
                   <span class="text-muted text-sm">分</span>
-                  <button v-if="form.gradingSteps.length > 1" type="button" class="icon-btn" @click="form.gradingSteps.splice(i, 1)"><AppIcon name="x" :size="16" /></button>
+                  <button v-if="form.gradingSteps.length > 1" type="button" class="icon-btn" @click="form.gradingSteps.splice(i, 1)"><AppIcon name="x" :size="15" /></button>
                 </div>
-                <button type="button" class="add-btn" @click="form.gradingSteps.push({ label: '', points: 1, description: '' })"><AppIcon name="plus" :size="16" /> 添加评分步骤</button>
-              </div>
-              <!-- 判断题 -->
-              <div v-else-if="form.question_type === 'judgment'">
-                <div class="radio-group">
-                  <label class="radio-label" :class="{ checked: form.judgmentCorrect === true }">
-                    <input type="radio" :value="true" v-model="form.judgmentCorrect" />
-                    正确
-                  </label>
-                  <label class="radio-label" :class="{ checked: form.judgmentCorrect === false }">
-                    <input type="radio" :value="false" v-model="form.judgmentCorrect" />
-                    错误
-                  </label>
-                </div>
+                <button type="button" class="add-btn add-btn-sm" @click="form.gradingSteps.push({ label: '', points: 1, description: '' })"><AppIcon name="plus" :size="14" /> 添加评分步骤</button>
               </div>
             </section>
 
             <!-- 解析 -->
             <section class="edit-section">
               <div class="section-label"><AppIcon name="lightbulb" :size="16" /> <span>解析</span></div>
-              <textarea v-model="form.analysis" rows="4" class="edit-textarea" placeholder="解题思路与易错点，支持 $...$ LaTeX"></textarea>
+              <textarea v-model="form.analysis" rows="3" class="edit-textarea" placeholder="解题思路与易错点，支持 $...$ LaTeX"></textarea>
             </section>
 
             <!-- 高级设置（默认折叠） -->
-            <!-- 说明：collapse.collab 初值为 true（原语义=展开）；此处取反以实现"默认折叠"，脚本不可修改 -->
             <section class="advanced-section">
               <button class="advanced-header" @click="toggleCollapse('collab')">
                 <span class="advanced-title"><AppIcon name="users" :size="16" /> 高级设置 · 协作</span>
@@ -196,43 +182,90 @@
           </div>
         </div>
 
-        <!-- 右栏：预览 -->
+        <!-- 右栏：试卷化预览 -->
         <div class="preview-col">
           <div class="preview-col-inner">
-            <div class="preview-section">
-              <div class="section-label"><AppIcon name="eye" :size="16" /> <span>题目预览</span></div>
-              <div class="preview-box"><LatexRender :text="form.stem || '（等待输入…）'" /></div>
+            <!-- 骨架屏（无输入时） -->
+            <div v-if="!form.stem && !form.solutionAnswer && !form.analysis && form.options.every(o => !o.content)" class="preview-skeleton">
+              <div class="skeleton-line skeleton-title"></div>
+              <div class="skeleton-line skeleton-text"></div>
+              <div class="skeleton-line skeleton-text skeleton-short"></div>
+              <div class="skeleton-line skeleton-text"></div>
+              <div class="skeleton-gap"></div>
+              <div class="skeleton-line skeleton-opt"></div>
+              <div class="skeleton-line skeleton-opt"></div>
+              <div class="skeleton-line skeleton-opt"></div>
+              <div class="skeleton-line skeleton-opt"></div>
+              <div class="skeleton-gap"></div>
+              <div class="skeleton-line skeleton-answer"></div>
+              <div class="skeleton-line skeleton-text skeleton-short"></div>
             </div>
-            <div class="preview-section">
-              <div class="section-label"><AppIcon name="check-circle" :size="16" /> <span>答案预览</span></div>
-              <div class="preview-box">
-                <div v-if="form.question_type === 'choice'">
-                  <div v-if="form.options.filter(o => o.content).length === 0" class="text-muted">（等待输入…）</div>
-                  <div
-                    v-for="opt in form.options.filter(o => o.content)"
-                    :key="opt.label"
-                    class="preview-opt"
-                    :class="{ correct: form.correctAnswer === opt.label }"
-                  >
-                    <span class="opt-letter">{{ opt.label }}.</span>
-                    <LatexRender :text="opt.content" :inline="true" />
-                    <AppBadge v-if="form.correctAnswer === opt.label" color="green"><AppIcon name="check" :size="13" /></AppBadge>
-                  </div>
-                </div>
-                <div v-else-if="form.question_type === 'judgment'">
-                  <AppBadge :color="form.judgmentCorrect ? 'green' : 'red'">
-                    {{ form.judgmentCorrect ? '正确' : '错误' }}
-                  </AppBadge>
-                </div>
-                <template v-else>
-                  <LatexRender v-if="form.solutionAnswer" :text="form.solutionAnswer" />
-                  <span v-else class="text-muted">（等待输入…）</span>
-                </template>
+
+            <!-- 试卷卡片（有输入时） -->
+            <div v-else class="paper-card">
+              <div class="paper-card-header">
+                <span class="paper-type-badge">{{ typeOptions.find(t => t.value === form.question_type)?.label }}</span>
+                <span class="paper-difficulty">
+                  <AppIcon v-for="n in 5" :key="n" name="star" :size="12" :class="{ active: difficultyStars >= n }" class="paper-star" />
+                </span>
               </div>
-            </div>
-            <div class="preview-section">
-              <div class="section-label"><AppIcon name="lightbulb" :size="16" /> <span>解析预览</span></div>
-              <div class="preview-box"><LatexRender :text="form.analysis || '（等待输入…）'" /></div>
+
+              <!-- 题干 -->
+              <div class="paper-stem">
+                <LatexRender :text="form.stem || ''" />
+              </div>
+
+              <!-- 选择题选项 -->
+              <div v-if="form.question_type === 'choice' && form.options.some(o => o.content)" class="paper-options">
+                <div
+                  v-for="opt in form.options.filter(o => o.content)"
+                  :key="opt.label"
+                  class="paper-opt"
+                  :class="{ correct: form.correctAnswer === opt.label }"
+                >
+                  <span class="paper-opt-letter">{{ opt.label }}.</span>
+                  <LatexRender :text="opt.content" :inline="true" />
+                </div>
+              </div>
+
+              <!-- 填空题答案 -->
+              <div v-else-if="form.question_type === 'fill' && form.blanks.some(b => b.answer)" class="paper-blanks">
+                <div v-for="(blank, i) in form.blanks.filter(b => b.answer)" :key="i" class="paper-blank">
+                  <span class="paper-blank-label">第{{ form.blanks.indexOf(blank) + 1 }}空：</span>
+                  <LatexRender :text="blank.answer" :inline="true" />
+                </div>
+              </div>
+
+              <!-- 解答题答案 -->
+              <div v-else-if="form.question_type === 'solution' && form.solutionAnswer" class="paper-solution">
+                <LatexRender :text="form.solutionAnswer" />
+              </div>
+
+              <!-- 答案 & 解析 -->
+              <div class="paper-answer-block">
+                <div class="paper-answer-label">答案</div>
+                <div class="paper-answer-content">
+                  <template v-if="form.question_type === 'choice' && form.correctAnswer">
+                    <span class="paper-correct-answer">{{ form.correctAnswer }}</span>
+                  </template>
+                  <template v-else-if="form.question_type === 'fill' && form.blanks.some(b => b.answer)">
+                    <span v-for="(blank, i) in form.blanks.filter(b => b.answer)" :key="i">
+                      {{ form.blanks.indexOf(blank) + 1 }}. <LatexRender :text="blank.answer" :inline="true" />&nbsp;
+                    </span>
+                  </template>
+                  <template v-else-if="form.question_type === 'solution' && form.solutionAnswer">
+                    <LatexRender :text="form.solutionAnswer" />
+                  </template>
+                  <span v-else class="paper-muted">—</span>
+                </div>
+              </div>
+
+              <div v-if="form.analysis" class="paper-answer-block">
+                <div class="paper-answer-label">解析</div>
+                <div class="paper-answer-content">
+                  <LatexRender :text="form.analysis" />
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -568,6 +601,11 @@ function addOption() {
   const labels = 'ABCDEFGH'
   const i = form.options.length
   if (i < 8) form.options.push({ label: labels[i], content: '' })
+}
+
+// 题干配图上传（占位，后续对接文件上传API）
+function handleImageUpload() {
+  toast.info('图片上传功能即将上线')
 }
 
 // ===== 构建提交数据 =====
@@ -995,7 +1033,7 @@ watch(() => form.question_type, () => {
 .edit-col-inner {
   flex: 1;
   overflow-y: auto;
-  padding: 18px 20px;
+  padding: 14px 16px;
 }
 
 .preview-col {
@@ -1012,12 +1050,12 @@ watch(() => form.question_type, () => {
 .preview-col-inner {
   flex: 1;
   overflow-y: auto;
-  padding: 18px 20px;
+  padding: 16px;
 }
 
 /* ============ 编辑区段 ============ */
 .edit-section {
-  margin-bottom: 18px;
+  margin-bottom: 14px;
 }
 
 .edit-section:last-child {
@@ -1043,13 +1081,13 @@ watch(() => form.question_type, () => {
 
 .edit-textarea {
   width: 100%;
-  padding: 12px 14px;
+  padding: 10px 12px;
   border-radius: var(--radius-sm);
   background: var(--bg-input);
   border: 1px solid var(--border-color);
   color: var(--text-primary);
   font-size: 13px;
-  line-height: 1.7;
+  line-height: 1.6;
   font-family: 'SF Mono', 'Menlo', 'Consolas', 'Courier New', monospace;
   resize: vertical;
   transition: var(--transition-fast);
@@ -1063,53 +1101,70 @@ watch(() => form.question_type, () => {
   background: var(--bg-card);
 }
 
-/* 题目图片占位 */
-.stem-image-area {
-  margin-top: 10px;
+/* 图片上传按钮 */
+.stem-image-bar {
+  margin-top: 6px;
 }
 
-.image-placeholder {
-  display: flex;
-  flex-direction: column;
+.img-upload-btn {
+  display: inline-flex;
   align-items: center;
-  justify-content: center;
-  gap: 6px;
-  aspect-ratio: 16 / 5;
-  border: 2px dashed var(--border-color);
-  border-radius: var(--radius-sm);
+  gap: 5px;
+  padding: 4px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
   background: var(--bg-input);
   color: var(--text-muted);
+  font-size: 12px;
+  font-family: inherit;
   cursor: pointer;
   transition: var(--transition-fast);
 }
 
-.image-placeholder:hover {
+.img-upload-btn:hover {
   border-color: var(--accent);
   color: var(--accent);
   background: var(--accent-light);
 }
 
-.placeholder-icon {
-  opacity: 0.5;
+/* 选择题选项 Grid */
+.choice-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
 }
 
-.placeholder-text {
-  font-size: 12px;
-  font-weight: 500;
+/* 填空题紧凑布局 */
+.blank-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: flex-end;
+}
+
+.blank-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.blank-input {
+  width: 100px !important;
+  flex: none !important;
 }
 
 /* 选项行 */
 .opt-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
+  gap: 6px;
+  margin-bottom: 6px;
 }
 
 .opt-input {
   flex: 1;
   min-width: 0;
-  padding: 8px 12px;
+  padding: 6px 10px;
   border-radius: 8px;
   background: var(--bg-input);
   border: 1px solid var(--border-color);
@@ -1207,6 +1262,12 @@ watch(() => form.question_type, () => {
   color: var(--accent);
   border-style: solid;
   background: var(--accent-light);
+}
+
+.add-btn-sm {
+  padding: 4px 10px;
+  font-size: 12px;
+  gap: 4px;
 }
 
 /* Radio */
@@ -1330,44 +1391,181 @@ watch(() => form.question_type, () => {
   margin-top: 6px;
 }
 
-/* ============ 预览区段 ============ */
-.preview-section {
-  margin-bottom: 22px;
+/* ============ 试卷化预览 ============ */
+
+/* 骨架屏 */
+.preview-skeleton {
+  padding: 32px 28px;
 }
 
-.preview-section:last-child {
-  margin-bottom: 0;
+.skeleton-line {
+  height: 14px;
+  border-radius: 6px;
+  background: linear-gradient(90deg, var(--bg-input) 25%, var(--bg-hover) 50%, var(--bg-input) 75%);
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.5s ease-in-out infinite;
+  margin-bottom: 10px;
 }
 
-.preview-box {
+.skeleton-title { width: 35%; height: 20px; margin-bottom: 20px; }
+.skeleton-text { width: 100%; }
+.skeleton-short { width: 70%; }
+.skeleton-opt { width: 45%; height: 16px; }
+.skeleton-answer { width: 30%; height: 16px; }
+.skeleton-gap { height: 16px; }
+
+@keyframes skeleton-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* 试卷卡片 */
+.paper-card {
+  background: #ffffff;
+  border-radius: 12px;
+  padding: 24px 28px;
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.04),
+    0 8px 32px rgba(0, 0, 0, 0.06);
+  border: 1px solid rgba(0, 0, 0, 0.04);
+}
+
+[data-theme='dark'] .paper-card {
+  background: #1c1c1e;
+  border-color: rgba(255, 255, 255, 0.06);
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.2),
+    0 8px 32px rgba(0, 0, 0, 0.3);
+}
+
+.paper-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+[data-theme='dark'] .paper-card-header {
+  border-bottom-color: rgba(255, 255, 255, 0.06);
+}
+
+.paper-type-badge {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.paper-difficulty {
+  display: flex;
+  gap: 1px;
+}
+
+.paper-star {
+  color: #d1d1d6;
+  transition: color 0.2s;
+}
+
+.paper-star.active {
+  color: #ff9500;
+}
+
+.paper-stem {
   font-size: 14px;
   line-height: 1.8;
-  min-height: 40px;
-  color: var(--text-primary);
+  color: #1d1d1f;
+  margin-bottom: 14px;
   word-break: break-word;
 }
 
-.preview-opt {
+[data-theme='dark'] .paper-stem {
+  color: #f5f5f7;
+}
+
+.paper-options {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 24px;
+  margin-bottom: 14px;
+}
+
+.paper-opt {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  margin-bottom: 6px;
-  border-radius: 8px;
-  border: 1px solid var(--border-color);
-  background: var(--bg-card);
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: #3a3a3c;
+  padding: 4px 0;
+}
+
+.paper-opt.correct {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+[data-theme='dark'] .paper-opt {
+  color: #d1d1d6;
+}
+
+.paper-opt-letter {
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.paper-blanks,
+.paper-solution {
+  margin-bottom: 14px;
   font-size: 14px;
+  line-height: 1.7;
 }
 
-.preview-opt.correct {
-  border-color: var(--success);
-  background: var(--success-light);
+.paper-blank {
+  display: inline;
+  margin-right: 12px;
 }
 
-.opt-letter {
-  font-family: 'SF Mono', 'Menlo', monospace;
-  font-weight: 650;
+.paper-blank-label {
+  font-weight: 600;
   color: var(--text-secondary);
+}
+
+/* 答案/解析区块 */
+.paper-answer-block {
+  background: #f5f5f7;
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-top: 10px;
+}
+
+[data-theme='dark'] .paper-answer-block {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.paper-answer-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 4px;
+}
+
+.paper-answer-content {
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--text-primary);
+}
+
+.paper-correct-answer {
+  font-weight: 700;
+  font-size: 16px;
+  color: var(--accent);
+}
+
+.paper-muted {
+  color: var(--text-muted);
 }
 
 /* 知识点显示框（只读，来自左侧树选中） */
