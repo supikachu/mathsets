@@ -98,7 +98,7 @@
               <div class="section-label"><AppIcon name="book-open" :size="16" /> <span>题干</span><span class="required">*</span></div>
               <textarea v-model="form.stem" rows="4" class="edit-textarea" placeholder="输入题目内容，LaTeX 公式用 $...$ 包裹。例如：已知集合 $A = \{x | x^2 - 2x = 0\}$..."></textarea>
               <button type="button" class="img-upload-btn" @click="handleImageUpload">
-                <AppIcon name="image" :size="14" />
+                <AppIcon name="paperclip" :size="13" />
                 <span>上传题干配图</span>
               </button>
             </section>
@@ -1098,26 +1098,26 @@ watch(() => form.question_type, () => {
   background: var(--bg-card);
 }
 
-/* 图片上传按钮 - 虚线样式紧贴题干 */
+/* 图片上传按钮 - 虚线轻量短按钮紧贴题干 */
 .img-upload-btn {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  margin-top: 6px;
-  padding: 4px 12px;
+  gap: 4px;
+  margin-top: 4px;
+  padding: 2px 10px;
   border: 1px dashed var(--border-strong);
-  border-radius: 6px;
+  border-radius: 5px;
   background: transparent;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: 11px;
   font-family: inherit;
   cursor: pointer;
   transition: var(--transition-fast);
+  line-height: 1.6;
 }
 
 .img-upload-btn:hover {
   border-color: var(--accent);
-  border-style: dashed;
   color: var(--accent);
   background: var(--accent-light);
 }
@@ -1152,14 +1152,14 @@ watch(() => form.question_type, () => {
 .opt-row {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   margin-bottom: 6px;
 }
 
 .opt-input {
   flex: 1;
   min-width: 0;
-  padding: 6px 10px;
+  padding: 6px 30px 6px 10px;
   border-radius: 8px;
   background: var(--bg-input);
   border: 1px solid var(--border-color);
@@ -1389,9 +1389,20 @@ watch(() => form.question_type, () => {
 
 /* ============ 试卷化预览 ============ */
 
-/* 骨架屏 */
+/* 骨架屏 - 同试卷卡片样式 */
 .preview-skeleton {
+  background: #ffffff;
+  border-radius: 8px;
   padding: 32px 28px;
+  margin: 20px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.06);
+  border: 1px solid rgba(0, 0, 0, 0.04);
+}
+
+[data-theme='dark'] .preview-skeleton {
+  background: #1c1c1e;
+  border-color: rgba(255, 255, 255, 0.06);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
 }
 
 .skeleton-line {
@@ -1420,19 +1431,15 @@ watch(() => form.question_type, () => {
   background: #ffffff;
   border-radius: 8px;
   padding: 24px 28px;
-  margin: 16px;
-  box-shadow:
-    0 1px 4px rgba(0, 0, 0, 0.05),
-    0 4px 16px rgba(0, 0, 0, 0.04);
+  margin: 20px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.06);
   border: 1px solid rgba(0, 0, 0, 0.04);
 }
 
 [data-theme='dark'] .paper-card {
   background: #1c1c1e;
   border-color: rgba(255, 255, 255, 0.06);
-  box-shadow:
-    0 1px 4px rgba(0, 0, 0, 0.2),
-    0 4px 16px rgba(0, 0, 0, 0.2);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
 }
 
 .paper-card-header {
