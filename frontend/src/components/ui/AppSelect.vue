@@ -148,6 +148,8 @@ onBeforeUnmount(() => {
   cursor: pointer;
   transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
   text-align: left;
+  box-sizing: border-box;
+  min-height: 36px;
 }
 
 .app-select-trigger:hover:not(.disabled) {

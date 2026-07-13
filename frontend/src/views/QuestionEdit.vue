@@ -885,7 +885,7 @@ watch(() => form.question_type, () => {
   display: flex;
   align-items: center;
   gap: 2px;
-  height: 33px;
+  min-height: 36px;
 }
 
 .star {
@@ -909,7 +909,7 @@ watch(() => form.question_type, () => {
 /* 难度系数输入 */
 .diff-coef-input {
   width: 48px;
-  padding: 3px 6px;
+  padding: 7px 6px;
   border: 1px solid var(--border-color);
   border-radius: 6px;
   background: var(--bg-input);
@@ -918,6 +918,7 @@ watch(() => form.question_type, () => {
   text-align: center;
   margin-left: 6px;
   font-family: inherit;
+  box-sizing: border-box;
 }
 
 .diff-coef-input:focus {
@@ -962,7 +963,7 @@ watch(() => form.question_type, () => {
 .num-input,
 .text-input {
   width: 100%;
-  padding: 8px 12px;
+  padding: 7px 12px;
   border-radius: 8px;
   background: var(--bg-input);
   border: 1px solid var(--border-color);
@@ -972,6 +973,7 @@ watch(() => form.question_type, () => {
   transition: var(--transition-fast);
   font-family: inherit;
   box-sizing: border-box;
+  min-height: 36px;
 }
 
 .num-input:focus,
@@ -998,13 +1000,15 @@ watch(() => form.question_type, () => {
   justify-content: center;
   gap: 6px;
   width: 100%;
-  padding: 8px 12px;
+  padding: 7px 12px;
   border-radius: 8px;
   background: var(--bg-input);
   border: 1px solid var(--border-color);
   color: var(--text-secondary);
   font-size: 13px;
   cursor: pointer;
+  box-sizing: border-box;
+  min-height: 36px;
   transition: var(--transition-fast);
   font-family: inherit;
   box-sizing: border-box;
@@ -1624,7 +1628,7 @@ watch(() => form.question_type, () => {
   align-items: center;
   gap: 6px;
   width: 100%;
-  padding: 8px 12px;
+  padding: 7px 12px;
   border-radius: 8px;
   background: var(--bg-input);
   border: 1px solid var(--border-color);
