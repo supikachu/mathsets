@@ -70,9 +70,17 @@
         </div>
         <div class="meta-field">
           <label class="field-label">知识点</label>
-          <button type="button" class="kp-btn" @click="showKpDialog = true">
+          <div class="kp-display">
             <AppIcon name="tag" :size="15" />
-            <span>{{ form.knowledgePointIds.length ? `已选 ${form.knowledgePointIds.length} 个` : '添加标签' }}</span>
+            <span v-if="selectedKpName">{{ selectedKpName }}</span>
+            <span v-else class="kp-empty">在左侧知识树中选择</span>
+          </div>
+        </div>
+        <div class="meta-field">
+          <label class="field-label">标签</label>
+          <button type="button" class="kp-btn" @click="showTagDialog = true">
+            <AppIcon name="bookmark" :size="15" />
+            <span>{{ form.tags.length ? `已选 ${form.tags.length} 个` : '添加标签' }}</span>
           </button>
         </div>
       </div>
@@ -233,63 +241,27 @@
       <div class="loading-hint">版本历史功能即将上线</div>
     </AppModal>
 
-    <!-- 知识点选择弹窗 -->
-    <AppModal v-model="showKpDialog" title="选择知识点">
-      <div class="kp-dialog-body">
-        <!-- 学段切换 -->
-        <div class="kp-dialog-level">
-          <button
-            v-for="lv in [{ v: 'junior', l: '初中' }, { v: 'senior', l: '高中' }]"
-            :key="lv.v"
-            class="kp-level-btn"
-            :class="{ active: kpDialogLevel === lv.v }"
-            @click="kpDialogLevel = lv.v as 'junior' | 'senior'"
-          >
-            {{ lv.l }}
-          </button>
-        </div>
-        <!-- 知识点树 -->
-        <div class="kp-dialog-tree">
-          <template v-for="node in filteredKpTree" :key="node.id">
-            <label class="checkbox-label kp-root">
-              <input
-                type="checkbox"
-                :value="node.id"
-                :checked="form.knowledgePointIds.includes(node.id)"
-                @change="toggleKp(node.id)"
-              />
-              <b>{{ node.name }}</b>
-            </label>
-            <div v-if="node.children?.length" class="kp-dialog-children">
-              <template v-for="c in node.children" :key="c.id">
-                <label class="checkbox-label kp-child">
-                  <input
-                    type="checkbox"
-                    :value="c.id"
-                    :checked="form.knowledgePointIds.includes(c.id)"
-                    @change="toggleKp(c.id)"
-                  />
-                  {{ c.name }}
-                </label>
-                <div v-if="c.children?.length" class="kp-dialog-grandchildren">
-                  <label v-for="gc in c.children" :key="gc.id" class="checkbox-label kp-grandchild">
-                    <input
-                      type="checkbox"
-                      :value="gc.id"
-                      :checked="form.knowledgePointIds.includes(gc.id)"
-                      @change="toggleKp(gc.id)"
-                    />
-                    {{ gc.name }}
-                  </label>
-                </div>
-              </template>
-            </div>
-          </template>
-          <AppEmpty v-if="!kpLoading && filteredKpTree.length === 0" description="暂无知识点" />
+    <!-- 标签选择弹窗 -->
+    <AppModal v-model="showTagDialog" title="选择标签">
+      <div class="tag-dialog-body">
+        <p class="tag-dialog-hint">选择题目涉及的解题方法与数学思想标签</p>
+        <div v-for="cat in tagCategories" :key="cat.name" class="tag-category">
+          <div class="tag-category-title">{{ cat.name }}</div>
+          <div class="tag-chips">
+            <button
+              v-for="tag in cat.tags"
+              :key="tag"
+              type="button"
+              class="tag-chip"
+              :class="{ active: form.tags.includes(tag) }"
+              @click="toggleTag(tag)"
+            >{{ tag }}</button>
+          </div>
         </div>
       </div>
       <div class="form-actions">
-        <AppButton variant="primary" @click="showKpDialog = false">完成</AppButton>
+        <AppButton variant="ghost" @click="showTagDialog = false">取消</AppButton>
+        <AppButton variant="primary" @click="showTagDialog = false">完成（{{ form.tags.length }}）</AppButton>
       </div>
     </AppModal>
 
@@ -325,12 +297,14 @@ import { AppButton, AppBadge, AppModal, AppConfirm, AppEmpty, AppSelect, AppIcon
 import { useToast } from '@/composables/useToast'
 import { useSpaceStore } from '@/stores/space'
 import { useAuthStore } from '@/stores/auth'
+import { useSelectedKp } from '@/composables/useSelectedKp'
 
 const route = useRoute()
 const router = useRouter()
 const toast = useToast()
 const space = useSpaceStore()
 const auth = useAuthStore()
+const { selectedKpId, selectedKpName } = useSelectedKp()
 const isNew = route.path.endsWith('/new')
 const loading = ref(false)
 const saving = ref(false)
@@ -339,27 +313,40 @@ const isLoading = ref(false)
 const kpLoading = ref(false)
 const kpTree = ref<KnowledgePoint[]>([])
 const showHistory = ref(false)
-const showKpDialog = ref(false)
-const kpDialogLevel = ref<'junior' | 'senior'>('junior')
+const showTagDialog = ref(false)
 const grades = ['初一', '初二', '初三', '高一', '高二', '高三']
 
-// 知识点弹窗中按学段过滤的树
-function findNodeByName(nodes: KnowledgePoint[], name: string): KnowledgePoint | null {
-  for (const node of nodes) {
-    if (node.name === name) return node
-    if (node.children?.length) {
-      const found = findNodeByName(node.children, name)
-      if (found) return found
-    }
-  }
-  return null
-}
+// 已选知识点名称映射（用于编辑题目时回显已关联的知识点）
+const kpMap = ref<Record<string, string>>({})
 
-const filteredKpTree = computed(() => {
-  const target = kpDialogLevel.value === 'junior' ? '初中' : '高中'
-  const lvNode = findNodeByName(kpTree.value, target)
-  return lvNode?.children ?? kpTree.value
-})
+// 标签分类数据：解题方法与数学思想
+const tagCategories = [
+  {
+    name: '解题方法',
+    tags: ['反证法', '数学归纳法', '枚举法', '构造法', '换元法', '配方法', '待定系数法', '面积法', '定义法', '综合法', '分析法'],
+  },
+  {
+    name: '数学思想',
+    tags: ['数形结合', '分类讨论', '化归与转化', '函数与方程', '整体思想', '极限思想', '模型思想', '统计思想'],
+  },
+  {
+    name: '常见技巧',
+    tags: ['极值点偏移', '隐零点', '零点分段', '放缩法', '参变分离', '齐次化', '设而不求', '韦达定理', '判别式法', '单调性分析'],
+  },
+  {
+    name: '分析方法',
+    tags: ['逆向分析', '正向推导', '穷举法', '图形分析', '代数变形', '三角代换', '向量法', '坐标法'],
+  },
+]
+
+function toggleTag(tag: string) {
+  const idx = form.tags.indexOf(tag)
+  if (idx >= 0) {
+    form.tags.splice(idx, 1)
+  } else {
+    form.tags.push(tag)
+  }
+}
 
 const gradeOptions = grades.map((g) => ({ label: g, value: g }))
 const sourceOptions = [
@@ -433,22 +420,13 @@ function stopResize() {
   document.removeEventListener('mouseup', stopResize)
 }
 
-// 已选知识点名称映射
-const kpMap = ref<Record<string, string>>({})
-const selectedKps = computed(() =>
-  form.knowledgePointIds.map(id => ({ id, name: kpMap.value[id] || id.substring(0, 8) }))
-)
-function removeKp(id: string) {
-  form.knowledgePointIds = form.knowledgePointIds.filter(k => k !== id)
-}
-function toggleKp(id: string) {
-  const idx = form.knowledgePointIds.indexOf(id)
-  if (idx >= 0) {
-    form.knowledgePointIds.splice(idx, 1)
-  } else {
-    form.knowledgePointIds.push(id)
+// 已选知识点（来自左侧知识树，非表单内选择）
+const selectedKps = computed(() => {
+  if (selectedKpId.value && selectedKpName.value) {
+    return [{ id: selectedKpId.value, name: selectedKpName.value }]
   }
-}
+  return []
+})
 
 // 难度映射
 const diffMap: Record<string, number> = { easy: 1, medium: 2, hard: 3 }
@@ -480,6 +458,7 @@ const form = reactive({
   gradingSteps: [] as { label: string; points: number; description: string }[],
   judgmentCorrect: true,
   knowledgePointIds: [] as string[],
+  tags: [] as string[],
   reviewer: '' as string,
   reviewer_ids: [] as string[],
   internal_note: '',
@@ -516,6 +495,8 @@ function addOption() {
 
 // ===== 构建提交数据 =====
 function buildPayload() {
+  // 知识点来自左侧知识树选中项
+  const kpIds = selectedKpId.value ? [selectedKpId.value] : (form.knowledgePointIds.length > 0 ? form.knowledgePointIds : [])
   const payload: any = {
     stem: form.stem,
     question_type: form.question_type,
@@ -525,7 +506,8 @@ function buildPayload() {
     semester: form.semester || null,
     source: form.source,
     analysis: form.analysis || null,
-    knowledge_point_ids: form.knowledgePointIds.length > 0 ? form.knowledgePointIds : null,
+    knowledge_point_ids: kpIds.length > 0 ? kpIds : null,
+    tags: form.tags.length > 0 ? form.tags : null,
   }
   switch (form.question_type) {
     case 'choice':
@@ -607,7 +589,7 @@ function doRestoreDraft() {
   if (!pendingDraft) return
   const fields = ['stem', 'question_type', 'difficulty', 'default_score', 'grade', 'semester',
     'source', 'analysis', 'options', 'correctAnswer', 'blanks', 'solutionAnswer',
-    'gradingSteps', 'judgmentCorrect', 'knowledgePointIds', 'reviewer', 'reviewer_ids', 'internal_note']
+    'gradingSteps', 'judgmentCorrect', 'knowledgePointIds', 'tags', 'reviewer', 'reviewer_ids', 'internal_note']
   for (const f of fields) {
     if (pendingDraft[f] !== undefined) (form as any)[f] = pendingDraft[f]
   }
@@ -629,10 +611,6 @@ async function loadKpTree() {
   kpLoading.value = true
   try {
     const res = await kpApi.tree(); kpTree.value = res.data
-    function walk(nodes: KnowledgePoint[]) {
-      for (const n of nodes) { kpMap.value[n.id] = n.name; if (n.children) walk(n.children) }
-    }
-    walk(res.data)
   } catch { /* handled */ }
   finally { kpLoading.value = false }
 }
@@ -663,6 +641,7 @@ async function loadQuestion() {
     form.status = d.status
     form.version = d.version
     form.knowledgePointIds = d.knowledge_points?.map(k => k.id) || []
+    form.tags = (d as any).tags || []
     form.correctAnswer = ''
     form.blanks = [{ position: 1, answer: '' }]
     form.solutionAnswer = ''
@@ -1329,98 +1308,80 @@ watch(() => form.question_type, () => {
   color: var(--text-secondary);
 }
 
-/* 知识点弹窗 */
-.kp-dialog-body {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.kp-dialog-level {
-  display: inline-flex;
-  background: var(--bg-input);
-  border: 1px solid var(--border-color);
-  border-radius: 9px;
-  padding: 2px;
-  gap: 2px;
-  align-self: flex-start;
-}
-
-.kp-level-btn {
-  padding: 5px 16px;
-  border: none;
-  background: transparent;
-  border-radius: 7px;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-secondary);
-  cursor: pointer;
-  transition: var(--transition-fast);
-}
-
-.kp-level-btn:hover:not(.active) {
-  color: var(--text-primary);
-}
-
-.kp-level-btn.active {
-  background: var(--bg-elevated, var(--bg-card));
-  color: var(--text-primary);
-  font-weight: 600;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
-}
-
-[data-theme='dark'] .kp-level-btn.active {
-  background: #3a3a3c;
-}
-
-.kp-dialog-tree {
-  max-height: 360px;
-  overflow-y: auto;
-  padding: 4px 0;
-}
-
-.kp-dialog-children {
-  margin-left: 24px;
-}
-
-.kp-dialog-grandchildren {
-  margin-left: 22px;
-}
-
-.checkbox-label {
+/* 知识点显示框（只读，来自左侧树选中） */
+.kp-display {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 14px;
-  padding: 5px 0;
-  cursor: pointer;
-  transition: var(--transition-fast);
-  border-radius: 6px;
-}
-
-.checkbox-label:hover {
-  background: var(--bg-hover);
-}
-
-.checkbox-label.kp-root {
-  font-size: 15px;
-  padding: 6px 8px;
-}
-
-.checkbox-label.kp-child {
-  padding: 5px 8px;
+  width: 100%;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
   color: var(--text-secondary);
+  font-size: 13px;
+  box-sizing: border-box;
+  min-height: 36px;
 }
 
-.checkbox-label.kp-grandchild {
-  padding: 4px 8px;
+.kp-display .kp-empty {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* 标签弹窗 */
+.tag-dialog-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.tag-dialog-hint {
   font-size: 13px;
   color: var(--text-muted);
+  margin: 0 0 4px 0;
 }
 
-.checkbox-label input {
-  margin: 0;
-  accent-color: var(--accent);
+.tag-category-title {
+  font-size: 12px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+
+.tag-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tag-chip {
+  padding: 6px 14px;
+  border-radius: 18px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: var(--transition-fast);
+  font-family: inherit;
+}
+
+.tag-chip:hover:not(.active) {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-light);
+}
+
+.tag-chip.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 122, 255, 0.3);
 }
 
 .form-actions {
