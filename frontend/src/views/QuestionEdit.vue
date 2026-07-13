@@ -518,13 +518,12 @@ const selectedKps = computed(() => {
 })
 
 // 难度映射
-const diffMap: Record<string, number> = { easy: 1, medium: 3, hard: 5 }
-const starMap: Record<number, string> = { 1: 'easy', 2: 'easy', 3: 'medium', 4: 'hard', 5: 'hard' }
 const diffLabels = ['简单', '较易', '中等', '较难', '困难']
+const _diffStars = ref(3)
 const difficultyStars = computed({
-  get: () => diffMap[form.difficulty] || 3,
+  get: () => _diffStars.value,
   set: (v: number) => {
-    form.difficulty = starMap[v] || 'medium'
+    _diffStars.value = v
     // 5星难度系数: 1→0.9, 2→0.75, 3→0.55, 4→0.35, 5→0.2
     form.difficulty_coefficient = [0.9, 0.75, 0.55, 0.35, 0.2][v - 1] ?? 0.55
   },
