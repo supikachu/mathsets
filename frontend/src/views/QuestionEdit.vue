@@ -97,7 +97,7 @@
             <section class="edit-section">
               <div class="section-label"><AppIcon name="book-open" :size="16" /> <span>题干</span><span class="required">*</span></div>
               <div class="stem-wrap">
-                <textarea v-model="form.stem" rows="4" class="edit-textarea" placeholder="输入题目内容，LaTeX 公式用 $...$ 包裹。例如：已知集合 $A = \{x | x^2 - 2x = 0\}$..."></textarea>
+                <textarea v-model="form.stem" rows="4" class="edit-textarea stem-textarea" placeholder="输入题目内容，LaTeX 公式用 $...$ 包裹。例如：已知集合 $A = \{x | x^2 - 2x = 0\}$..."></textarea>
                 <button type="button" class="img-upload-btn" @click="handleImageUpload">
                   <AppIcon name="paperclip" :size="13" />
                   <span>上传配图</span>
@@ -146,7 +146,7 @@
             <!-- 解析 -->
             <section class="edit-section">
               <div class="section-label"><AppIcon name="lightbulb" :size="16" /> <span>解析</span></div>
-              <textarea v-model="form.analysis" rows="3" class="edit-textarea" placeholder="解题思路与易错点，支持 $...$ LaTeX"></textarea>
+              <textarea v-model="form.analysis" rows="6" class="edit-textarea analysis-textarea" placeholder="解题思路与易错点，支持 $...$ LaTeX"></textarea>
             </section>
 
             <!-- 高级设置（默认折叠） -->
@@ -1103,13 +1103,23 @@ watch(() => form.question_type, () => {
   background: var(--bg-card);
 }
 
+/* 题干输入框 - 最低高度120px */
+.stem-textarea {
+  min-height: 120px;
+}
+
+/* 解析输入框 - 最低高度160px */
+.analysis-textarea {
+  min-height: 160px;
+}
+
 /* 题干容器 - 图片按钮挂载在右下角 */
 .stem-wrap {
   position: relative;
 }
 
 .stem-wrap .edit-textarea {
-  padding-bottom: 28px;
+  padding-bottom: 35px;
 }
 
 /* 图片上传按钮 - 挂载在题干右下角内部 */
@@ -1246,6 +1256,7 @@ watch(() => form.question_type, () => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  align-self: center;
   width: 30px;
   height: 30px;
   flex-shrink: 0;
