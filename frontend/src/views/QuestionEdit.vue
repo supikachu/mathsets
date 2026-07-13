@@ -21,49 +21,33 @@
         </div>
       </header>
 
-      <!-- ==================== 维度2: 题型 + 子题型 + 维度3: 难度系数 ==================== -->
-      <div class="type-row">
-        <div class="segmented">
-          <button
-            v-for="t in typeOptions"
-            :key="t.value"
-            type="button"
-            class="segmented-item"
-            :class="{ active: form.question_type === t.value }"
-            @click="form.question_type = t.value"
-          >{{ t.label }}</button>
-        </div>
-        <AppSelect
-          v-if="subTypeOptions.length > 0"
-          v-model="form.sub_type"
-          :options="subTypeOptions"
-          placeholder="子题型"
-          class="subtype-select"
-        />
-        <div class="difficulty">
-          <button
-            v-for="n in 3"
-            :key="n"
-            type="button"
-            class="star"
-            :class="{ active: difficultyStars >= n }"
-            @click="difficultyStars = n"
-          ><AppIcon name="star" :size="18" /></button>
-          <span class="star-text">{{ ['简单', '中等', '困难'][difficultyStars - 1] || '' }}</span>
-          <input
-            type="number"
-            v-model.number="form.difficulty_coefficient"
-            min="0"
-            max="1"
-            step="0.05"
-            class="diff-coef-input"
-          />
-          <span class="diff-coef-label">难度系数</span>
-        </div>
-      </div>
-
-      <!-- ==================== 维度1+4+5: 所有属性同一行 ==================== -->
+      <!-- ==================== 所有属性同一行 ==================== -->
       <div class="meta-row">
+        <div class="meta-field meta-field-type">
+          <label class="field-label">题型</label>
+          <AppSelect v-model="form.question_type" :options="typeOptions" />
+        </div>
+        <div class="meta-field meta-field-diff">
+          <label class="field-label">难度</label>
+          <div class="diff-row">
+            <button
+              v-for="n in 5"
+              :key="n"
+              type="button"
+              class="star"
+              :class="{ active: difficultyStars >= n }"
+              @click="difficultyStars = n"
+            ><AppIcon name="star" :size="15" /></button>
+            <input
+              type="number"
+              v-model.number="form.difficulty_coefficient"
+              min="0"
+              max="1"
+              step="0.05"
+              class="diff-coef-input"
+            />
+          </div>
+        </div>
         <div class="meta-field">
           <label class="field-label">学年</label>
           <AppSelect v-model="form.academic_year" :options="academicYearOptions" clearable />
@@ -397,14 +381,7 @@ function toggleLiteracy(lit: string) {
 
 const gradeOptions = grades.map((g) => ({ label: g, value: g }))
 
-// 子题型选项（根据大题型动态变化）
-const subTypeMap: Record<string, { label: string; value: string }[]> = {
-  choice: [{ label: '单选题', value: 'single' }, { label: '多选题', value: 'multiple' }],
-  fill: [{ label: '单空题', value: 'single' }, { label: '多空题', value: 'multiple' }],
-  solution: [{ label: '证明题', value: 'proof' }, { label: '计算题', value: 'calc' }, { label: '应用题', value: 'applied' }, { label: '综合题', value: 'comprehensive' }],
-  judgment: [],
-}
-const subTypeOptions = computed(() => subTypeMap[form.question_type] ?? [])
+// 子题型已移除
 
 // 学年选项
 const currentYear = new Date().getFullYear()
@@ -449,7 +426,6 @@ const typeOptions = [
   { label: '选择题', value: 'choice' },
   { label: '填空题', value: 'fill' },
   { label: '解答题', value: 'solution' },
-  { label: '判断题', value: 'judgment' },
 ]
 const semesterOptions = [
   { label: '上学期', value: '上学期' },
@@ -518,20 +494,16 @@ const selectedKps = computed(() => {
 })
 
 // 难度映射
-const diffMap: Record<string, number> = { easy: 1, medium: 2, hard: 3 }
-const starMap: Record<number, string> = { 1: 'easy', 2: 'medium', 3: 'hard' }
+const diffMap: Record<string, number> = { easy: 1, medium: 3, hard: 5 }
+const starMap: Record<number, string> = { 1: 'easy', 2: 'easy', 3: 'medium', 4: 'hard', 5: 'hard' }
+const diffLabels = ['简单', '较易', '中等', '较难', '困难']
 const difficultyStars = computed({
-  get: () => diffMap[form.difficulty] || 2,
+  get: () => diffMap[form.difficulty] || 3,
   set: (v: number) => {
     form.difficulty = starMap[v] || 'medium'
-    // 联动难度系数：简单→0.85, 中等→0.55, 困难→0.3
-    form.difficulty_coefficient = v === 1 ? 0.85 : v === 2 ? 0.55 : 0.3
+    // 5星难度系数: 1→0.9, 2→0.75, 3→0.55, 4→0.35, 5→0.2
+    form.difficulty_coefficient = [0.9, 0.75, 0.55, 0.35, 0.2][v - 1] ?? 0.55
   },
-})
-
-// 切换题型时重置子题型
-watch(() => form.question_type, () => {
-  form.sub_type = ''
 })
 
 const form = reactive({
@@ -701,7 +673,7 @@ function doRestoreDraft() {
   if (!pendingDraft) return
   const fields = ['stem', 'question_type', 'difficulty', 'default_score', 'grade', 'semester',
     'source', 'analysis', 'options', 'correctAnswer', 'blanks', 'solutionAnswer',
-    'gradingSteps', 'judgmentCorrect', 'knowledgePointIds', 'tags', 'literacy_tags', 'sub_type', 'difficulty_coefficient', 'academic_year', 'grade_semester', 'region', 'exam_type', 'reviewer', 'reviewer_ids', 'internal_note']
+    'gradingSteps', 'judgmentCorrect', 'knowledgePointIds', 'tags', 'literacy_tags', 'difficulty_coefficient', 'academic_year', 'grade_semester', 'region', 'exam_type', 'reviewer', 'reviewer_ids', 'internal_note']
   for (const f of fields) {
     if (pendingDraft[f] !== undefined) (form as any)[f] = pendingDraft[f]
   }
@@ -855,52 +827,22 @@ watch(() => form.question_type, () => {
 }
 
 /* ============ 题型分段控件 + 难度 ============ */
-.type-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+/* 题型字段宽度 */
+.meta-field-type {
+  min-width: 90px;
   flex-shrink: 0;
-  gap: 16px;
 }
 
-.segmented {
-  display: inline-flex;
-  background: var(--bg-input);
-  border-radius: var(--radius-sm);
-  padding: 3px;
+/* 难度字段 */
+.meta-field-diff {
+  flex-shrink: 0;
+}
+
+.diff-row {
+  display: flex;
+  align-items: center;
   gap: 2px;
-  border: 1px solid var(--border-color);
-}
-
-.segmented-item {
-  border: none;
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 13px;
-  font-weight: 550;
-  padding: 6px 18px;
-  border-radius: 8px;
-  cursor: pointer;
-  transition: var(--transition-fast);
-  white-space: nowrap;
-}
-
-.segmented-item:hover:not(.active) {
-  color: var(--text-primary);
-}
-
-.segmented-item.active {
-  background: var(--bg-elevated);
-  color: var(--text-primary);
-  box-shadow: var(--shadow-xs);
-  font-weight: 600;
-}
-
-.difficulty {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex-shrink: 0;
+  height: 33px;
 }
 
 .star {
@@ -921,21 +863,9 @@ watch(() => form.question_type, () => {
   color: var(--star-color);
 }
 
-.star-text {
-  font-size: 12px;
-  color: var(--text-muted);
-  margin-left: 8px;
-  font-weight: 500;
-}
-
-/* 子题型选择器 */
-.subtype-select {
-  width: 120px;
-}
-
 /* 难度系数输入 */
 .diff-coef-input {
-  width: 56px;
+  width: 48px;
   padding: 3px 6px;
   border: 1px solid var(--border-color);
   border-radius: 6px;
@@ -943,7 +873,7 @@ watch(() => form.question_type, () => {
   color: var(--text-primary);
   font-size: 12px;
   text-align: center;
-  margin-left: 10px;
+  margin-left: 6px;
   font-family: inherit;
 }
 
@@ -951,13 +881,6 @@ watch(() => form.question_type, () => {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-light);
-}
-
-.diff-coef-label {
-  font-size: 11px;
-  color: var(--text-muted);
-  margin-left: 4px;
-  white-space: nowrap;
 }
 
 /* ============ 元数据工具栏 ============ */
@@ -1559,16 +1482,8 @@ watch(() => form.question_type, () => {
   .edit-page {
     padding: 12px;
   }
-  .type-row {
-    flex-direction: column;
-    align-items: stretch;
-  }
-  .segmented {
-    justify-content: space-between;
-  }
-  .segmented-item {
-    flex: 1;
-    text-align: center;
+  .meta-row {
+    flex-wrap: wrap;
   }
   .form-grid-2 {
     grid-template-columns: 1fr;

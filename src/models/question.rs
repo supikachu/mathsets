@@ -14,7 +14,6 @@ pub enum QuestionType {
     Choice,
     Fill,
     Solution,
-    Judgment,
 }
 
 /// 难度
