@@ -38,14 +38,6 @@
               :class="{ active: difficultyStars >= n }"
               @click="difficultyStars = n"
             ><AppIcon name="star" :size="15" /></button>
-            <input
-              type="number"
-              v-model.number="form.difficulty_coefficient"
-              min="0"
-              max="1"
-              step="0.05"
-              class="diff-coef-input"
-            />
           </div>
         </div>
         <div class="meta-field">
