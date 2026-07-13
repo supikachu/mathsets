@@ -97,7 +97,7 @@
             <section class="edit-section">
               <div class="section-label"><AppIcon name="book-open" :size="16" /> <span>题干</span><span class="required">*</span></div>
               <div class="stem-wrap">
-                <textarea v-model="form.stem" rows="4" class="edit-textarea stem-textarea" placeholder="输入题目内容，LaTeX 公式用 $...$ 包裹。例如：已知集合 $A = \{x | x^2 - 2x = 0\}$..."></textarea>
+                <textarea v-model="form.stem" rows="4" class="edit-textarea stem-textarea" placeholder="输入题目内容，LaTeX 公式用 $...$ 包裹。例如：已知集合 $A = \{x | x^2 - 2x = 0\}$..." @input="autoResize"></textarea>
                 <button type="button" class="img-upload-btn" @click="handleImageUpload">
                   <AppIcon name="paperclip" :size="13" />
                   <span>上传配图</span>
@@ -146,7 +146,7 @@
             <!-- 解析 -->
             <section class="edit-section">
               <div class="section-label"><AppIcon name="lightbulb" :size="16" /> <span>解析</span></div>
-              <textarea v-model="form.analysis" rows="6" class="edit-textarea analysis-textarea" placeholder="解题思路与易错点，支持 $...$ LaTeX"></textarea>
+              <textarea v-model="form.analysis" rows="6" class="edit-textarea analysis-textarea" placeholder="解题思路与易错点，支持 $...$ LaTeX" @input="autoResize"></textarea>
             </section>
 
             <!-- 高级设置（默认折叠） -->
@@ -605,6 +605,13 @@ function addOption() {
 // 题干配图上传（占位，后续对接文件上传API）
 function handleImageUpload() {
   toast.info('图片上传功能即将上线')
+}
+
+// textarea 自适应高度
+function autoResize(e: Event) {
+  const el = e.target as HTMLTextAreaElement
+  el.style.height = 'auto'
+  el.style.height = el.scrollHeight + 'px'
 }
 
 // ===== 构建提交数据 =====
@@ -1091,7 +1098,8 @@ watch(() => form.question_type, () => {
   font-size: 13px;
   line-height: 1.6;
   font-family: 'SF Mono', 'Menlo', 'Consolas', 'Courier New', monospace;
-  resize: vertical;
+  resize: none;
+  overflow-y: hidden;
   transition: var(--transition-fast);
   box-sizing: border-box;
 }
