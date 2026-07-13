@@ -207,7 +207,7 @@
               </div>
 
               <!-- 选择题选项 -->
-              <div v-if="form.question_type === 'choice' && form.options.some(o => o.content)" class="paper-options">
+              <div v-if="form.question_type === 'choice' && Array.isArray(form.options) && form.options.some(o => o.content)" class="paper-options">
                 <div
                   v-for="opt in form.options.filter(o => o.content)"
                   :key="opt.label"
@@ -217,19 +217,6 @@
                   <span class="paper-opt-letter">{{ opt.label }}.</span>
                   <LatexRender :text="opt.content" :inline="true" />
                 </div>
-              </div>
-
-              <!-- 填空题答案 -->
-              <div v-else-if="form.question_type === 'fill' && form.blanks.some(b => b.answer)" class="paper-blanks">
-                <div v-for="(blank, i) in form.blanks.filter(b => b.answer)" :key="i" class="paper-blank">
-                  <span class="paper-blank-label">第{{ form.blanks.indexOf(blank) + 1 }}空：</span>
-                  <LatexRender :text="blank.answer" :inline="true" />
-                </div>
-              </div>
-
-              <!-- 解答题答案 -->
-              <div v-else-if="form.question_type === 'solution' && form.solutionAnswer" class="paper-solution">
-                <LatexRender :text="form.solutionAnswer" />
               </div>
 
               <!-- 答案 & 解析 -->
@@ -630,7 +617,7 @@ function buildPayload() {
   }
   switch (form.question_type) {
     case 'choice':
-      payload.options = form.options.filter(o => o.content.trim())
+      payload.options = (form.options || []).filter(o => o.content.trim())
       payload.correct_answer = form.correctAnswer ? [form.correctAnswer] : []
       break
     case 'fill':
@@ -774,7 +761,16 @@ async function loadQuestion() {
     form.gradingSteps = []
     form.judgmentCorrect = true
     if (d.question_type === 'choice' && d.options) {
-      form.options = d.options as any
+      let opts = d.options
+      if (typeof opts === 'string') { try { opts = JSON.parse(opts) } catch { opts = [] } }
+      if (Array.isArray(opts)) {
+        form.options = opts.map((opt: any) => {
+          if (typeof opt === 'string') return { label: opt[0] || '', content: opt.slice(1).trim() }
+          if (opt && typeof opt === 'object' && opt.label) return { label: opt.label, content: opt.content || '' }
+          if (opt && typeof opt === 'object') return { label: Object.keys(opt)[0], content: Object.values(opt)[0] as string }
+          return { label: '', content: String(opt) }
+        })
+      }
       if (Array.isArray(d.correct_answer)) form.correctAnswer = d.correct_answer[0] || ''
     } else if (d.question_type === 'fill' && Array.isArray(d.correct_answer)) {
       form.blanks = (d.correct_answer as any[]).map((b: any) => ({ position: b.position, answer: b.answer }))
@@ -1557,23 +1553,6 @@ watch(() => form.question_type, () => {
 .paper-opt-letter {
   font-weight: 600;
   flex-shrink: 0;
-}
-
-.paper-blanks,
-.paper-solution {
-  margin-bottom: 14px;
-  font-size: 14px;
-  line-height: 1.7;
-}
-
-.paper-blank {
-  display: inline;
-  margin-right: 12px;
-}
-
-.paper-blank-label {
-  font-weight: 600;
-  color: var(--text-secondary);
 }
 
 /* 答案/解析区块 */
