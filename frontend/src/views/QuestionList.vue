@@ -259,7 +259,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick, type ComponentPublicInstance } from 'vue'
 import { useRouter } from 'vue-router'
 import { questionApi, type QuestionSummary, type QuestionDetail, type QuestionQuery } from '@/api/client'
 import LatexRender from '@/components/LatexRender.vue'
@@ -510,7 +510,7 @@ function recomputeAllLayouts() {
 
 /** 设置卡片 body 的 ref，并注册 ResizeObserver */
 function setCardBodyRef(cardId: string) {
-  return (el: Element | null) => {
+  return (el: Element | ComponentPublicInstance | null) => {
     if (el instanceof HTMLElement) {
       cardBodyRefs[cardId] = el
       // 注册 ResizeObserver 监听容器宽度变化
@@ -612,7 +612,7 @@ async function fetchList() {
   }
 }
 
-function goDetail(row: QuestionSummary) {
+function goDetail(row: { id: string }) {
   router.push(`/questions/${row.id}`)
 }
 

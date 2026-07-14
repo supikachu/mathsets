@@ -70,14 +70,13 @@
               >
                 <span class="paper-opt-letter">{{ opt.label }}.</span>
                 <span class="paper-opt-content"><LatexRender :text="opt.content" :inline="true" /></span>
-                <AppIcon v-if="isCorrect(opt.label)" name="check-circle" :size="15" class="paper-opt-check" />
               </div>
             </div>
 
             <!-- 答案与解析打包区 -->
             <div v-if="hasAnswer || q?.analysis || hasGrading" class="answer-solution-block">
               <!-- 答案区（选择题） -->
-              <div v-if="q?.question_type === 'choice' && correctLabels.length" class="as-row">
+              <div v-if="q?.question_type === 'choice' && correctLabels.length" class="as-row as-row-answer">
                 <span class="as-label">参考答案</span>
                 <div class="as-answer-content">
                   <span class="paper-correct-answer" v-for="a in correctLabels" :key="a">{{ a }}</span>
@@ -112,11 +111,27 @@
                 </div>
               </div>
 
-              <!-- 解析 -->
-              <div v-if="q?.analysis" class="as-row as-row-analysis">
-                <span class="as-label">解析</span>
+              <!-- 解析（多解法分段切换） -->
+              <div v-if="q?.analysis" class="as-row as-row-analysis as-row-multi">
+                <div class="as-label-row">
+                  <span class="as-label">解析</span>
+                  <div v-if="detailSolutions.length > 1" class="sol-seg">
+                    <button
+                      v-for="(s, i) in detailSolutions"
+                      :key="i"
+                      class="sol-seg-btn"
+                      :class="{ active: activeSolution === i }"
+                      @click="activeSolution = i"
+                    >解法{{ cnNum(i + 1) }}</button>
+                  </div>
+                </div>
                 <div class="paper-analysis-content">
-                  <LatexRender :text="q.analysis" />
+                  <Transition name="sol-fade" mode="out-in">
+                    <LatexRender :key="activeSolution" :text="splitSolution(detailSolutions[activeSolution]).body" />
+                  </Transition>
+                </div>
+                <div v-if="splitSolution(detailSolutions[activeSolution]).conclusion" class="paper-conclusion">
+                  <LatexRender :text="splitSolution(detailSolutions[activeSolution]).conclusion" />
                 </div>
               </div>
 
@@ -242,9 +257,43 @@ const optionList = computed(() => {
 const correctLabels = computed(() => {
   const ans = q.value?.correct_answer
   if (!ans) return []
-  if (Array.isArray(ans)) return ans.map(String)
+  if (Array.isArray(ans)) return ans.map(String).sort()
   return [String(ans)]
 })
+
+// ===== 多解法 =====
+const cnNums = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十']
+function cnNum(n: number): string {
+  return cnNums[n - 1] || String(n)
+}
+
+const activeSolution = ref(0)
+
+const detailSolutions = computed(() => {
+  const analysis = q.value?.analysis
+  if (!analysis) return []
+  if (analysis.includes('\n\n---\n\n')) return analysis.split(/\n\n---\n\n/)
+  if (/\n解法[二三四五六七八九十]/.test(analysis)) return analysis.split(/\n(?=解法[二三四五六七八九十])/).map(s => s.trim())
+  return [analysis]
+})
+
+function splitSolution(text: string): { body: string; conclusion: string } {
+  if (!text) return { body: '', conclusion: '' }
+  const patterns = [
+    /(?:故|因此|所以|综上)[选答]\s*[A-Z](?:[、,，]\s*[A-Z])*\s*。?\s*$/,
+    /(?:故|因此|所以|综上)[^。\n]*答案[^。\n]*[。]?\s*$/,
+    /(?:故|因此|所以|综上)[^。\n]*[。]?\s*$/,
+    /故选\s*[A-Z](?:[、,，]\s*[A-Z])*\s*。?\s*$/,
+  ]
+  for (const p of patterns) {
+    const m = text.match(p)
+    if (m) {
+      const idx = text.lastIndexOf(m[0])
+      return { body: text.substring(0, idx).trim(), conclusion: m[0].trim() }
+    }
+  }
+  return { body: text.trim(), conclusion: '' }
+}
 
 // 是否有参考答案
 const hasAnswer = computed(() => {
@@ -402,7 +451,7 @@ function isCorrect(label: string): boolean {
 
 const isMultiChoice = computed(() => {
   if (q.value?.question_type !== 'choice') return false
-  if (q.value?.sub_type === 'multi') return true
+  if ((q.value as any)?.sub_type === 'multi') return true
   const ans = q.value?.correct_answer
   return Array.isArray(ans) && ans.length > 1
 })
@@ -510,8 +559,8 @@ onBeforeUnmount(() => {
 /* ============ 中间：沉浸式试卷卡片 ============ */
 .paper-card {
   background: #ffffff;
-  border-radius: 8px;
-  padding: 24px 36px;
+  border-radius: 12px;
+  padding: 28px 36px;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.03), 0 2px 8px rgba(0, 0, 0, 0.02);
   border: 1px solid rgba(0, 0, 0, 0.04);
   margin: 16px 0;
@@ -643,12 +692,6 @@ onBeforeUnmount(() => {
   min-width: 0;
 }
 
-.paper-opt-check {
-  margin-left: auto;
-  color: var(--success);
-  flex-shrink: 0;
-}
-
 /* 填空题答案 */
 .paper-blanks {
   display: flex;
@@ -745,6 +788,23 @@ onBeforeUnmount(() => {
   border-top-color: rgba(255, 255, 255, 0.06);
 }
 
+/* 多解法行：label+seg 在顶部，内容在下方全宽 */
+.as-row-multi {
+  flex-direction: column;
+  gap: 10px;
+}
+
+.as-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+}
+
+.as-label-row .as-label {
+  width: auto;
+}
+
 .as-label {
   width: 80px;
   flex-shrink: 0;
@@ -780,13 +840,26 @@ onBeforeUnmount(() => {
 }
 
 .paper-correct-answer {
-  font-weight: 700;
-  font-size: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: var(--radius-full);
+  background: rgba(52, 199, 89, 0.12);
   color: var(--success);
+  font-weight: 700;
+  font-size: 15px;
+  margin-right: 6px;
+}
+
+[data-theme='dark'] .paper-correct-answer {
+  background: rgba(48, 209, 88, 0.15);
 }
 
 .paper-analysis-content {
-  flex: 1;
+  width: 100%;
   font-size: 14px;
   line-height: 1.8;
   color: var(--text-primary);
@@ -794,6 +867,59 @@ onBeforeUnmount(() => {
 
 .paper-analysis-content :deep(p) {
   margin: 0 0 8px;
+}
+
+/* 多解法分段切换 */
+.sol-seg {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius-full);
+  background: var(--bg-input);
+}
+
+.sol-seg-btn {
+  padding: 3px 10px;
+  border: none;
+  border-radius: var(--radius-full);
+  background: transparent;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.sol-seg-btn.active {
+  background: var(--bg-card);
+  color: var(--accent);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+[data-theme='dark'] .sol-seg-btn.active {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+/* 结论高亮区 */
+.paper-conclusion {
+  margin-top: 12px;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  background: var(--accent-light);
+  border-left: 3px solid var(--accent);
+  font-size: 14px;
+  color: var(--text-primary);
+}
+
+/* 淡入淡出过渡 */
+.sol-fade-enter-active,
+.sol-fade-leave-active {
+  transition: opacity 0.2s ease;
+}
+
+.sol-fade-enter-from,
+.sol-fade-leave-to {
+  opacity: 0;
 }
 
 /* 评分标准 */

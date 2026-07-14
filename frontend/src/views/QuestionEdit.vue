@@ -23,12 +23,8 @@
 
       <!-- ==================== 所有属性同一行 ==================== -->
       <div class="meta-row">
-        <div class="meta-field meta-field-type">
-          <label class="field-label">题型</label>
-          <AppSelect v-model="form.question_type" :options="typeOptions" />
-        </div>
+        <AppSelect v-model="form.question_type" :options="typeOptions" placeholder="题型" class="meta-field" />
         <div class="meta-field meta-field-diff">
-          <label class="field-label">难度</label>
           <div class="diff-row">
             <button
               v-for="n in 5"
@@ -40,44 +36,23 @@
             ><AppIcon name="star" :size="15" /></button>
           </div>
         </div>
-        <div class="meta-field">
-          <label class="field-label">学年</label>
-          <AppSelect v-model="form.academic_year" :options="academicYearOptions" clearable />
+        <AppSelect v-model="form.academic_year" :options="academicYearOptions" placeholder="学年" clearable class="meta-field" />
+        <AppSelect v-model="form.grade_semester" :options="gradeSemesterOptions" placeholder="年级学期" clearable class="meta-field" />
+        <input v-model="form.region" placeholder="地区/学校" class="meta-field text-input" />
+        <AppSelect v-model="form.exam_type" :options="examTypeOptions" placeholder="考试类型" clearable class="meta-field" />
+        <div class="meta-field kp-display">
+          <AppIcon name="tag" :size="13" />
+          <span v-if="selectedKpName" class="kp-name">{{ selectedKpName }}</span>
+          <span v-else class="kp-empty">知识点</span>
         </div>
-        <div class="meta-field">
-          <label class="field-label">年级学期</label>
-          <AppSelect v-model="form.grade_semester" :options="gradeSemesterOptions" clearable />
-        </div>
-        <div class="meta-field">
-          <label class="field-label">地区/学校</label>
-          <input v-model="form.region" placeholder="如 湖北襄阳" class="text-input" />
-        </div>
-        <div class="meta-field">
-          <label class="field-label">考试类型</label>
-          <AppSelect v-model="form.exam_type" :options="examTypeOptions" clearable />
-        </div>
-        <div class="meta-field">
-          <label class="field-label">知识点</label>
-          <div class="kp-display">
-            <AppIcon name="tag" :size="15" />
-            <span v-if="selectedKpName">{{ selectedKpName }}</span>
-            <span v-else class="kp-empty">左侧选择</span>
-          </div>
-        </div>
-        <div class="meta-field">
-          <label class="field-label">核心素养</label>
-          <button type="button" class="kp-btn" @click="showLiteracyDialog = true">
-            <AppIcon name="award" :size="15" />
-            <span>{{ form.literacy_tags.length ? `${form.literacy_tags.length}个` : '添加' }}</span>
-          </button>
-        </div>
-        <div class="meta-field">
-          <label class="field-label">解题方法</label>
-          <button type="button" class="kp-btn" @click="showTagDialog = true">
-            <AppIcon name="bookmark" :size="15" />
-            <span>{{ form.tags.length ? `${form.tags.length}个` : '添加' }}</span>
-          </button>
-        </div>
+        <button type="button" class="meta-field kp-btn" @click="showLiteracyDialog = true">
+          <AppIcon name="award" :size="13" />
+          <span>{{ form.literacy_tags.length ? `${form.literacy_tags.length}个` : '核心素养' }}</span>
+        </button>
+        <button type="button" class="meta-field kp-btn" @click="showTagDialog = true">
+          <AppIcon name="bookmark" :size="13" />
+          <span>{{ form.tags.length ? `${form.tags.length}个` : '解题方法' }}</span>
+        </button>
       </div>
 
       <!-- ==================== 主内容 双栏 ==================== -->
@@ -89,7 +64,7 @@
             <section class="edit-section">
               <div class="section-label"><AppIcon name="book-open" :size="16" /> <span>题干</span><span class="required">*</span></div>
               <div class="stem-wrap">
-                <textarea v-model="form.stem" rows="4" class="edit-textarea stem-textarea" placeholder="输入题目内容，LaTeX 公式用 $...$ 包裹。例如：已知集合 $A = \{x | x^2 - 2x = 0\}$..." @input="autoResize"></textarea>
+                <textarea ref="stemTextareaRef" v-model="form.stem" rows="4" class="edit-textarea stem-textarea" placeholder="输入题目内容，LaTeX 公式用 $...$ 包裹。例如：已知集合 $A = \{x | x^2 - 2x = 0\}$..." @input="autoResize"></textarea>
                 <button type="button" class="img-upload-btn" @click="handleImageUpload">
                   <AppIcon name="paperclip" :size="13" />
                   <span>上传配图</span>
@@ -119,7 +94,15 @@
                     <input v-else type="radio" :value="opt.label" v-model="form.correctAnswer" />
                     <span class="opt-letter">{{ opt.label }}</span>
                   </label>
-                  <input v-model="opt.content" :placeholder="`选项 ${opt.label}`" class="opt-card-input" />
+                  <input
+                    v-model="opt.content"
+                    :placeholder="`选项 ${opt.label}`"
+                    class="opt-card-input"
+                    @paste="onOptionPaste($event, i)"
+                  />
+                  <button type="button" class="opt-img-btn" @click="handleOptionImageUpload(i)" title="上传配图">
+                    <AppIcon name="paperclip" :size="14" />
+                  </button>
                   <button v-if="form.options.length > 2" type="button" class="opt-delete" @click="form.options.splice(i, 1)"><AppIcon name="x" :size="15" /></button>
                 </div>
                 <button type="button" class="add-btn add-btn-sm" @click="addOption"><AppIcon name="plus" :size="14" /> 添加选项</button>
@@ -135,22 +118,56 @@
               </div>
               <!-- 解答题 -->
               <div v-else-if="form.question_type === 'solution'">
-                <textarea v-model="form.solutionAnswer" rows="3" class="edit-textarea" placeholder="完整解答过程，支持 $...$ LaTeX"></textarea>
-                <div class="grading-label">分步评分</div>
-                <div v-for="(step, i) in form.gradingSteps" :key="i" class="opt-row">
-                  <input v-model="step.label" placeholder="步骤名" class="step-input" />
-                  <input type="number" v-model.number="step.points" min="0" max="20" class="num-input num-input-sm" />
-                  <span class="text-muted text-sm">分</span>
-                  <button v-if="form.gradingSteps.length > 1" type="button" class="icon-btn" @click="form.gradingSteps.splice(i, 1)"><AppIcon name="x" :size="15" /></button>
+                <div class="sub-answer-list">
+                  <div v-for="(ans, i) in form.sub_answers" :key="i" class="sub-answer-card">
+                    <span class="sub-answer-num">({{ i + 1 }})</span>
+                    <textarea
+                      v-model="form.sub_answers[i]"
+                      rows="2"
+                      class="edit-textarea sub-answer-input"
+                      :placeholder="`小题(${i + 1})答案，支持 $...$ LaTeX`"
+                      @input="autoResize"
+                    ></textarea>
+                    <button v-if="form.sub_answers.length > 1" type="button" class="sub-answer-del" @click="removeSubAnswer(i)" title="删除此小题">
+                      <AppIcon name="x" :size="14" />
+                    </button>
+                  </div>
                 </div>
-                <button type="button" class="add-btn add-btn-sm" @click="form.gradingSteps.push({ label: '', points: 1, description: '' })"><AppIcon name="plus" :size="14" /> 添加评分步骤</button>
+                <button type="button" class="add-btn add-btn-sm" @click="addSubAnswer">
+                  <AppIcon name="plus" :size="14" /> 增加小题答案
+                </button>
               </div>
             </section>
 
-            <!-- 解析 -->
+            <!-- 解析（多解法） -->
             <section class="edit-section">
               <div class="section-label"><AppIcon name="lightbulb" :size="16" /> <span>解析</span></div>
-              <textarea v-model="form.analysis" rows="6" class="edit-textarea analysis-textarea" placeholder="解题思路与易错点，支持 $...$ LaTeX" @input="autoResize"></textarea>
+              <div class="solutions-list">
+                <div v-for="(sol, i) in form.solutions" :key="i" class="solution-item">
+                  <div class="solution-head">
+                    <span class="solution-name">解法{{ cnNum(i + 1) }}</span>
+                    <button v-if="form.solutions.length > 1" class="solution-del" @click="removeSolution(i)" title="删除此解法">
+                      <AppIcon name="trash-2" :size="14" />
+                    </button>
+                  </div>
+                  <div class="solution-textarea-wrap">
+                    <textarea
+                      v-model="form.solutions[i]"
+                      rows="6"
+                      class="edit-textarea solution-textarea"
+                      :placeholder="`解法${cnNum(i + 1)}的解题思路，支持 $...$ LaTeX`"
+                      @input="autoResize"
+                    ></textarea>
+                    <button type="button" class="img-upload-btn" @click="handleSolutionImageUpload(i)">
+                      <AppIcon name="paperclip" :size="13" />
+                      <span>上传配图</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <button class="add-solution-btn" @click="addSolution">
+                <AppIcon name="plus" :size="15" /> 添加新解法
+              </button>
             </section>
 
             <!-- 高级设置（默认折叠） -->
@@ -189,7 +206,7 @@
         <div class="preview-col">
           <div class="preview-col-inner">
             <!-- 骨架屏（无输入时） -->
-            <div v-if="!form.stem && !form.solutionAnswer && !form.analysis && form.options.every(o => !o.content)" class="preview-skeleton">
+            <div v-if="!form.stem && !form.solutionAnswer && !form.solutions.some(s => s.trim()) && form.options.every(o => !o.content)" class="preview-skeleton">
               <div class="skeleton-line skeleton-title"></div>
               <div class="skeleton-line skeleton-text"></div>
               <div class="skeleton-line skeleton-text skeleton-short"></div>
@@ -219,7 +236,7 @@
               </div>
 
               <!-- 选择题选项 -->
-              <div v-if="form.question_type === 'choice' && previewOptions.length" class="paper-options">
+              <div v-if="form.question_type === 'choice' && previewOptions.length" class="paper-options" :class="'paper-options-' + optionsLayout">
                 <div
                   v-for="opt in previewOptions"
                   :key="opt.label"
@@ -243,17 +260,36 @@
                       {{ form.blanks.indexOf(blank) + 1 }}. <LatexRender :text="blank.answer" :inline="true" />&nbsp;
                     </span>
                   </template>
-                  <template v-else-if="form.question_type === 'solution' && form.solutionAnswer">
-                    <LatexRender :text="form.solutionAnswer" />
+                  <template v-else-if="form.question_type === 'solution' && form.sub_answers.some(a => a.trim())">
+                    <div v-for="(ans, i) in form.sub_answers" :key="i" class="paper-sub-answer">
+                      <span class="paper-sub-num">({{ i + 1 }})</span>
+                      <LatexRender :text="ans" :inline="false" />
+                    </div>
                   </template>
                   <span v-else class="paper-muted">—</span>
                 </div>
               </div>
 
-              <div v-if="form.analysis" class="paper-answer-block">
-                <div class="paper-answer-label">解析</div>
+              <div v-if="previewSolutions.length" class="paper-answer-block">
+                <div class="paper-answer-label">
+                  解析
+                  <div v-if="previewSolutions.length > 1" class="sol-seg">
+                    <button
+                      v-for="(s, i) in previewSolutions"
+                      :key="i"
+                      class="sol-seg-btn"
+                      :class="{ active: activeSolution === i }"
+                      @click="activeSolution = i"
+                    >解法{{ cnNum(i + 1) }}</button>
+                  </div>
+                </div>
                 <div class="paper-answer-content">
-                  <LatexRender :text="form.analysis" />
+                  <Transition name="sol-fade" mode="out-in">
+                    <LatexRender :key="activeSolution" :text="splitSolution(previewSolutions[activeSolution]).body" />
+                  </Transition>
+                </div>
+                <div v-if="splitSolution(previewSolutions[activeSolution]).conclusion" class="paper-conclusion">
+                  <LatexRender :text="splitSolution(previewSolutions[activeSolution]).conclusion" />
                 </div>
               </div>
             </div>
@@ -473,7 +509,7 @@ const isMultiChoice = computed(() => form.question_type === 'choice' && form.sub
 // 多选答案数组（与 form.correctAnswer 双向同步）
 const multiCorrectAnswers = computed({
   get: () => Array.isArray(form.correctAnswer) ? form.correctAnswer : [],
-  set: (val: string[]) => { form.correctAnswer = val },
+  set: (val: string[]) => { form.correctAnswer = [...val].sort() },
 })
 
 function isOptionCorrect(label: string): boolean {
@@ -487,7 +523,7 @@ const hasCorrectAnswer = computed(() => {
 })
 
 const displayCorrectAnswer = computed(() => {
-  if (Array.isArray(form.correctAnswer)) return form.correctAnswer.join('')
+  if (Array.isArray(form.correctAnswer)) return [...form.correctAnswer].sort().join('')
   return form.correctAnswer
 })
 
@@ -591,7 +627,7 @@ const form = reactive({
   exam_type: '' as string,
   source: '原创',
   estimated_time: 5,
-  analysis: '',
+  solutions: [''] as string[],
   options: [
     { label: 'A', content: '' },
     { label: 'B', content: '' },
@@ -601,6 +637,7 @@ const form = reactive({
   correctAnswer: '' as string | string[],
   blanks: [{ position: 1, answer: '' }] as { position: number; answer: string }[],
   solutionAnswer: '',
+  sub_answers: [''] as string[],
   gradingSteps: [] as { label: string; points: number; description: string }[],
   judgmentCorrect: true,
   knowledgePointIds: [] as string[],
@@ -645,12 +682,180 @@ function addOption() {
   if (i < 8) form.options.push({ label: labels[i], content: '' })
 }
 
-// 题干配图上传（占位，后续对接文件上传API）
+// 题干配图上传
+const stemTextareaRef = ref<HTMLTextAreaElement>()
 function handleImageUpload() {
-  toast.info('图片上传功能即将上线')
+  const input = document.createElement('input')
+  input.type = 'file'
+  input.accept = 'image/png,image/jpeg,image/gif,image/webp'
+  input.onchange = async () => {
+    const file = input.files?.[0]
+    if (!file) return
+    if (file.size > 5 * 1024 * 1024) {
+      toast.error('图片不能超过 5MB')
+      return
+    }
+    // 使用 Blob URL（短链接），避免 base64 海量字符污染文本域
+    const imageUrl = URL.createObjectURL(file)
+    const ta = stemTextareaRef.value
+    if (!ta) {
+      form.stem += `\n![题干配图](${imageUrl})\n`
+      return
+    }
+    const pos = ta.selectionStart
+    const before = form.stem.substring(0, pos)
+    const after = form.stem.substring(ta.selectionEnd)
+    const insert = `\n![题干配图](${imageUrl})\n`
+    form.stem = before + insert + after
+    nextTick(() => {
+      ta.focus()
+      const newPos = pos + insert.length
+      ta.setSelectionRange(newPos, newPos)
+      resizeTextarea(ta)
+    })
+  }
+  input.click()
 }
 
-// textarea 自适应高度
+// 选项配图上传（按索引定位对应 input）
+function handleOptionImageUpload(index: number) {
+  const input = document.createElement('input')
+  input.type = 'file'
+  input.accept = 'image/png,image/jpeg,image/gif,image/webp'
+  input.onchange = async () => {
+    const file = input.files?.[0]
+    if (!file) return
+    if (file.size > 5 * 1024 * 1024) {
+      toast.error('图片不能超过 5MB')
+      return
+    }
+    const imageUrl = URL.createObjectURL(file)
+    const inp = document.querySelectorAll<HTMLInputElement>('.opt-card-input')[index]
+    if (!inp) {
+      form.options[index].content += `![选项配图](${imageUrl})`
+      return
+    }
+    const pos = inp.selectionStart ?? 0
+    const before = form.options[index].content.substring(0, pos)
+    const after = form.options[index].content.substring(inp.selectionEnd ?? 0)
+    const insert = `![选项配图](${imageUrl})`
+    form.options[index].content = before + insert + after
+    nextTick(() => {
+      inp.focus()
+      const newPos = pos + insert.length
+      inp.setSelectionRange(newPos, newPos)
+    })
+  }
+  input.click()
+}
+
+// 选项输入框粘贴图片
+function onOptionPaste(e: ClipboardEvent, index: number) {
+  const items = e.clipboardData?.items
+  if (!items) return
+  for (const item of items) {
+    if (item.type.startsWith('image/')) {
+      e.preventDefault()
+      const file = item.getAsFile()
+      if (!file) return
+      if (file.size > 5 * 1024 * 1024) {
+        toast.error('图片不能超过 5MB')
+        return
+      }
+      const imageUrl = URL.createObjectURL(file)
+      const inp = e.target as HTMLInputElement
+      const pos = inp.selectionStart ?? 0
+      const before = form.options[index].content.substring(0, pos)
+      const after = form.options[index].content.substring(inp.selectionEnd ?? 0)
+      const insert = `![选项配图](${imageUrl})`
+      form.options[index].content = before + insert + after
+      nextTick(() => {
+        inp.focus()
+        const newPos = pos + insert.length
+        inp.setSelectionRange(newPos, newPos)
+      })
+      break
+    }
+  }
+}
+
+// 预览区选项布局智能判定（Layout Calculator）
+// 返回 '1col' | '2col' | '4col'
+const optionsLayout = computed(() => {
+  const opts = previewOptions.value
+  if (opts.length === 0) return '2col'
+
+  // 任何选项含图片标记 → 单列
+  if (opts.some(opt => opt.content.includes('!['))) return '1col'
+
+  // 预估单选项渲染宽度（粗略：LaTeX 命令字符不计入，中文2字符宽，英文1字符宽）
+  function estimateWidth(text: string): number {
+    // 去除 LaTeX 命令的影响：$...$ 内的公式按字符数粗估
+    let w = 0
+    let inFormula = false
+    for (const ch of text) {
+      if (ch === '$') { inFormula = !inFormula; continue }
+      if (inFormula && /\\[a-zA-Z]+/.test(text)) {
+        // LaTeX 命令大致按 1.5 个字符宽估算
+        w += 0.6
+      } else if (/[\u4e00-\u9fff]/.test(ch)) {
+        w += 2 // 中文字符约 2 个单位宽
+      } else if (ch === '\\') {
+        w += 0 // 跳过反斜杠
+      } else {
+        w += 1
+      }
+    }
+    // 加上 "A. " 前缀约 2 个单位
+    return w + 2
+  }
+
+  // 预览区可用宽度估算：容器约 380px，每字符约 8px → 约 47 单位
+  // 但用比例更稳定：W/4 ≈ 12 单位，W/2 ≈ 24 单位
+  const QUARTER_W = 14  // W/4 阈值（含字母前缀）
+  const HALF_W = 28     // W/2 阈值
+
+  const widths = opts.map(opt => estimateWidth(opt.content))
+  const maxW = Math.max(...widths)
+
+  if (maxW > HALF_W) return '1col'
+  if (maxW > QUARTER_W) return '2col'
+  return '4col'
+})
+
+// 兼容旧引用
+const shouldUseSingleColumn = computed(() => optionsLayout.value === '1col')
+function handleSolutionImageUpload(index: number) {
+  const input = document.createElement('input')
+  input.type = 'file'
+  input.accept = 'image/png,image/jpeg,image/gif,image/webp'
+  input.onchange = async () => {
+    const file = input.files?.[0]
+    if (!file) return
+    if (file.size > 5 * 1024 * 1024) {
+      toast.error('图片不能超过 5MB')
+      return
+    }
+    const imageUrl = URL.createObjectURL(file)
+    const ta = document.querySelectorAll<HTMLTextAreaElement>('.solution-textarea')[index]
+    if (!ta) {
+      form.solutions[index] += `\n![解析配图](${imageUrl})\n`
+      return
+    }
+    const pos = ta.selectionStart
+    const before = form.solutions[index].substring(0, pos)
+    const after = form.solutions[index].substring(ta.selectionEnd)
+    const insert = `\n![解析配图](${imageUrl})\n`
+    form.solutions[index] = before + insert + after
+    nextTick(() => {
+      ta.focus()
+      const newPos = pos + insert.length
+      ta.setSelectionRange(newPos, newPos)
+      resizeTextarea(ta)
+    })
+  }
+  input.click()
+}
 function resizeTextarea(el: HTMLTextAreaElement) {
   el.style.height = 'auto'
   el.style.height = el.scrollHeight + 'px'
@@ -663,6 +868,68 @@ function resizeAllTextareas() {
   document.querySelectorAll<HTMLTextAreaElement>('.edit-textarea').forEach(el => {
     resizeTextarea(el)
   })
+}
+
+// ===== 多解法 =====
+const cnNums = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十']
+function cnNum(n: number): string {
+  return cnNums[n - 1] || String(n)
+}
+
+function addSolution() {
+  form.solutions.push('')
+  nextTick(() => {
+    const els = document.querySelectorAll<HTMLTextAreaElement>('.solution-textarea')
+    els[els.length - 1]?.focus()
+  })
+}
+
+function removeSolution(i: number) {
+  form.solutions.splice(i, 1)
+  if (form.solutions.length === 0) form.solutions.push('')
+  if (activeSolution.value >= form.solutions.length) activeSolution.value = form.solutions.length - 1
+}
+
+// ===== 多小题答案 =====
+function addSubAnswer() {
+  form.sub_answers.push('')
+  nextTick(() => {
+    const els = document.querySelectorAll<HTMLTextAreaElement>('.sub-answer-input')
+    const last = els[els.length - 1]
+    if (last) {
+      resizeTextarea(last)
+      last.focus()
+    }
+  })
+}
+
+function removeSubAnswer(i: number) {
+  form.sub_answers.splice(i, 1)
+  if (form.sub_answers.length === 0) form.sub_answers.push('')
+}
+
+const activeSolution = ref(0)
+
+const previewSolutions = computed(() => form.solutions.filter(s => s.trim()))
+
+// 抽离结论性文字（"故选X"、"故答案为..."等）
+function splitSolution(text: string): { body: string; conclusion: string } {
+  if (!text) return { body: '', conclusion: '' }
+  // 匹配结尾的结论性语句
+  const patterns = [
+    /(?:故|因此|所以|综上)[选答]\s*[A-Z](?:[、,，]\s*[A-Z])*\s*。?\s*$/,
+    /(?:故|因此|所以|综上)[^。\n]*答案[^。\n]*[。]?\s*$/,
+    /(?:故|因此|所以|综上)[^。\n]*[。]?\s*$/,
+    /故选\s*[A-Z](?:[、,，]\s*[A-Z])*\s*。?\s*$/,
+  ]
+  for (const p of patterns) {
+    const m = text.match(p)
+    if (m) {
+      const idx = text.lastIndexOf(m[0])
+      return { body: text.substring(0, idx).trim(), conclusion: m[0].trim() }
+    }
+  }
+  return { body: text.trim(), conclusion: '' }
 }
 
 // ===== 构建提交数据 =====
@@ -683,7 +950,7 @@ function buildPayload() {
     region: form.region || null,
     exam_type: form.exam_type || null,
     source: form.source,
-    analysis: form.analysis || null,
+    analysis: form.solutions.filter(s => s.trim()).join('\n\n---\n\n') || null,
     knowledge_point_ids: kpIds.length > 0 ? kpIds : null,
     tags: form.tags.length > 0 ? form.tags : null,
     literacy_tags: form.literacy_tags.length > 0 ? form.literacy_tags : null,
@@ -702,8 +969,7 @@ function buildPayload() {
       payload.correct_answer = form.blanks.filter(b => b.answer.trim()).map(b => ({ position: b.position, answer: b.answer.trim() }))
       break
     case 'solution':
-      payload.correct_answer = form.solutionAnswer ? [form.solutionAnswer] : []
-      if (form.gradingSteps.length > 0) payload.grading_criteria = form.gradingSteps.filter(s => s.label)
+      payload.correct_answer = form.sub_answers.filter(a => a.trim())
       break
     case 'judgment':
       payload.correct_answer = [form.judgmentCorrect]
@@ -771,7 +1037,7 @@ function restoreDraft() {
     const saved = sessionStorage.getItem(key)
     if (!saved) return
     const draft = JSON.parse(saved)
-    if (draft.stem || draft.analysis || draft.solutionAnswer) {
+    if (draft.stem || draft.solutions?.some((s: string) => s?.trim()) || draft.solutionAnswer) {
       pendingDraft = draft
       restoreDialog.value = true
     }
@@ -781,7 +1047,7 @@ function restoreDraft() {
 function doRestoreDraft() {
   if (!pendingDraft) return
   const fields = ['stem', 'question_type', 'sub_type', 'difficulty', 'default_score', 'grade', 'semester',
-    'source', 'analysis', 'options', 'correctAnswer', 'blanks', 'solutionAnswer',
+    'source', 'solutions', 'options', 'correctAnswer', 'blanks', 'solutionAnswer', 'sub_answers',
     'gradingSteps', 'judgmentCorrect', 'knowledgePointIds', 'tags', 'literacy_tags', 'difficulty_coefficient', 'academic_year', 'grade_semester', 'region', 'exam_type', 'reviewer', 'reviewer_ids', 'internal_note']
   for (const f of fields) {
     if (pendingDraft[f] !== undefined) (form as any)[f] = pendingDraft[f]
@@ -837,7 +1103,15 @@ async function loadQuestion() {
     form.region = (d as any).region || ''
     form.exam_type = (d as any).exam_type || ''
     form.source = d.source || '原创'
-    form.analysis = d.analysis || ''
+    const raw = d.analysis || ''
+    if (raw.includes('\n\n---\n\n')) {
+      form.solutions = raw.split(/\n\n---\n\n/)
+    } else if (/\n解法[二三四五六七八九十]/.test(raw)) {
+      // 迁移旧数据：按"解法二"、"解法三"等文本标记自动拆分
+      form.solutions = raw.split(/\n(?=解法[二三四五六七八九十])/).map(s => s.trim())
+    } else {
+      form.solutions = raw ? [raw] : ['']
+    }
     form.status = d.status
     form.version = d.version
     form.knowledgePointIds = d.knowledge_points?.map(k => k.id) || []
@@ -846,6 +1120,7 @@ async function loadQuestion() {
     form.correctAnswer = ''
     form.blanks = [{ position: 1, answer: '' }]
     form.solutionAnswer = ''
+    form.sub_answers = ['']
     form.gradingSteps = []
     form.judgmentCorrect = true
     if (d.question_type === 'choice' && d.options) {
@@ -860,7 +1135,7 @@ async function loadQuestion() {
         })
       }
       if (Array.isArray(d.correct_answer)) {
-        if (d.sub_type === 'multi' || d.correct_answer.length > 1) {
+        if ((d as any).sub_type === 'multi' || d.correct_answer.length > 1) {
           form.sub_type = 'multi'
           form.correctAnswer = d.correct_answer as string[]
         } else {
@@ -870,8 +1145,9 @@ async function loadQuestion() {
     } else if (d.question_type === 'fill' && Array.isArray(d.correct_answer)) {
       form.blanks = (d.correct_answer as any[]).map((b: any) => ({ position: b.position, answer: b.answer }))
     } else if (d.question_type === 'solution') {
-      if (Array.isArray(d.correct_answer)) form.solutionAnswer = d.correct_answer[0] || ''
-      if (d.grading_criteria) form.gradingSteps = d.grading_criteria as any
+      if (Array.isArray(d.correct_answer) && d.correct_answer.length > 0) {
+        form.sub_answers = d.correct_answer.map((a: any) => typeof a === 'string' ? a : String(a))
+      }
     } else if (d.question_type === 'judgment') {
       if (Array.isArray(d.correct_answer)) form.judgmentCorrect = d.correct_answer[0] === true
     }
@@ -915,6 +1191,7 @@ watch(() => form.question_type, () => {
     form.correctAnswer = ''
     form.blanks = [{ position: 1, answer: '' }]
     form.solutionAnswer = ''
+    form.sub_answers = ['']
     form.gradingSteps = []
     form.judgmentCorrect = true
   }
@@ -977,8 +1254,8 @@ watch(() => form.question_type, () => {
 .diff-row {
   display: flex;
   align-items: center;
-  gap: 2px;
-  min-height: 36px;
+  gap: 1px;
+  min-height: auto;
 }
 
 .star {
@@ -986,9 +1263,15 @@ watch(() => form.question_type, () => {
   background: none;
   border: none;
   cursor: pointer;
-  padding: 0;
+  padding: 4px;
   display: inline-flex;
   transition: var(--transition-fast);
+}
+
+/* SVG 图标不拦截点击，确保点击事件落在 button 上 */
+.star :deep(svg),
+.star svg {
+  pointer-events: none;
 }
 
 .star:hover {
@@ -999,19 +1282,27 @@ watch(() => form.question_type, () => {
   color: var(--star-color);
 }
 
+/* 激活态星星图标覆盖降噪色 — 确保 SVG currentColor 生效 */
+.star.active :deep(svg),
+.star.active svg {
+  color: var(--star-color) !important;
+}
+
 /* 难度系数输入 */
 .diff-coef-input {
-  width: 48px;
-  padding: 7px 6px;
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  background: var(--bg-input);
+  width: 36px;
+  padding: 0 4px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
   color: var(--text-primary);
   font-size: 12px;
   text-align: center;
-  margin-left: 6px;
+  margin-left: 4px;
   font-family: inherit;
   box-sizing: border-box;
+  min-height: auto;
+  outline: none;
 }
 
 .diff-coef-input:focus {
@@ -1020,12 +1311,12 @@ watch(() => form.question_type, () => {
   box-shadow: 0 0 0 3px var(--accent-light);
 }
 
-/* ============ 元数据工具栏 ============ */
+/* ============ 元数据工具栏 — 一体化胶囊卡片 ============ */
 .meta-row {
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-end;
-  gap: 12px 8px;
+  align-items: center;
+  gap: 8px;
   flex-shrink: 0;
   padding: 10px 14px;
   background: var(--bg-card);
@@ -1034,83 +1325,238 @@ watch(() => form.question_type, () => {
   box-shadow: var(--shadow-xs);
 }
 
+/* 通用胶囊样式 — 适用于 AppSelect、input、button、div */
 .meta-field {
-  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: initial;
   min-width: 0;
+  padding: 4px 16px;
+  height: 32px;
+  border-radius: 9999px;
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  color: #8c8c8c;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  position: relative;
+  box-sizing: border-box;
+  white-space: nowrap;
+}
+
+/* 已选择/激活状态：文字加深、边框加深、淡雅背景 */
+.meta-field :deep(.app-select-trigger.has-value),
+.meta-field.text-input:not(:placeholder-shown),
+.meta-field .kp-name {
+  color: #262626;
+}
+
+.meta-field.app-select-wrapper:has(.app-select-trigger.has-value) {
+  color: #262626;
+  border-color: #b7b7b7;
+  background: rgba(0, 122, 255, 0.03);
+}
+
+[data-theme='dark'] .meta-field.app-select-wrapper:has(.app-select-trigger.has-value) {
+  color: rgba(255, 255, 255, 0.95);
+  border-color: rgba(255, 255, 255, 0.25);
+  background: rgba(0, 122, 255, 0.08);
+}
+
+.meta-field.text-input:not(:placeholder-shown) {
+  color: #262626;
+  border-color: #b7b7b7;
+  background: rgba(0, 122, 255, 0.03);
+}
+
+[data-theme='dark'] .meta-field.text-input:not(:placeholder-shown) {
+  color: rgba(255, 255, 255, 0.95);
+  border-color: rgba(255, 255, 255, 0.25);
+  background: rgba(0, 122, 255, 0.08);
+}
+
+/* 有值的知识点/标签胶囊 */
+.meta-field.kp-display:has(.kp-name) {
+  color: #262626;
+  border-color: #b7b7b7;
+}
+
+[data-theme='dark'] .meta-field.kp-display:has(.kp-name) {
+  color: rgba(255, 255, 255, 0.95);
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+[data-theme='dark'] .meta-field {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.meta-field:hover {
+  border-color: var(--accent);
+}
+
+.meta-field:focus-within {
+  border-color: #b7b7b7;
+  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.06);
 }
 
 .meta-field-sm {
-  flex: 1;
-  min-width: 80px;
+  flex: initial;
+  min-width: 0;
 }
 
-.field-label {
-  display: block;
-  font-size: 11px;
-  font-weight: 600;
-  margin-bottom: 5px;
-  color: var(--text-muted);
-  letter-spacing: 0.02em;
-}
-
-.num-input,
-.text-input {
-  width: 100%;
-  padding: 7px 12px;
-  border-radius: 8px;
-  background: var(--bg-input);
-  border: 1px solid var(--border-color);
-  color: var(--text-primary);
-  font-size: 13px;
-  line-height: 1.4;
-  transition: var(--transition-fast);
-  font-family: inherit;
-  box-sizing: border-box;
-  min-height: 36px;
-}
-
-.num-input:focus,
-.text-input:focus {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-light);
-  background: var(--bg-card);
-}
-
-.num-input-sm {
-  flex: 0 0 76px;
-  width: auto;
-}
-
-/* 让元数据栏内的下拉与输入框尺寸统一 */
-.meta-field :deep(.app-select-wrapper) {
-  width: 100%;
-}
-
-.kp-btn {
+/* AppSelect 直接作为 meta-field 时的胶囊样式 */
+.meta-field.app-select-wrapper {
   display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  width: 100%;
-  padding: 7px 12px;
-  border-radius: 8px;
-  background: var(--bg-input);
-  border: 1px solid var(--border-color);
-  color: var(--text-secondary);
-  font-size: 13px;
-  cursor: pointer;
-  box-sizing: border-box;
-  min-height: 36px;
-  transition: var(--transition-fast);
-  font-family: inherit;
+  width: auto;
+  padding: 4px 16px;
+  height: 32px;
+  border-radius: 9999px;
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  color: #8c8c8c;
   box-sizing: border-box;
 }
 
-.kp-btn:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: var(--accent-light);
+/* 内层 trigger 彻底隐形化 — 由外层胶囊接管全部视觉 */
+.meta-field :deep(.app-select-trigger) {
+  border: none !important;
+  background: transparent !important;
+  outline: none !important;
+  box-shadow: none !important;
+  appearance: none;
+  -webkit-appearance: none;
+  padding: 0 !important;
+  min-height: auto !important;
+  height: 100%;
+  width: 100%;
+  font-size: 13px;
+  color: inherit;
+  border-radius: 0;
+}
+
+.meta-field :deep(.app-select-trigger:hover) {
+  border: none !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.meta-field :deep(.app-select-trigger.open) {
+  border: none !important;
+  box-shadow: none !important;
+  background: transparent !important;
+}
+
+.meta-field :deep(.app-select-text) {
+  white-space: nowrap;
+  color: inherit;
+}
+
+.meta-field :deep(.app-select-text.placeholder) {
+  color: var(--text-muted);
+}
+
+/* text-input 作为胶囊 */
+.meta-field.text-input {
+  border: 1px solid #d9d9d9;
+  background: #fff;
+  border-radius: 9999px;
+  padding: 4px 16px;
+  height: 32px;
+  font-size: 13px;
+  color: var(--text-primary);
+  outline: none;
+  width: auto;
+  max-width: 140px;
+}
+
+[data-theme='dark'] .meta-field.text-input {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.15);
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.meta-field.text-input::placeholder {
+  color: var(--text-muted);
+}
+
+.meta-field.text-input:focus {
+  border-color: #b7b7b7;
+  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.06);
+}
+
+/* 难度星级胶囊 — 对称内边距呼吸感 */
+.meta-field-diff {
+  gap: 2px;
+  padding: 0 16px;
+}
+
+.diff-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-height: auto;
+}
+
+/* 知识点显示胶囊 */
+.meta-field.kp-display {
+  max-width: 140px;
+  overflow: hidden;
+}
+
+.kp-display .kp-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kp-display .kp-empty {
+  color: #8c8c8c;
+}
+
+/* 标签按钮胶囊 */
+.meta-field.kp-btn {
+  border: 1px solid #e0e0e0;
+  background: #fff;
+  cursor: pointer;
+}
+
+[data-theme='dark'] .meta-field.kp-btn {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.meta-field.kp-btn:hover {
+  border-color: #b7b7b7;
+  color: #262626;
+}
+
+/* 降噪图标系统 — 统一 14px + 灰色 */
+.meta-field :deep(svg),
+.meta-field .app-icon,
+.meta-field svg {
+  width: 14px !important;
+  height: 14px !important;
+  color: #999;
+  flex-shrink: 0;
+}
+
+[data-theme='dark'] .meta-field :deep(svg),
+[data-theme='dark'] .meta-field .app-icon,
+[data-theme='dark'] .meta-field svg {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+/* AppSelect 箭头图标也降噪 */
+.meta-field :deep(.app-select-chevron) {
+  color: #999;
+}
+
+[data-theme='dark'] .meta-field :deep(.app-select-chevron) {
+  color: rgba(255, 255, 255, 0.4);
 }
 
 /* ============ 主内容双栏 ============ */
@@ -1195,7 +1641,7 @@ watch(() => form.question_type, () => {
   color: var(--text-primary);
   font-size: 13px;
   line-height: 1.6;
-  font-family: 'SF Mono', 'Menlo', 'Consolas', 'Courier New', monospace;
+  font-family: var(--font-cn-isolated);
   resize: none;
   overflow-y: hidden;
   transition: var(--transition-fast);
@@ -1214,9 +1660,148 @@ watch(() => form.question_type, () => {
   min-height: 120px;
 }
 
-/* 解析输入框 - 最低高度160px */
-.analysis-textarea {
-  min-height: 160px;
+/* 解法输入框 */
+.solution-textarea {
+  min-height: 120px;
+}
+
+.solution-textarea-wrap {
+  position: relative;
+}
+
+.solution-textarea-wrap .solution-textarea {
+  padding-bottom: 35px;
+}
+
+.solutions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.solution-item {
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  transition: border-color 0.2s ease;
+}
+
+.solution-item:focus-within {
+  border-color: var(--accent);
+}
+
+.solution-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: var(--bg-input);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.solution-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.solution-del {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.solution-del:hover {
+  background: var(--danger-light);
+  color: var(--danger);
+}
+
+.solution-textarea {
+  border: none !important;
+  border-radius: 0 !important;
+}
+
+.add-solution-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 8px 14px;
+  border: 1px dashed var(--border-color);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.add-solution-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-light);
+}
+
+/* 预览端分段切换 */
+.sol-seg {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius-full);
+  background: var(--bg-input);
+}
+
+.sol-seg-btn {
+  padding: 3px 10px;
+  border: none;
+  border-radius: var(--radius-full);
+  background: transparent;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.sol-seg-btn.active {
+  background: var(--bg-card);
+  color: var(--accent);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+[data-theme='dark'] .sol-seg-btn.active {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+/* 结论高亮区 */
+.paper-conclusion {
+  margin-top: 12px;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  background: var(--accent-light);
+  border-left: 3px solid var(--accent);
+  font-size: 14px;
+  color: var(--text-primary);
+}
+
+/* 淡入淡出过渡 */
+.sol-fade-enter-active,
+.sol-fade-leave-active {
+  transition: opacity 0.2s ease;
+}
+
+.sol-fade-enter-from,
+.sol-fade-leave-to {
+  opacity: 0;
 }
 
 /* 题干容器 - 图片按钮挂载在右下角 */
@@ -1304,13 +1889,27 @@ watch(() => form.question_type, () => {
   transition: border-color 0.2s ease, background-color 0.2s ease, box-shadow 0.2s ease;
 }
 
+[data-theme='dark'] .opt-card {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
 .opt-card:focus-within {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-light);
 }
 
+[data-theme='dark'] .opt-card:focus-within {
+  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.15);
+}
+
 .opt-card.correct {
   background: var(--accent-light);
+  border-color: var(--accent);
+}
+
+[data-theme='dark'] .opt-card.correct {
+  background: rgba(0, 122, 255, 0.12);
   border-color: var(--accent);
 }
 
@@ -1385,6 +1984,34 @@ watch(() => form.question_type, () => {
   background: var(--danger-light);
 }
 
+/* 选项配图按钮（hover/focus 淡入） */
+.opt-img-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: 6px;
+  opacity: 0;
+  transition: opacity 0.2s ease, color 0.2s ease, background-color 0.2s ease;
+}
+
+.opt-card:hover .opt-img-btn,
+.opt-card:focus-within .opt-img-btn {
+  opacity: 0.6;
+}
+
+.opt-img-btn:hover {
+  opacity: 1 !important;
+  color: var(--accent);
+  background: var(--accent-light);
+}
+
 .step-input {
   flex: 1;
   min-width: 0;
@@ -1436,11 +2063,100 @@ watch(() => form.question_type, () => {
 }
 
 .grading-label {
-  font-size: 12px;
+  display: none;
+}
+
+/* 动态小题答案卡片组 */
+.sub-answer-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sub-answer-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  position: relative;
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 10px 12px;
+  transition: border-color 0.2s;
+}
+
+.sub-answer-card:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-light);
+}
+
+[data-theme='dark'] .sub-answer-card {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+.sub-answer-num {
+  font-size: 13px;
   font-weight: 600;
-  margin-top: 10px;
-  margin-bottom: 8px;
   color: var(--text-secondary);
+  flex-shrink: 0;
+  padding-top: 6px;
+  min-width: 24px;
+}
+
+.sub-answer-input {
+  flex: 1;
+  border: none !important;
+  background: transparent !important;
+  padding: 4px 0 !important;
+  min-height: 32px;
+  font-family: var(--font-cn-isolated);
+}
+
+.sub-answer-input:focus {
+  border: none !important;
+  box-shadow: none !important;
+}
+
+.sub-answer-del {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.04);
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.2s, background 0.2s;
+  flex-shrink: 0;
+}
+
+.sub-answer-card:hover .sub-answer-del {
+  opacity: 1;
+}
+
+.sub-answer-del:hover {
+  background: rgba(255, 59, 48, 0.1);
+  color: #ff3b30;
+}
+
+/* 预览区多小题答案 */
+.paper-sub-answer {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+
+.paper-sub-num {
+  font-weight: 700;
+  flex-shrink: 0;
 }
 
 .icon-btn {
@@ -1739,6 +2455,7 @@ watch(() => form.question_type, () => {
   color: #1d1d1f;
   margin-bottom: 14px;
   word-break: break-word;
+  font-family: var(--font-cn-isolated);
 }
 
 [data-theme='dark'] .paper-stem {
@@ -1752,14 +2469,38 @@ watch(() => form.question_type, () => {
   margin-bottom: 14px;
 }
 
+/* 4列横排 — 短选项紧凑排列 */
+.paper-options-4col {
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+}
+
+/* 2列双排 — 默认布局 */
+.paper-options-2col {
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px 24px;
+}
+
+/* 1列竖排 — 长选项或含图片 */
+.paper-options-1col {
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+
+/* 兼容旧类名 */
+.paper-options-single {
+  grid-template-columns: 1fr;
+}
+
 .paper-opt {
-  display: flex;
-  align-items: flex-start;
+  display: inline-flex;
+  align-items: center;
   gap: 4px;
   font-size: 13px;
   line-height: 1.7;
   color: #3a3a3c;
   padding: 4px 0;
+  font-family: var(--font-cn-isolated);
 }
 
 .paper-opt.correct {
@@ -1773,6 +2514,16 @@ watch(() => form.question_type, () => {
 .paper-opt-letter {
   font-weight: 600;
   flex-shrink: 0;
+}
+
+/* 选项内图片样式 */
+.paper-opt img.latex-img {
+  max-height: 80px;
+  width: auto;
+  display: inline-block;
+  vertical-align: middle;
+  margin: 4px 0;
+  border-radius: 4px;
 }
 
 /* 答案/解析区块 */
@@ -1800,6 +2551,7 @@ watch(() => form.question_type, () => {
   font-size: 13px;
   line-height: 1.7;
   color: var(--text-primary);
+  font-family: var(--font-cn-isolated);
 }
 
 .paper-correct-answer {
@@ -1810,27 +2562,6 @@ watch(() => form.question_type, () => {
 
 .paper-muted {
   color: var(--text-muted);
-}
-
-/* 知识点显示框（只读，来自左侧树选中） */
-.kp-display {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  padding: 7px 12px;
-  border-radius: 8px;
-  background: var(--bg-input);
-  border: 1px solid var(--border-color);
-  color: var(--text-secondary);
-  font-size: 13px;
-  box-sizing: border-box;
-  min-height: 36px;
-}
-
-.kp-display .kp-empty {
-  color: var(--text-muted);
-  font-style: italic;
 }
 
 /* 标签弹窗 */
@@ -1922,7 +2653,7 @@ watch(() => form.question_type, () => {
   }
   .meta-field,
   .meta-field-sm {
-    flex: 1 1 calc(33.33% - 14px);
+    flex: 0 1 auto;
   }
 }
 
@@ -1951,7 +2682,7 @@ watch(() => form.question_type, () => {
   }
   .meta-field,
   .meta-field-sm {
-    flex: 1 1 100%;
+    flex: 0 1 auto;
   }
   .top-bar-left,
   .top-bar-right {

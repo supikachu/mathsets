@@ -221,8 +221,8 @@ onBeforeUnmount(() => {
   position: absolute;
   top: calc(100% + 4px);
   left: 0;
-  right: 0;
-  z-index: 100;
+  z-index: 1000;
+  min-width: max-content;
   max-height: 240px;
   overflow-y: auto;
   padding: 4px;
@@ -249,7 +249,7 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   width: 100%;
-  padding: 7px 10px;
+  padding: 8px 12px;
   border: none;
   border-radius: 6px;
   background: transparent;
@@ -260,10 +260,15 @@ onBeforeUnmount(() => {
   cursor: pointer;
   transition: background 0.12s, color 0.12s;
   text-align: left;
+  white-space: nowrap;
 }
 
 .app-select-option:hover {
-  background: var(--bg-hover);
+  background: #f5f5f7;
+}
+
+[data-theme='dark'] .app-select-option:hover {
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .app-select-option.selected {

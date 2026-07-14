@@ -83,6 +83,13 @@
   --bg-wallpaper: none;
   --blur-nav: saturate(180%) blur(20px);
   --blur-modal: saturate(180%) blur(8px);
+
+  /* ---- Font stacks ---- */
+  /* 中英隔离字体栈：英文/数字优先原生系统字体，中文自动降级到霞鹜文楷 */
+  --font-cn-isolated: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    'Helvetica Neue', 'LXGW WenKai Screen', 'LXGW WenKai', 'Kaiti', sans-serif;
+  /* 等宽字体（代码/LaTeX 源码编辑区） */
+  --font-mono: 'SF Mono', 'Menlo', 'Consolas', 'Courier New', monospace;
 }
 
 /* ---- Dark mode (Apple system dark) ---- */
