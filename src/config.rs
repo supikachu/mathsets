@@ -6,6 +6,55 @@ pub struct AppConfig {
     pub jwt_expiry_hours: i64,
     pub host: String,
     pub port: u16,
+    pub ai: AiConfig,
+}
+
+/// AI 服务配置（平台默认 Key + 加密密钥 + 默认模型）
+#[derive(Debug, Clone)]
+pub struct AiConfig {
+    pub default_provider: String,
+    pub deepseek_api_key: Option<String>,
+    pub deepseek_base_url: String,
+    pub qwen_api_key: Option<String>,
+    pub qwen_base_url: String,
+    pub openai_api_key: Option<String>,
+    pub openai_base_url: String,
+    /// 用户个人 API Key 的 AES-256-GCM 主密钥（base64 编码的 32 字节）
+    pub key_encryption_key: Option<String>,
+    pub default_model_text: String,
+    pub default_model_vision: String,
+}
+
+impl AiConfig {
+    /// 从环境变量加载 AI 配置，缺失时使用默认值
+    pub fn from_env() -> Self {
+        Self {
+            default_provider: std::env::var("AI_DEFAULT_PROVIDER")
+                .unwrap_or_else(|_| "deepseek".to_string()),
+            deepseek_api_key: std::env::var("DEEPSEEK_API_KEY")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            deepseek_base_url: std::env::var("DEEPSEEK_BASE_URL")
+                .unwrap_or_else(|_| "https://api.deepseek.com".to_string()),
+            qwen_api_key: std::env::var("QWEN_API_KEY")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            qwen_base_url: std::env::var("QWEN_BASE_URL")
+                .unwrap_or_else(|_| "https://dashscope.aliyuncs.com/compatible-mode".to_string()),
+            openai_api_key: std::env::var("OPENAI_API_KEY")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            openai_base_url: std::env::var("OPENAI_BASE_URL")
+                .unwrap_or_else(|_| "https://api.openai.com".to_string()),
+            key_encryption_key: std::env::var("AI_KEY_ENCRYPTION_KEY")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            default_model_text: std::env::var("AI_DEFAULT_MODEL_TEXT")
+                .unwrap_or_else(|_| "deepseek-chat".to_string()),
+            default_model_vision: std::env::var("AI_DEFAULT_MODEL_VISION")
+                .unwrap_or_else(|_| "qwen-vl-plus".to_string()),
+        }
+    }
 }
 
 impl AppConfig {
@@ -25,6 +74,7 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(3000),
+            ai: AiConfig::from_env(),
         }
     }
 }

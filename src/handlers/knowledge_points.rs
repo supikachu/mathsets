@@ -21,7 +21,7 @@ pub struct KpQuery {
 }
 
 /// 构建知识点树（递归）
-fn build_tree(points: &[KnowledgePoint], parent_id: Option<Uuid>) -> Vec<KnowledgePointTreeNode> {
+pub fn build_tree(points: &[KnowledgePoint], parent_id: Option<Uuid>) -> Vec<KnowledgePointTreeNode> {
     let mut children: Vec<KnowledgePointTreeNode> = points
         .iter()
         .filter(|p| p.parent_id == parent_id)
@@ -33,6 +33,32 @@ fn build_tree(points: &[KnowledgePoint], parent_id: Option<Uuid>) -> Vec<Knowled
         .collect();
     children.sort_by_key(|n| n.sort_order);
     children
+}
+
+/// 从数据库获取知识点树（供其他模块调用，如 AI 解析的知识点匹配）
+pub async fn fetch_tree(
+    pool: &sqlx::PgPool,
+    space_id: Option<Uuid>,
+) -> Vec<KnowledgePointTreeNode> {
+    let points = if let Some(sid) = space_id {
+        sqlx::query_as::<_, KnowledgePoint>(
+            "SELECT * FROM knowledge_points WHERE space_id IS NULL OR space_id = $1 ORDER BY sort_order, name",
+        )
+        .bind(sid)
+        .fetch_all(pool)
+        .await
+    } else {
+        sqlx::query_as::<_, KnowledgePoint>(
+            "SELECT * FROM knowledge_points WHERE space_id IS NULL ORDER BY sort_order, name",
+        )
+        .fetch_all(pool)
+        .await
+    };
+
+    match points {
+        Ok(p) => build_tree(&p, None),
+        Err(_) => vec![],
+    }
 }
 
 /// GET /api/v1/knowledge-points — 获取知识点树

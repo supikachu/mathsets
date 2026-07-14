@@ -39,6 +39,7 @@ async fn main() {
         pool,
         jwt_secret: config.jwt_secret.clone(),
         jwt_expiry_hours: config.jwt_expiry_hours,
+        ai_config: config.ai.clone(),
     };
 
     // 构建路由
