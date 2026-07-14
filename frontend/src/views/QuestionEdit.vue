@@ -99,16 +99,28 @@
 
             <!-- 答案 -->
             <section class="edit-section">
-              <div class="section-label"><AppIcon name="file-text" :size="16" /> <span>答案</span></div>
+              <div class="section-label">
+                <AppIcon name="file-text" :size="16" /> <span>答案</span>
+                <div v-if="form.question_type === 'choice'" class="seg-toggle">
+                  <button type="button" class="seg-btn" :class="{ active: form.sub_type !== 'multi' }" @click="switchChoiceMode('single')">单选</button>
+                  <button type="button" class="seg-btn" :class="{ active: form.sub_type === 'multi' }" @click="switchChoiceMode('multi')">多选</button>
+                </div>
+              </div>
               <!-- 选择题选项 -->
               <div v-if="form.question_type === 'choice'" class="choice-grid">
-                <div v-for="(opt, i) in form.options" :key="i" class="opt-row">
-                  <label class="radio-label" :class="{ checked: form.correctAnswer === opt.label }">
-                    <input type="radio" :value="opt.label" v-model="form.correctAnswer" />
-                    {{ opt.label }}
+                <div
+                  v-for="(opt, i) in form.options"
+                  :key="i"
+                  class="opt-card"
+                  :class="{ correct: isOptionCorrect(opt.label) }"
+                >
+                  <label class="opt-prefix" :class="{ checked: isOptionCorrect(opt.label) }">
+                    <input v-if="isMultiChoice" type="checkbox" :value="opt.label" v-model="multiCorrectAnswers" />
+                    <input v-else type="radio" :value="opt.label" v-model="form.correctAnswer" />
+                    <span class="opt-letter">{{ opt.label }}</span>
                   </label>
-                  <input v-model="opt.content" :placeholder="`选项 ${opt.label}`" class="opt-input" />
-                  <button v-if="form.options.length > 2" type="button" class="icon-btn" @click="form.options.splice(i, 1)"><AppIcon name="x" :size="15" /></button>
+                  <input v-model="opt.content" :placeholder="`选项 ${opt.label}`" class="opt-card-input" />
+                  <button v-if="form.options.length > 2" type="button" class="opt-delete" @click="form.options.splice(i, 1)"><AppIcon name="x" :size="15" /></button>
                 </div>
                 <button type="button" class="add-btn add-btn-sm" @click="addOption"><AppIcon name="plus" :size="14" /> 添加选项</button>
               </div>
@@ -207,12 +219,12 @@
               </div>
 
               <!-- 选择题选项 -->
-              <div v-if="form.question_type === 'choice' && Array.isArray(form.options) && form.options.some(o => o.content)" class="paper-options">
+              <div v-if="form.question_type === 'choice' && previewOptions.length" class="paper-options">
                 <div
-                  v-for="opt in form.options.filter(o => o.content)"
+                  v-for="opt in previewOptions"
                   :key="opt.label"
                   class="paper-opt"
-                  :class="{ correct: form.correctAnswer === opt.label }"
+                  :class="{ correct: isOptionCorrect(opt.label) }"
                 >
                   <span class="paper-opt-letter">{{ opt.label }}.</span>
                   <LatexRender :text="opt.content" :inline="true" />
@@ -223,8 +235,8 @@
               <div class="paper-answer-block">
                 <div class="paper-answer-label">答案</div>
                 <div class="paper-answer-content">
-                  <template v-if="form.question_type === 'choice' && form.correctAnswer">
-                    <span class="paper-correct-answer">{{ form.correctAnswer }}</span>
+                  <template v-if="form.question_type === 'choice' && hasCorrectAnswer">
+                    <span class="paper-correct-answer">{{ displayCorrectAnswer }}</span>
                   </template>
                   <template v-else-if="form.question_type === 'fill' && form.blanks.some(b => b.answer)">
                     <span v-for="(blank, i) in form.blanks.filter(b => b.answer)" :key="i">
@@ -327,7 +339,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { questionApi, kpApi, spaceApi, type KnowledgePoint, type SpaceMemberInfo } from '@/api/client'
 import LatexRender from '@/components/LatexRender.vue'
@@ -449,6 +461,54 @@ const spaceMembers = ref<SpaceMemberInfo[]>([])
 // 当前空间是否为团队空间（团队空间才显示审题人选择）
 const isTeamSpace = computed(() => space.currentSpace?.kind === 'team')
 
+// 预览区选择题选项（computed 缓存，避免每次渲染都 filter 产生新数组导致重渲染抖动）
+const previewOptions = computed(() => {
+  if (!Array.isArray(form.options)) return []
+  return form.options.filter(o => o.content)
+})
+
+// ===== 单选/多选切换 =====
+const isMultiChoice = computed(() => form.question_type === 'choice' && form.sub_type === 'multi')
+
+// 多选答案数组（与 form.correctAnswer 双向同步）
+const multiCorrectAnswers = computed({
+  get: () => Array.isArray(form.correctAnswer) ? form.correctAnswer : [],
+  set: (val: string[]) => { form.correctAnswer = val },
+})
+
+function isOptionCorrect(label: string): boolean {
+  if (Array.isArray(form.correctAnswer)) return form.correctAnswer.includes(label)
+  return form.correctAnswer === label
+}
+
+const hasCorrectAnswer = computed(() => {
+  if (Array.isArray(form.correctAnswer)) return form.correctAnswer.length > 0
+  return !!form.correctAnswer
+})
+
+const displayCorrectAnswer = computed(() => {
+  if (Array.isArray(form.correctAnswer)) return form.correctAnswer.join('')
+  return form.correctAnswer
+})
+
+function switchChoiceMode(mode: 'single' | 'multi') {
+  if (mode === 'multi') {
+    form.sub_type = 'multi'
+    // 单选答案转多选数组
+    if (form.correctAnswer && !Array.isArray(form.correctAnswer)) {
+      form.correctAnswer = [form.correctAnswer]
+    } else if (!form.correctAnswer) {
+      form.correctAnswer = []
+    }
+  } else {
+    form.sub_type = ''
+    // 多选数组取第一个转单选
+    if (Array.isArray(form.correctAnswer)) {
+      form.correctAnswer = form.correctAnswer[0] || ''
+    }
+  }
+}
+
 // 可折叠面板
 const collapse = reactive({
   source: true,
@@ -564,8 +624,13 @@ function handleBack() {
   }
 }
 function goBack() {
-  if (isNew) router.replace('/questions')
-  else router.replace(`/questions/${route.params.id}`)
+  // 优先用 router.back() 回退，不产生重复历史条目
+  if (window.history.state?.back) {
+    router.back()
+  } else {
+    if (isNew) router.replace('/questions')
+    else router.replace(`/questions/${route.params.id}`)
+  }
 }
 
 // ===== AI 识别（预留） =====
@@ -586,10 +651,18 @@ function handleImageUpload() {
 }
 
 // textarea 自适应高度
-function autoResize(e: Event) {
-  const el = e.target as HTMLTextAreaElement
+function resizeTextarea(el: HTMLTextAreaElement) {
   el.style.height = 'auto'
   el.style.height = el.scrollHeight + 'px'
+}
+function autoResize(e: Event) {
+  resizeTextarea(e.target as HTMLTextAreaElement)
+}
+// 对页面内所有 .edit-textarea 执行自适应（用于加载已有题目后手动触发）
+function resizeAllTextareas() {
+  document.querySelectorAll<HTMLTextAreaElement>('.edit-textarea').forEach(el => {
+    resizeTextarea(el)
+  })
 }
 
 // ===== 构建提交数据 =====
@@ -618,7 +691,12 @@ function buildPayload() {
   switch (form.question_type) {
     case 'choice':
       payload.options = (form.options || []).filter(o => o.content.trim())
-      payload.correct_answer = form.correctAnswer ? [form.correctAnswer] : []
+      payload.sub_type = form.sub_type || null
+      if (Array.isArray(form.correctAnswer)) {
+        payload.correct_answer = form.correctAnswer
+      } else {
+        payload.correct_answer = form.correctAnswer ? [form.correctAnswer] : []
+      }
       break
     case 'fill':
       payload.correct_answer = form.blanks.filter(b => b.answer.trim()).map(b => ({ position: b.position, answer: b.answer.trim() }))
@@ -637,7 +715,7 @@ function buildPayload() {
 // ===== 保存 =====
 async function handleSave(submitAfter: boolean) {
   if (!form.stem.trim()) { toast.warning('请输入题干'); return }
-  if (form.question_type === 'choice' && !form.correctAnswer) { toast.warning('请选择正确答案'); return }
+  if (form.question_type === 'choice' && !hasCorrectAnswer.value) { toast.warning('请选择正确答案'); return }
   const flag = submitAfter ? submitting : saving
   flag.value = true
   try {
@@ -651,7 +729,16 @@ async function handleSave(submitAfter: boolean) {
       toast.success('已创建并提交审核')
     }
     else { toast.success(isNew ? '草稿已保存' : '已更新') }
-    router.replace(`/questions/${qid}`)
+    // 保存后跳转详情页：新题用 replace 替换编辑页；已有题用 back() 回退到来源详情页
+    if (isNew) {
+      router.replace(`/questions/${qid}`)
+    } else {
+      if (window.history.state?.back) {
+        router.back()
+      } else {
+        router.replace(`/questions/${qid}`)
+      }
+    }
   } catch (e: any) { toast.error(e.response?.data?.error || '操作失败') }
   finally { flag.value = false }
 }
@@ -693,7 +780,7 @@ function restoreDraft() {
 
 function doRestoreDraft() {
   if (!pendingDraft) return
-  const fields = ['stem', 'question_type', 'difficulty', 'default_score', 'grade', 'semester',
+  const fields = ['stem', 'question_type', 'sub_type', 'difficulty', 'default_score', 'grade', 'semester',
     'source', 'analysis', 'options', 'correctAnswer', 'blanks', 'solutionAnswer',
     'gradingSteps', 'judgmentCorrect', 'knowledgePointIds', 'tags', 'literacy_tags', 'difficulty_coefficient', 'academic_year', 'grade_semester', 'region', 'exam_type', 'reviewer', 'reviewer_ids', 'internal_note']
   for (const f of fields) {
@@ -701,6 +788,7 @@ function doRestoreDraft() {
   }
   toast.success('草稿已恢复')
   pendingDraft = null
+  restoreDialog.value = false
 }
 
 function discardDraft() {
@@ -771,7 +859,14 @@ async function loadQuestion() {
           return { label: '', content: String(opt) }
         })
       }
-      if (Array.isArray(d.correct_answer)) form.correctAnswer = d.correct_answer[0] || ''
+      if (Array.isArray(d.correct_answer)) {
+        if (d.sub_type === 'multi' || d.correct_answer.length > 1) {
+          form.sub_type = 'multi'
+          form.correctAnswer = d.correct_answer as string[]
+        } else {
+          form.correctAnswer = d.correct_answer[0] || ''
+        }
+      }
     } else if (d.question_type === 'fill' && Array.isArray(d.correct_answer)) {
       form.blanks = (d.correct_answer as any[]).map((b: any) => ({ position: b.position, answer: b.answer }))
     } else if (d.question_type === 'solution') {
@@ -782,7 +877,17 @@ async function loadQuestion() {
     }
     form.hasUnsaved = false
   } catch { /* handled */ }
-  finally { loading.value = false; isLoading.value = false }
+  finally {
+    loading.value = false
+    // 等待 watcher 在 isLoading=true 时刷新（避免误触发 hasUnsaved）
+    await nextTick()
+    isLoading.value = false
+    // 程序化设置的值不会触发 @input，需手动调整文本框高度
+    if (!isNew) {
+      await nextTick()
+      resizeAllTextareas()
+    }
+  }
 }
 
 // ===== 窗口关闭检测 =====
@@ -806,6 +911,7 @@ onBeforeUnmount(() => {
 
 watch(() => form.question_type, () => {
   if (isNew) {
+    form.sub_type = ''
     form.correctAnswer = ''
     form.blanks = [{ position: 1, answer: '' }]
     form.solutionAnswer = ''
@@ -1157,7 +1263,7 @@ watch(() => form.question_type, () => {
 .choice-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 6px;
+  gap: 8px;
 }
 
 .choice-grid .add-btn-sm {
@@ -1186,33 +1292,97 @@ watch(() => form.question_type, () => {
   flex: none !important;
 }
 
-/* 选项行 */
-.opt-row {
+/* 选项卡片（一体化胶囊） */
+.opt-card {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 6px;
+  gap: 12px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: #f5f5f7;
+  border: 1.5px solid transparent;
+  transition: border-color 0.2s ease, background-color 0.2s ease, box-shadow 0.2s ease;
 }
 
-.opt-input {
+.opt-card:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-light);
+}
+
+.opt-card.correct {
+  background: var(--accent-light);
+  border-color: var(--accent);
+}
+
+/* 前缀（单选/多选 + 字母） */
+.opt-prefix {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  cursor: pointer;
+  user-select: none;
+}
+
+.opt-prefix input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.opt-letter {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.opt-prefix.checked .opt-letter {
+  color: var(--accent);
+}
+
+/* 隐形输入框 */
+.opt-card-input {
   flex: 1;
   min-width: 0;
-  padding: 6px 32px 6px 10px;
-  border-radius: 8px;
-  background: var(--bg-input);
-  border: 1px solid var(--border-color);
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  outline: none;
   color: var(--text-primary);
   font-size: 13px;
   line-height: 1.4;
-  transition: var(--transition-fast);
   font-family: inherit;
+  padding: 2px 0;
 }
 
-.opt-input:focus {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-light);
-  background: var(--bg-card);
+.opt-card-input::placeholder {
+  color: var(--text-muted);
+}
+
+/* 删除按钮（hover 淡入） */
+.opt-delete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: 6px;
+  opacity: 0;
+  transition: opacity 0.2s ease, color 0.2s ease, background-color 0.2s ease;
+}
+
+.opt-card:hover .opt-delete {
+  opacity: 0.6;
+}
+
+.opt-delete:hover {
+  opacity: 1 !important;
+  color: var(--danger);
+  background: var(--danger-light);
 }
 
 .step-input {
@@ -1230,6 +1400,27 @@ watch(() => form.question_type, () => {
 }
 
 .step-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-light);
+  background: var(--bg-card);
+}
+
+.opt-input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 32px 6px 10px;
+  border-radius: 8px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.4;
+  transition: var(--transition-fast);
+  font-family: inherit;
+}
+
+.opt-input:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-light);
@@ -1315,13 +1506,14 @@ watch(() => form.question_type, () => {
   align-items: center;
   gap: 6px;
   font-size: 14px;
+  font-weight: 600;
   cursor: pointer;
   padding: 8px 16px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border-color);
   background: var(--bg-input);
   color: var(--text-secondary);
-  transition: var(--transition-fast);
+  transition: border-color 0.18s ease, background-color 0.18s ease, color 0.18s ease;
   user-select: none;
 }
 
@@ -1333,12 +1525,41 @@ watch(() => form.question_type, () => {
   border-color: var(--accent);
   background: var(--accent-light);
   color: var(--accent);
-  font-weight: 600;
 }
 
 .radio-label input {
   margin: 0;
   accent-color: var(--accent);
+}
+
+/* 单选/多选精简分段控制器（答案区内） */
+.seg-toggle {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 8px;
+  gap: 2px;
+  background: var(--bg-input);
+  border-radius: var(--radius-sm);
+  padding: 2px;
+}
+
+.seg-btn {
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: calc(var(--radius-sm) - 1px);
+  transition: background-color 0.15s ease, color 0.15s ease;
+  font-family: inherit;
+  line-height: 1.5;
+}
+
+.seg-btn.active {
+  background: var(--accent);
+  color: #fff;
 }
 
 /* ============ 高级设置折叠 ============ */
@@ -1534,7 +1755,7 @@ watch(() => form.question_type, () => {
 .paper-opt {
   display: flex;
   align-items: flex-start;
-  gap: 6px;
+  gap: 4px;
   font-size: 13px;
   line-height: 1.7;
   color: #3a3a3c;
@@ -1543,7 +1764,6 @@ watch(() => form.question_type, () => {
 
 .paper-opt.correct {
   color: var(--accent);
-  font-weight: 600;
 }
 
 [data-theme='dark'] .paper-opt {

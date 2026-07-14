@@ -13,6 +13,17 @@ const props = defineProps<{
 
 const container = ref<HTMLElement>()
 
+// 全局 KaTeX 宏：将 \emptyset 映射为 \varnothing，符合国内教材椭圆空集符号
+const katexMacros = {
+  '\\emptyset': '\\varnothing',
+}
+
+// 将公式中的 Unicode 空集符号 ∅ (U+2205) 替换为 \varnothing
+// KaTeX macros 只对 LaTeX 命令生效，Unicode 字符需预处理
+function normalizeEmptyset(s: string): string {
+  return s.replace(/\u2205/g, '\\varnothing')
+}
+
 function escapeHtml(s: string): string {
   return s
     .replace(/&/g, '&amp;')
@@ -42,7 +53,7 @@ function render() {
         .replace(/&gt;/g, '>')
         .replace(/&quot;/g, '"')
         .replace(/&#39;/g, "'")
-      return katex.renderToString(raw.trim(), { displayMode: true, throwOnError: false })
+      return katex.renderToString(normalizeEmptyset(raw.trim()), { displayMode: true, throwOnError: false, macros: katexMacros })
     } catch {
       return `<span class="katex-error">${formula}</span>`
     }
@@ -57,7 +68,7 @@ function render() {
         .replace(/&gt;/g, '>')
         .replace(/&quot;/g, '"')
         .replace(/&#39;/g, "'")
-      return katex.renderToString(raw.trim(), { displayMode: false, throwOnError: false })
+      return katex.renderToString(normalizeEmptyset(raw.trim()), { displayMode: false, throwOnError: false, macros: katexMacros })
     } catch {
       return `<span class="katex-error">${formula}</span>`
     }

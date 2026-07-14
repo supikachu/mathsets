@@ -35,9 +35,10 @@ export const useAuthStore = defineStore('auth', () => {
     } catch {
       /* ignore */
     }
-    const { default: router } = await import('@/router')
-    const redirect = router.currentRoute.value.query.redirect as string
-    router.replace(redirect || '/dashboard')
+    // 使用 window.location 跳转，避免引入 router 造成循环依赖（HMR 问题）
+    const params = new URLSearchParams(window.location.search)
+    const redirect = params.get('redirect')
+    window.location.href = redirect || '/dashboard'
   }
 
   async function logout() {
@@ -46,8 +47,7 @@ export const useAuthStore = defineStore('auth', () => {
     localStorage.removeItem('token')
     localStorage.removeItem('user')
     localStorage.removeItem('currentSpaceId')
-    const { default: router } = await import('@/router')
-    router.replace('/login')
+    window.location.href = '/login'
   }
 
   return {

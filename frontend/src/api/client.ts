@@ -21,18 +21,12 @@ client.interceptors.request.use((config) => {
 // 响应拦截器：401 → 跳转登录
 client.interceptors.response.use(
   (resp) => resp,
-  async (error) => {
+  (error) => {
     if (error.response?.status === 401) {
       localStorage.removeItem('token')
       localStorage.removeItem('user')
-      // 动态导入避免循环依赖
-      const { useAuthStore } = await import('@/stores/auth')
-      const auth = useAuthStore()
-      auth.token = ''
-      auth.user = null
-      const { default: router } = await import('@/router')
-      router.replace('/login')
-      useToast().error('登录已过期，请重新登录')
+      // 使用 window.location 跳转，避免引入 router/store 造成循环依赖（HMR 问题）
+      window.location.href = '/login'
     }
     return Promise.reject(error)
   },

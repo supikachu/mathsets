@@ -3,13 +3,13 @@
     <div v-if="loading" class="loading-hint">加载中…</div>
 
     <template v-else>
-      <!-- 头部导航 -->
-      <div class="detail-header">
+      <!-- ============ 顶部吸顶导航 ============ -->
+      <header class="detail-header">
         <div class="header-left">
-          <AppButton variant="ghost" size="sm" @click="$router.replace('/questions')"><AppIcon name="chevron-left" :size="17" /> 返回列表</AppButton>
+          <AppButton variant="ghost" size="sm" @click="backToList"><AppIcon name="chevron-left" :size="17" /> 返回列表</AppButton>
           <h1 class="page-title">题目详情</h1>
         </div>
-        <div class="flex gap-2">
+        <div class="header-actions">
           <template v-if="q?.status === 'draft'">
             <AppButton variant="primary" size="sm" @click="$router.push(`/questions/${q!.id}/edit`)">编辑</AppButton>
             <AppButton variant="success" size="sm" :loading="submitting" @click="submitReview">提交审核</AppButton>
@@ -26,103 +26,129 @@
             <AppButton variant="outline" size="sm" @click="toast.info('停用功能即将上线')"><AppIcon name="ban" :size="17" /> 停用</AppButton>
           </template>
         </div>
-      </div>
+      </header>
 
-      <div class="detail-layout">
-        <!-- 主内容区 -->
-        <div class="detail-main">
-          <!-- 一、题干 -->
-          <div class="section-card">
-            <div class="section-title"><span class="section-num">1</span> 题干</div>
-            <div class="q-info-bar">
-              <AppBadge :color="statusBadgeColor(q?.status || '')"><AppIcon :name="statusIcon(q?.status || '')" :size="13" /> {{ statusLabel(q?.status || '') }}</AppBadge>
-              <AppBadge :color="typeBadgeColor(q?.question_type || '')">{{ typeLabel(q?.question_type || '') }}</AppBadge>
-              <span class="q-info-item"><AppIcon name="star" :size="13" /> {{ diffLabel(q?.difficulty || '') }}</span>
-              <span class="q-info-item">{{ q?.default_score }}分</span>
-              <span v-if="q?.grade" class="q-info-item">{{ q.grade }}</span>
-              <span v-if="q?.semester" class="q-info-item">{{ q.semester }}</span>
-              <span v-if="q?.source" class="q-info-item">{{ q.source }}</span>
+      <!-- ============ 内容区：Flex 双栏，各自独立滚动 ============ -->
+      <div class="detail-body">
+        <!-- ===== 中间：沉浸式试卷卡片 ===== -->
+        <div class="paper-scroll">
+          <div class="paper-card">
+            <!-- 卡片头部属性栏 -->
+            <div class="paper-header">
+              <div class="paper-header-left">
+                <span v-if="q?.source" class="paper-source-tag">{{ q.source }}</span>
+                <AppBadge :color="typeBadgeColor(q?.question_type || '')">{{ typeLabel(q?.question_type || '') }}</AppBadge>
+                <span class="paper-difficulty">
+                  <AppIcon v-for="n in 5" :key="n" name="star" :size="12" :class="{ active: diffStars >= n }" class="paper-star" />
+                </span>
+              </div>
+              <div class="paper-header-right">
+                <AppBadge :color="statusBadgeColor(q?.status || '')"><AppIcon :name="statusIcon(q?.status || '')" :size="13" /> {{ statusLabel(q?.status || '') }}</AppBadge>
+                <span class="paper-meta-tag">{{ q?.default_score }}分</span>
+                <span v-if="q?.grade" class="paper-meta-tag">{{ q.grade }}</span>
+                <span v-if="q?.semester" class="paper-meta-tag">{{ q.semester }}</span>
+              </div>
             </div>
-            <div class="q-stem">
+
+            <!-- 题干 -->
+            <div class="paper-stem">
               <LatexRender :text="q?.stem || ''" />
             </div>
+
             <!-- 选择题选项 -->
             <div
               v-if="q?.question_type === 'choice' && optionList.length"
               ref="optionsContainer"
-              class="q-options"
+              class="paper-options"
               :class="optionLayoutClass"
             >
               <div
                 v-for="opt in optionList"
                 :key="opt.label"
-                class="q-option"
+                class="paper-opt"
                 :class="{ correct: isCorrect(opt.label) }"
               >
-                <span class="q-option-label" :class="{ 'label-correct': isCorrect(opt.label) }">{{ opt.label }}</span>
-                <LatexRender :text="opt.content" :inline="true" />
-                <AppIcon v-if="isCorrect(opt.label)" name="check-circle" :size="16" class="q-option-check" />
+                <span class="paper-opt-letter">{{ opt.label }}.</span>
+                <span class="paper-opt-content"><LatexRender :text="opt.content" :inline="true" /></span>
+                <AppIcon v-if="isCorrect(opt.label)" name="check-circle" :size="15" class="paper-opt-check" />
               </div>
             </div>
-          </div>
 
-          <!-- 二、参考答案 -->
-          <div v-if="hasAnswer" class="section-card answer-section">
-            <div class="section-title"><span class="section-num">2</span> 参考答案</div>
-            <!-- 选择题 -->
-            <div v-if="q?.question_type === 'choice'" class="answer-content">
-              <span class="answer-letter" v-for="a in correctLabels" :key="a">{{ a }}</span>
-            </div>
-            <!-- 判断题 -->
-            <div v-else-if="q?.question_type === 'judgment'" class="answer-inline">
-              <span class="answer-tag" :class="q?.correct_answer?.[0] === true ? 'tag-correct' : 'tag-wrong'">
-                {{ q?.correct_answer?.[0] === true ? '正确' : '错误' }}
-              </span>
-            </div>
-            <!-- 填空题 -->
-            <div v-else-if="q?.question_type === 'fill' && q?.correct_answer" class="q-blanks">
-              <div v-for="(item, i) in (q!.correct_answer as any[])" :key="i" class="q-blank">
-                <span class="q-blank-num">{{ i + 1 }}</span>
-                <LatexRender :text="item.answer || String(item)" :inline="true" />
+            <!-- 答案与解析打包区 -->
+            <div v-if="hasAnswer || q?.analysis || hasGrading" class="answer-solution-block">
+              <!-- 答案区（选择题） -->
+              <div v-if="q?.question_type === 'choice' && correctLabels.length" class="as-row">
+                <span class="as-label">参考答案</span>
+                <div class="as-answer-content">
+                  <span class="paper-correct-answer" v-for="a in correctLabels" :key="a">{{ a }}</span>
+                </div>
               </div>
-            </div>
-            <!-- 解答题 -->
-            <div v-else-if="q?.question_type === 'solution' && q?.correct_answer" class="q-solution-answer">
-              <LatexRender v-for="(ans, i) in (q!.correct_answer as string[])" :key="i" :text="ans" :inline="true" />
-            </div>
-          </div>
 
-          <!-- 三、解析 -->
-          <div v-if="q?.analysis || hasGrading" class="section-card">
-            <div class="section-title"><span class="section-num">3</span> 解析</div>
-            <div v-if="q?.analysis" class="analysis-content">
-              <LatexRender :text="q.analysis" />
-            </div>
-            <!-- 评分标准（解答题） -->
-            <div v-if="hasGrading" class="grading-list">
-              <div v-for="(step, i) in (q!.grading_criteria as any[])" :key="i" class="grading-step">
-                <span class="grading-step-label">{{ step.label || `步骤${i + 1}` }}</span>
-                <span class="grading-step-score">{{ step.score || 0 }}分</span>
-                <span v-if="step.desc" class="grading-step-desc">{{ step.desc }}</span>
+              <!-- 填空题答案 -->
+              <div v-else-if="q?.question_type === 'fill' && hasAnswer" class="as-row">
+                <span class="as-label">参考答案</span>
+                <div class="as-answer-content as-fill-list">
+                  <span v-for="(item, i) in (q!.correct_answer as any[])" :key="i" class="as-fill-item">
+                    {{ i + 1 }}. <LatexRender :text="item.answer || String(item)" :inline="true" />
+                  </span>
+                </div>
+              </div>
+
+              <!-- 解答题答案 -->
+              <div v-else-if="q?.question_type === 'solution' && hasAnswer" class="as-row">
+                <span class="as-label">参考答案</span>
+                <div class="as-answer-content">
+                  <LatexRender v-for="(ans, i) in (q!.correct_answer as string[])" :key="i" :text="ans" />
+                </div>
+              </div>
+
+              <!-- 判断题答案 -->
+              <div v-else-if="q?.question_type === 'judgment'" class="as-row">
+                <span class="as-label">参考答案</span>
+                <div class="as-answer-content">
+                  <span class="paper-judge-tag" :class="q?.correct_answer?.[0] === true ? 'judge-correct' : 'judge-wrong'">
+                    {{ q?.correct_answer?.[0] === true ? '正确' : '错误' }}
+                  </span>
+                </div>
+              </div>
+
+              <!-- 解析 -->
+              <div v-if="q?.analysis" class="as-row as-row-analysis">
+                <span class="as-label">解析</span>
+                <div class="paper-analysis-content">
+                  <LatexRender :text="q.analysis" />
+                </div>
+              </div>
+
+              <!-- 评分标准 -->
+              <div v-if="hasGrading" class="as-row">
+                <span class="as-label">评分标准</span>
+                <div class="as-grading-list">
+                  <div v-for="(step, i) in (q!.grading_criteria as any[])" :key="i" class="paper-grading-step">
+                    <span class="paper-grading-label">{{ step.label || `步骤${i + 1}` }}</span>
+                    <span class="paper-grading-score">{{ step.score || 0 }}分</span>
+                    <span v-if="step.desc" class="paper-grading-desc">{{ step.desc }}</span>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
         </div>
 
-        <!-- 侧边栏 -->
-        <div class="detail-side">
-          <!-- 知识点 -->
+        <!-- ===== 右侧：知识点 + 元信息 ===== -->
+        <div class="side-scroll">
+          <!-- 知识点卡片 -->
           <div class="side-card">
-            <div class="side-title"><AppIcon name="tag" :size="16" /> 知识点</div>
+            <div class="side-card-title"><AppIcon name="tag" :size="15" /> 知识点</div>
             <div v-if="q?.knowledge_points?.length" class="kp-tags">
               <span v-for="kp in q!.knowledge_points" :key="kp.id" class="kp-tag">{{ kp.name }}</span>
             </div>
             <div v-else class="side-empty">未关联知识点</div>
           </div>
 
-          <!-- 元信息 -->
+          <!-- 元信息卡片 -->
           <div class="side-card">
-            <div class="side-title"><AppIcon name="info" :size="16" /> 元信息</div>
+            <div class="side-card-title"><AppIcon name="info" :size="15" /> 元信息</div>
             <div class="meta-list">
               <div class="meta-row"><span class="meta-label">创建者</span><span class="meta-val">{{ q?.creator_name || q?.creator_id?.substring(0, 8) || '—' }}</span></div>
               <div class="meta-row"><span class="meta-label">版本</span><span class="meta-val">v{{ q?.version }}</span></div>
@@ -184,6 +210,12 @@ const rejectDialog = ref(false)
 const rejectComment = ref('')
 const deleteDialog = ref(false)
 
+// 难度星数
+const diffStars = computed(() => {
+  const map: Record<string, number> = { easy: 1, medium: 3, hard: 5 }
+  return map[q.value?.difficulty || ''] || 0
+})
+
 // 安全提取选项列表（兼容数组/对象/JSON字符串）
 const optionList = computed(() => {
   const opts = q.value?.options
@@ -243,7 +275,7 @@ function computeOptionLayout() {
   const containerWidth = container.clientWidth
   if (containerWidth === 0) return
 
-  const optionEls = container.querySelectorAll<HTMLElement>('.q-option')
+  const optionEls = container.querySelectorAll<HTMLElement>('.paper-opt')
   if (optionEls.length === 0) return
 
   // 临时切换为 block 布局测量真实宽度
@@ -312,6 +344,15 @@ async function submitReview() {
   finally { submitting.value = false }
 }
 
+// 返回列表：优先用 router.back() 回退，不产生重复历史条目
+function backToList() {
+  if (window.history.state?.back) {
+    router.back()
+  } else {
+    router.replace('/questions')
+  }
+}
+
 function confirmDelete() {
   deleteDialog.value = true
 }
@@ -320,7 +361,7 @@ async function doDelete() {
   try {
     await client.delete(`/questions/${route.params.id}`)
     toast.success('已删除')
-    router.replace('/questions')
+    backToList()
   } catch { /* handled */ }
 }
 
@@ -359,6 +400,13 @@ function isCorrect(label: string): boolean {
   return String(ans) === label
 }
 
+const isMultiChoice = computed(() => {
+  if (q.value?.question_type !== 'choice') return false
+  if (q.value?.sub_type === 'multi') return true
+  const ans = q.value?.correct_answer
+  return Array.isArray(ans) && ans.length > 1
+})
+
 onMounted(async () => {
   await fetchDetail()
   nextTick(() => {
@@ -380,26 +428,35 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+/* ============ 页面根容器：锁死视口，禁止全局滚动 ============ */
 .detail-page {
-  padding: 20px 24px;
-  height: 100%;
-  overflow-y: auto;
-  box-sizing: border-box;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: #f5f7fa;
+}
+
+[data-theme='dark'] .detail-page {
+  background: var(--bg-primary);
 }
 
 .loading-hint {
   text-align: center;
   padding: 48px 20px;
   color: var(--text-muted);
+  font-size: 14px;
 }
 
-/* 头部 */
+/* ============ 顶部吸顶导航 ============ */
 .detail-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 20px;
-  flex-wrap: wrap;
+  flex-shrink: 0;
+  padding: 12px 24px;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border-color);
   gap: 12px;
 }
 
@@ -410,207 +467,205 @@ onBeforeUnmount(() => {
 }
 
 .page-title {
-  font-size: 20px;
-  font-weight: 700;
+  font-size: 17px;
+  font-weight: 650;
   color: var(--text-primary);
   margin: 0;
+  letter-spacing: -0.01em;
 }
 
-/* 布局 */
-.detail-layout {
-  display: grid;
-  grid-template-columns: 1fr 280px;
-  gap: 20px;
-  align-items: start;
-}
-
-@media (max-width: 1024px) {
-  .detail-layout {
-    grid-template-columns: 1fr;
-  }
-}
-
-/* 分区卡片 */
-.section-card {
-  background: var(--bg-card);
-  border: 1px solid var(--border-color);
-  border-radius: 12px;
-  padding: 22px 26px;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.04);
-  margin-bottom: 14px;
-}
-
-.section-card.answer-section {
-  border-color: var(--success);
-  background: var(--success-light);
-  box-shadow: 0 1px 6px rgba(16, 185, 129, 0.1);
-}
-
-.section-title {
+.header-actions {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 16px;
-  font-weight: 700;
-  color: var(--text-primary);
-  margin-bottom: 16px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid var(--border-light, rgba(0, 0, 0, 0.06));
 }
 
-.section-num {
-  display: inline-flex;
+/* ============ 内容区：Flex 双栏 ============ */
+.detail-body {
+  flex: 1;
+  display: flex;
+  gap: 16px;
+  min-height: 0;
+  padding: 0 24px 16px;
+}
+
+/* 中间滚动区 */
+.paper-scroll {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+/* 右侧滚动区 */
+.side-scroll {
+  flex: 0 0 280px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 4px 0;
+}
+
+/* ============ 中间：沉浸式试卷卡片 ============ */
+.paper-card {
+  background: #ffffff;
+  border-radius: 8px;
+  padding: 24px 36px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.03), 0 2px 8px rgba(0, 0, 0, 0.02);
+  border: 1px solid rgba(0, 0, 0, 0.04);
+  margin: 16px 0;
+  transition: box-shadow 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+}
+
+[data-theme='dark'] .paper-card {
+  background: #1c1c1e;
+  border-color: rgba(255, 255, 255, 0.06);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3), 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+/* 卡片头部属性栏 */
+.paper-header {
+  display: flex;
   align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  border-radius: 50%;
-  background: var(--accent);
-  color: #fff;
-  font-size: 13px;
-  font-weight: 700;
-  flex-shrink: 0;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 18px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid #f0f0f0;
 }
 
-.answer-section .section-num {
-  background: var(--success);
+[data-theme='dark'] .paper-header {
+  border-bottom-color: rgba(255, 255, 255, 0.06);
 }
 
-.q-info-bar {
+.paper-header-left,
+.paper-header-right {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  padding: 8px 12px;
-  margin-bottom: 18px;
-  background: var(--bg-input);
-  border-radius: 8px;
 }
 
-.q-info-item {
-  font-size: 13px;
+.paper-source-tag {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 6px;
+  background: var(--accent-light);
+  color: var(--accent);
+}
+
+.paper-difficulty {
+  display: flex;
+  gap: 1px;
+}
+
+.paper-star {
+  color: #d1d1d6;
+  transition: color 0.2s;
+}
+
+.paper-star.active {
+  color: #ff9500;
+}
+
+.paper-meta-tag {
+  font-size: 12px;
   color: var(--text-muted);
   display: inline-flex;
   align-items: center;
-  gap: 3px;
 }
 
-.q-stem {
+/* 题干 */
+.paper-stem {
   font-size: 15px;
   line-height: 1.8;
-  color: var(--text-primary);
-  margin-bottom: 20px;
+  color: #1d1d1f;
+  margin-bottom: 16px;
+  word-break: break-word;
 }
 
-.q-stem :deep(p) {
+[data-theme='dark'] .paper-stem {
+  color: #f5f5f7;
+}
+
+.paper-stem :deep(p) {
   margin: 0 0 8px;
 }
 
-/* 选项 — 自适应网格布局（与列表页一致） */
-.q-options {
+/* 选项 — 自适应网格 */
+.paper-options {
   display: grid;
-  gap: 12px;
-  margin-top: 14px;
+  gap: 10px;
+  margin-bottom: 16px;
 }
 
-.q-options.grid-4 {
+.paper-options.grid-4 {
   grid-template-columns: repeat(4, 1fr);
 }
 
-.q-options.grid-2 {
+.paper-options.grid-2 {
   grid-template-columns: repeat(2, 1fr);
 }
 
-.q-options.grid-1 {
+.paper-options.grid-1 {
   grid-template-columns: 1fr;
 }
 
-.q-option {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 10px 14px;
-  border-radius: 8px;
-  background: var(--bg-input);
-  border: 1px solid transparent;
-  font-size: 14px;
-  line-height: 1.6;
-  color: var(--text-primary);
-  transition: var(--transition-fast);
-}
-
-.q-option.correct {
-  border-color: var(--success);
-  background: var(--success-light);
-}
-
-.q-option-label {
-  flex-shrink: 0;
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  background: var(--bg-active, rgba(0, 0, 0, 0.05));
+.paper-opt {
   display: flex;
   align-items: center;
-  justify-content: center;
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--text-secondary);
+  gap: 4px;
+  font-size: 14px;
+  line-height: 1.7;
+  color: #3a3a3c;
+  padding: 4px 0;
 }
 
-.q-option-label.label-correct {
-  background: var(--success);
-  color: #fff;
+[data-theme='dark'] .paper-opt {
+  color: #d1d1d6;
 }
 
-.q-option-check {
+.paper-opt.correct {
+  color: var(--success);
+}
+
+.paper-opt-letter {
+  flex-shrink: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: inherit;
+}
+
+.paper-opt-content {
+  min-width: 0;
+}
+
+.paper-opt-check {
   margin-left: auto;
   color: var(--success);
   flex-shrink: 0;
 }
 
-/* 判断题 */
-.answer-inline {
-  margin-top: 4px;
-}
-
-.answer-tag {
-  display: inline-block;
-  padding: 4px 16px;
-  border-radius: 6px;
-  font-weight: 600;
-  font-size: 14px;
-}
-
-.tag-correct {
-  background: var(--success-light);
-  color: var(--success);
-}
-
-.tag-wrong {
-  background: var(--danger-light, rgba(239, 68, 68, 0.1));
-  color: var(--danger, #ef4444);
-}
-
-/* 填空题 */
-.q-blanks {
+/* 填空题答案 */
+.paper-blanks {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  margin-top: 12px;
+  margin-bottom: 16px;
 }
 
-.q-blank {
+.paper-blank {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
-  background: var(--bg-input);
-  border-radius: 6px;
   font-size: 14px;
+  padding: 6px 0;
 }
 
-.q-blank-num {
+.paper-blank-num {
   flex-shrink: 0;
   width: 20px;
   height: 20px;
@@ -625,96 +680,192 @@ onBeforeUnmount(() => {
 }
 
 /* 解答题答案 */
-.q-solution-answer {
-  margin-top: 12px;
-  padding: 12px 16px;
-  background: var(--bg-input);
+.paper-solution-answer {
+  font-size: 14px;
+  line-height: 1.8;
+  color: #1d1d1f;
+  margin-bottom: 16px;
+}
+
+[data-theme='dark'] .paper-solution-answer {
+  color: #f5f5f7;
+}
+
+/* 判断题 */
+.paper-judgment {
+  margin-bottom: 16px;
+}
+
+.paper-judge-tag {
+  display: inline-block;
+  padding: 4px 16px;
+  border-radius: 6px;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.judge-correct {
+  background: var(--success-light);
+  color: var(--success);
+}
+
+.judge-wrong {
+  background: var(--danger-light, rgba(239, 68, 68, 0.1));
+  color: var(--danger, #ef4444);
+}
+
+/* 答案与解析打包区 — 视觉二阶层级 */
+.answer-solution-block {
+  background: #f8f9fa;
   border-radius: 8px;
+  padding: 18px 20px;
+  margin-top: 4px;
+}
+
+[data-theme='dark'] .answer-solution-block {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.as-row {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.as-row:last-child {
+  margin-bottom: 0;
+}
+
+.as-row-analysis {
+  padding-top: 14px;
+  border-top: 1px solid rgba(0, 0, 0, 0.04);
+}
+
+[data-theme='dark'] .as-row-analysis {
+  border-top-color: rgba(255, 255, 255, 0.06);
+}
+
+.as-label {
+  width: 80px;
+  flex-shrink: 0;
+  text-align: left;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+  padding-top: 1px;
+}
+
+.as-answer-content {
+  flex: 1;
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--text-primary);
+}
+
+.as-fill-list {
+  flex-direction: column;
+  gap: 8px;
+}
+
+.as-fill-item {
   font-size: 14px;
   line-height: 1.7;
 }
 
-/* 参考答案内容 */
-.answer-content {
+.as-grading-list {
+  flex: 1;
   display: flex;
-  gap: 8px;
+  flex-direction: column;
+  gap: 6px;
 }
 
-.answer-letter {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  background: var(--success);
-  color: #fff;
+.paper-correct-answer {
   font-weight: 700;
-  font-size: 16px;
+  font-size: 18px;
+  color: var(--success);
 }
 
-/* 解析内容 */
-.analysis-content {
+.paper-analysis-content {
+  flex: 1;
   font-size: 14px;
   line-height: 1.8;
   color: var(--text-primary);
 }
 
-.analysis-content :deep(p) {
+.paper-analysis-content :deep(p) {
   margin: 0 0 8px;
 }
 
 /* 评分标准 */
-.grading-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-top: 12px;
+.paper-grading {
+  margin-bottom: 16px;
 }
 
-.grading-step {
+.paper-grading-step {
   display: flex;
   align-items: center;
   gap: 12px;
   padding: 8px 12px;
-  background: var(--bg-input);
+  background: #ffffff;
+  border: 1px solid #f0f0f0;
   border-radius: 6px;
   font-size: 13px;
+  margin-top: 0;
+  transition: all 0.2s ease;
 }
 
-.grading-step-label {
+.paper-grading-step:hover {
+  border-color: rgba(24, 144, 255, 0.3);
+  background: rgba(24, 144, 255, 0.02);
+}
+
+[data-theme='dark'] .paper-grading-step {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+.paper-grading-label {
   font-weight: 600;
   color: var(--text-primary);
 }
 
-.grading-step-score {
+.paper-grading-score {
   color: var(--accent);
   font-weight: 600;
 }
 
-.grading-step-desc {
+.paper-grading-desc {
   color: var(--text-muted);
 }
 
-/* 侧边栏 */
-.detail-side {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
+/* ============ 右侧卡片 ============ */
 .side-card {
   background: var(--bg-card);
   border: 1px solid var(--border-color);
-  border-radius: 10px;
+  border-radius: 8px;
   padding: 16px 18px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.03), 0 2px 8px rgba(0, 0, 0, 0.02);
+  transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
 }
 
-.side-title {
+.side-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.06), 0 4px 12px rgba(0, 0, 0, 0.04);
+}
+
+[data-theme='dark'] .side-card {
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3), 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+[data-theme='dark'] .side-card:hover {
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4), 0 4px 12px rgba(0, 0, 0, 0.2);
+}
+
+.side-card-title {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 700;
   color: var(--text-primary);
   margin-bottom: 12px;
@@ -736,6 +887,12 @@ onBeforeUnmount(() => {
   border-radius: 12px;
   font-size: 12px;
   font-weight: 500;
+  transition: all 0.2s ease;
+}
+
+.kp-tag:hover {
+  background: var(--accent);
+  color: #fff;
 }
 
 .side-empty {
@@ -746,7 +903,7 @@ onBeforeUnmount(() => {
 .meta-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
 }
 
 .meta-row {
@@ -765,7 +922,7 @@ onBeforeUnmount(() => {
   font-weight: 500;
 }
 
-/* 弹窗 */
+/* ============ 弹窗 ============ */
 .reject-textarea {
   width: 100%;
   padding: 10px 12px;
@@ -783,5 +940,43 @@ onBeforeUnmount(() => {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-light);
+}
+
+/* ============ 响应式 ============ */
+@media (max-width: 1024px) {
+  .detail-body {
+    flex-direction: column;
+  }
+  .side-scroll {
+    flex: none;
+    flex-direction: row;
+    gap: 14px;
+  }
+  .side-card {
+    flex: 1;
+  }
+}
+
+@media (max-width: 768px) {
+  .detail-header {
+    padding: 10px 16px;
+  }
+  .detail-body {
+    padding: 0 16px 12px;
+  }
+  .paper-card {
+    padding: 18px 20px;
+    margin: 10px 0;
+  }
+  .paper-options.grid-4,
+  .paper-options.grid-2 {
+    grid-template-columns: 1fr;
+  }
+  .side-scroll {
+    flex-direction: column;
+  }
+  .header-actions {
+    flex-wrap: wrap;
+  }
 }
 </style>
