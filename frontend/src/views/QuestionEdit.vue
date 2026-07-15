@@ -334,6 +334,15 @@
         <nav class="attr-panel-nav">
           <button
             class="attr-nav-item"
+            :class="{ active: attrPanelTab === 'kp' }"
+            @click="attrPanelTab = 'kp'"
+          >
+            <AppIcon name="tag" :size="15" />
+            <span>知识点</span>
+            <span v-if="selectedKpId" class="attr-nav-badge">1</span>
+          </button>
+          <button
+            class="attr-nav-item"
             :class="{ active: attrPanelTab === 'competence' }"
             @click="attrPanelTab = 'competence'"
           >
@@ -363,6 +372,28 @@
 
         <!-- 右侧内容画布 -->
         <div class="attr-panel-content">
+          <!-- 知识点面板 — 内嵌搜索 + 级联树 -->
+          <div v-show="attrPanelTab === 'kp'" class="attr-canvas attr-canvas-kp">
+            <input
+              v-model="kpSearchQuery"
+              class="attr-dialog-input kp-search-input"
+              placeholder="搜索知识点…"
+            />
+            <div class="kp-canvas-tree">
+              <div v-if="kpLoading" class="loading-hint">加载中…</div>
+              <KpPickerNode
+                v-for="node in filteredKpTree"
+                :key="node.id"
+                :node="node"
+                :level="0"
+                :selected-kp-id="selectedKpId"
+                :expanded="kpExpandedRecord"
+                @select="onKpNodeSelect"
+                @toggle-expand="onKpToggleExpand"
+              />
+            </div>
+          </div>
+
           <!-- 核心素养面板 -->
           <div v-show="attrPanelTab === 'competence'" class="attr-canvas">
             <div class="attr-canvas-hint">最多选择 {{ TAG_LIMITS.core_competence }} 个</div>
@@ -601,6 +632,8 @@ import { useToast } from '@/composables/useToast'
 import { useSpaceStore } from '@/stores/space'
 import { useAuthStore } from '@/stores/auth'
 import { useSelectedKp } from '@/composables/useSelectedKp'
+import KpPickerNode from '@/components/KpPickerNode.vue'
+import { useLayoutState } from '@/composables/useLayoutState'
 import { parseMarkdownToQuestion, RECOMMENDED_PROMPT } from '@/utils/parseMarkdown'
 
 const route = useRoute()
@@ -609,6 +642,7 @@ const toast = useToast()
 const space = useSpaceStore()
 const auth = useAuthStore()
 const { selectedKpId, selectedKpName, select: selectKp, clear: clearKp } = useSelectedKp()
+const { isKpTreeCollapsed } = useLayoutState()
 const isNew = route.path.endsWith('/new')
 const loading = ref(false)
 const saving = ref(false)
@@ -616,9 +650,69 @@ const submitting = ref(false)
 const isLoading = ref(false)
 const kpLoading = ref(false)
 const kpTree = ref<KnowledgePoint[]>([])
+const kpSearchQuery = ref('')
+const kpExpanded = ref<Set<string>>(new Set())
+
+// 知识点搜索过滤：递归匹配名称并保留匹配节点的父链
+function filterKpTree(nodes: KnowledgePoint[], query: string): KnowledgePoint[] {
+  if (!query.trim()) return nodes
+  const q = query.trim().toLowerCase()
+  function filterNode(node: KnowledgePoint): KnowledgePoint | null {
+    const nameMatch = node.name.toLowerCase().includes(q)
+    const filteredChildren = (node.children || [])
+      .map(child => filterNode(child))
+      .filter((c): c is KnowledgePoint => c !== null)
+    if (nameMatch || filteredChildren.length > 0) {
+      return { ...node, children: filteredChildren }
+    }
+    return null
+  }
+  return nodes
+    .map(n => filterNode(n))
+    .filter((n): n is KnowledgePoint => n !== null)
+}
+
+const filteredKpTree = computed(() => filterKpTree(kpTree.value, kpSearchQuery.value))
+
+// Set → Record 转换（KpPickerNode 组件需要 Record<string, boolean>）
+const kpExpandedRecord = computed<Record<string, boolean>>(() => {
+  const rec: Record<string, boolean> = {}
+  kpExpanded.value.forEach(id => { rec[id] = true })
+  return rec
+})
+
+function onKpNodeSelect(node: KnowledgePoint) {
+  selectKp(node.id, node.name)
+  form.knowledgePointIds = [node.id]
+}
+
+function onKpToggleExpand(node: KnowledgePoint) {
+  if (kpExpanded.value.has(node.id)) {
+    kpExpanded.value.delete(node.id)
+  } else {
+    kpExpanded.value.add(node.id)
+  }
+  kpExpanded.value = new Set(kpExpanded.value)
+}
+
+// 搜索时自动展开所有可见节点
+watch(kpSearchQuery, (q) => {
+  if (q.trim()) {
+    // 展开所有过滤后可见的节点
+    function collectIds(nodes: KnowledgePoint[], set: Set<string>) {
+      for (const n of nodes) {
+        set.add(n.id)
+        if (n.children?.length) collectIds(n.children, set)
+      }
+    }
+    const ids = new Set<string>()
+    collectIds(filteredKpTree.value, ids)
+    kpExpanded.value = ids
+  }
+})
 const showHistory = ref(false)
 const showAttrDialog = ref(false)
-const attrPanelTab = ref<'competence' | 'method' | 'school'>('competence')
+const attrPanelTab = ref<'kp' | 'competence' | 'method' | 'school'>('kp')
 const grades = ['初一', '初二', '初三', '高一', '高二', '高三']
 
 // 标签分类数据：从后端 API 动态加载
@@ -978,6 +1072,13 @@ const aiText = ref('')
 const aiParsing = ref(false)
 const aiResult = ref<ParsedQuestion | null>(null)
 const aiError = ref('')
+
+// AI 弹窗 / 属性弹窗激活时自动收起知识点树，释放屏幕宽度
+watch([showAiDialog, showAttrDialog], ([aiOpen, attrOpen]) => {
+  if (aiOpen || attrOpen) {
+    isKpTreeCollapsed.value = true
+  }
+})
 // AI 痕迹高亮：记录哪些字段被 AI 填充
 const aiGeneratedFields = ref<Set<string>>(new Set())
 // 解析模式：api 调用后端 / markdown 前端纯解析
@@ -3306,6 +3407,45 @@ watch(() => form.question_type, () => {
   font-size: 12px;
   color: var(--text-muted);
   letter-spacing: 0.02em;
+}
+
+/* 知识点面板专用 */
+.attr-canvas-kp {
+  height: 320px;
+  display: flex;
+  flex-direction: column;
+}
+
+.kp-search-input {
+  margin-bottom: 10px;
+  flex-shrink: 0;
+}
+
+.kp-canvas-tree {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 4px;
+  /* 轻量化滚动条 */
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-color) transparent;
+}
+
+.kp-canvas-tree::-webkit-scrollbar {
+  width: 4px;
+}
+
+.kp-canvas-tree::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.kp-canvas-tree::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 2px;
+}
+
+.kp-canvas-tree::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
 }
 
 .attr-dialog-input {
