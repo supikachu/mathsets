@@ -3409,8 +3409,8 @@ watch(() => form.question_type, () => {
 
 /* 左侧分类导航 — macOS Sidebar 风格 */
 .attr-panel-nav {
-  flex: 0 0 25%;
-  max-width: 160px;
+  flex: 0 0 150px;
+  max-width: 150px;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -3433,8 +3433,8 @@ watch(() => form.question_type, () => {
   height: 36px;
   background: #fff;
   border-radius: 8px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 0 0 0.5px rgba(0, 0, 0, 0.04);
-  transition: transform 0.35s cubic-bezier(0.25, 1, 0.5, 1);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.02);
+  transition: all 0.25s cubic-bezier(0.25, 1, 0.5, 1);
   pointer-events: none;
   z-index: 0;
 }
@@ -3453,7 +3453,7 @@ watch(() => form.question_type, () => {
   background: transparent;
   cursor: pointer;
   font-size: 14px;
-  color: var(--text-secondary);
+  color: #8e8e93;
   text-align: left;
   transition: color 0.18s ease;
   font-family: inherit;
@@ -3461,15 +3461,34 @@ watch(() => form.question_type, () => {
   position: relative;
   z-index: 1;
   min-height: 36px;
+  white-space: nowrap;
+}
+
+.attr-nav-item > span:not(.attr-nav-badge) {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .attr-nav-item:hover {
-  color: var(--text-primary);
+  color: #1c1c1e;
+}
+
+[data-theme='dark'] .attr-nav-item:hover {
+  color: #fff;
 }
 
 .attr-nav-item.active {
-  color: var(--text-primary);
-  font-weight: 600;
+  color: #1c1c1e;
+  font-weight: 500;
+}
+
+[data-theme='dark'] .attr-nav-item {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+[data-theme='dark'] .attr-nav-item.active {
+  color: #fff;
 }
 
 .attr-nav-badge {
@@ -3544,6 +3563,12 @@ watch(() => form.question_type, () => {
   border-color: var(--purple);
   color: var(--purple);
   background: var(--purple-light);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.04);
+}
+
+.competence-chip:active {
+  transform: translateY(0);
 }
 
 .competence-chip.active {
@@ -3551,6 +3576,8 @@ watch(() => form.question_type, () => {
   color: var(--purple);
   border-color: transparent;
   font-weight: 500;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.04);
 }
 
 .competence-check {
@@ -3790,12 +3817,20 @@ watch(() => form.question_type, () => {
   border-color: var(--purple);
   color: var(--purple);
   background: var(--purple-light);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.04);
+}
+
+.recommend-chip:active {
+  transform: translateY(0);
 }
 
 .recommend-chip.active {
   background: var(--purple-light);
   color: var(--purple);
   border-color: transparent;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.04);
 }
 
 .recommend-check {
