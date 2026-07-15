@@ -523,13 +523,13 @@
           </div>
         </div>
       </div>
-      <!-- 底部全局已选预览条 — 苹果风弹性横滑底栏 -->
+      <!-- 底部全局已选预览条 — 苹果风弹性横滑底栏（双区 Flex 布局） -->
       <div class="modal-footer-row">
-        <!-- 1. 渐变遮罩容器：控制整体区域并设置渐变褪色 -->
-        <div class="selected-flow-container">
-          <!-- 2. 实际滚动轨：只有它负责 overflow-x 滚动 -->
-          <div class="selected-tags-preview-flow">
-            <!-- 3. 知识点标签（多选，第一个为 Primary） -->
+        <!-- 左侧：滚动包裹容器，天然占满剩余宽度，控制渐变遮罩 -->
+        <div class="selected-flow-wrapper">
+          <!-- 实际滚动轨：负责 overflow-x 滚动与鼠标滚轮事件绑定 -->
+          <div class="selected-tags-preview-flow" @wheel="handleFooterWheel">
+            <!-- 知识点标签（多选，第一个为 Primary） -->
             <span
               v-for="(kp, idx) in attrSelectedKps"
               :key="'pv-kp-' + kp.id"
@@ -559,8 +559,10 @@
             <span v-if="attrSelectedKps.length === 0 && form_tagList.length === 0" class="preview-empty">暂未选择任何属性</span>
           </div>
         </div>
-        <!-- 完成按钮：绝对定位，悬浮在最右侧 -->
-        <AppButton class="modal-footer-submit-btn" variant="primary" size="sm" @click="showAttrDialog = false">完成</AppButton>
+        <!-- 右侧：按钮容器，固定物理宽度，绝不参与滚动 -->
+        <div class="footer-action-area">
+          <AppButton class="modal-footer-submit-btn" variant="primary" size="sm" @click="showAttrDialog = false">完成</AppButton>
+        </div>
       </div>
     </AppModal>
 
@@ -745,6 +747,16 @@ function removeAttrKp(id: string) {
     clearKp()
   }
 }
+
+// PC 端滚轮横移：将垂直滚轮事件平滑转换为底部标签流的横向滚动
+function handleFooterWheel(event: WheelEvent) {
+  const container = event.currentTarget as HTMLElement
+  if (container) {
+    event.preventDefault()
+    container.scrollLeft += event.deltaY
+  }
+}
+
 const isNew = route.path.endsWith('/new')
 const loading = ref(false)
 const saving = ref(false)
@@ -3944,9 +3956,10 @@ watch(() => form.question_type, () => {
 
 /* ======================================================
    🍏 苹果风弹性横滑底栏 (Apple-Style Edge Fade Smooth Scroll)
+   现代自适应双区布局：左滚动 + 右固定按钮
    ====================================================== */
 
-/* 1. 锁死吸底大容器 */
+/* 1. 吸底大容器 — 两端对齐：左侧标签流，右侧按钮 */
 .modal-footer-row {
   position: absolute;
   bottom: 0;
@@ -3955,6 +3968,7 @@ watch(() => form.question_type, () => {
   height: 64px;
   display: flex;
   align-items: center;
+  justify-content: space-between;
   padding: 0 24px;
   background: #ffffff;
   border-top: 1px solid #f2f2f7;
@@ -3967,19 +3981,20 @@ watch(() => form.question_type, () => {
   background: var(--bg-card);
 }
 
-/* 2. 渐变遮罩容器：利用 CSS Mask 实现右侧平滑褪色渐变，视觉暗示可滑动 */
-.selected-flow-container {
+/* 2. 左侧自适应滚动容器 — 渐变滤镜精髓 */
+.selected-flow-wrapper {
   flex: 1;
-  min-width: 0;
+  min-width: 0; /* ⚠️ 核心死穴：强制 Flex 子项可收拢，触发内部 overflow-x */
   height: 100%;
   display: flex;
   align-items: center;
+  margin-right: 16px; /* 优雅拉开标签流与右侧完成按钮的呼吸间距 */
   position: relative;
-  -webkit-mask-image: linear-gradient(to right, #000 0%, #000 calc(100% - 150px), rgba(0, 0, 0, 0) calc(100% - 110px));
-  mask-image: linear-gradient(to right, #000 0%, #000 calc(100% - 150px), rgba(0, 0, 0, 0) calc(100% - 110px));
+  -webkit-mask-image: linear-gradient(to right, #000 0%, #000 calc(100% - 40px), rgba(0, 0, 0, 0) 100%);
+  mask-image: linear-gradient(to right, #000 0%, #000 calc(100% - 40px), rgba(0, 0, 0, 0) 100%);
 }
 
-/* 3. 实际滚动轴：锁死高度，开启横向滚动 */
+/* 3. 实际滚动容器：只负责溢出和纯横向滚动 */
 .selected-tags-preview-flow {
   display: flex;
   flex-direction: row;
@@ -3990,30 +4005,31 @@ watch(() => form.question_type, () => {
   overflow-x: auto !important;
   overflow-y: hidden !important;
   gap: 8px;
-  padding-right: 150px;
-  box-sizing: border-box;
-  -webkit-overflow-scrolling: touch;
   scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
 }
 
 .selected-tags-preview-flow::-webkit-scrollbar {
   display: none !important;
 }
 
-/* 4. 每个彩色标签：强行剥夺被挤扁的权力（核心物理规则） */
+/* 4. 每个彩色标签：强行剥夺被挤扁的权力 */
 .selected-tags-preview-flow .attr-tag {
   flex-shrink: 0 !important;
   white-space: nowrap !important;
   box-sizing: border-box;
 }
 
-/* 5. 完成按钮：绝对静止，强制悬浮在最右侧，并提供微弱阴影使其层级高于滑动的标签 */
+/* 5. 右侧静态按钮控制区 — 绝不发生重叠 */
+.footer-action-area {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  height: 100%;
+}
+
 .modal-footer-submit-btn {
-  position: absolute;
-  right: 24px;
-  top: 14px;
-  z-index: 12;
-  box-shadow: -10px 0 20px rgba(255, 255, 255, 0.9);
+  flex-shrink: 0;
 }
 
 /* ===== 彩色标签胶囊样式 ===== */
