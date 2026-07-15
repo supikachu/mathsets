@@ -237,4 +237,68 @@ export const kpApi = {
   },
 }
 
+// ─── AI 智能录入 ───
+
+export interface SubAnswer {
+  sub_id: number
+  content: string
+}
+
+export interface AnalysisMethod {
+  title: string
+  content: string
+}
+
+export interface BlankAnswer {
+  position: number
+  answer: string
+}
+
+export interface ParsedOption {
+  label: string
+  content: string
+}
+
+export interface ParsedAnswer {
+  kind: 'choice' | 'fill' | 'solution'
+  value: {
+    options?: string[]
+    blanks?: BlankAnswer[]
+    subs?: SubAnswer[]
+  }
+}
+
+export interface ParsedQuestion {
+  question_type: 'choice' | 'fill' | 'solution'
+  sub_type?: string
+  difficulty?: string
+  stem: string
+  options?: ParsedOption[]
+  correct_answer: ParsedAnswer
+  analysis: AnalysisMethod[]
+  knowledge_points: string[]
+  confidence: number
+  warnings: string[]
+  image_placeholders: string[]
+}
+
+export interface AiSettings {
+  provider: string
+  has_api_key: boolean
+  model_text: string | null
+  model_vision: string | null
+}
+
+export const aiApi = {
+  parseText(text: string) {
+    return client.post<{ data: ParsedQuestion }>('/ai/parse-text', { text })
+  },
+  getSettings() {
+    return client.get<AiSettings>('/ai/settings')
+  },
+  updateSettings(data: { provider?: string; api_key?: string; model_text?: string; model_vision?: string }) {
+    return client.put<AiSettings>('/ai/settings', data)
+  },
+}
+
 

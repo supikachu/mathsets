@@ -83,14 +83,16 @@ pub fn extract_json_by_bracket_count(s: &str) -> Result<String, String> {
 pub fn clean_and_parse<T: DeserializeOwned>(raw: &str) -> Result<T, String> {
     // 阶段 1：快速路径（rfind 截取）
     if let Ok(cleaned) = clean_llm_json(raw) {
-        if let Ok(parsed) = serde_json::from_str::<T>(&cleaned) {
-            return Ok(parsed);
+        match serde_json::from_str::<T>(&cleaned) {
+            Ok(parsed) => return Ok(parsed),
+            Err(e) => tracing::warn!("阶段1 clean_llm_json 反序列化失败: {e}"),
         }
     }
     // 阶段 2：花括号计数器兜底
     if let Ok(precise) = extract_json_by_bracket_count(raw) {
-        if let Ok(parsed) = serde_json::from_str::<T>(&precise) {
-            return Ok(parsed);
+        match serde_json::from_str::<T>(&precise) {
+            Ok(parsed) => return Ok(parsed),
+            Err(e) => tracing::warn!("阶段2 bracket_count 反序列化失败: {e}"),
         }
     }
     Err("AI 返回 JSON 反序列化失败（两条清洗路径均未通过）".into())

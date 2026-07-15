@@ -130,6 +130,20 @@ watch(() => [props.text, props.inline], render)
   border-bottom: 1px dashed #e74c3c;
 }
 
+/* 行间公式（$$...$$）：覆盖 KaTeX 默认的 1em 上下 margin，
+   并重置 line-height 防止继承容器的 1.8 撑高公式块 */
+.latex-render .katex-display {
+  margin: 4px 0;
+  line-height: 1;
+}
+/* 行间公式自带上下 margin，隐藏公式前后的 <br> 避免额外空行。
+   br:has(+ .katex-display) 隐藏公式前的 <br>，
+   .katex-display + br 隐藏公式后的 <br> */
+.latex-render .katex-display + br,
+.latex-render br:has(+ .katex-display) {
+  display: none;
+}
+
 /* 块级图片：苹果级极简视觉 */
 .latex-render img.latex-img.img-block {
   max-width: 80%;

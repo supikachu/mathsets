@@ -14,7 +14,7 @@ use crate::auth::permissions::{
 };
 use crate::models::question::{
     CreateQuestionRequest, KnowledgePointSummary, Question, QuestionDetail, QuestionQuery,
-    QuestionStatus, QuestionSummary, ReviewActionRequest, SubmitReviewRequest,
+    QuestionStatus, QuestionSummary, ReviewActionRequest, SubmitReviewRequest, TagSummary,
     TransferQuestionRequest, UpdateQuestionRequest,
 };
 use crate::models::space::SpaceKind;
@@ -97,6 +97,61 @@ async fn get_question_knowledge_points(
     .await
 }
 
+/// 同步题目标签关联：先删除旧关联，再批量插入新关联
+async fn update_question_tags(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    question_id: Uuid,
+    tag_ids: &[Uuid],
+) -> Result<(), sqlx::Error> {
+    // 删除旧关联
+    sqlx::query("DELETE FROM question_tags_relation WHERE question_id = $1")
+        .bind(question_id)
+        .execute(&mut **tx)
+        .await?;
+
+    // 批量插入新关联
+    for tag_id in tag_ids {
+        sqlx::query(
+            r#"
+            INSERT INTO question_tags_relation (question_id, tag_id)
+            VALUES ($1, $2)
+            ON CONFLICT DO NOTHING
+            "#,
+        )
+        .bind(question_id)
+        .bind(tag_id)
+        .execute(&mut **tx)
+        .await?;
+
+        // 原子化递增 use_count
+        sqlx::query("UPDATE tags SET use_count = use_count + 1 WHERE id = $1")
+            .bind(tag_id)
+            .execute(&mut **tx)
+            .await?;
+    }
+
+    Ok(())
+}
+
+/// 获取题目的关联标签
+async fn get_question_tags(
+    pool: &sqlx::PgPool,
+    question_id: Uuid,
+) -> Result<Vec<TagSummary>, sqlx::Error> {
+    sqlx::query_as::<_, TagSummary>(
+        r#"
+        SELECT t.id, t.name, t.category
+        FROM tags t
+        JOIN question_tags_relation qtr ON qtr.tag_id = t.id
+        WHERE qtr.question_id = $1
+        ORDER BY t.category, t.name
+        "#,
+    )
+    .bind(question_id)
+    .fetch_all(pool)
+    .await
+}
+
 async fn replace_reviewers(
     pool: &sqlx::PgPool,
     question_id: Uuid,
@@ -136,9 +191,13 @@ async fn build_detail(
     let kps = get_question_knowledge_points(pool, question.id)
         .await
         .unwrap_or_default();
+    let tags = get_question_tags(pool, question.id)
+        .await
+        .unwrap_or_default();
     let reviewer_ids = list_reviewers(pool, question.id).await.unwrap_or_default();
 
     let mut detail = QuestionDetail::from((question.clone(), kps));
+    detail.tags = tags;
     detail.creator_name = creator_name;
     detail.reviewer_ids = reviewer_ids;
 
@@ -442,8 +501,11 @@ pub async fn create_question(
         r#"
         INSERT INTO questions (id, stem, question_type, difficulty, default_score, status,
             options, correct_answer, analysis, grading_criteria, grade, semester, source,
+            academic_year, grade_semester, exam_type, exam_region,
             creator_id, created_at, updated_at, version, space_id)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+            $14, $15, $16, $17,
+            $18, $19, $20, $21, $22)
         "#,
     )
     .bind(id)
@@ -459,6 +521,10 @@ pub async fn create_question(
     .bind(&req.grade)
     .bind(&req.semester)
     .bind(&req.source)
+    .bind(&req.academic_year)
+    .bind(&req.grade_semester)
+    .bind(&req.exam_type)
+    .bind(&req.exam_region)
     .bind(creator_id)
     .bind(now)
     .bind(now)
@@ -472,6 +538,15 @@ pub async fn create_question(
         update_knowledge_points(&mut tx, id, kp_ids)
             .await
             .map_err(|e| db_err(format!("关联知识点失败: {}", e)))?;
+    }
+
+    // 同步题目标签关联
+    if let Some(ref tag_ids) = req.tag_ids {
+        if !tag_ids.is_empty() {
+            update_question_tags(&mut tx, id, tag_ids)
+                .await
+                .map_err(|e| db_err(format!("关联标签失败: {}", e)))?;
+        }
     }
 
     save_version(&mut tx, id, version, Some(creator_id))
@@ -598,11 +673,15 @@ pub async fn update_question(
             grade = COALESCE($9, grade),
             semester = COALESCE($10, semester),
             source = COALESCE($11, source),
+            academic_year = COALESCE($12, academic_year),
+            grade_semester = COALESCE($13, grade_semester),
+            exam_type = COALESCE($14, exam_type),
+            exam_region = COALESCE($15, exam_region),
             status = 'draft'::question_status,
-            updated_by = $12,
-            updated_at = $13,
-            version = $14
-        WHERE id = $15
+            updated_by = $16,
+            updated_at = $17,
+            version = $18
+        WHERE id = $19
         "#,
     )
     .bind(&req.stem)
@@ -616,6 +695,10 @@ pub async fn update_question(
     .bind(&req.grade)
     .bind(&req.semester)
     .bind(&req.source)
+    .bind(&req.academic_year)
+    .bind(&req.grade_semester)
+    .bind(&req.exam_type)
+    .bind(&req.exam_region)
     .bind(auth_user.id)
     .bind(now)
     .bind(new_version)
@@ -628,6 +711,13 @@ pub async fn update_question(
         update_knowledge_points(&mut tx, id, kp_ids)
             .await
             .map_err(|e| db_err(format!("更新知识点关联失败: {}", e)))?;
+    }
+
+    // 同步题目标签关联
+    if let Some(ref tag_ids) = req.tag_ids {
+        update_question_tags(&mut tx, id, tag_ids)
+            .await
+            .map_err(|e| db_err(format!("更新标签关联失败: {}", e)))?;
     }
 
     save_version(&mut tx, id, new_version, Some(auth_user.id))

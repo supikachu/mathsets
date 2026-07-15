@@ -173,7 +173,9 @@ pub async fn parse_text(
     let raw_json = provider
         .parse_text(&req.text, model.as_deref())
         .await
-        .map_err(|e| match e {
+        .map_err(|e| {
+            tracing::warn!("AI parse_text 调用失败: {:?}", e);
+            match e {
             AiError::NoApiKey => (
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": "未配置 AI API Key，请到设置页配置或联系管理员"})),
@@ -184,8 +186,8 @@ pub async fn parse_text(
                 } else {
                     StatusCode::BAD_GATEWAY
                 };
-                let short_msg = if msg.len() > 500 {
-                    format!("{}...", &msg[..500])
+                let short_msg = if msg.chars().count() > 500 {
+                    format!("{}...", msg.chars().take(500).collect::<String>())
                 } else {
                     msg
                 };
@@ -195,10 +197,12 @@ pub async fn parse_text(
                 StatusCode::GATEWAY_TIMEOUT,
                 Json(json!({"error": "AI 服务响应超时（60s）"})),
             ),
+        }
         })?;
 
     // 两阶段清洗 + 反序列化
     let mut parsed: ParsedQuestion = clean_and_parse(&raw_json).map_err(|e| {
+        tracing::warn!("clean_and_parse 失败: {e}");
         (
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(json!({"error": format!("AI 返回格式损坏: {e}")})),
@@ -221,7 +225,7 @@ pub async fn parse_text(
         ));
     }
 
-    // 知识点模糊匹配（附加到 warnings，不改 schema）
+    // 知识点模糊匹配（填充 kp_matches 供前端自动选中 / 手动确认）
     if !parsed.knowledge_points.is_empty() {
         let tree = crate::handlers::knowledge_points::fetch_tree(&state.pool, None).await;
         if !tree.is_empty() {
@@ -236,6 +240,7 @@ pub async fn parse_text(
                     ));
                 }
             }
+            parsed.kp_matches = matches;
         }
     }
 

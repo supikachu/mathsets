@@ -90,6 +90,11 @@ pub fn build_app(state: AppState) -> Router {
         .route("/ai/parse-text", post(handlers::ai::parse_text))
         .route("/ai/settings", get(handlers::ai::get_settings))
         .route("/ai/settings", put(handlers::ai::update_settings))
+        // 标签管理
+        .route("/tags", get(handlers::tags::list_tags))
+        .route("/tags", post(handlers::tags::create_tag))
+        .route("/tags/{id}", put(handlers::tags::update_tag))
+        .route("/tags/{id}", delete(handlers::tags::delete_tag))
         // 统一应用认证中间件
         .layer(middleware::from_fn_with_state(
             state.clone(),

@@ -21,8 +21,8 @@
         </div>
       </header>
 
-      <!-- ==================== 所有属性同一行 ==================== -->
-      <div class="meta-row">
+      <!-- ==================== 第一层：核心控制元数据栏（单行不换行） ==================== -->
+      <div class="meta-bar">
         <AppSelect v-model="form.question_type" :options="typeOptions" placeholder="题型" class="meta-field" />
         <div class="meta-field meta-field-diff">
           <div class="diff-row">
@@ -38,21 +38,7 @@
         </div>
         <AppSelect v-model="form.academic_year" :options="academicYearOptions" placeholder="学年" clearable class="meta-field" />
         <AppSelect v-model="form.grade_semester" :options="gradeSemesterOptions" placeholder="年级学期" clearable class="meta-field" />
-        <input v-model="form.region" placeholder="地区/学校" class="meta-field text-input" />
         <AppSelect v-model="form.exam_type" :options="examTypeOptions" placeholder="考试类型" clearable class="meta-field" />
-        <div class="meta-field kp-display">
-          <AppIcon name="tag" :size="13" />
-          <span v-if="selectedKpName" class="kp-name">{{ selectedKpName }}</span>
-          <span v-else class="kp-empty">知识点</span>
-        </div>
-        <button type="button" class="meta-field kp-btn" @click="showLiteracyDialog = true">
-          <AppIcon name="award" :size="13" />
-          <span>{{ form.literacy_tags.length ? `${form.literacy_tags.length}个` : '核心素养' }}</span>
-        </button>
-        <button type="button" class="meta-field kp-btn" @click="showTagDialog = true">
-          <AppIcon name="bookmark" :size="13" />
-          <span>{{ form.tags.length ? `${form.tags.length}个` : '解题方法' }}</span>
-        </button>
       </div>
 
       <!-- ==================== 主内容 双栏 ==================== -->
@@ -60,8 +46,36 @@
         <!-- 左栏：编辑 -->
         <div class="edit-col">
           <div class="edit-col-inner">
+            <!-- ==================== 第二层：描述性标签流 ==================== -->
+            <div class="question-tags-wrapper">
+              <span v-if="form.region" class="attr-tag">
+                <AppIcon name="pin" :size="11" />
+                <span class="attr-tag-text">{{ form.region }}</span>
+                <button type="button" class="attr-tag-x" @click="form.region = ''"><AppIcon name="x" :size="10" /></button>
+              </span>
+              <span v-if="selectedKpName" class="attr-tag attr-tag-kp">
+                <AppIcon name="tag" :size="11" />
+                <span class="attr-tag-text">{{ selectedKpName }}</span>
+                <button type="button" class="attr-tag-x" @click="clearKp"><AppIcon name="x" :size="10" /></button>
+              </span>
+              <span v-for="lit in form.literacy_tags" :key="'lit-' + lit" class="attr-tag attr-tag-literacy">
+                <AppIcon name="award" :size="11" />
+                <span class="attr-tag-text">{{ lit }}</span>
+                <button type="button" class="attr-tag-x" @click="toggleLiteracy(lit)"><AppIcon name="x" :size="10" /></button>
+              </span>
+              <span v-for="tag in form.tags" :key="'tag-' + tag" class="attr-tag attr-tag-method">
+                <AppIcon name="bookmark" :size="11" />
+                <span class="attr-tag-text">{{ tag }}</span>
+                <button type="button" class="attr-tag-x" @click="toggleTag(tag)"><AppIcon name="x" :size="10" /></button>
+              </span>
+              <button type="button" class="attr-add-btn" @click="showAttrDialog = true">
+                <AppIcon name="plus" :size="13" />
+                <span>添加属性</span>
+              </button>
+            </div>
+
             <!-- 题干 -->
-            <section class="edit-section">
+            <section class="edit-section" :class="{ 'ai-highlight': aiGeneratedFields.has('stem') }">
               <div class="section-label"><AppIcon name="book-open" :size="16" /> <span>题干</span><span class="required">*</span></div>
               <div class="stem-wrap">
                 <textarea ref="stemTextareaRef" v-model="form.stem" rows="4" class="edit-textarea stem-textarea" placeholder="输入题目内容，LaTeX 公式用 $...$ 包裹。例如：已知集合 $A = \{x | x^2 - 2x = 0\}$..." @input="autoResize"></textarea>
@@ -73,7 +87,7 @@
             </section>
 
             <!-- 答案 -->
-            <section class="edit-section">
+            <section class="edit-section" :class="{ 'ai-highlight': aiGeneratedFields.has('options') || aiGeneratedFields.has('blanks') || aiGeneratedFields.has('sub_answers') }">
               <div class="section-label">
                 <AppIcon name="file-text" :size="16" /> <span>答案</span>
                 <div v-if="form.question_type === 'choice'" class="seg-toggle">
@@ -140,7 +154,7 @@
             </section>
 
             <!-- 解析（多解法） -->
-            <section class="edit-section">
+            <section class="edit-section" :class="{ 'ai-highlight': aiGeneratedFields.has('solutions') }">
               <div class="section-label"><AppIcon name="lightbulb" :size="16" /> <span>解析</span></div>
               <div class="solutions-list">
                 <div v-for="(sol, i) in form.solutions" :key="i" class="solution-item">
@@ -303,12 +317,32 @@
       <div class="loading-hint">版本历史功能即将上线</div>
     </AppModal>
 
-    <!-- 标签选择弹窗 -->
-    <AppModal v-model="showTagDialog" title="选择解题方法/思想标签">
-      <div class="tag-dialog-body">
-        <p class="tag-dialog-hint">选择题目涉及的解题方法与数学思想标签</p>
-        <div v-for="cat in tagCategories" :key="cat.name" class="tag-category">
-          <div class="tag-category-title">{{ cat.name }}</div>
+    <!-- 统一属性面板 -->
+    <AppModal v-model="showAttrDialog" title="属性面板">
+      <div class="attr-dialog-body">
+        <div class="attr-dialog-section">
+          <div class="attr-dialog-label"><AppIcon name="pin" :size="14" /> 地区 / 学校</div>
+          <input v-model="form.region" placeholder="如：北京、人大附中…" class="attr-dialog-input" />
+        </div>
+        <div class="attr-dialog-section">
+          <div class="attr-dialog-label"><AppIcon name="tag" :size="14" /> 知识点</div>
+          <div class="attr-dialog-hint">从左侧知识树中选择知识点，选中后将以标签形式显示在题干上方。</div>
+        </div>
+        <div class="attr-dialog-section">
+          <div class="attr-dialog-label"><AppIcon name="award" :size="14" /> 核心素养</div>
+          <div class="tag-chips">
+            <button
+              v-for="lit in literacyTags"
+              :key="lit"
+              type="button"
+              class="tag-chip"
+              :class="{ active: form.literacy_tags.includes(lit) }"
+              @click="toggleLiteracy(lit)"
+            >{{ lit }}</button>
+          </div>
+        </div>
+        <div v-for="cat in tagCategories" :key="cat.name" class="attr-dialog-section">
+          <div class="attr-dialog-label">{{ cat.name }}</div>
           <div class="tag-chips">
             <button
               v-for="tag in cat.tags"
@@ -322,32 +356,7 @@
         </div>
       </div>
       <div class="form-actions">
-        <AppButton variant="ghost" @click="showTagDialog = false">取消</AppButton>
-        <AppButton variant="primary" @click="showTagDialog = false">完成（{{ form.tags.length }}）</AppButton>
-      </div>
-    </AppModal>
-
-    <!-- 核心素养标签弹窗 -->
-    <AppModal v-model="showLiteracyDialog" title="选择核心素养标签">
-      <div class="tag-dialog-body">
-        <p class="tag-dialog-hint">选择题目考查的数学核心素养</p>
-        <div class="tag-category">
-          <div class="tag-category-title">数学核心素养</div>
-          <div class="tag-chips">
-            <button
-              v-for="lit in literacyTags"
-              :key="lit"
-              type="button"
-              class="tag-chip"
-              :class="{ active: form.literacy_tags.includes(lit) }"
-              @click="toggleLiteracy(lit)"
-            >{{ lit }}</button>
-          </div>
-        </div>
-      </div>
-      <div class="form-actions">
-        <AppButton variant="ghost" @click="showLiteracyDialog = false">取消</AppButton>
-        <AppButton variant="primary" @click="showLiteracyDialog = false">完成（{{ form.literacy_tags.length }}）</AppButton>
+        <AppButton variant="primary" @click="showAttrDialog = false">完成</AppButton>
       </div>
     </AppModal>
 
@@ -371,26 +380,117 @@
       @confirm="doRestoreDraft"
       @update:model-value="(v: boolean) => { if (!v) discardDraft() }"
     />
+
+    <!-- AI 智能识别弹窗 -->
+    <AppModal v-model="showAiDialog" title="AI 智能识别" size="lg">
+      <div class="ai-dialog-body">
+        <!-- 输入区 -->
+        <div v-if="!aiResult" class="ai-input-section">
+          <!-- 模式切换 Tab -->
+          <div class="ai-mode-tabs">
+            <button :class="{ active: aiMode === 'api' }" @click="aiMode = 'api'">API 智能解析</button>
+            <button :class="{ active: aiMode === 'markdown' }" @click="aiMode = 'markdown'">Markdown 粘贴</button>
+          </div>
+
+          <!-- Markdown 模式：提示词复制区 -->
+          <div v-if="aiMode === 'markdown'" class="ai-prompt-section">
+            <div class="ai-prompt-header">
+              <span class="ai-prompt-title">第一步：复制提示词</span>
+              <AppButton variant="outline" size="sm" @click="copyPrompt">
+                <AppIcon name="copy" :size="14" /> {{ promptCopied ? '已复制' : '复制提示词' }}
+              </AppButton>
+            </div>
+            <div class="ai-prompt-preview">{{ RECOMMENDED_PROMPT }}</div>
+            <div class="ai-steps">
+              ① 复制提示词 → ② 打开 AI 网页上传题目图片并粘贴提示词 → ③ 复制 AI 输出 → ④ 粘贴到下方
+            </div>
+          </div>
+
+          <p v-if="aiMode === 'api'" class="ai-hint">粘贴题目文本（含题干、选项、答案、解析），AI 将自动识别结构并填入表单。</p>
+          <p v-else class="ai-hint">粘贴 AI 按推荐格式输出的 Markdown，系统将自动解析并填入表单。</p>
+          <textarea
+            v-model="aiText"
+            class="ai-textarea"
+            rows="10"
+            :placeholder="aiMode === 'markdown'
+              ? '在此粘贴 AI 输出的 Markdown...'
+              : '例如：\n已知函数 f(x) = 2x + 1，求 f(3) 的值。\n解：f(3) = 2×3 + 1 = 7'"
+          ></textarea>
+          <div v-if="aiError" class="ai-error">{{ aiError }}</div>
+          <div class="ai-actions">
+            <AppButton variant="ghost" @click="showAiDialog = false">取消</AppButton>
+            <AppButton variant="primary" :loading="aiParsing" @click="doAiParse">
+              <AppIcon name="sparkles" :size="16" /> {{ aiParsing ? '解析中…' : '开始识别' }}
+            </AppButton>
+          </div>
+        </div>
+
+        <!-- 结果预览 -->
+        <div v-else class="ai-result-section">
+          <div class="ai-result-meta">
+            <AppBadge :color="aiResult.confidence >= 0.8 ? 'green' : aiResult.confidence >= 0.5 ? 'yellow' : 'red'">
+              置信度 {{ Math.round(aiResult.confidence * 100) }}%
+            </AppBadge>
+            <span class="ai-result-type">{{ ({ choice: '选择题', fill: '填空题', solution: '解答题' } as Record<string, string>)[aiResult.question_type] }}</span>
+          </div>
+          <div v-if="aiResult.warnings.length" class="ai-warnings">
+            <div v-for="(w, i) in aiResult.warnings" :key="i" class="ai-warning-item">⚠ {{ w }}</div>
+          </div>
+          <div class="ai-result-preview">
+            <div class="ai-preview-block">
+              <div class="ai-preview-label">题干</div>
+              <div class="ai-preview-content">{{ aiResult.stem }}</div>
+            </div>
+            <div v-if="aiResult.options?.length" class="ai-preview-block">
+              <div class="ai-preview-label">选项</div>
+              <div v-for="opt in aiResult.options" :key="opt.label" class="ai-preview-option">
+                <span class="ai-opt-label">{{ opt.label }}.</span> {{ opt.content }}
+              </div>
+            </div>
+            <div class="ai-preview-block">
+              <div class="ai-preview-label">答案</div>
+              <div class="ai-preview-content">
+                <span v-if="aiResult.correct_answer.kind === 'choice'">{{ aiResult.correct_answer.value.options?.join(', ') }}</span>
+                <span v-else-if="aiResult.correct_answer.kind === 'fill'">{{ aiResult.correct_answer.value.blanks?.map(b => b.answer).join('、') }}</span>
+                <span v-else>{{ aiResult.correct_answer.value.subs?.map(s => s.content).join('；') }}</span>
+              </div>
+            </div>
+            <div class="ai-preview-block">
+              <div class="ai-preview-label">解析（{{ aiResult.analysis.length }} 种解法）</div>
+              <div v-for="(a, i) in aiResult.analysis" :key="i" class="ai-preview-analysis">
+                <strong>{{ a.title }}</strong>
+                <div>{{ a.content }}</div>
+              </div>
+            </div>
+          </div>
+          <div class="ai-actions">
+            <AppButton variant="ghost" @click="aiResult = null">返回修改</AppButton>
+            <AppButton variant="success" @click="applyAiResult"><AppIcon name="check" :size="16" /> 应用到表单</AppButton>
+          </div>
+        </div>
+      </div>
+    </AppModal>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { questionApi, kpApi, spaceApi, type KnowledgePoint, type SpaceMemberInfo } from '@/api/client'
+import { questionApi, kpApi, spaceApi, aiApi, type KnowledgePoint, type SpaceMemberInfo, type ParsedQuestion } from '@/api/client'
 import LatexRender from '@/components/LatexRender.vue'
 import { AppButton, AppBadge, AppModal, AppConfirm, AppEmpty, AppSelect, AppIcon } from '@/components/ui'
 import { useToast } from '@/composables/useToast'
 import { useSpaceStore } from '@/stores/space'
 import { useAuthStore } from '@/stores/auth'
 import { useSelectedKp } from '@/composables/useSelectedKp'
+import { parseMarkdownToQuestion, RECOMMENDED_PROMPT } from '@/utils/parseMarkdown'
 
 const route = useRoute()
 const router = useRouter()
 const toast = useToast()
 const space = useSpaceStore()
 const auth = useAuthStore()
-const { selectedKpId, selectedKpName } = useSelectedKp()
+const { selectedKpId, selectedKpName, select: selectKp, clear: clearKp } = useSelectedKp()
 const isNew = route.path.endsWith('/new')
 const loading = ref(false)
 const saving = ref(false)
@@ -399,8 +499,7 @@ const isLoading = ref(false)
 const kpLoading = ref(false)
 const kpTree = ref<KnowledgePoint[]>([])
 const showHistory = ref(false)
-const showTagDialog = ref(false)
-const showLiteracyDialog = ref(false)
+const showAttrDialog = ref(false)
 const grades = ['初一', '初二', '初三', '高一', '高二', '高三']
 
 // 标签分类数据：解题方法与数学思想
@@ -436,6 +535,26 @@ function toggleTag(tag: string) {
 function toggleLiteracy(lit: string) {
   const idx = form.literacy_tags.indexOf(lit)
   if (idx >= 0) { form.literacy_tags.splice(idx, 1) } else { form.literacy_tags.push(lit) }
+}
+
+// 扁平化知识树并按名称匹配知识点
+function flattenKpTree(tree: KnowledgePoint[]): KnowledgePoint[] {
+  const result: KnowledgePoint[] = []
+  for (const node of tree) {
+    result.push(node)
+    if (node.children?.length) result.push(...flattenKpTree(node.children))
+  }
+  return result
+}
+
+function matchKnowledgePoints(names: string[], tree: KnowledgePoint[]): KnowledgePoint | null {
+  if (!names.length || !tree.length) return null
+  const flat = flattenKpTree(tree)
+  for (const name of names) {
+    const found = flat.find(kp => kp.name === name || kp.name.includes(name) || name.includes(kp.name))
+    if (found) return found
+  }
+  return null
 }
 
 const gradeOptions = grades.map((g) => ({ label: g, value: g }))
@@ -592,14 +711,6 @@ function stopResize() {
   document.removeEventListener('mouseup', stopResize)
 }
 
-// 已选知识点（来自左侧知识树，非表单内选择）
-const selectedKps = computed(() => {
-  if (selectedKpId.value && selectedKpName.value) {
-    return [{ id: selectedKpId.value, name: selectedKpName.value }]
-  }
-  return []
-})
-
 // 难度映射
 const diffLabels = ['简单', '较易', '中等', '较难', '困难']
 const _diffStars = ref(3)
@@ -609,6 +720,8 @@ const difficultyStars = computed({
     _diffStars.value = v
     // 5星难度系数: 1→0.9, 2→0.75, 3→0.55, 4→0.35, 5→0.2
     form.difficulty_coefficient = [0.9, 0.75, 0.55, 0.35, 0.2][v - 1] ?? 0.55
+    // 同步 difficulty 字段：1-2→easy, 3→medium, 4-5→hard
+    form.difficulty = v <= 2 ? 'easy' : v === 3 ? 'medium' : 'hard'
   },
 })
 
@@ -670,9 +783,149 @@ function goBack() {
   }
 }
 
-// ===== AI 识别（预留） =====
+// ===== AI 智能识别 =====
+const showAiDialog = ref(false)
+const aiText = ref('')
+const aiParsing = ref(false)
+const aiResult = ref<ParsedQuestion | null>(null)
+const aiError = ref('')
+// AI 痕迹高亮：记录哪些字段被 AI 填充
+const aiGeneratedFields = ref<Set<string>>(new Set())
+// 解析模式：api 调用后端 / markdown 前端纯解析
+const aiMode = ref<'api' | 'markdown'>('api')
+const promptCopied = ref(false)
+// AI 结果应用期间跳过 watch 对 question_type 的重置（避免覆盖刚赋好的 sub_answers）
+const applyingAiResult = ref(false)
+
 function handleAi() {
-  toast.info('AI 智能识别功能即将上线')
+  showAiDialog.value = true
+  aiError.value = ''
+  aiResult.value = null
+}
+
+// 复制提示词到剪贴板
+async function copyPrompt() {
+  try {
+    await navigator.clipboard.writeText(RECOMMENDED_PROMPT)
+    toast.success('提示词已复制，请粘贴到 AI 对话框使用')
+    promptCopied.value = true
+    setTimeout(() => { promptCopied.value = false }, 3000)
+  } catch {
+    toast.error('复制失败，请手动选择提示词文本复制')
+  }
+}
+
+async function doAiParse() {
+  if (!aiText.value.trim()) {
+    toast.warning('请输入题目文本')
+    return
+  }
+  aiParsing.value = true
+  aiError.value = ''
+  aiResult.value = null
+  try {
+    if (aiMode.value === 'markdown') {
+      // 纯前端解析，不调用 API
+      aiResult.value = parseMarkdownToQuestion(aiText.value)
+    } else {
+      const res = await aiApi.parseText(aiText.value)
+      aiResult.value = res.data.data
+    }
+  } catch (e: any) {
+    aiError.value = e.response?.data?.error || e.message || 'AI 解析失败'
+  } finally {
+    aiParsing.value = false
+  }
+}
+
+// §4.4a: 应用 AI 结果 — 映射前先重置题型依赖数组，防止旧题型残留污染
+function applyAiResult() {
+  const q = aiResult.value
+  if (!q) return
+
+  // 标记 AI 应用中，阻止 watch(question_type) 重置 sub_answers 等
+  applyingAiResult.value = true
+
+  // 强制重置题型相关的依赖数组
+  form.options = []
+  form.blanks = []
+  form.sub_answers = ['']
+  form.correctAnswer = ''
+  form.solutions = ['']
+  aiGeneratedFields.value = new Set()
+
+  // 题型
+  form.question_type = q.question_type
+  form.sub_type = q.sub_type || ''
+  aiGeneratedFields.value.add('question_type')
+
+  // 题干
+  form.stem = q.stem
+  aiGeneratedFields.value.add('stem')
+
+  // 难度（如果 AI 返回了）
+  if (q.difficulty) {
+    form.difficulty = q.difficulty
+    const diffMap: Record<string, number> = { easy: 2, medium: 3, hard: 4 }
+    _diffStars.value = diffMap[q.difficulty] || 3
+    form.difficulty_coefficient = [0.9, 0.75, 0.55, 0.35, 0.2][_diffStars.value - 1] ?? 0.55
+    aiGeneratedFields.value.add('difficulty')
+  }
+
+  // 答案（按题型分支）
+  if (q.question_type === 'choice' && q.options) {
+    form.options = q.options.map(o => ({ label: o.label, content: o.content }))
+    if (q.correct_answer.kind === 'choice' && q.correct_answer.value.options) {
+      const opts = q.correct_answer.value.options
+      if (q.sub_type === 'multi' || opts.length > 1) {
+        form.sub_type = 'multi'
+        form.correctAnswer = opts
+      } else {
+        form.correctAnswer = opts[0] || ''
+      }
+    }
+    aiGeneratedFields.value.add('options')
+    aiGeneratedFields.value.add('correctAnswer')
+  } else if (q.question_type === 'fill') {
+    if (q.correct_answer.kind === 'fill' && q.correct_answer.value.blanks) {
+      form.blanks = q.correct_answer.value.blanks.map(b => ({ position: b.position, answer: b.answer }))
+    }
+    aiGeneratedFields.value.add('blanks')
+  } else if (q.question_type === 'solution') {
+    if (q.correct_answer.kind === 'solution' && q.correct_answer.value.subs) {
+      form.sub_answers = q.correct_answer.value.subs.map(s => s.content)
+    }
+    aiGeneratedFields.value.add('sub_answers')
+  }
+
+  // 解析（多解法 → solutions 数组，保存时用 \n\n---\n\n 拼接）
+  form.solutions = q.analysis.map(a => a.content)
+  aiGeneratedFields.value.add('solutions')
+
+  // 知识点匹配：AI 返回的知识点名称与知识树匹配
+  if (q.knowledge_points?.length && kpTree.value.length) {
+    const matched = matchKnowledgePoints(q.knowledge_points, kpTree.value)
+    if (matched) {
+      selectKp(matched.id, matched.name)
+      aiGeneratedFields.value.add('knowledge_point')
+    }
+  }
+
+  form.hasUnsaved = true
+  showAiDialog.value = false
+  toast.success('AI 识别结果已应用')
+
+  // 程序化赋值不会触发 @input，需在 DOM 更新后手动重算 textarea 高度；
+  // 同时在 watch 回调执行后解除标志位
+  nextTick(() => {
+    applyingAiResult.value = false
+    resizeAllTextareas()
+  })
+
+  // 痕迹高亮 8 秒后淡出
+  setTimeout(() => {
+    aiGeneratedFields.value.clear()
+  }, 8000)
 }
 
 // ===== 选项增删 =====
@@ -1186,7 +1439,8 @@ onBeforeUnmount(() => {
 })
 
 watch(() => form.question_type, () => {
-  if (isNew) {
+  // AI 应用期间跳过重置，避免覆盖 applyAiResult 刚赋好的 sub_answers/blanks/options
+  if (isNew && !applyingAiResult.value) {
     form.sub_type = ''
     form.correctAnswer = ''
     form.blanks = [{ position: 1, answer: '' }]
@@ -1311,11 +1565,12 @@ watch(() => form.question_type, () => {
   box-shadow: 0 0 0 3px var(--accent-light);
 }
 
-/* ============ 元数据工具栏 — 一体化胶囊卡片 ============ */
-.meta-row {
+/* ============ 元数据工具栏 — 第一层：核心控制元数据栏（单行不换行） ============ */
+.meta-bar {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
+  white-space: nowrap;
+  overflow-x: auto;
   gap: 8px;
   flex-shrink: 0;
   padding: 10px 14px;
@@ -1323,6 +1578,16 @@ watch(() => form.question_type, () => {
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-xs);
+  scrollbar-width: thin;
+}
+
+.meta-bar::-webkit-scrollbar {
+  height: 4px;
+}
+
+.meta-bar::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 2px;
 }
 
 /* 通用胶囊样式 — 适用于 AppSelect、input、button、div */
@@ -1348,8 +1613,7 @@ watch(() => form.question_type, () => {
 
 /* 已选择/激活状态：文字加深、边框加深、淡雅背景 */
 .meta-field :deep(.app-select-trigger.has-value),
-.meta-field.text-input:not(:placeholder-shown),
-.meta-field .kp-name {
+.meta-field.text-input:not(:placeholder-shown) {
   color: #262626;
 }
 
@@ -1377,17 +1641,7 @@ watch(() => form.question_type, () => {
   background: rgba(0, 122, 255, 0.08);
 }
 
-/* 有值的知识点/标签胶囊 */
-.meta-field.kp-display:has(.kp-name) {
-  color: #262626;
-  border-color: #b7b7b7;
-}
-
-[data-theme='dark'] .meta-field.kp-display:has(.kp-name) {
-  color: rgba(255, 255, 255, 0.95);
-  border-color: rgba(255, 255, 255, 0.25);
-}
-
+/* 暗色模式 */
 [data-theme='dark'] .meta-field {
   background: rgba(255, 255, 255, 0.06);
   border-color: rgba(255, 255, 255, 0.12);
@@ -1401,11 +1655,6 @@ watch(() => form.question_type, () => {
 .meta-field:focus-within {
   border-color: #b7b7b7;
   box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.06);
-}
-
-.meta-field-sm {
-  flex: initial;
-  min-width: 0;
 }
 
 /* AppSelect 直接作为 meta-field 时的胶囊样式 */
@@ -1501,37 +1750,156 @@ watch(() => form.question_type, () => {
   min-height: auto;
 }
 
-/* 知识点显示胶囊 */
-.meta-field.kp-display {
-  max-width: 140px;
-  overflow: hidden;
+/* ============ 第二层：描述性标签流区域 ============ */
+.question-tags-wrapper {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  min-height: 44px;
 }
 
-.kp-display .kp-name {
+/* 空状态时隐藏 wrapper 避免多余间距 */
+.question-tags-wrapper:empty {
+  display: none;
+}
+
+/* 属性标签胶囊 — 苹果风半透明浅色 */
+.attr-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 4px 3px 10px;
+  border-radius: 9999px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: rgba(0, 122, 255, 0.06);
+  border: 1px solid rgba(0, 122, 255, 0.12);
+  transition: all 0.2s ease;
+  white-space: nowrap;
+  max-width: 200px;
+}
+
+[data-theme='dark'] .attr-tag {
+  background: rgba(0, 122, 255, 0.1);
+  border-color: rgba(0, 122, 255, 0.18);
+  color: rgba(255, 255, 255, 0.85);
+}
+
+/* 知识点标签 — 蓝色系 */
+.attr-tag-kp {
+  background: rgba(0, 122, 255, 0.08);
+  border-color: rgba(0, 122, 255, 0.18);
+  color: var(--accent);
+}
+
+/* 核心素养标签 — 紫色系 */
+.attr-tag-literacy {
+  background: rgba(175, 82, 222, 0.06);
+  border-color: rgba(175, 82, 222, 0.15);
+  color: #7b2cbf;
+}
+
+[data-theme='dark'] .attr-tag-literacy {
+  background: rgba(175, 82, 222, 0.12);
+  border-color: rgba(175, 82, 222, 0.2);
+  color: #c77dff;
+}
+
+/* 解题方法标签 — 绿色系 */
+.attr-tag-method {
+  background: rgba(52, 199, 89, 0.06);
+  border-color: rgba(52, 199, 89, 0.15);
+  color: #1a7a37;
+}
+
+[data-theme='dark'] .attr-tag-method {
+  background: rgba(52, 199, 89, 0.12);
+  border-color: rgba(52, 199, 89, 0.2);
+  color: #6bce8a;
+}
+
+.attr-tag :deep(svg),
+.attr-tag svg {
+  width: 11px !important;
+  height: 11px !important;
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
+.attr-tag-text {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.kp-display .kp-empty {
-  color: #8c8c8c;
-}
-
-/* 标签按钮胶囊 */
-.meta-field.kp-btn {
-  border: 1px solid #e0e0e0;
-  background: #fff;
+/* 标签删除手柄 */
+.attr-tag-x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--text-muted);
   cursor: pointer;
+  flex-shrink: 0;
+  transition: all 0.15s ease;
+  padding: 0;
 }
 
-[data-theme='dark'] .meta-field.kp-btn {
-  background: rgba(255, 255, 255, 0.06);
-  border-color: rgba(255, 255, 255, 0.12);
+.attr-tag-x:hover {
+  background: var(--danger);
+  color: #fff;
 }
 
-.meta-field.kp-btn:hover {
-  border-color: #b7b7b7;
-  color: #262626;
+[data-theme='dark'] .attr-tag-x {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.attr-tag-x :deep(svg),
+.attr-tag-x svg {
+  width: 10px !important;
+  height: 10px !important;
+}
+
+/* 添加属性辅助按钮 */
+.attr-add-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 12px;
+  border-radius: 9999px;
+  border: 1px dashed var(--border-strong);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+  font-family: inherit;
+}
+
+.attr-add-btn:hover {
+  border-color: var(--accent);
+  border-style: solid;
+  color: var(--accent);
+  background: var(--accent-light);
+}
+
+.attr-add-btn :deep(svg),
+.attr-add-btn svg {
+  width: 13px !important;
+  height: 13px !important;
 }
 
 /* 降噪图标系统 — 统一 14px + 灰色 */
@@ -2564,26 +2932,58 @@ watch(() => form.question_type, () => {
   color: var(--text-muted);
 }
 
-/* 标签弹窗 */
-.tag-dialog-body {
+/* 统一属性面板弹窗 */
+.attr-dialog-body {
   display: flex;
   flex-direction: column;
   gap: 16px;
 }
 
-.tag-dialog-hint {
-  font-size: 13px;
-  color: var(--text-muted);
-  margin: 0 0 4px 0;
+.attr-dialog-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
-.tag-category-title {
+.attr-dialog-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 12px;
   font-weight: 650;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--text-secondary);
-  margin-bottom: 8px;
+}
+
+.attr-dialog-label :deep(svg),
+.attr-dialog-label svg {
+  width: 14px !important;
+  height: 14px !important;
+  opacity: 0.6;
+}
+
+.attr-dialog-input {
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 13px;
+  outline: none;
+  transition: var(--transition-fast);
+  font-family: inherit;
+}
+
+.attr-dialog-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-light);
+}
+
+.attr-dialog-hint {
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.5;
 }
 
 .tag-chips {
@@ -2648,13 +3048,7 @@ watch(() => form.question_type, () => {
     width: 100%;
     min-height: 400px;
   }
-  .meta-row {
-    flex-wrap: wrap;
-  }
-  .meta-field,
-  .meta-field-sm {
-    flex: 0 1 auto;
-  }
+  /* meta-bar 始终保持单行不换行，仅横向滚动 */
 }
 
 @media (max-width: 768px) {
@@ -2674,19 +3068,217 @@ watch(() => form.question_type, () => {
   .edit-page {
     padding: 12px;
   }
-  .meta-row {
-    flex-wrap: wrap;
-  }
+  /* meta-bar 始终保持单行不换行，仅横向滚动 */
   .form-grid-2 {
     grid-template-columns: 1fr;
-  }
-  .meta-field,
-  .meta-field-sm {
-    flex: 0 1 auto;
   }
   .top-bar-left,
   .top-bar-right {
     flex-wrap: wrap;
   }
+}
+
+/* ===== AI 智能识别弹窗 ===== */
+.ai-dialog-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.ai-mode-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 2px solid var(--border);
+  padding-bottom: 0;
+}
+
+.ai-mode-tabs button {
+  padding: 8px 16px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+  font-size: 14px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.ai-mode-tabs button:hover {
+  color: var(--text-primary);
+}
+
+.ai-mode-tabs button.active {
+  color: var(--purple);
+  border-bottom-color: var(--purple);
+  font-weight: 600;
+}
+
+.ai-prompt-section {
+  background: var(--bg-secondary, var(--bg-input));
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ai-prompt-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.ai-prompt-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.ai-prompt-preview {
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  background: var(--bg-input);
+  border-radius: 6px;
+  padding: 10px;
+  max-height: 200px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ai-steps {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.ai-hint {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.ai-textarea {
+  width: 100%;
+  min-height: 200px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 14px;
+  font-family: inherit;
+  resize: vertical;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  line-height: 1.6;
+}
+
+.ai-textarea:focus {
+  outline: none;
+  border-color: var(--purple);
+}
+
+.ai-error {
+  padding: 10px 12px;
+  background: var(--danger-light);
+  color: var(--danger);
+  border-radius: var(--radius);
+  font-size: 13px;
+}
+
+.ai-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.ai-result-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ai-result-type {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.ai-warnings {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ai-warning-item {
+  font-size: 12px;
+  color: var(--warning);
+  background: var(--warning-light);
+  padding: 6px 10px;
+  border-radius: var(--radius);
+}
+
+.ai-result-preview {
+  max-height: 400px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.ai-preview-block {
+  border-left: 3px solid var(--purple-light);
+  padding-left: 12px;
+}
+
+.ai-preview-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--purple);
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.ai-preview-content {
+  font-size: 14px;
+  color: var(--text-primary);
+  line-height: 1.6;
+}
+
+.ai-preview-option {
+  font-size: 14px;
+  color: var(--text-primary);
+  padding: 2px 0;
+}
+
+.ai-opt-label {
+  font-weight: 700;
+  margin-right: 4px;
+}
+
+.ai-preview-analysis {
+  font-size: 13px;
+  color: var(--text-secondary);
+  padding: 6px 0;
+}
+
+/* ===== AI 痕迹高亮（紫色呼吸边框） ===== */
+@keyframes ai-breathe {
+  0%, 100% {
+    box-shadow: 0 0 0 2px var(--purple);
+  }
+  50% {
+    box-shadow: 0 0 8px 2px var(--purple-light);
+  }
+}
+
+.ai-highlight {
+  animation: ai-breathe 2s ease-in-out infinite;
+  border-radius: var(--radius);
+  transition: box-shadow 0.5s ease;
 }
 </style>

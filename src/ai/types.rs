@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::ai::kp_matcher::KpMatch;
+
 /// 多小题答案单元（解答题）
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SubAnswer {
@@ -34,7 +36,7 @@ pub struct ParsedOption {
 
 /// 按题型分支的答案结构
 #[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(tag = "kind", content = "value")]
+#[serde(tag = "kind", content = "value", rename_all = "lowercase")]
 pub enum ParsedAnswer {
     /// 选择题：["A"] 或 ["A", "C"]
     Choice { options: Vec<String> },
@@ -69,4 +71,7 @@ pub struct ParsedQuestion {
     pub warnings: Vec<String>,
     /// ["IMAGE_PLACEHOLDER_0", ...] 便于前端批量替换
     pub image_placeholders: Vec<String>,
+    /// 后端知识点模糊匹配结果（非 AI 输出，后端填充）
+    #[serde(default)]
+    pub kp_matches: Vec<KpMatch>,
 }
