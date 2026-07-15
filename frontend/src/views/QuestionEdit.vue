@@ -39,6 +39,11 @@
         <AppSelect v-model="form.academic_year" :options="academicYearOptions" placeholder="学年" clearable class="meta-field" />
         <AppSelect v-model="form.grade_semester" :options="gradeSemesterOptions" placeholder="年级学期" clearable class="meta-field" />
         <AppSelect v-model="form.exam_type" :options="examTypeOptions" placeholder="考试类型" clearable class="meta-field" />
+        <input
+          v-model="form.exam_region"
+          placeholder="考试地区"
+          class="meta-field meta-input"
+        />
       </div>
 
       <!-- ==================== 主内容 双栏 ==================== -->
@@ -322,109 +327,139 @@
       <div class="loading-hint">版本历史功能即将上线</div>
     </AppModal>
 
-    <!-- 统一属性面板 -->
+    <!-- 属性面板 — 左右双栏 -->
     <AppModal v-model="showAttrDialog" title="属性面板">
-      <div class="attr-dialog-body">
-        <div class="attr-dialog-section">
-          <div class="attr-dialog-label"><AppIcon name="pin" :size="14" /> 考试地区</div>
-          <input v-model="form.exam_region" placeholder="如：北京、上海…" class="attr-dialog-input" />
-        </div>
-        <div class="attr-dialog-section">
-          <div class="attr-dialog-label"><AppIcon name="tag" :size="14" /> 知识点</div>
-          <div class="attr-dialog-hint">从左侧知识树中选择知识点，选中后将以标签形式显示在题干上方。</div>
-        </div>
-        <div class="attr-dialog-section">
-          <div class="attr-dialog-label"><AppIcon name="award" :size="14" /> 核心素养（最多 {{ TAG_LIMITS.core_competence }} 个）</div>
-          <div class="tag-chips">
-            <button
-              v-for="t in competenceTags"
-              :key="t.id"
-              type="button"
-              class="tag-chip"
-              :class="{ active: form.tagIds.includes(t.id) }"
-              @click="toggleTagById(t)"
-            >{{ t.name }}</button>
-          </div>
-        </div>
-        <div class="attr-dialog-section">
-          <div class="attr-dialog-label">解题方法 / 数学思想（最多 {{ TAG_LIMITS.method }} 个）</div>
-          <div class="tag-chips">
-            <button
-              v-for="t in methodTags"
-              :key="t.id"
-              type="button"
-              class="tag-chip"
-              :class="{ active: form.tagIds.includes(t.id) }"
-              @click="toggleTagById(t)"
-            >{{ t.name }}</button>
-          </div>
-          <!-- typeahead 联想输入 -->
-          <div class="typeahead-wrap">
-            <input
-              v-model="suggestMethod.query"
-              class="attr-dialog-input"
-              placeholder="搜索或创建新方法标签…"
-              @input="onSuggestInput(suggestMethod, 'method')"
-            />
-            <div v-if="suggestMethod.results.length" class="typeahead-dropdown">
+      <div class="attr-panel">
+        <!-- 左侧分类导航 -->
+        <nav class="attr-panel-nav">
+          <button
+            class="attr-nav-item"
+            :class="{ active: attrPanelTab === 'competence' }"
+            @click="attrPanelTab = 'competence'"
+          >
+            <AppIcon name="award" :size="15" />
+            <span>核心素养</span>
+            <span v-if="selectedCompetenceTags.length" class="attr-nav-badge">{{ selectedCompetenceTags.length }}</span>
+          </button>
+          <button
+            class="attr-nav-item"
+            :class="{ active: attrPanelTab === 'method' }"
+            @click="attrPanelTab = 'method'"
+          >
+            <AppIcon name="bookmark" :size="15" />
+            <span>解题方法</span>
+            <span v-if="selectedMethodTags.length" class="attr-nav-badge">{{ selectedMethodTags.length }}</span>
+          </button>
+          <button
+            class="attr-nav-item"
+            :class="{ active: attrPanelTab === 'school' }"
+            @click="attrPanelTab = 'school'"
+          >
+            <AppIcon name="pin" :size="15" />
+            <span>学校来源</span>
+            <span v-if="selectedSchoolTags.length" class="attr-nav-badge">{{ selectedSchoolTags.length }}</span>
+          </button>
+        </nav>
+
+        <!-- 右侧内容画布 -->
+        <div class="attr-panel-content">
+          <!-- 核心素养面板 -->
+          <div v-show="attrPanelTab === 'competence'" class="attr-canvas">
+            <div class="attr-canvas-hint">最多选择 {{ TAG_LIMITS.core_competence }} 个</div>
+            <div class="tag-chips tag-chips-grid">
               <button
-                v-for="t in suggestMethod.results"
+                v-for="t in competenceTags"
                 :key="t.id"
                 type="button"
-                class="typeahead-item"
-                @click="toggleTagById(t); suggestMethod.query = ''; suggestMethod.results = []"
-              >
-                <span>{{ t.name }}</span>
-                <span class="typeahead-count">{{ t.use_count }} 次</span>
-              </button>
+                class="tag-chip"
+                :class="{ active: form.tagIds.includes(t.id) }"
+                @click="toggleTagById(t)"
+              >{{ t.name }}</button>
             </div>
-            <button
-              v-if="suggestMethod.query.trim() && !suggestMethod.results.some(t => t.name === suggestMethod.query.trim())"
-              type="button"
-              class="typeahead-create"
-              @click="createNewTag(suggestMethod.query.trim(), 'method', suggestMethod)"
-            >+ 创建新标签「{{ suggestMethod.query.trim() }}」</button>
           </div>
-        </div>
-        <div class="attr-dialog-section">
-          <div class="attr-dialog-label">学校（最多 {{ TAG_LIMITS.school }} 个）</div>
-          <div class="tag-chips">
-            <button
-              v-for="t in schoolTags"
-              :key="t.id"
-              type="button"
-              class="tag-chip"
-              :class="{ active: form.tagIds.includes(t.id) }"
-              @click="toggleTagById(t)"
-            >{{ t.name }}</button>
-            <span v-if="schoolTags.length === 0" class="text-sm text-muted">暂无学校标签，可在下方搜索创建</span>
-          </div>
-          <!-- 学校 typeahead -->
-          <div class="typeahead-wrap">
-            <input
-              v-model="suggestSchool.query"
-              class="attr-dialog-input"
-              placeholder="搜索或创建学校标签…"
-              @input="onSuggestInput(suggestSchool, 'school')"
-            />
-            <div v-if="suggestSchool.results.length" class="typeahead-dropdown">
+
+          <!-- 解题方法面板 -->
+          <div v-show="attrPanelTab === 'method'" class="attr-canvas">
+            <div class="attr-canvas-hint">最多选择 {{ TAG_LIMITS.method }} 个</div>
+            <div class="tag-chips tag-chips-grid">
               <button
-                v-for="t in suggestSchool.results"
+                v-for="t in methodTags"
                 :key="t.id"
                 type="button"
-                class="typeahead-item"
-                @click="toggleTagById(t); suggestSchool.query = ''; suggestSchool.results = []"
-              >
-                <span>{{ t.name }}</span>
-                <span class="typeahead-count">{{ t.use_count }} 次</span>
-              </button>
+                class="tag-chip"
+                :class="{ active: form.tagIds.includes(t.id) }"
+                @click="toggleTagById(t)"
+              >{{ t.name }}</button>
             </div>
-            <button
-              v-if="suggestSchool.query.trim() && !suggestSchool.results.some(t => t.name === suggestSchool.query.trim())"
-              type="button"
-              class="typeahead-create"
-              @click="createNewTag(suggestSchool.query.trim(), 'school', suggestSchool)"
-            >+ 创建新标签「{{ suggestSchool.query.trim() }}」</button>
+            <!-- typeahead 联想输入 -->
+            <div class="typeahead-wrap">
+              <input
+                v-model="suggestMethod.query"
+                class="attr-dialog-input"
+                placeholder="搜索或创建新方法标签…"
+                @input="onSuggestInput(suggestMethod, 'method')"
+              />
+              <div v-if="suggestMethod.results.length" class="typeahead-dropdown">
+                <button
+                  v-for="t in suggestMethod.results"
+                  :key="t.id"
+                  type="button"
+                  class="typeahead-item"
+                  @click="toggleTagById(t); suggestMethod.query = ''; suggestMethod.results = []"
+                >
+                  <span>{{ t.name }}</span>
+                  <span class="typeahead-count">{{ t.use_count }} 次</span>
+                </button>
+              </div>
+              <button
+                v-if="suggestMethod.query.trim() && !suggestMethod.results.some(t => t.name === suggestMethod.query.trim())"
+                type="button"
+                class="typeahead-create"
+                @click="createNewTag(suggestMethod.query.trim(), 'method', suggestMethod)"
+              >+ 创建新标签「{{ suggestMethod.query.trim() }}」</button>
+            </div>
+          </div>
+
+          <!-- 学校来源面板 -->
+          <div v-show="attrPanelTab === 'school'" class="attr-canvas">
+            <div class="attr-canvas-hint">最多选择 {{ TAG_LIMITS.school }} 个</div>
+            <div v-if="schoolTags.length" class="tag-chips tag-chips-grid">
+              <button
+                v-for="t in schoolTags"
+                :key="t.id"
+                type="button"
+                class="tag-chip"
+                :class="{ active: form.tagIds.includes(t.id) }"
+                @click="toggleTagById(t)"
+              >{{ t.name }}</button>
+            </div>
+            <!-- 学校 typeahead -->
+            <div class="typeahead-wrap">
+              <input
+                v-model="suggestSchool.query"
+                class="attr-dialog-input"
+                placeholder="搜索或创建学校标签…"
+                @input="onSuggestInput(suggestSchool, 'school')"
+              />
+              <div v-if="suggestSchool.results.length" class="typeahead-dropdown">
+                <button
+                  v-for="t in suggestSchool.results"
+                  :key="t.id"
+                  type="button"
+                  class="typeahead-item"
+                  @click="toggleTagById(t); suggestSchool.query = ''; suggestSchool.results = []"
+                >
+                  <span>{{ t.name }}</span>
+                  <span class="typeahead-count">{{ t.use_count }} 次</span>
+                </button>
+              </div>
+              <button
+                v-if="suggestSchool.query.trim() && !suggestSchool.results.some(t => t.name === suggestSchool.query.trim())"
+                type="button"
+                class="typeahead-create"
+                @click="createNewTag(suggestSchool.query.trim(), 'school', suggestSchool)"
+              >+ 创建新标签「{{ suggestSchool.query.trim() }}」</button>
+            </div>
           </div>
         </div>
       </div>
@@ -583,6 +618,7 @@ const kpLoading = ref(false)
 const kpTree = ref<KnowledgePoint[]>([])
 const showHistory = ref(false)
 const showAttrDialog = ref(false)
+const attrPanelTab = ref<'competence' | 'method' | 'school'>('competence')
 const grades = ['初一', '初二', '初三', '高一', '高二', '高三']
 
 // 标签分类数据：从后端 API 动态加载
@@ -1938,6 +1974,53 @@ watch(() => form.question_type, () => {
   box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.06);
 }
 
+/* 考试地区平铺输入框（与 AppSelect 胶囊视觉一致） */
+.meta-input {
+  border: 1px solid #e0e0e0;
+  background: #fff;
+  border-radius: 9999px;
+  padding: 4px 16px;
+  height: 32px;
+  font-size: 13px;
+  color: #8c8c8c;
+  outline: none;
+  width: auto;
+  max-width: 120px;
+  box-sizing: border-box;
+  transition: all 0.2s ease;
+}
+
+.meta-input:not(:placeholder-shown) {
+  color: #262626;
+  border-color: #b7b7b7;
+  background: rgba(0, 122, 255, 0.03);
+}
+
+.meta-input::placeholder {
+  color: var(--text-muted);
+}
+
+.meta-input:hover {
+  border-color: var(--accent);
+}
+
+.meta-input:focus {
+  border-color: #b7b7b7;
+  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.06);
+}
+
+[data-theme='dark'] .meta-input {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.5);
+}
+
+[data-theme='dark'] .meta-input:not(:placeholder-shown) {
+  color: rgba(255, 255, 255, 0.95);
+  border-color: rgba(255, 255, 255, 0.25);
+  background: rgba(0, 122, 255, 0.08);
+}
+
 /* 难度星级胶囊 — 对称内边距呼吸感 */
 .meta-field-diff {
   gap: 2px;
@@ -3133,35 +3216,96 @@ watch(() => form.question_type, () => {
   color: var(--text-muted);
 }
 
-/* 统一属性面板弹窗 */
-.attr-dialog-body {
+/* 属性面板 — 左右双栏布局 */
+.attr-panel {
   display: flex;
-  flex-direction: column;
-  gap: 16px;
+  min-height: 340px;
+  gap: 0;
 }
 
-.attr-dialog-section {
+/* 左侧分类导航 */
+.attr-panel-nav {
+  flex: 0 0 25%;
+  max-width: 160px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 2px;
+  padding: 8px 0;
+  border-right: 1px solid var(--border-color);
+  margin-right: -1px;
 }
 
-.attr-dialog-label {
+.attr-nav-item {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  font-weight: 650;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  gap: 8px;
+  padding: 10px 16px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 14px;
   color: var(--text-secondary);
+  text-align: left;
+  transition: all 0.15s;
+  font-family: inherit;
+  border-radius: 0;
+  position: relative;
 }
 
-.attr-dialog-label :deep(svg),
-.attr-dialog-label svg {
-  width: 14px !important;
-  height: 14px !important;
-  opacity: 0.6;
+.attr-nav-item:hover {
+  background: var(--accent-light);
+  color: var(--accent);
+}
+
+.attr-nav-item.active {
+  color: var(--accent);
+  font-weight: 600;
+  background: var(--accent-light);
+}
+
+.attr-nav-item.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--accent);
+}
+
+.attr-nav-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  margin-left: auto;
+}
+
+/* 右侧内容画布 */
+.attr-panel-content {
+  flex: 1;
+  padding: 16px 4px 16px 24px;
+  min-width: 0;
+}
+
+.attr-canvas {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.attr-canvas-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
 }
 
 .attr-dialog-input {
@@ -3174,6 +3318,8 @@ watch(() => form.question_type, () => {
   outline: none;
   transition: var(--transition-fast);
   font-family: inherit;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .attr-dialog-input:focus {
@@ -3181,16 +3327,14 @@ watch(() => form.question_type, () => {
   box-shadow: 0 0 0 3px var(--accent-light);
 }
 
-.attr-dialog-hint {
-  font-size: 13px;
-  color: var(--text-muted);
-  line-height: 1.5;
-}
-
 .tag-chips {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.tag-chips-grid {
+  gap: 10px;
 }
 
 .tag-chip {
