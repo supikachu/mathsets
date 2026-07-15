@@ -523,7 +523,7 @@
           </div>
         </div>
       </div>
-      <!-- 底部全局已选预览条 -->
+      <!-- 底部全局已选预览条 — 吸底 Footer -->
       <div class="modal-selected-preview-bar">
         <div class="preview-track">
           <!-- 知识点（多选，第一个为 Primary） -->
@@ -555,7 +555,7 @@
           </span>
           <span v-if="attrSelectedKps.length === 0 && form_tagList.length === 0" class="preview-empty">暂未选择任何属性</span>
         </div>
-        <AppButton variant="primary" size="sm" @click="showAttrDialog = false">完成</AppButton>
+        <AppButton class="preview-done-btn" variant="primary" size="sm" @click="showAttrDialog = false">完成</AppButton>
       </div>
     </AppModal>
 
@@ -716,7 +716,7 @@ function onKpNodeToggle(node: KnowledgePoint) {
   } else {
     // 防呆限制
     if (attrSelectedKps.value.length >= TAG_LIMITS.knowledge_point) {
-      toast.warning(`知识点最多选择 ${TAG_LIMITS.knowledge_point} 个`)
+      toast.warning('已达到该类别最大可选择上限')
       return
     }
     attrSelectedKps.value.push({ id: node.id, name: node.name })
@@ -874,8 +874,7 @@ function toggleTagById(tag: TagSummary) {
   const count = form_tagList.value.filter(t => t.category === tag.category).length
   const limit = TAG_LIMITS[tag.category] ?? 99
   if (count >= limit) {
-    const labels: Record<string, string> = { core_competence: '核心素养', method: '解题方法', school: '学校' }
-    toast.warning(`${labels[tag.category] || '标签'}最多选择 ${limit} 个`)
+    toast.warning('已达到该类别最大可选择上限')
     return
   }
   form.tagIds.push(tag.id)
@@ -884,7 +883,7 @@ function toggleTagById(tag: TagSummary) {
 // 知识点数量防呆
 function checkKpLimit(): boolean {
   if (attrSelectedKps.value.length >= TAG_LIMITS.knowledge_point) {
-    toast.warning(`知识点最多选择 ${TAG_LIMITS.knowledge_point} 个`)
+    toast.warning('已达到该类别最大可选择上限')
     return false
   }
   return true
@@ -2324,30 +2323,30 @@ watch(() => form.question_type, () => {
   font-weight: 600;
 }
 
-/* 核心素养标签 — 紫色系 */
+/* 核心素养标签 — 莫兰迪浅蓝系 */
 .attr-tag-literacy {
-  background: rgba(175, 82, 222, 0.06);
-  border-color: rgba(175, 82, 222, 0.15);
-  color: #7b2cbf;
+  background: #e5f1ff;
+  border-color: rgba(0, 113, 227, 0.15);
+  color: #0071e3;
 }
 
 [data-theme='dark'] .attr-tag-literacy {
-  background: rgba(175, 82, 222, 0.12);
-  border-color: rgba(175, 82, 222, 0.2);
-  color: #c77dff;
+  background: rgba(0, 113, 227, 0.15);
+  border-color: rgba(0, 113, 227, 0.25);
+  color: #4d9eff;
 }
 
-/* 解题方法标签 — 绿色系 */
+/* 解题方法标签 — 莫兰迪浅绿系 */
 .attr-tag-method {
-  background: rgba(52, 199, 89, 0.06);
-  border-color: rgba(52, 199, 89, 0.15);
-  color: #1a7a37;
+  background: #e4f6ed;
+  border-color: rgba(29, 130, 76, 0.15);
+  color: #1d824c;
 }
 
 [data-theme='dark'] .attr-tag-method {
-  background: rgba(52, 199, 89, 0.12);
-  border-color: rgba(52, 199, 89, 0.2);
-  color: #6bce8a;
+  background: rgba(29, 130, 76, 0.15);
+  border-color: rgba(29, 130, 76, 0.25);
+  color: #5dbf7e;
 }
 
 .attr-tag :deep(svg),
@@ -3499,7 +3498,7 @@ watch(() => form.question_type, () => {
   height: 36px;
   background: #fff;
   border-radius: 8px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.02);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 4px 12px rgba(0, 0, 0, 0.03);
   transition: all 0.25s cubic-bezier(0.25, 1, 0.5, 1);
   pointer-events: none;
   z-index: 0;
@@ -3643,9 +3642,9 @@ watch(() => form.question_type, () => {
 }
 
 .competence-chip:hover:not(.active) {
-  border-color: var(--purple);
-  color: var(--purple);
-  background: var(--purple-light);
+  border-color: #0071e3;
+  color: #0071e3;
+  background: #e5f1ff;
   transform: translateY(-1px);
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.04);
 }
@@ -3655,8 +3654,8 @@ watch(() => form.question_type, () => {
 }
 
 .competence-chip.active {
-  background: var(--purple-light);
-  color: var(--purple);
+  background: #e5f1ff;
+  color: #0071e3;
   border-color: transparent;
   font-weight: 500;
   transform: translateY(-1px);
@@ -3670,7 +3669,7 @@ watch(() => form.question_type, () => {
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: var(--purple);
+  background: #0071e3;
   color: #fff;
   font-size: 10px;
   font-weight: 700;
@@ -3938,6 +3937,7 @@ watch(() => form.question_type, () => {
 
 /* ===== 底部全局已选预览条 — 吸底 Footer (固定 64px) ===== */
 .modal-selected-preview-bar {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -3962,11 +3962,21 @@ watch(() => form.question_type, () => {
   gap: 8px;
   overflow-x: auto;
   scrollbar-width: none;
-  padding: 2px 0;
+  padding: 2px 120px 2px 0;
 }
 
 .preview-track::-webkit-scrollbar {
   display: none;
+}
+
+/* 完成按钮 — absolute 锁定最右侧 */
+.preview-done-btn {
+  position: absolute;
+  right: 24px;
+  top: 50%;
+  transform: translateY(-50%);
+  flex-shrink: 0;
+  z-index: 2;
 }
 
 .preview-pill {
@@ -4007,13 +4017,13 @@ watch(() => form.question_type, () => {
 }
 
 .preview-pill-comp {
-  background: rgba(175, 82, 222, 0.1);
-  color: var(--purple);
+  background: #e5f1ff;
+  color: #0071e3;
 }
 
 .preview-pill-method {
-  background: rgba(0, 113, 227, 0.1);
-  color: var(--accent);
+  background: #e4f6ed;
+  color: #1d824c;
 }
 
 .preview-pill-school {
