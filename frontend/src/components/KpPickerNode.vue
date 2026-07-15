@@ -2,7 +2,7 @@
   <div>
     <div
       class="kp-picker-node"
-      :class="{ active: selectedKpId === node.id, 'has-children': hasChildren }"
+      :class="{ active: isSelected, primary: isPrimary, 'has-children': hasChildren }"
       :style="{ paddingLeft: level * 16 + 8 + 'px' }"
       @click="hasChildren ? emit('toggle-expand', node) : emit('select', node)"
     >
@@ -20,8 +20,19 @@
         </svg>
       </span>
       <span v-else class="kp-picker-leaf-dot" />
-      <!-- 节点名称（点击选中） -->
+      <!-- Checkbox 多选框 -->
+      <span
+        class="kp-picker-checkbox"
+        :class="{ checked: isSelected, primary: isPrimary }"
+        @click.stop="emit('select', node)"
+      >
+        <svg v-if="isSelected" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M20 6 9 17l-5-5" />
+        </svg>
+      </span>
+      <!-- 节点名称 -->
       <span class="kp-picker-name" @click.stop="emit('select', node)">{{ node.name }}</span>
+      <span v-if="isPrimary" class="kp-picker-primary-tag">主</span>
       <span v-if="hasChildren" class="kp-picker-count">{{ node.children.length }}</span>
     </div>
     <Transition name="kp-picker-expand">
@@ -31,7 +42,8 @@
           :key="child.id"
           :node="child"
           :level="level + 1"
-          :selected-kp-id="selectedKpId"
+          :selected-kp-ids="selectedKpIds"
+          :primary-kp-id="primaryKpId"
           :expanded="expanded"
           @select="emit('select', $event)"
           @toggle-expand="emit('toggle-expand', $event)"
@@ -48,7 +60,8 @@ import type { KnowledgePoint } from '@/api/client'
 const props = defineProps<{
   node: KnowledgePoint
   level: number
-  selectedKpId: string | null
+  selectedKpIds: string[]
+  primaryKpId: string | null
   expanded: Record<string, boolean>
 }>()
 
@@ -59,6 +72,8 @@ const emit = defineEmits<{
 
 const hasChildren = computed(() => (props.node.children?.length ?? 0) > 0)
 const isExpanded = computed(() => props.expanded[props.node.id] === true)
+const isSelected = computed(() => props.selectedKpIds.includes(props.node.id))
+const isPrimary = computed(() => props.primaryKpId === props.node.id)
 </script>
 
 <style scoped>
@@ -86,8 +101,12 @@ const isExpanded = computed(() => props.expanded[props.node.id] === true)
 }
 
 .kp-picker-node.active {
-  background: var(--purple-light);
   color: var(--purple);
+  font-weight: 500;
+}
+
+.kp-picker-node.primary {
+  background: var(--purple-light);
   font-weight: 600;
 }
 
@@ -134,12 +153,54 @@ const isExpanded = computed(() => props.expanded[props.node.id] === true)
   margin-right: 1px;
 }
 
+/* Checkbox 多选框 */
+.kp-picker-checkbox {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  border: 1.5px solid #d1d1d6;
+  background: #fff;
+  flex-shrink: 0;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  color: #fff;
+}
+
+[data-theme='dark'] .kp-picker-checkbox {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.kp-picker-checkbox.checked {
+  background: var(--purple);
+  border-color: var(--purple);
+}
+
+.kp-picker-checkbox.checked.primary {
+  background: var(--purple);
+  border-color: var(--purple);
+  box-shadow: 0 0 0 2px rgba(175, 82, 222, 0.2);
+}
+
 .kp-picker-name {
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   cursor: pointer;
+}
+
+.kp-picker-primary-tag {
+  font-size: 9px;
+  font-weight: 700;
+  color: #fff;
+  background: var(--purple);
+  border-radius: 4px;
+  padding: 1px 4px;
+  flex-shrink: 0;
 }
 
 .kp-picker-count {

@@ -58,10 +58,15 @@
                 <span class="attr-tag-text">{{ form.exam_region }}</span>
                 <button type="button" class="attr-tag-x" @click="form.exam_region = ''"><AppIcon name="x" :size="10" /></button>
               </span>
-              <span v-if="selectedKpName" class="attr-tag attr-tag-kp">
+              <span
+                v-for="(kp, idx) in attrSelectedKps"
+                :key="'kp-tag-' + kp.id"
+                class="attr-tag attr-tag-kp"
+                :class="{ 'attr-tag-kp-primary': idx === 0 }"
+              >
                 <AppIcon name="tag" :size="11" />
-                <span class="attr-tag-text">{{ selectedKpName }}</span>
-                <button type="button" class="attr-tag-x" @click="clearKp"><AppIcon name="x" :size="10" /></button>
+                <span class="attr-tag-text">{{ kp.name }}</span>
+                <button type="button" class="attr-tag-x" @click="removeAttrKp(kp.id)"><AppIcon name="x" :size="10" /></button>
               </span>
               <span v-for="t in selectedCompetenceTags" :key="'comp-' + t.id" class="attr-tag attr-tag-literacy">
                 <AppIcon name="award" :size="11" />
@@ -342,7 +347,7 @@
           >
             <AppIcon name="tag" :size="15" />
             <span>知识点</span>
-            <span v-if="selectedKpId" class="attr-nav-badge">1</span>
+            <span v-if="attrSelectedKps.length" class="attr-nav-badge">{{ attrSelectedKps.length }}</span>
           </button>
           <button
             ref="attrNavRefs"
@@ -392,9 +397,10 @@
                 :key="node.id"
                 :node="node"
                 :level="0"
-                :selected-kp-id="selectedKpId"
+                :selected-kp-ids="attrSelectedKpIds"
+                :primary-kp-id="attrSelectedKps[0]?.id ?? null"
                 :expanded="kpExpandedRecord"
-                @select="onKpNodeSelect"
+                @select="onKpNodeToggle"
                 @toggle-expand="onKpToggleExpand"
               />
             </div>
@@ -519,11 +525,17 @@
       <!-- 底部全局已选预览条 -->
       <div class="modal-selected-preview-bar">
         <div class="preview-track">
-          <!-- 知识点 -->
-          <span v-if="selectedKpName" class="preview-pill preview-pill-kp">
-            <span class="preview-pill-icon">KP</span>
-            <span class="preview-pill-text">{{ selectedKpName }}</span>
-            <button type="button" class="preview-pill-x" @click="clearKp"><AppIcon name="x" :size="10" /></button>
+          <!-- 知识点（多选，第一个为 Primary） -->
+          <span
+            v-for="(kp, idx) in attrSelectedKps"
+            :key="'pv-kp-' + kp.id"
+            class="preview-pill preview-pill-kp"
+            :class="{ 'preview-pill-primary': idx === 0 }"
+          >
+            <span v-if="idx === 0" class="preview-pill-icon">主</span>
+            <span v-else class="preview-pill-icon">KP</span>
+            <span class="preview-pill-text">{{ kp.name }}</span>
+            <button type="button" class="preview-pill-x" @click="removeAttrKp(kp.id)"><AppIcon name="x" :size="10" /></button>
           </span>
           <!-- 核心素养 -->
           <span v-for="t in selectedCompetenceTags" :key="'pv-comp-' + t.id" class="preview-pill preview-pill-comp">
@@ -540,7 +552,7 @@
             <span class="preview-pill-text">{{ t.name }}</span>
             <button type="button" class="preview-pill-x" @click="toggleTagById(t)"><AppIcon name="x" :size="10" /></button>
           </span>
-          <span v-if="!selectedKpName && form_tagList.length === 0" class="preview-empty">暂未选择任何属性</span>
+          <span v-if="attrSelectedKps.length === 0 && form_tagList.length === 0" class="preview-empty">暂未选择任何属性</span>
         </div>
         <AppButton variant="primary" size="sm" @click="showAttrDialog = false">完成</AppButton>
       </div>
@@ -690,6 +702,43 @@ const space = useSpaceStore()
 const auth = useAuthStore()
 const { selectedKpId, selectedKpName, select: selectKp, clear: clearKp } = useSelectedKp()
 const { isKpTreeCollapsed } = useLayoutState()
+
+// 属性面板知识点多选状态（独立于全局单选 useSelectedKp）
+const attrSelectedKps = ref<{ id: string; name: string }[]>([])
+const attrSelectedKpIds = computed(() => attrSelectedKps.value.map(k => k.id))
+
+function onKpNodeToggle(node: KnowledgePoint) {
+  const idx = attrSelectedKps.value.findIndex(k => k.id === node.id)
+  if (idx >= 0) {
+    // 已选中 → 移除
+    attrSelectedKps.value.splice(idx, 1)
+  } else {
+    // 防呆限制
+    if (attrSelectedKps.value.length >= TAG_LIMITS.knowledge_point) {
+      toast.warning(`知识点最多选择 ${TAG_LIMITS.knowledge_point} 个`)
+      return
+    }
+    attrSelectedKps.value.push({ id: node.id, name: node.name })
+  }
+  // 同步到 form
+  form.knowledgePointIds = attrSelectedKps.value.map(k => k.id)
+  // 同步第一个到全局单选（兼容侧边栏过滤）
+  if (attrSelectedKps.value.length > 0) {
+    selectKp(attrSelectedKps.value[0].id, attrSelectedKps.value[0].name)
+  } else {
+    clearKp()
+  }
+}
+
+function removeAttrKp(id: string) {
+  attrSelectedKps.value = attrSelectedKps.value.filter(k => k.id !== id)
+  form.knowledgePointIds = attrSelectedKps.value.map(k => k.id)
+  if (attrSelectedKps.value.length > 0) {
+    selectKp(attrSelectedKps.value[0].id, attrSelectedKps.value[0].name)
+  } else {
+    clearKp()
+  }
+}
 const isNew = route.path.endsWith('/new')
 const loading = ref(false)
 const saving = ref(false)
@@ -727,11 +776,6 @@ const kpExpandedRecord = computed<Record<string, boolean>>(() => {
   kpExpanded.value.forEach(id => { rec[id] = true })
   return rec
 })
-
-function onKpNodeSelect(node: KnowledgePoint) {
-  selectKp(node.id, node.name)
-  form.knowledgePointIds = [node.id]
-}
 
 function onKpToggleExpand(node: KnowledgePoint) {
   if (kpExpanded.value.has(node.id)) {
@@ -838,8 +882,7 @@ function toggleTagById(tag: TagSummary) {
 
 // 知识点数量防呆
 function checkKpLimit(): boolean {
-  const kpCount = selectedKpId.value ? 1 : 0
-  if (kpCount >= TAG_LIMITS.knowledge_point) {
+  if (attrSelectedKps.value.length >= TAG_LIMITS.knowledge_point) {
     toast.warning(`知识点最多选择 ${TAG_LIMITS.knowledge_point} 个`)
     return false
   }
@@ -1316,6 +1359,8 @@ function doApplyAiResult(q: ParsedQuestion) {
     const highConfidenceMatch = q.kp_matches.find(m => m.score >= 0.95 && m.matched_id)
     if (highConfidenceMatch) {
       selectKp(highConfidenceMatch.matched_id!, highConfidenceMatch.matched_name!)
+      attrSelectedKps.value = [{ id: highConfidenceMatch.matched_id!, name: highConfidenceMatch.matched_name! }]
+      form.knowledgePointIds = [highConfidenceMatch.matched_id!]
       aiGeneratedFields.value.add('knowledge_point')
     }
   }
@@ -1597,7 +1642,7 @@ function splitSolution(text: string): { body: string; conclusion: string } {
 // ===== 构建提交数据 =====
 function buildPayload() {
   // 知识点来自左侧知识树选中项
-  const kpIds = selectedKpId.value ? [selectedKpId.value] : (form.knowledgePointIds.length > 0 ? form.knowledgePointIds : [])
+  const kpIds = attrSelectedKps.value.map(k => k.id)
   const payload: any = {
     stem: form.stem,
     question_type: form.question_type,
@@ -1776,6 +1821,12 @@ async function loadQuestion() {
     form.status = d.status
     form.version = d.version
     form.knowledgePointIds = d.knowledge_points?.map(k => k.id) || []
+    // 同步到属性面板多选状态
+    attrSelectedKps.value = (d.knowledge_points || []).map(k => ({ id: k.id, name: k.name }))
+    // 同步第一个到全局单选
+    if (attrSelectedKps.value.length > 0) {
+      selectKp(attrSelectedKps.value[0].id, attrSelectedKps.value[0].name)
+    }
     form.tagIds = d.tags?.map(t => t.id) || []
     // 将后端返回的标签（可能是空间私有标签）合并到本地缓存，确保 allTagsMap 能找到
     if (d.tags?.length) {
@@ -2260,9 +2311,16 @@ watch(() => form.question_type, () => {
 
 /* 知识点标签 — 蓝色系 */
 .attr-tag-kp {
-  background: rgba(0, 122, 255, 0.08);
-  border-color: rgba(0, 122, 255, 0.18);
-  color: var(--accent);
+  background: rgba(175, 82, 222, 0.08);
+  border-color: rgba(175, 82, 222, 0.18);
+  color: var(--purple);
+}
+
+.attr-tag-kp-primary {
+  background: var(--purple-light);
+  border-color: var(--purple);
+  color: var(--purple);
+  font-weight: 600;
 }
 
 /* 核心素养标签 — 紫色系 */
@@ -3401,7 +3459,7 @@ watch(() => form.question_type, () => {
 /* 属性面板 — 左右双栏布局 */
 .attr-panel {
   display: flex;
-  min-height: 340px;
+  max-height: 420px;
   gap: 0;
   border-radius: 10px;
   overflow: hidden;
@@ -3513,8 +3571,24 @@ watch(() => form.question_type, () => {
 /* 右侧内容画布 */
 .attr-panel-content {
   flex: 1;
-  padding: 16px 4px 16px 24px;
+  padding: 24px;
   min-width: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, 0.1) transparent;
+}
+
+.attr-panel-content::-webkit-scrollbar {
+  width: 4px;
+}
+
+.attr-panel-content::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.attr-panel-content::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.1);
+  border-radius: 2px;
 }
 
 .attr-canvas {
@@ -3597,7 +3671,7 @@ watch(() => form.question_type, () => {
 
 /* 知识点面板专用 */
 .attr-canvas-kp {
-  height: 320px;
+  min-height: 280px;
   display: flex;
   flex-direction: column;
 }
@@ -3773,7 +3847,7 @@ watch(() => form.question_type, () => {
 
 /* ============ 常用推荐区 ============ */
 .recommend-section {
-  margin-top: 18px;
+  margin-top: 20px;
 }
 
 .recommend-label {
@@ -3854,25 +3928,28 @@ watch(() => form.question_type, () => {
   margin-top: 16px;
 }
 
-/* ===== 底部全局已选预览条 ===== */
+/* ===== 底部全局已选预览条 — 吸底 Footer ===== */
 .modal-selected-preview-bar {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-top: 14px;
+  margin-top: 0;
   padding-top: 12px;
-  border-top: 1px solid rgba(0, 0, 0, 0.06);
+  border-top: 1px solid #e5e5ea;
+  flex-shrink: 0;
 }
 
 [data-theme='dark'] .modal-selected-preview-bar {
-  border-top-color: rgba(255, 255, 255, 0.06);
+  border-top-color: rgba(255, 255, 255, 0.08);
 }
 
 .preview-track {
   flex: 1;
   display: flex;
   align-items: center;
-  gap: 6px;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+  gap: 8px;
   overflow-x: auto;
   scrollbar-width: none;
   padding: 2px 0;
@@ -3903,6 +3980,20 @@ watch(() => form.question_type, () => {
 .preview-pill-kp {
   background: rgba(175, 82, 222, 0.1);
   color: var(--purple);
+}
+
+.preview-pill-kp.preview-pill-primary {
+  background: var(--purple);
+  color: #fff;
+}
+
+.preview-pill-kp.preview-pill-primary .preview-pill-x {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.preview-pill-kp.preview-pill-primary .preview-pill-x:hover {
+  background: rgba(255, 255, 255, 0.2);
+  color: #fff;
 }
 
 .preview-pill-comp {
