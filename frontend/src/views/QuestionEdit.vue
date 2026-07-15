@@ -3456,13 +3456,15 @@ watch(() => form.question_type, () => {
   color: var(--text-muted);
 }
 
-/* 中层 Body — 左右双栏，吃满剩余空间（footer 已 absolute 脱离流） */
+/* 中层 Body — 左右双栏，高度扣除 header(54px)+footer(64px) */
 .attr-panel-body {
   display: flex;
   flex-direction: row;
   flex: 1;
+  height: calc(100% - 118px);
   overflow: hidden;
-  padding-bottom: 64px;
+  padding-bottom: 8px;
+  box-sizing: border-box;
 }
 
 /* 左侧分类导航 — macOS Sidebar 风格 */

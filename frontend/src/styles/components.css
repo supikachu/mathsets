@@ -538,11 +538,13 @@
 
 /* ===== Rigid Modal — 固定尺寸刚性盒子 ===== */
 .modal-rigid {
+  position: relative;
   display: flex;
   flex-direction: column;
   overflow: hidden;
   padding: 0;
   max-height: none;
+  background: #ffffff;
 }
 
 .modal-rigid > .modal-header {
