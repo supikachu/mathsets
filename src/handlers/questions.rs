@@ -14,7 +14,7 @@ use crate::auth::permissions::{
 };
 use crate::models::question::{
     CreateQuestionRequest, KnowledgePointSummary, Question, QuestionDetail, QuestionQuery,
-    QuestionStatus, QuestionSummary, ReviewActionRequest, SubmitReviewRequest,
+    QuestionStatus, QuestionSummary, ReviewActionRequest, SubmitReviewRequest, TagSummary,
     TransferQuestionRequest, UpdateQuestionRequest,
 };
 use crate::models::space::SpaceKind;
@@ -97,6 +97,119 @@ async fn get_question_knowledge_points(
     .await
 }
 
+/// 同步题目标签关联：增量更新 — 仅对新增关联递增 use_count，仅对移除关联递减
+async fn update_question_tags(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    question_id: Uuid,
+    tag_ids: &[Uuid],
+) -> Result<(), sqlx::Error> {
+    // 1. 查询当前已有关联
+    let existing: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT tag_id FROM question_tags_relation WHERE question_id = $1",
+    )
+    .bind(question_id)
+    .fetch_all(&mut **tx)
+    .await?;
+
+    let existing_set: std::collections::HashSet<Uuid> = existing.into_iter().collect();
+
+    // 2. 删除被移除的关联，递减 use_count
+    let removed: Vec<Uuid> = existing_set
+        .iter()
+        .filter(|id| !tag_ids.contains(id))
+        .copied()
+        .collect();
+    if !removed.is_empty() {
+        sqlx::query("DELETE FROM question_tags_relation WHERE question_id = $1 AND tag_id = ANY($2)")
+            .bind(question_id)
+            .bind(&removed)
+            .execute(&mut **tx)
+            .await?;
+        sqlx::query("UPDATE tags SET use_count = GREATEST(use_count - 1, 0) WHERE id = ANY($1)")
+            .bind(&removed)
+            .execute(&mut **tx)
+            .await?;
+    }
+
+    // 3. 插入新增关联，仅对新关联递增 use_count
+    let added: Vec<Uuid> = tag_ids
+        .iter()
+        .filter(|id| !existing_set.contains(id))
+        .copied()
+        .collect();
+    for tag_id in &added {
+        sqlx::query(
+            r#"
+            INSERT INTO question_tags_relation (question_id, tag_id)
+            VALUES ($1, $2)
+            ON CONFLICT DO NOTHING
+            "#,
+        )
+        .bind(question_id)
+        .bind(tag_id)
+        .execute(&mut **tx)
+        .await?;
+
+        sqlx::query("UPDATE tags SET use_count = use_count + 1 WHERE id = $1")
+            .bind(tag_id)
+            .execute(&mut **tx)
+            .await?;
+    }
+
+    Ok(())
+}
+
+/// 获取题目的关联标签
+async fn get_question_tags(
+    pool: &sqlx::PgPool,
+    question_id: Uuid,
+) -> Result<Vec<TagSummary>, sqlx::Error> {
+    sqlx::query_as::<_, TagSummary>(
+        r#"
+        SELECT t.id, t.name, t.category
+        FROM tags t
+        JOIN question_tags_relation qtr ON qtr.tag_id = t.id
+        WHERE qtr.question_id = $1
+        ORDER BY t.category, t.name
+        "#,
+    )
+    .bind(question_id)
+    .fetch_all(pool)
+    .await
+}
+
+/// 自建标签原子化 Upsert：名称未入库则创建（use_count=1），已存在则递增 use_count
+/// 返回所有标签的 ID（含已存在 + 新建），供合并到 tag_ids
+async fn upsert_new_tags(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    new_tags: &[crate::models::question::NewTagInput],
+    space_id: Option<Uuid>,
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    let mut ids = Vec::with_capacity(new_tags.len());
+    for nt in new_tags {
+        let name = nt.name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let id: Uuid = sqlx::query_scalar(
+            r#"
+            INSERT INTO tags (id, name, category, space_id, use_count, created_at)
+            VALUES ($1, $2, $3, $4, 1, NOW())
+            ON CONFLICT DO UPDATE SET use_count = tags.use_count + 1
+            RETURNING id
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(name)
+        .bind(&nt.category)
+        .bind(space_id)
+        .fetch_one(&mut **tx)
+        .await?;
+        ids.push(id);
+    }
+    Ok(ids)
+}
+
 async fn replace_reviewers(
     pool: &sqlx::PgPool,
     question_id: Uuid,
@@ -136,9 +249,13 @@ async fn build_detail(
     let kps = get_question_knowledge_points(pool, question.id)
         .await
         .unwrap_or_default();
+    let tags = get_question_tags(pool, question.id)
+        .await
+        .unwrap_or_default();
     let reviewer_ids = list_reviewers(pool, question.id).await.unwrap_or_default();
 
     let mut detail = QuestionDetail::from((question.clone(), kps));
+    detail.tags = tags;
     detail.creator_name = creator_name;
     detail.reviewer_ids = reviewer_ids;
 
@@ -442,8 +559,11 @@ pub async fn create_question(
         r#"
         INSERT INTO questions (id, stem, question_type, difficulty, default_score, status,
             options, correct_answer, analysis, grading_criteria, grade, semester, source,
+            academic_year, grade_semester, exam_type, exam_region,
             creator_id, created_at, updated_at, version, space_id)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+            $14, $15, $16, $17,
+            $18, $19, $20, $21, $22)
         "#,
     )
     .bind(id)
@@ -459,6 +579,10 @@ pub async fn create_question(
     .bind(&req.grade)
     .bind(&req.semester)
     .bind(&req.source)
+    .bind(&req.academic_year)
+    .bind(&req.grade_semester)
+    .bind(&req.exam_type)
+    .bind(&req.exam_region)
     .bind(creator_id)
     .bind(now)
     .bind(now)
@@ -472,6 +596,27 @@ pub async fn create_question(
         update_knowledge_points(&mut tx, id, kp_ids)
             .await
             .map_err(|e| db_err(format!("关联知识点失败: {}", e)))?;
+    }
+
+    // 合并已有 tag_ids + 自建 new_tags（Upsert 后取 ID）
+    let tag_ids_provided = req.tag_ids.is_some();
+    let new_tags_provided = req
+        .new_tags
+        .as_ref()
+        .map_or(false, |nt| !nt.is_empty());
+    let mut all_tag_ids: Vec<Uuid> = req.tag_ids.clone().unwrap_or_default();
+    if new_tags_provided {
+        let new_ids = upsert_new_tags(&mut tx, req.new_tags.as_ref().unwrap(), Some(space_id))
+            .await
+            .map_err(|e| db_err(format!("自建标签入库失败: {}", e)))?;
+        all_tag_ids.extend(new_ids);
+    }
+
+    // tag_ids 或 new_tags 被显式提供时同步关联（含清空场景）
+    if tag_ids_provided || new_tags_provided {
+        update_question_tags(&mut tx, id, &all_tag_ids)
+            .await
+            .map_err(|e| db_err(format!("关联标签失败: {}", e)))?;
     }
 
     save_version(&mut tx, id, version, Some(creator_id))
@@ -598,11 +743,15 @@ pub async fn update_question(
             grade = COALESCE($9, grade),
             semester = COALESCE($10, semester),
             source = COALESCE($11, source),
+            academic_year = COALESCE($12, academic_year),
+            grade_semester = COALESCE($13, grade_semester),
+            exam_type = COALESCE($14, exam_type),
+            exam_region = COALESCE($15, exam_region),
             status = 'draft'::question_status,
-            updated_by = $12,
-            updated_at = $13,
-            version = $14
-        WHERE id = $15
+            updated_by = $16,
+            updated_at = $17,
+            version = $18
+        WHERE id = $19
         "#,
     )
     .bind(&req.stem)
@@ -616,6 +765,10 @@ pub async fn update_question(
     .bind(&req.grade)
     .bind(&req.semester)
     .bind(&req.source)
+    .bind(&req.academic_year)
+    .bind(&req.grade_semester)
+    .bind(&req.exam_type)
+    .bind(&req.exam_region)
     .bind(auth_user.id)
     .bind(now)
     .bind(new_version)
@@ -628,6 +781,27 @@ pub async fn update_question(
         update_knowledge_points(&mut tx, id, kp_ids)
             .await
             .map_err(|e| db_err(format!("更新知识点关联失败: {}", e)))?;
+    }
+
+    // 合并已有 tag_ids + 自建 new_tags（Upsert 后取 ID）
+    let tag_ids_provided = req.tag_ids.is_some();
+    let new_tags_provided = req
+        .new_tags
+        .as_ref()
+        .map_or(false, |nt| !nt.is_empty());
+    let mut all_tag_ids: Vec<Uuid> = req.tag_ids.clone().unwrap_or_default();
+    if new_tags_provided {
+        let new_ids = upsert_new_tags(&mut tx, req.new_tags.as_ref().unwrap(), Some(existing.space_id))
+            .await
+            .map_err(|e| db_err(format!("自建标签入库失败: {}", e)))?;
+        all_tag_ids.extend(new_ids);
+    }
+
+    // tag_ids 或 new_tags 被显式提供时同步关联（含清空场景）
+    if tag_ids_provided || new_tags_provided {
+        update_question_tags(&mut tx, id, &all_tag_ids)
+            .await
+            .map_err(|e| db_err(format!("更新标签关联失败: {}", e)))?;
     }
 
     save_version(&mut tx, id, new_version, Some(auth_user.id))

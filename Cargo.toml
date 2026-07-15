@@ -35,6 +35,13 @@ bcrypt = "0.16"
 # Configuration
 dotenvy = "0.15"
 
+# AI 录入功能（reqwest 用 rustls-tls 避免 windows-sys/dlltool 原生依赖）
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+aes-gcm = "0.10"
+base64 = "0.22"
+regex = "1"
+async-trait = "0.1"
+
 [dev-dependencies]
 # Axum 测试工具（oneshot 调用 Router）
 tower = { version = "0.5", features = ["util"] }

@@ -58,6 +58,11 @@ pub struct Question {
     pub grade: Option<String>,
     pub semester: Option<String>,
     pub source: Option<String>,
+    // 结构化元数据（枚举型强控制字段）
+    pub academic_year: Option<String>,
+    pub grade_semester: Option<String>,
+    pub exam_type: Option<String>,
+    pub exam_region: Option<String>,
     pub creator_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_by: Option<Uuid>,
@@ -81,6 +86,16 @@ pub struct CreateQuestionRequest {
     pub grade: Option<String>,
     pub semester: Option<String>,
     pub source: Option<String>,
+    // 结构化元数据
+    pub academic_year: Option<String>,
+    pub grade_semester: Option<String>,
+    pub exam_type: Option<String>,
+    pub exam_region: Option<String>,
+    // 标签 ID 列表（核心素养 + 解题方法 + 学校）
+    pub tag_ids: Option<Vec<Uuid>>,
+    /// 自建标签（尚未入库的名称，后端 Upsert 后合并到 tag_ids）
+    #[serde(default)]
+    pub new_tags: Option<Vec<NewTagInput>>,
     pub knowledge_point_ids: Option<Vec<Uuid>>,
     /// 所属空间；缺省为当前用户个人空间
     pub space_id: Option<Uuid>,
@@ -100,7 +115,24 @@ pub struct UpdateQuestionRequest {
     pub grade: Option<String>,
     pub semester: Option<String>,
     pub source: Option<String>,
+    // 结构化元数据
+    pub academic_year: Option<String>,
+    pub grade_semester: Option<String>,
+    pub exam_type: Option<String>,
+    pub exam_region: Option<String>,
+    // 标签 ID 列表（核心素养 + 解题方法 + 学校）
+    pub tag_ids: Option<Vec<Uuid>>,
+    /// 自建标签（尚未入库的名称，后端 Upsert 后合并到 tag_ids）
+    #[serde(default)]
+    pub new_tags: Option<Vec<NewTagInput>>,
     pub knowledge_point_ids: Option<Vec<Uuid>>,
+}
+
+/// 自建标签输入（前端提交尚未入库的标签）
+#[derive(Debug, Deserialize, Clone)]
+pub struct NewTagInput {
+    pub name: String,
+    pub category: String,
 }
 
 /// 题目列表查询参数
@@ -175,6 +207,11 @@ pub struct QuestionDetail {
     pub grade: Option<String>,
     pub semester: Option<String>,
     pub source: Option<String>,
+    // 结构化元数据
+    pub academic_year: Option<String>,
+    pub grade_semester: Option<String>,
+    pub exam_type: Option<String>,
+    pub exam_region: Option<String>,
     pub creator_id: Option<Uuid>,
     pub creator_name: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -184,6 +221,8 @@ pub struct QuestionDetail {
     pub space_id: Uuid,
     pub origin_question_id: Option<Uuid>,
     pub knowledge_points: Vec<KnowledgePointSummary>,
+    /// 关联标签（核心素养 + 解题方法 + 学校）
+    pub tags: Vec<TagSummary>,
     pub reviewer_ids: Vec<Uuid>,
     pub can_review: bool,
 }
@@ -204,6 +243,10 @@ impl From<(Question, Vec<KnowledgePointSummary>)> for QuestionDetail {
             grade: q.grade,
             semester: q.semester,
             source: q.source,
+            academic_year: q.academic_year,
+            grade_semester: q.grade_semester,
+            exam_type: q.exam_type,
+            exam_region: q.exam_region,
             creator_id: q.creator_id,
             creator_name: None,
             created_at: q.created_at,
@@ -213,6 +256,7 @@ impl From<(Question, Vec<KnowledgePointSummary>)> for QuestionDetail {
             space_id: q.space_id,
             origin_question_id: q.origin_question_id,
             knowledge_points: kps,
+            tags: vec![],
             reviewer_ids: vec![],
             can_review: false,
         }
@@ -320,4 +364,49 @@ pub struct ReviewRecord {
     pub action: String,
     pub comment: Option<String>,
     pub created_at: DateTime<Utc>,
+}
+
+// ---------------------------------------------------------------------------
+// 标签
+// ---------------------------------------------------------------------------
+
+/// 标签摘要（用于题目详情中的关联展示）
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct TagSummary {
+    pub id: Uuid,
+    pub name: String,
+    pub category: String,
+}
+
+/// 标签（数据库行）
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Tag {
+    pub id: Uuid,
+    pub name: String,
+    pub category: String,
+    pub space_id: Option<Uuid>,
+    pub use_count: i32,
+    pub created_at: DateTime<Utc>,
+}
+
+/// 创建标签请求
+#[derive(Debug, Deserialize)]
+pub struct CreateTagRequest {
+    pub name: String,
+    pub category: String,
+    pub space_id: Option<Uuid>,
+}
+
+/// 更新标签请求（部分更新）
+#[derive(Debug, Deserialize)]
+pub struct UpdateTagRequest {
+    pub name: Option<String>,
+    pub category: Option<String>,
+}
+
+/// 标签查询参数
+#[derive(Debug, Deserialize)]
+pub struct TagQuery {
+    pub category: Option<String>,
+    pub space_id: Option<Uuid>,
 }

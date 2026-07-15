@@ -22,6 +22,7 @@ async fn create_test_app() -> Option<axum::Router> {
         pool,
         jwt_secret: "test-secret-for-integration-tests".to_string(),
         jwt_expiry_hours: 24,
+        ai_config: mathset::config::AiConfig::from_env(),
     };
     Some(build_app(state))
 }
@@ -1066,4 +1067,106 @@ async fn test_non_creator_cannot_submit() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "创建者提交应成功");
+}
+
+// ---------------------------------------------------------------------------
+// 12. AI 智能录入
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_ai_settings_default() {
+    let mut app = match create_test_app().await {
+        Some(app) => app,
+        None => return,
+    };
+    let token = register_and_login(&mut app).await;
+
+    // 未保存任何配置时，返回默认值
+    let (status, body) = get_auth(&mut app, "/api/v1/ai/settings", &token).await;
+    assert_eq!(status, StatusCode::OK, "获取默认配置失败: {:?}", body);
+    assert_eq!(body["provider"], "deepseek");
+    assert_eq!(body["has_api_key"], false);
+}
+
+#[tokio::test]
+async fn test_ai_settings_save_and_get() {
+    let mut app = match create_test_app().await {
+        Some(app) => app,
+        None => return,
+    };
+    let token = register_and_login(&mut app).await;
+
+    // 保存 API Key（加密存储）
+    let (status, body) = put_auth(
+        &mut app,
+        "/api/v1/ai/settings",
+        json!({
+            "provider": "deepseek",
+            "api_key": "sk-test-fake-key-12345",
+            "model_text": "deepseek-chat"
+        }),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "保存配置失败: {:?}", body);
+    assert_eq!(body["has_api_key"], true);
+    // 响应中不返回明文 Key
+    assert!(
+        body.get("api_key").is_none(),
+        "响应不应包含明文 api_key"
+    );
+
+    // 再次获取，确认 has_api_key=true 且无明文
+    let (status, body) = get_auth(&mut app, "/api/v1/ai/settings", &token).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["has_api_key"], true);
+    assert!(
+        body.get("api_key").is_none(),
+        "GET 响应不应包含明文 api_key"
+    );
+    assert_eq!(body["model_text"], "deepseek-chat");
+}
+
+#[tokio::test]
+async fn test_ai_parse_text_no_key() {
+    let mut app = match create_test_app().await {
+        Some(app) => app,
+        None => return,
+    };
+    let token = register_and_login(&mut app).await;
+
+    // 未配置任何 API Key（平台默认 + 用户个人均无）→ 400
+    let (status, body) = post_auth(
+        &mut app,
+        "/api/v1/ai/parse-text",
+        json!({"text": "已知函数 f(x) = 2x + 1，求 f(3) 的值。"}),
+        &token,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "无 Key 应返回 400: {:?}",
+        body
+    );
+    assert!(body["error"].as_str().unwrap().contains("未配置"));
+}
+
+#[tokio::test]
+async fn test_ai_parse_text_empty() {
+    let mut app = match create_test_app().await {
+        Some(app) => app,
+        None => return,
+    };
+    let token = register_and_login(&mut app).await;
+
+    // 空文本 → 400
+    let (status, _) = post_auth(
+        &mut app,
+        "/api/v1/ai/parse-text",
+        json!({"text": "   "}),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }

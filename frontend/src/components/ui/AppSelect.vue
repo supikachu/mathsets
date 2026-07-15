@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import AppIcon from './AppIcon.vue'
 
 export interface SelectOption {
@@ -23,6 +23,8 @@ const emit = defineEmits<{ 'update:modelValue': [value: string | undefined] }>()
 const open = ref(false)
 const triggerRef = ref<HTMLElement | null>(null)
 const popoverRef = ref<HTMLElement | null>(null)
+// 下拉面板的 fixed 定位坐标（基于 viewport）
+const popoverStyle = ref({ top: '0px', left: '0px', minWidth: '0px' })
 
 const selectedLabel = computed(() => {
   if (!props.modelValue) return ''
@@ -33,9 +35,22 @@ const selectedLabel = computed(() => {
 const displayText = computed(() => selectedLabel.value || props.placeholder || '请选择')
 const hasValue = computed(() => !!props.modelValue)
 
+function updatePopoverPosition() {
+  if (!triggerRef.value) return
+  const rect = triggerRef.value.getBoundingClientRect()
+  popoverStyle.value = {
+    top: `${rect.bottom + 4}px`,
+    left: `${rect.left}px`,
+    minWidth: `${rect.width}px`,
+  }
+}
+
 function toggle() {
   if (props.disabled) return
   open.value = !open.value
+  if (open.value) {
+    nextTick(() => updatePopoverPosition())
+  }
 }
 
 function select(val: string) {
@@ -62,6 +77,21 @@ function onEscape(e: KeyboardEvent) {
   }
 }
 
+// 下拉打开时监听滚动和缩放，实时更新位置
+function onScrollOrResize() {
+  if (open.value) updatePopoverPosition()
+}
+
+watch(open, (val) => {
+  if (val) {
+    window.addEventListener('scroll', onScrollOrResize, true)
+    window.addEventListener('resize', onScrollOrResize)
+  } else {
+    window.removeEventListener('scroll', onScrollOrResize, true)
+    window.removeEventListener('resize', onScrollOrResize)
+  }
+})
+
 onMounted(() => {
   document.addEventListener('click', onClickOutside)
   document.addEventListener('keydown', onEscape)
@@ -69,6 +99,8 @@ onMounted(() => {
 onBeforeUnmount(() => {
   document.removeEventListener('click', onClickOutside)
   document.removeEventListener('keydown', onEscape)
+  window.removeEventListener('scroll', onScrollOrResize, true)
+  window.removeEventListener('resize', onScrollOrResize)
 })
 </script>
 
@@ -96,30 +128,32 @@ onBeforeUnmount(() => {
       </div>
     </button>
 
-    <Transition name="select-pop">
-      <div v-if="open" ref="popoverRef" class="app-select-popover">
-        <button
-          type="button"
-          class="app-select-option"
-          :class="{ selected: !modelValue }"
-          @click="select('')"
-        >
-          <span>{{ placeholder || '请选择' }}</span>
-          <AppIcon v-if="!modelValue" name="check" :size="15" class="option-check" />
-        </button>
-        <button
-          v-for="opt in options"
-          :key="opt.value"
-          type="button"
-          class="app-select-option"
-          :class="{ selected: modelValue === opt.value }"
-          @click="select(opt.value)"
-        >
-          <span>{{ opt.label }}</span>
-          <AppIcon v-if="modelValue === opt.value" name="check" :size="15" class="option-check" />
-        </button>
-      </div>
-    </Transition>
+    <Teleport to="body">
+      <Transition name="select-pop">
+        <div v-if="open" ref="popoverRef" class="app-select-popover" :style="popoverStyle">
+          <button
+            type="button"
+            class="app-select-option"
+            :class="{ selected: !modelValue }"
+            @click="select('')"
+          >
+            <span>{{ placeholder || '请选择' }}</span>
+            <AppIcon v-if="!modelValue" name="check" :size="15" class="option-check" />
+          </button>
+          <button
+            v-for="opt in options"
+            :key="opt.value"
+            type="button"
+            class="app-select-option"
+            :class="{ selected: modelValue === opt.value }"
+            @click="select(opt.value)"
+          >
+            <span>{{ opt.label }}</span>
+            <AppIcon v-if="modelValue === opt.value" name="check" :size="15" class="option-check" />
+          </button>
+        </div>
+      </Transition>
+    </Teleport>
   </div>
 </template>
 
@@ -216,12 +250,10 @@ onBeforeUnmount(() => {
   transform: rotate(180deg);
 }
 
-/* Popover — Apple style floating card */
+/* Popover — Apple style floating card（Teleport 到 body，position: fixed 脱离父容器裁剪） */
 .app-select-popover {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
-  z-index: 1000;
+  position: fixed;
+  z-index: 10000;
   min-width: max-content;
   max-height: 240px;
   overflow-y: auto;

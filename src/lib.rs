@@ -1,3 +1,4 @@
+pub mod ai;
 pub mod auth;
 pub mod config;
 pub mod db;
@@ -20,6 +21,7 @@ pub struct AppState {
     pub pool: DbPool,
     pub jwt_secret: String,
     pub jwt_expiry_hours: i64,
+    pub ai_config: crate::config::AiConfig,
 }
 
 /// 构建应用 Router，用于 main 启动和集成测试
@@ -84,6 +86,17 @@ pub fn build_app(state: AppState) -> Router {
         .route("/papers/{paper_id}/questions", post(handlers::papers::add_question_to_paper))
         .route("/papers/{paper_id}/questions/{question_id}", put(handlers::papers::update_paper_question))
         .route("/papers/{paper_id}/questions/{question_id}", delete(handlers::papers::remove_question_from_paper))
+        // AI 智能录入（阶段 A：文本解析 + 配置；parse_image 阶段 C 挂载）
+        .route("/ai/parse-text", post(handlers::ai::parse_text))
+        .route("/ai/settings", get(handlers::ai::get_settings))
+        .route("/ai/settings", put(handlers::ai::update_settings))
+        // 标签管理
+        .route("/tags", get(handlers::tags::list_tags))
+        .route("/tags", post(handlers::tags::create_tag))
+        .route("/tags/suggest", get(handlers::tags::suggest_tags))
+        .route("/tags/{id}", put(handlers::tags::update_tag))
+        .route("/tags/{id}", delete(handlers::tags::delete_tag))
+        .route("/tags/{id}/merge", post(handlers::tags::merge_tag))
         // 统一应用认证中间件
         .layer(middleware::from_fn_with_state(
             state.clone(),

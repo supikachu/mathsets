@@ -536,6 +536,29 @@
   letter-spacing: -0.02em;
 }
 
+/* ===== Rigid Modal — 固定尺寸刚性盒子 ===== */
+.modal-rigid {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+  max-height: none;
+  background: #ffffff;
+}
+
+.modal-rigid > .modal-header {
+  flex-shrink: 0;
+  height: 54px;
+  padding: 0 24px;
+  margin-bottom: 0;
+  border-bottom: 1px solid #e5e5ea;
+}
+
+[data-theme='dark'] .modal-rigid > .modal-header {
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+
 .modal-close {
   width: 30px;
   height: 30px;
