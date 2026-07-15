@@ -523,38 +523,43 @@
           </div>
         </div>
       </div>
-      <!-- 底部全局已选预览条 — 吸底 Footer -->
+      <!-- 底部全局已选预览条 — 苹果风弹性横滑底栏 -->
       <div class="modal-footer-row">
-        <div class="selected-tags-preview-flow">
-          <!-- 知识点（多选，第一个为 Primary） -->
-          <span
-            v-for="(kp, idx) in attrSelectedKps"
-            :key="'pv-kp-' + kp.id"
-            class="preview-pill preview-pill-kp"
-            :class="{ 'preview-pill-primary': idx === 0 }"
-          >
-            <span v-if="idx === 0" class="preview-pill-icon">主</span>
-            <span v-else class="preview-pill-icon">KP</span>
-            <span class="preview-pill-text">{{ kp.name }}</span>
-            <button type="button" class="preview-pill-x" @click="removeAttrKp(kp.id)"><AppIcon name="x" :size="10" /></button>
-          </span>
-          <!-- 核心素养 -->
-          <span v-for="t in selectedCompetenceTags" :key="'pv-comp-' + t.id" class="preview-pill preview-pill-comp">
-            <span class="preview-pill-text">{{ t.name }}</span>
-            <button type="button" class="preview-pill-x" @click="toggleTagById(t)"><AppIcon name="x" :size="10" /></button>
-          </span>
-          <!-- 解题方法 -->
-          <span v-for="t in selectedMethodTags" :key="'pv-method-' + t.id" class="preview-pill preview-pill-method">
-            <span class="preview-pill-text">{{ t.name }}</span>
-            <button type="button" class="preview-pill-x" @click="toggleTagById(t)"><AppIcon name="x" :size="10" /></button>
-          </span>
-          <!-- 学校来源 -->
-          <span v-for="t in selectedSchoolTags" :key="'pv-school-' + t.id" class="preview-pill preview-pill-school">
-            <span class="preview-pill-text">{{ t.name }}</span>
-            <button type="button" class="preview-pill-x" @click="toggleTagById(t)"><AppIcon name="x" :size="10" /></button>
-          </span>
-          <span v-if="attrSelectedKps.length === 0 && form_tagList.length === 0" class="preview-empty">暂未选择任何属性</span>
+        <!-- 1. 渐变遮罩容器：控制整体区域并设置渐变褪色 -->
+        <div class="selected-flow-container">
+          <!-- 2. 实际滚动轨：只有它负责 overflow-x 滚动 -->
+          <div class="selected-tags-preview-flow">
+            <!-- 3. 知识点标签（多选，第一个为 Primary） -->
+            <span
+              v-for="(kp, idx) in attrSelectedKps"
+              :key="'pv-kp-' + kp.id"
+              class="attr-tag preview-pill preview-pill-kp"
+              :class="{ 'preview-pill-primary': idx === 0 }"
+            >
+              <span v-if="idx === 0" class="preview-pill-icon">主</span>
+              <span v-else class="preview-pill-icon">KP</span>
+              <span class="preview-pill-text">{{ kp.name }}</span>
+              <button type="button" class="preview-pill-x" @click="removeAttrKp(kp.id)"><AppIcon name="x" :size="10" /></button>
+            </span>
+            <!-- 核心素养标签 -->
+            <span v-for="t in selectedCompetenceTags" :key="'pv-comp-' + t.id" class="attr-tag preview-pill preview-pill-comp">
+              <span class="preview-pill-text">{{ t.name }}</span>
+              <button type="button" class="preview-pill-x" @click="toggleTagById(t)"><AppIcon name="x" :size="10" /></button>
+            </span>
+            <!-- 解题方法标签 -->
+            <span v-for="t in selectedMethodTags" :key="'pv-method-' + t.id" class="attr-tag preview-pill preview-pill-method">
+              <span class="preview-pill-text">{{ t.name }}</span>
+              <button type="button" class="preview-pill-x" @click="toggleTagById(t)"><AppIcon name="x" :size="10" /></button>
+            </span>
+            <!-- 学校来源标签 -->
+            <span v-for="t in selectedSchoolTags" :key="'pv-school-' + t.id" class="attr-tag preview-pill preview-pill-school">
+              <span class="preview-pill-text">{{ t.name }}</span>
+              <button type="button" class="preview-pill-x" @click="toggleTagById(t)"><AppIcon name="x" :size="10" /></button>
+            </span>
+            <span v-if="attrSelectedKps.length === 0 && form_tagList.length === 0" class="preview-empty">暂未选择任何属性</span>
+          </div>
         </div>
+        <!-- 完成按钮：绝对定位，悬浮在最右侧 -->
         <AppButton class="modal-footer-submit-btn" variant="primary" size="sm" @click="showAttrDialog = false">完成</AppButton>
       </div>
     </AppModal>
@@ -3937,7 +3942,11 @@ watch(() => form.question_type, () => {
   margin-top: 16px;
 }
 
-/* ===== 底部吸底 Footer — 绝对定位锁死，禁止溢出裁剪 ===== */
+/* ======================================================
+   🍏 苹果风弹性横滑底栏 (Apple-Style Edge Fade Smooth Scroll)
+   ====================================================== */
+
+/* 1. 锁死吸底大容器 */
 .modal-footer-row {
   position: absolute;
   bottom: 0;
@@ -3948,7 +3957,7 @@ watch(() => form.question_type, () => {
   align-items: center;
   padding: 0 24px;
   background: #ffffff;
-  border-top: 1px solid #e5e5ea;
+  border-top: 1px solid #f2f2f7;
   z-index: 10;
   box-sizing: border-box;
 }
@@ -3958,35 +3967,56 @@ watch(() => form.question_type, () => {
   background: var(--bg-card);
 }
 
-/* 核心修复：预览轨容器 min-width:0 允许自身收缩触发横向滚动 */
-.selected-tags-preview-flow {
-  display: flex;
-  flex-direction: row;
-  flex-wrap: nowrap;
-  align-items: center;
+/* 2. 渐变遮罩容器：利用 CSS Mask 实现右侧平滑褪色渐变，视觉暗示可滑动 */
+.selected-flow-container {
   flex: 1;
   min-width: 0;
   height: 100%;
-  overflow-x: auto;
-  overflow-y: hidden;
+  display: flex;
+  align-items: center;
+  position: relative;
+  -webkit-mask-image: linear-gradient(to right, #000 0%, #000 calc(100% - 150px), rgba(0, 0, 0, 0) calc(100% - 110px));
+  mask-image: linear-gradient(to right, #000 0%, #000 calc(100% - 150px), rgba(0, 0, 0, 0) calc(100% - 110px));
+}
+
+/* 3. 实际滚动轴：锁死高度，开启横向滚动 */
+.selected-tags-preview-flow {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap !important;
+  align-items: center;
+  width: 100%;
+  height: 100%;
+  overflow-x: auto !important;
+  overflow-y: hidden !important;
   gap: 8px;
-  padding-right: 120px;
+  padding-right: 150px;
   box-sizing: border-box;
+  -webkit-overflow-scrolling: touch;
   scrollbar-width: none;
 }
 
 .selected-tags-preview-flow::-webkit-scrollbar {
-  display: none;
+  display: none !important;
 }
 
-/* 完成按钮 — 抽离文档流，绝对静止 */
+/* 4. 每个彩色标签：强行剥夺被挤扁的权力（核心物理规则） */
+.selected-tags-preview-flow .attr-tag {
+  flex-shrink: 0 !important;
+  white-space: nowrap !important;
+  box-sizing: border-box;
+}
+
+/* 5. 完成按钮：绝对静止，强制悬浮在最右侧，并提供微弱阴影使其层级高于滑动的标签 */
 .modal-footer-submit-btn {
   position: absolute;
   right: 24px;
   top: 14px;
   z-index: 12;
+  box-shadow: -10px 0 20px rgba(255, 255, 255, 0.9);
 }
 
+/* ===== 彩色标签胶囊样式 ===== */
 .preview-pill {
   display: inline-flex;
   align-items: center;
@@ -4076,6 +4106,8 @@ watch(() => form.question_type, () => {
   font-size: 12px;
   color: var(--text-muted);
   font-style: italic;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 /* ============ 工具类（局部兜底，全局已存在） ============ */
