@@ -394,43 +394,35 @@
             </div>
           </div>
 
-          <!-- 核心素养面板 -->
+          <!-- 核心素养面板 — 实体胶囊网格 -->
           <div v-show="attrPanelTab === 'competence'" class="attr-canvas">
-            <div class="attr-canvas-hint">最多选择 {{ TAG_LIMITS.core_competence }} 个</div>
-            <div class="tag-chips tag-chips-grid">
+            <div class="competence-grid">
               <button
                 v-for="t in competenceTags"
                 :key="t.id"
                 type="button"
-                class="tag-chip"
+                class="competence-chip"
                 :class="{ active: form.tagIds.includes(t.id) }"
                 @click="toggleTagById(t)"
-              >{{ t.name }}</button>
+              >
+                <span v-if="form.tagIds.includes(t.id)" class="competence-check">✓</span>
+                <span>{{ t.name }}</span>
+              </button>
             </div>
           </div>
 
-          <!-- 解题方法面板 -->
+          <!-- 解题方法面板 — 输入框 + 常用推荐 -->
           <div v-show="attrPanelTab === 'method'" class="attr-canvas">
-            <div class="attr-canvas-hint">最多选择 {{ TAG_LIMITS.method }} 个</div>
-            <div class="tag-chips tag-chips-grid">
-              <button
-                v-for="t in methodTags"
-                :key="t.id"
-                type="button"
-                class="tag-chip"
-                :class="{ active: form.tagIds.includes(t.id) }"
-                @click="toggleTagById(t)"
-              >{{ t.name }}</button>
-            </div>
             <!-- typeahead 联想输入 -->
             <div class="typeahead-wrap">
               <input
                 v-model="suggestMethod.query"
                 class="attr-dialog-input"
-                placeholder="搜索或创建新方法标签…"
+                placeholder="搜索或创建方法标签…"
                 @input="onSuggestInput(suggestMethod, 'method')"
               />
-              <div v-if="suggestMethod.results.length" class="typeahead-dropdown">
+              <!-- 毛玻璃浮动 Pop-over 卡片 -->
+              <div v-if="suggestMethod.results.length" class="typeahead-popover">
                 <button
                   v-for="t in suggestMethod.results"
                   :key="t.id"
@@ -449,21 +441,27 @@
                 @click="createNewTag(suggestMethod.query.trim(), 'method', suggestMethod)"
               >+ 创建新标签「{{ suggestMethod.query.trim() }}」</button>
             </div>
+            <!-- 常用推荐区 -->
+            <div v-if="topMethods.length" class="recommend-section">
+              <div class="recommend-label">常用方法</div>
+              <div class="recommend-chips">
+                <button
+                  v-for="t in topMethods"
+                  :key="t.id"
+                  type="button"
+                  class="recommend-chip"
+                  :class="{ active: form.tagIds.includes(t.id) }"
+                  @click="toggleTagById(t)"
+                >
+                  <span v-if="form.tagIds.includes(t.id)" class="recommend-check">✓</span>
+                  <span>{{ t.name }}</span>
+                </button>
+              </div>
+            </div>
           </div>
 
-          <!-- 学校来源面板 -->
+          <!-- 学校来源面板 — 输入框 + 常用推荐 -->
           <div v-show="attrPanelTab === 'school'" class="attr-canvas">
-            <div class="attr-canvas-hint">最多选择 {{ TAG_LIMITS.school }} 个</div>
-            <div v-if="schoolTags.length" class="tag-chips tag-chips-grid">
-              <button
-                v-for="t in schoolTags"
-                :key="t.id"
-                type="button"
-                class="tag-chip"
-                :class="{ active: form.tagIds.includes(t.id) }"
-                @click="toggleTagById(t)"
-              >{{ t.name }}</button>
-            </div>
             <!-- 学校 typeahead -->
             <div class="typeahead-wrap">
               <input
@@ -472,7 +470,8 @@
                 placeholder="搜索或创建学校标签…"
                 @input="onSuggestInput(suggestSchool, 'school')"
               />
-              <div v-if="suggestSchool.results.length" class="typeahead-dropdown">
+              <!-- 毛玻璃浮动 Pop-over 卡片 -->
+              <div v-if="suggestSchool.results.length" class="typeahead-popover">
                 <button
                   v-for="t in suggestSchool.results"
                   :key="t.id"
@@ -490,6 +489,23 @@
                 class="typeahead-create"
                 @click="createNewTag(suggestSchool.query.trim(), 'school', suggestSchool)"
               >+ 创建新标签「{{ suggestSchool.query.trim() }}」</button>
+            </div>
+            <!-- 常用推荐区 -->
+            <div v-if="topSchools.length" class="recommend-section">
+              <div class="recommend-label">常用学校</div>
+              <div class="recommend-chips">
+                <button
+                  v-for="t in topSchools"
+                  :key="t.id"
+                  type="button"
+                  class="recommend-chip"
+                  :class="{ active: form.tagIds.includes(t.id) }"
+                  @click="toggleTagById(t)"
+                >
+                  <span v-if="form.tagIds.includes(t.id)" class="recommend-check">✓</span>
+                  <span>{{ t.name }}</span>
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -1046,6 +1062,14 @@ const form_tagList = computed<TagSummary[]>(() => {
 const selectedCompetenceTags = computed(() => form_tagList.value.filter(t => t.category === 'core_competence'))
 const selectedMethodTags = computed(() => form_tagList.value.filter(t => t.category === 'method'))
 const selectedSchoolTags = computed(() => form_tagList.value.filter(t => t.category === 'school'))
+
+// 常用推荐 — 按 use_count 降序取前 8
+const topMethods = computed(() =>
+  [...methodTags.value].sort((a, b) => b.use_count - a.use_count).slice(0, 8),
+)
+const topSchools = computed(() =>
+  [...schoolTags.value].sort((a, b) => b.use_count - a.use_count).slice(0, 8),
+)
 
 // ===== 返回检测 =====
 const leaveDialog = ref(false)
@@ -3322,57 +3346,64 @@ watch(() => form.question_type, () => {
   display: flex;
   min-height: 340px;
   gap: 0;
+  border-radius: 10px;
+  overflow: hidden;
 }
 
-/* 左侧分类导航 */
+/* 左侧分类导航 — macOS Sidebar 风格 */
 .attr-panel-nav {
   flex: 0 0 25%;
   max-width: 160px;
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: 8px 0;
-  border-right: 1px solid var(--border-color);
-  margin-right: -1px;
+  padding: 10px 8px;
+  background: #f5f5f7;
+  border-right: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+[data-theme='dark'] .attr-panel-nav {
+  background: rgba(255, 255, 255, 0.04);
+  border-right-color: rgba(255, 255, 255, 0.06);
 }
 
 .attr-nav-item {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 16px;
+  padding: 9px 12px;
   border: none;
   background: transparent;
   cursor: pointer;
   font-size: 14px;
   color: var(--text-secondary);
   text-align: left;
-  transition: all 0.15s;
+  transition: background 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
   font-family: inherit;
-  border-radius: 0;
+  border-radius: 8px;
   position: relative;
 }
 
 .attr-nav-item:hover {
-  background: var(--accent-light);
-  color: var(--accent);
+  background: rgba(0, 0, 0, 0.04);
+  color: var(--text-primary);
+}
+
+[data-theme='dark'] .attr-nav-item:hover {
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .attr-nav-item.active {
-  color: var(--accent);
+  background: #fff;
+  color: var(--text-primary);
   font-weight: 600;
-  background: var(--accent-light);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 0 0 0.5px rgba(0, 0, 0, 0.04);
 }
 
-.attr-nav-item.active::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 6px;
-  bottom: 6px;
-  width: 3px;
-  border-radius: 0 3px 3px 0;
-  background: var(--accent);
+[data-theme='dark'] .attr-nav-item.active {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
 }
 
 .attr-nav-badge {
@@ -3383,11 +3414,15 @@ watch(() => form.question_type, () => {
   height: 18px;
   padding: 0 5px;
   border-radius: 9px;
-  background: var(--accent);
+  background: var(--purple);
   color: #fff;
   font-size: 11px;
   font-weight: 600;
   margin-left: auto;
+}
+
+.attr-nav-item.active .attr-nav-badge {
+  background: var(--purple);
 }
 
 /* 右侧内容画布 */
@@ -3407,6 +3442,64 @@ watch(() => form.question_type, () => {
   font-size: 12px;
   color: var(--text-muted);
   letter-spacing: 0.02em;
+}
+
+/* ===== 核心素养实体胶囊网格 ===== */
+.competence-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.competence-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 9px 18px;
+  border-radius: 20px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  background: #fff;
+  color: var(--text-secondary);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  font-family: inherit;
+  user-select: none;
+}
+
+[data-theme='dark'] .competence-chip {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.competence-chip:hover:not(.active) {
+  border-color: var(--purple);
+  color: var(--purple);
+  background: var(--purple-light);
+}
+
+.competence-chip.active {
+  background: var(--purple-light);
+  color: var(--purple);
+  border-color: transparent;
+  font-weight: 500;
+}
+
+.competence-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--purple);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  flex-shrink: 0;
 }
 
 /* 知识点面板专用 */
@@ -3504,25 +3597,38 @@ watch(() => form.question_type, () => {
   box-shadow: 0 1px 3px rgba(0, 122, 255, 0.3);
 }
 
-/* ============ Typeahead 联想输入 ============ */
+/* ============ Typeahead 毛玻璃 Pop-over ============ */
 .typeahead-wrap {
   position: relative;
-  margin-top: 10px;
 }
 
-.typeahead-dropdown {
+.typeahead-popover {
   position: absolute;
-  top: 100%;
+  top: calc(100% + 6px);
   left: 0;
   right: 0;
-  z-index: 10;
-  background: var(--bg-primary);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
-  max-height: 200px;
+  z-index: 20;
+  background: rgba(255, 255, 255, 0.82);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 0.5px solid rgba(0, 0, 0, 0.08);
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12), 0 2px 8px rgba(0, 0, 0, 0.06);
+  max-height: 220px;
   overflow-y: auto;
-  margin-top: 4px;
+  padding: 4px;
+  animation: popover-in 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+[data-theme='dark'] .typeahead-popover {
+  background: rgba(30, 30, 30, 0.85);
+  border-color: rgba(255, 255, 255, 0.1);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+@keyframes popover-in {
+  from { opacity: 0; transform: translateY(-4px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
 .typeahead-item {
@@ -3530,18 +3636,20 @@ watch(() => form.question_type, () => {
   align-items: center;
   justify-content: space-between;
   width: 100%;
-  padding: 8px 12px;
+  padding: 9px 12px;
   border: none;
   background: transparent;
   cursor: pointer;
   font-size: 13px;
   color: var(--text-primary);
   text-align: left;
-  transition: background 0.15s;
+  border-radius: 8px;
+  transition: background 0.12s;
 }
 
 .typeahead-item:hover {
-  background: var(--accent-light);
+  background: var(--purple-light);
+  color: var(--purple);
 }
 
 .typeahead-count {
@@ -3554,20 +3662,89 @@ watch(() => form.question_type, () => {
   display: block;
   width: 100%;
   margin-top: 6px;
-  padding: 8px 12px;
-  border: 1px dashed var(--accent);
-  border-radius: 8px;
-  background: var(--accent-light);
-  color: var(--accent);
+  padding: 9px 12px;
+  border: 1px dashed var(--purple);
+  border-radius: 10px;
+  background: var(--purple-light);
+  color: var(--purple);
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  transition: background 0.15s;
+  transition: all 0.15s;
 }
 
 .typeahead-create:hover {
-  background: var(--accent);
+  background: var(--purple);
   color: #fff;
+}
+
+/* ============ 常用推荐区 ============ */
+.recommend-section {
+  margin-top: 18px;
+}
+
+.recommend-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+  letter-spacing: 0.02em;
+}
+
+.recommend-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.recommend-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 15px;
+  border-radius: 18px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  background: #fff;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  font-family: inherit;
+  user-select: none;
+}
+
+[data-theme='dark'] .recommend-chip {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.recommend-chip:hover:not(.active) {
+  border-color: var(--purple);
+  color: var(--purple);
+  background: var(--purple-light);
+}
+
+.recommend-chip.active {
+  background: var(--purple-light);
+  color: var(--purple);
+  border-color: transparent;
+}
+
+.recommend-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--purple);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  flex-shrink: 0;
 }
 
 .form-actions {
