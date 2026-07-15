@@ -109,11 +109,11 @@ pub async fn suggest_tags(
 ) -> Result<Json<Vec<Tag>>, (StatusCode, Json<serde_json::Value>)> {
     let _ = auth_user;
 
-    let pattern = format!("%{}%", query.q.trim());
-    if pattern.len() < 2 {
-        // 至少 1 个有效字符（% + 字符 + %）
+    let q_trimmed = query.q.trim();
+    if q_trimmed.is_empty() {
         return Ok(Json(vec![]));
     }
+    let pattern = format!("%{}%", q_trimmed);
 
     let tags = match (&query.category, &query.space_id) {
         (Some(cat), Some(sid)) => {

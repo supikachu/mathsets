@@ -97,20 +97,47 @@ async fn get_question_knowledge_points(
     .await
 }
 
-/// 同步题目标签关联：先删除旧关联，再批量插入新关联
+/// 同步题目标签关联：增量更新 — 仅对新增关联递增 use_count，仅对移除关联递减
 async fn update_question_tags(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     question_id: Uuid,
     tag_ids: &[Uuid],
 ) -> Result<(), sqlx::Error> {
-    // 删除旧关联
-    sqlx::query("DELETE FROM question_tags_relation WHERE question_id = $1")
-        .bind(question_id)
-        .execute(&mut **tx)
-        .await?;
+    // 1. 查询当前已有关联
+    let existing: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT tag_id FROM question_tags_relation WHERE question_id = $1",
+    )
+    .bind(question_id)
+    .fetch_all(&mut **tx)
+    .await?;
 
-    // 批量插入新关联
-    for tag_id in tag_ids {
+    let existing_set: std::collections::HashSet<Uuid> = existing.into_iter().collect();
+
+    // 2. 删除被移除的关联，递减 use_count
+    let removed: Vec<Uuid> = existing_set
+        .iter()
+        .filter(|id| !tag_ids.contains(id))
+        .copied()
+        .collect();
+    if !removed.is_empty() {
+        sqlx::query("DELETE FROM question_tags_relation WHERE question_id = $1 AND tag_id = ANY($2)")
+            .bind(question_id)
+            .bind(&removed)
+            .execute(&mut **tx)
+            .await?;
+        sqlx::query("UPDATE tags SET use_count = GREATEST(use_count - 1, 0) WHERE id = ANY($1)")
+            .bind(&removed)
+            .execute(&mut **tx)
+            .await?;
+    }
+
+    // 3. 插入新增关联，仅对新关联递增 use_count
+    let added: Vec<Uuid> = tag_ids
+        .iter()
+        .filter(|id| !existing_set.contains(id))
+        .copied()
+        .collect();
+    for tag_id in &added {
         sqlx::query(
             r#"
             INSERT INTO question_tags_relation (question_id, tag_id)
@@ -123,7 +150,6 @@ async fn update_question_tags(
         .execute(&mut **tx)
         .await?;
 
-        // 原子化递增 use_count
         sqlx::query("UPDATE tags SET use_count = use_count + 1 WHERE id = $1")
             .bind(tag_id)
             .execute(&mut **tx)
@@ -573,17 +599,21 @@ pub async fn create_question(
     }
 
     // 合并已有 tag_ids + 自建 new_tags（Upsert 后取 ID）
+    let tag_ids_provided = req.tag_ids.is_some();
+    let new_tags_provided = req
+        .new_tags
+        .as_ref()
+        .map_or(false, |nt| !nt.is_empty());
     let mut all_tag_ids: Vec<Uuid> = req.tag_ids.clone().unwrap_or_default();
-    if let Some(ref new_tags) = req.new_tags {
-        if !new_tags.is_empty() {
-            let new_ids = upsert_new_tags(&mut tx, new_tags, Some(space_id))
-                .await
-                .map_err(|e| db_err(format!("自建标签入库失败: {}", e)))?;
-            all_tag_ids.extend(new_ids);
-        }
+    if new_tags_provided {
+        let new_ids = upsert_new_tags(&mut tx, req.new_tags.as_ref().unwrap(), Some(space_id))
+            .await
+            .map_err(|e| db_err(format!("自建标签入库失败: {}", e)))?;
+        all_tag_ids.extend(new_ids);
     }
 
-    if !all_tag_ids.is_empty() {
+    // tag_ids 或 new_tags 被显式提供时同步关联（含清空场景）
+    if tag_ids_provided || new_tags_provided {
         update_question_tags(&mut tx, id, &all_tag_ids)
             .await
             .map_err(|e| db_err(format!("关联标签失败: {}", e)))?;
@@ -754,17 +784,21 @@ pub async fn update_question(
     }
 
     // 合并已有 tag_ids + 自建 new_tags（Upsert 后取 ID）
+    let tag_ids_provided = req.tag_ids.is_some();
+    let new_tags_provided = req
+        .new_tags
+        .as_ref()
+        .map_or(false, |nt| !nt.is_empty());
     let mut all_tag_ids: Vec<Uuid> = req.tag_ids.clone().unwrap_or_default();
-    if let Some(ref new_tags) = req.new_tags {
-        if !new_tags.is_empty() {
-            let new_ids = upsert_new_tags(&mut tx, new_tags, Some(existing.space_id))
-                .await
-                .map_err(|e| db_err(format!("自建标签入库失败: {}", e)))?;
-            all_tag_ids.extend(new_ids);
-        }
+    if new_tags_provided {
+        let new_ids = upsert_new_tags(&mut tx, req.new_tags.as_ref().unwrap(), Some(existing.space_id))
+            .await
+            .map_err(|e| db_err(format!("自建标签入库失败: {}", e)))?;
+        all_tag_ids.extend(new_ids);
     }
 
-    if !all_tag_ids.is_empty() {
+    // tag_ids 或 new_tags 被显式提供时同步关联（含清空场景）
+    if tag_ids_provided || new_tags_provided {
         update_question_tags(&mut tx, id, &all_tag_ids)
             .await
             .map_err(|e| db_err(format!("更新标签关联失败: {}", e)))?;

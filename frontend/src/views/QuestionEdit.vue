@@ -361,29 +361,29 @@
           <!-- typeahead 联想输入 -->
           <div class="typeahead-wrap">
             <input
-              v-model="suggestQuery"
+              v-model="suggestMethod.query"
               class="attr-dialog-input"
               placeholder="搜索或创建新方法标签…"
-              @input="suggestCategory = 'method'; onSuggestInput()"
+              @input="onSuggestInput(suggestMethod, 'method')"
             />
-            <div v-if="suggestResults.length && suggestCategory === 'method'" class="typeahead-dropdown">
+            <div v-if="suggestMethod.results.length" class="typeahead-dropdown">
               <button
-                v-for="t in suggestResults"
+                v-for="t in suggestMethod.results"
                 :key="t.id"
                 type="button"
                 class="typeahead-item"
-                @click="toggleTagById(t); suggestQuery = ''; suggestResults = []"
+                @click="toggleTagById(t); suggestMethod.query = ''; suggestMethod.results = []"
               >
                 <span>{{ t.name }}</span>
                 <span class="typeahead-count">{{ t.use_count }} 次</span>
               </button>
             </div>
             <button
-              v-if="suggestQuery.trim() && suggestCategory === 'method' && !suggestResults.some(t => t.name === suggestQuery.trim())"
+              v-if="suggestMethod.query.trim() && !suggestMethod.results.some(t => t.name === suggestMethod.query.trim())"
               type="button"
               class="typeahead-create"
-              @click="createNewTag(suggestQuery.trim(), 'method')"
-            >+ 创建新标签「{{ suggestQuery.trim() }}」</button>
+              @click="createNewTag(suggestMethod.query.trim(), 'method', suggestMethod)"
+            >+ 创建新标签「{{ suggestMethod.query.trim() }}」</button>
           </div>
         </div>
         <div class="attr-dialog-section">
@@ -402,29 +402,29 @@
           <!-- 学校 typeahead -->
           <div class="typeahead-wrap">
             <input
-              v-model="suggestQuery"
+              v-model="suggestSchool.query"
               class="attr-dialog-input"
               placeholder="搜索或创建学校标签…"
-              @input="suggestCategory = 'school'; onSuggestInput()"
+              @input="onSuggestInput(suggestSchool, 'school')"
             />
-            <div v-if="suggestResults.length && suggestCategory === 'school'" class="typeahead-dropdown">
+            <div v-if="suggestSchool.results.length" class="typeahead-dropdown">
               <button
-                v-for="t in suggestResults"
+                v-for="t in suggestSchool.results"
                 :key="t.id"
                 type="button"
                 class="typeahead-item"
-                @click="toggleTagById(t); suggestQuery = ''; suggestResults = []"
+                @click="toggleTagById(t); suggestSchool.query = ''; suggestSchool.results = []"
               >
                 <span>{{ t.name }}</span>
                 <span class="typeahead-count">{{ t.use_count }} 次</span>
               </button>
             </div>
             <button
-              v-if="suggestQuery.trim() && suggestCategory === 'school' && !suggestResults.some(t => t.name === suggestQuery.trim())"
+              v-if="suggestSchool.query.trim() && !suggestSchool.results.some(t => t.name === suggestSchool.query.trim())"
               type="button"
               class="typeahead-create"
-              @click="createNewTag(suggestQuery.trim(), 'school')"
-            >+ 创建新标签「{{ suggestQuery.trim() }}」</button>
+              @click="createNewTag(suggestSchool.query.trim(), 'school', suggestSchool)"
+            >+ 创建新标签「{{ suggestSchool.query.trim() }}」</button>
           </div>
         </div>
       </div>
@@ -643,32 +643,35 @@ function checkKpLimit(): boolean {
   return true
 }
 
-// 标签 typeahead 联想状态
-const suggestQuery = ref('')
-const suggestResults = ref<Tag[]>([])
-const suggestCategory = ref<'method' | 'school'>('method')
-const suggestLoading = ref(false)
-let suggestTimer: ReturnType<typeof setTimeout> | null = null
+// 标签 typeahead 联想状态（method 和 school 独立，避免串扰）
+interface SuggestState {
+  query: string
+  results: Tag[]
+  loading: boolean
+  timer: ReturnType<typeof setTimeout> | null
+}
+const suggestMethod = reactive<SuggestState>({ query: '', results: [], loading: false, timer: null })
+const suggestSchool = reactive<SuggestState>({ query: '', results: [], loading: false, timer: null })
 
-function onSuggestInput() {
-  if (suggestTimer) clearTimeout(suggestTimer)
-  const q = suggestQuery.value.trim()
+function onSuggestInput(state: SuggestState, category: 'method' | 'school') {
+  if (state.timer) clearTimeout(state.timer)
+  const q = state.query.trim()
   if (!q) {
-    suggestResults.value = []
+    state.results = []
     return
   }
-  suggestTimer = setTimeout(async () => {
-    suggestLoading.value = true
+  state.timer = setTimeout(async () => {
+    state.loading = true
     try {
-      const res = await tagsApi.suggest(q, suggestCategory.value)
-      suggestResults.value = res.data
-    } catch { suggestResults.value = [] }
-    finally { suggestLoading.value = false }
+      const res = await tagsApi.suggest(q, category)
+      state.results = res.data
+    } catch { state.results = [] }
+    finally { state.loading = false }
   }, 200)
 }
 
 // 创建新标签（typeahead 无匹配时）
-async function createNewTag(name: string, category: 'method' | 'school') {
+async function createNewTag(name: string, category: 'method' | 'school', state: SuggestState) {
   try {
     const res = await tagsApi.create(name, category)
     // 刷新对应列表
@@ -680,8 +683,8 @@ async function createNewTag(name: string, category: 'method' | 'school') {
     // 自动选中
     form.tagIds.push(res.data.id)
     toast.success(`已创建并选中标签「${name}」`)
-    suggestQuery.value = ''
-    suggestResults.value = []
+    state.query = ''
+    state.results = []
   } catch (e: any) {
     toast.error(e.response?.data?.error || '创建标签失败')
   }
@@ -1393,7 +1396,7 @@ function buildPayload() {
     source: form.source,
     analysis: form.solutions.filter(s => s.trim()).join('\n\n---\n\n') || null,
     knowledge_point_ids: kpIds.length > 0 ? kpIds : null,
-    tag_ids: form.tagIds.length > 0 ? form.tagIds : null,
+    tag_ids: form.tagIds,
   }
   switch (form.question_type) {
     case 'choice':
@@ -1556,6 +1559,17 @@ async function loadQuestion() {
     form.version = d.version
     form.knowledgePointIds = d.knowledge_points?.map(k => k.id) || []
     form.tagIds = d.tags?.map(t => t.id) || []
+    // 将后端返回的标签（可能是空间私有标签）合并到本地缓存，确保 allTagsMap 能找到
+    if (d.tags?.length) {
+      for (const t of d.tags) {
+        if (!allTagsMap.value.has(t.id)) {
+          const fullTag: Tag = { ...t, space_id: null, use_count: 0, created_at: '' }
+          if (t.category === 'core_competence') competenceTags.value = [...competenceTags.value, fullTag]
+          else if (t.category === 'method') methodTags.value = [...methodTags.value, fullTag]
+          else if (t.category === 'school') schoolTags.value = [...schoolTags.value, fullTag]
+        }
+      }
+    }
     form.correctAnswer = ''
     form.blanks = [{ position: 1, answer: '' }]
     form.solutionAnswer = ''
