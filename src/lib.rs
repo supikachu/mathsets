@@ -96,6 +96,7 @@ pub fn build_app(state: AppState) -> Router {
         .route("/tags/suggest", get(handlers::tags::suggest_tags))
         .route("/tags/{id}", put(handlers::tags::update_tag))
         .route("/tags/{id}", delete(handlers::tags::delete_tag))
+        .route("/tags/{id}/merge", post(handlers::tags::merge_tag))
         // 统一应用认证中间件
         .layer(middleware::from_fn_with_state(
             state.clone(),

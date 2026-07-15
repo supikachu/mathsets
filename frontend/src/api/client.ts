@@ -275,6 +275,9 @@ export const tagsApi = {
   remove(id: string) {
     return client.delete(`/tags/${id}`)
   },
+  merge(sourceId: string, targetId: string) {
+    return client.post(`/tags/${sourceId}/merge`, { target_id: targetId })
+  },
 }
 
 // ─── AI 智能录入 ───

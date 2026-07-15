@@ -290,12 +290,18 @@ pub async fn update_tag(
 
 /// DELETE /api/v1/tags/:id — 删除标签
 /// 关联表 question_tags_relation 通过 ON DELETE CASCADE 自动清理
+/// 仅管理员可执行
 pub async fn delete_tag(
     State(state): State<AppState>,
     Extension(auth_user): Extension<AuthUser>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
-    let _ = auth_user;
+    if !is_admin(&auth_user.role) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "仅管理员可删除标签"})),
+        ));
+    }
 
     let result = sqlx::query("DELETE FROM tags WHERE id = $1")
         .bind(id)
@@ -308,4 +314,141 @@ pub async fn delete_tag(
     }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// 合并标签请求体
+#[derive(Debug, Deserialize)]
+pub struct MergeTagRequest {
+    /// 目标标签 ID（保留此标签，将源标签的关联全部迁移过来）
+    pub target_id: Uuid,
+}
+
+/// POST /api/v1/tags/:id/merge — 合并同义词标签
+/// :id = 源标签（被合并、将被删除），target_id = 目标标签（保留）
+/// 操作：将源标签的所有题目关联迁移到目标标签（去重），合并 use_count，删除源标签
+/// 仅管理员可执行
+pub async fn merge_tag(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(source_id): Path<Uuid>,
+    Json(req): Json<MergeTagRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if !is_admin(&auth_user.role) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "仅管理员可合并标签"})),
+        ));
+    }
+
+    if source_id == req.target_id {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "不能将标签合并到自身"})),
+        ));
+    }
+
+    let mut tx = state
+        .pool
+        .begin()
+        .await
+        .map_err(|e| db_err(format!("开启事务失败: {}", e)))?;
+
+    // 1. 验证两个标签都存在且同类别
+    let source: Option<Tag> = sqlx::query_as::<_, Tag>("SELECT * FROM tags WHERE id = $1")
+        .bind(source_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| db_err(format!("查询源标签失败: {}", e)))?;
+    let target: Option<Tag> = sqlx::query_as::<_, Tag>("SELECT * FROM tags WHERE id = $1")
+        .bind(req.target_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| db_err(format!("查询目标标签失败: {}", e)))?;
+
+    let source = source.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "源标签不存在"})),
+        )
+    })?;
+    let target = target.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "目标标签不存在"})),
+        )
+    })?;
+
+    if source.category != target.category {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "只能合并同类别的标签"})),
+        ));
+    }
+
+    // 2. 将源标签的题目关联迁移到目标标签（冲突时跳过——题目已有目标标签则不重复）
+    sqlx::query(
+        r#"
+        INSERT INTO question_tags_relation (question_id, tag_id)
+        SELECT question_id, $1 FROM question_tags_relation WHERE tag_id = $2
+        ON CONFLICT DO NOTHING
+        "#,
+    )
+    .bind(req.target_id)
+    .bind(source_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| db_err(format!("迁移关联失败: {}", e)))?;
+
+    // 3. 统计实际迁移的关联数（目标已有关联的题目不重复计入）
+    let migrated_count: i64 = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*) FROM question_tags_relation
+        WHERE tag_id = $1 AND question_id IN (
+            SELECT question_id FROM question_tags_relation WHERE tag_id = $2
+        )
+        "#,
+    )
+    .bind(req.target_id)
+    .bind(source_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| db_err(format!("统计迁移数失败: {}", e)))?;
+
+    // 4. 合并 use_count（目标 = 目标已有 + 源标签全部，因迁移后目标可能因去重而少于源+目）
+    let merged_use_count: i64 = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(DISTINCT question_id) FROM question_tags_relation
+        WHERE tag_id IN ($1, $2)
+        "#,
+    )
+    .bind(req.target_id)
+    .bind(source_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| db_err(format!("统计合并后 use_count 失败: {}", e)))?;
+
+    sqlx::query("UPDATE tags SET use_count = $1 WHERE id = $2")
+        .bind(merged_use_count)
+        .bind(req.target_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| db_err(format!("更新 use_count 失败: {}", e)))?;
+
+    // 5. 删除源标签（关联表通过 ON DELETE CASCADE 自动清理源标签的残余关联）
+    sqlx::query("DELETE FROM tags WHERE id = $1")
+        .bind(source_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| db_err(format!("删除源标签失败: {}", e)))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| db_err(format!("提交事务失败: {}", e)))?;
+
+    Ok(Json(json!({
+        "message": format!("已将「{}」合并到「{}」", source.name, target.name),
+        "migrated_count": migrated_count,
+        "merged_use_count": merged_use_count,
+        "target_tag": target,
+    })))
 }

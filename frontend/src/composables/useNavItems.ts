@@ -19,6 +19,7 @@ export function useNavItems() {
     ]
     if (auth.isAdmin) {
       list.push({ path: '/users', label: '用户管理', icon: 'user', shortLabel: '用户' })
+      list.push({ path: '/settings/tags', label: '标签管理', icon: 'tag', shortLabel: '标签' })
     }
     return list
   })
