@@ -333,8 +333,9 @@
     </AppModal>
 
     <!-- 属性面板 — 左右双栏 -->
-    <AppModal v-model="showAttrDialog" title="属性面板">
-      <div class="attr-panel">
+    <AppModal v-model="showAttrDialog" title="属性面板" width="820px" height="580px">
+      <!-- 中层 Body — 左右双栏 -->
+      <div class="attr-panel-body">
         <!-- 左侧分类导航 -->
         <nav class="attr-panel-nav">
           <!-- 苹果风弹性滑块 -->
@@ -3456,12 +3457,12 @@ watch(() => form.question_type, () => {
   color: var(--text-muted);
 }
 
-/* 属性面板 — 左右双栏布局 */
-.attr-panel {
+/* 中层 Body — 左右双栏，吃满剩余空间 */
+.attr-panel-body {
   display: flex;
-  max-height: 420px;
-  gap: 0;
-  border-radius: 10px;
+  flex-direction: row;
+  flex: 1;
+  height: calc(100% - 118px);
   overflow: hidden;
 }
 
@@ -3469,6 +3470,7 @@ watch(() => form.question_type, () => {
 .attr-panel-nav {
   flex: 0 0 150px;
   max-width: 150px;
+  height: 100%;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -3476,6 +3478,12 @@ watch(() => form.question_type, () => {
   background: #f5f5f7;
   border-right: 1px solid rgba(0, 0, 0, 0.06);
   position: relative;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+
+.attr-panel-nav::-webkit-scrollbar {
+  display: none;
 }
 
 [data-theme='dark'] .attr-panel-nav {
@@ -3568,9 +3576,10 @@ watch(() => form.question_type, () => {
   background: var(--purple);
 }
 
-/* 右侧内容画布 */
+/* 右侧内容画布 — 吃满右侧空间，内部局部滚动 */
 .attr-panel-content {
   flex: 1;
+  height: 100%;
   padding: 24px;
   min-width: 0;
   overflow-y: auto;
@@ -3671,7 +3680,6 @@ watch(() => form.question_type, () => {
 
 /* 知识点面板专用 */
 .attr-canvas-kp {
-  min-height: 280px;
   display: flex;
   flex-direction: column;
 }
@@ -3928,19 +3936,21 @@ watch(() => form.question_type, () => {
   margin-top: 16px;
 }
 
-/* ===== 底部全局已选预览条 — 吸底 Footer ===== */
+/* ===== 底部全局已选预览条 — 吸底 Footer (固定 64px) ===== */
 .modal-selected-preview-bar {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-top: 0;
-  padding-top: 12px;
-  border-top: 1px solid #e5e5ea;
+  height: 64px;
   flex-shrink: 0;
+  padding: 0 24px;
+  border-top: 1px solid #e5e5ea;
+  background: #ffffff;
 }
 
 [data-theme='dark'] .modal-selected-preview-bar {
   border-top-color: rgba(255, 255, 255, 0.08);
+  background: var(--bg-card);
 }
 
 .preview-track {
