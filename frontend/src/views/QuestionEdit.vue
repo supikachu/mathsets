@@ -524,8 +524,8 @@
         </div>
       </div>
       <!-- 底部全局已选预览条 — 吸底 Footer -->
-      <div class="modal-selected-preview-bar">
-        <div class="preview-track">
+      <div class="modal-footer-row">
+        <div class="selected-tags-preview-flow">
           <!-- 知识点（多选，第一个为 Primary） -->
           <span
             v-for="(kp, idx) in attrSelectedKps"
@@ -555,7 +555,7 @@
           </span>
           <span v-if="attrSelectedKps.length === 0 && form_tagList.length === 0" class="preview-empty">暂未选择任何属性</span>
         </div>
-        <AppButton class="preview-done-btn" variant="primary" size="sm" @click="showAttrDialog = false">完成</AppButton>
+        <AppButton class="modal-footer-submit-btn" variant="primary" size="sm" @click="showAttrDialog = false">完成</AppButton>
       </div>
     </AppModal>
 
@@ -3456,13 +3456,13 @@ watch(() => form.question_type, () => {
   color: var(--text-muted);
 }
 
-/* 中层 Body — 左右双栏，吃满剩余空间 */
+/* 中层 Body — 左右双栏，吃满剩余空间（footer 已 absolute 脱离流） */
 .attr-panel-body {
   display: flex;
   flex-direction: row;
   flex: 1;
-  height: calc(100% - 118px);
   overflow: hidden;
+  padding-bottom: 64px;
 }
 
 /* 左侧分类导航 — macOS Sidebar 风格 */
@@ -3935,48 +3935,54 @@ watch(() => form.question_type, () => {
   margin-top: 16px;
 }
 
-/* ===== 底部全局已选预览条 — 吸底 Footer (固定 64px) ===== */
-.modal-selected-preview-bar {
-  position: relative;
+/* ===== 底部吸底 Footer — 绝对定位锁死，禁止溢出裁剪 ===== */
+.modal-footer-row {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 64px;
   display: flex;
   align-items: center;
-  gap: 12px;
-  height: 64px;
-  flex-shrink: 0;
   padding: 0 24px;
-  border-top: 1px solid #e5e5ea;
   background: #ffffff;
+  border-top: 1px solid #e5e5ea;
+  z-index: 10;
+  box-sizing: border-box;
 }
 
-[data-theme='dark'] .modal-selected-preview-bar {
+[data-theme='dark'] .modal-footer-row {
   border-top-color: rgba(255, 255, 255, 0.08);
   background: var(--bg-card);
 }
 
-.preview-track {
-  flex: 1;
+/* 核心修复：预览轨容器 min-width:0 允许自身收缩触发横向滚动 */
+.selected-tags-preview-flow {
   display: flex;
-  align-items: center;
+  flex-direction: row;
   flex-wrap: nowrap;
-  white-space: nowrap;
-  gap: 8px;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
   overflow-x: auto;
+  overflow-y: hidden;
+  gap: 8px;
+  padding-right: 120px;
+  box-sizing: border-box;
   scrollbar-width: none;
-  padding: 2px 120px 2px 0;
 }
 
-.preview-track::-webkit-scrollbar {
+.selected-tags-preview-flow::-webkit-scrollbar {
   display: none;
 }
 
-/* 完成按钮 — absolute 锁定最右侧 */
-.preview-done-btn {
+/* 完成按钮 — 抽离文档流，绝对静止 */
+.modal-footer-submit-btn {
   position: absolute;
   right: 24px;
-  top: 50%;
-  transform: translateY(-50%);
-  flex-shrink: 0;
-  z-index: 2;
+  top: 14px;
+  z-index: 12;
 }
 
 .preview-pill {
