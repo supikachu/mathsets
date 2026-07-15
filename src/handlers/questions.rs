@@ -152,6 +152,38 @@ async fn get_question_tags(
     .await
 }
 
+/// 自建标签原子化 Upsert：名称未入库则创建（use_count=1），已存在则递增 use_count
+/// 返回所有标签的 ID（含已存在 + 新建），供合并到 tag_ids
+async fn upsert_new_tags(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    new_tags: &[crate::models::question::NewTagInput],
+    space_id: Option<Uuid>,
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    let mut ids = Vec::with_capacity(new_tags.len());
+    for nt in new_tags {
+        let name = nt.name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let id: Uuid = sqlx::query_scalar(
+            r#"
+            INSERT INTO tags (id, name, category, space_id, use_count, created_at)
+            VALUES ($1, $2, $3, $4, 1, NOW())
+            ON CONFLICT DO UPDATE SET use_count = tags.use_count + 1
+            RETURNING id
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(name)
+        .bind(&nt.category)
+        .bind(space_id)
+        .fetch_one(&mut **tx)
+        .await?;
+        ids.push(id);
+    }
+    Ok(ids)
+}
+
 async fn replace_reviewers(
     pool: &sqlx::PgPool,
     question_id: Uuid,
@@ -540,13 +572,21 @@ pub async fn create_question(
             .map_err(|e| db_err(format!("关联知识点失败: {}", e)))?;
     }
 
-    // 同步题目标签关联
-    if let Some(ref tag_ids) = req.tag_ids {
-        if !tag_ids.is_empty() {
-            update_question_tags(&mut tx, id, tag_ids)
+    // 合并已有 tag_ids + 自建 new_tags（Upsert 后取 ID）
+    let mut all_tag_ids: Vec<Uuid> = req.tag_ids.clone().unwrap_or_default();
+    if let Some(ref new_tags) = req.new_tags {
+        if !new_tags.is_empty() {
+            let new_ids = upsert_new_tags(&mut tx, new_tags, Some(space_id))
                 .await
-                .map_err(|e| db_err(format!("关联标签失败: {}", e)))?;
+                .map_err(|e| db_err(format!("自建标签入库失败: {}", e)))?;
+            all_tag_ids.extend(new_ids);
         }
+    }
+
+    if !all_tag_ids.is_empty() {
+        update_question_tags(&mut tx, id, &all_tag_ids)
+            .await
+            .map_err(|e| db_err(format!("关联标签失败: {}", e)))?;
     }
 
     save_version(&mut tx, id, version, Some(creator_id))
@@ -713,9 +753,19 @@ pub async fn update_question(
             .map_err(|e| db_err(format!("更新知识点关联失败: {}", e)))?;
     }
 
-    // 同步题目标签关联
-    if let Some(ref tag_ids) = req.tag_ids {
-        update_question_tags(&mut tx, id, tag_ids)
+    // 合并已有 tag_ids + 自建 new_tags（Upsert 后取 ID）
+    let mut all_tag_ids: Vec<Uuid> = req.tag_ids.clone().unwrap_or_default();
+    if let Some(ref new_tags) = req.new_tags {
+        if !new_tags.is_empty() {
+            let new_ids = upsert_new_tags(&mut tx, new_tags, Some(existing.space_id))
+                .await
+                .map_err(|e| db_err(format!("自建标签入库失败: {}", e)))?;
+            all_tag_ids.extend(new_ids);
+        }
+    }
+
+    if !all_tag_ids.is_empty() {
+        update_question_tags(&mut tx, id, &all_tag_ids)
             .await
             .map_err(|e| db_err(format!("更新标签关联失败: {}", e)))?;
     }

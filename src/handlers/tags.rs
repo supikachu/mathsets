@@ -3,6 +3,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
+use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
@@ -87,6 +88,92 @@ pub async fn list_tags(
         }
     }
     .map_err(|e| db_err(format!("查询标签失败: {}", e)))?;
+
+    Ok(Json(tags))
+}
+
+/// 模糊联想查询参数
+#[derive(Debug, Deserialize)]
+pub struct SuggestQuery {
+    pub q: String,
+    pub category: Option<String>,
+    pub space_id: Option<Uuid>,
+}
+
+/// GET /api/v1/tags/suggest — 模糊联想
+/// LIKE '%q%'，按 use_count DESC 排序，LIMIT 10
+pub async fn suggest_tags(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Query(query): Query<SuggestQuery>,
+) -> Result<Json<Vec<Tag>>, (StatusCode, Json<serde_json::Value>)> {
+    let _ = auth_user;
+
+    let pattern = format!("%{}%", query.q.trim());
+    if pattern.len() < 2 {
+        // 至少 1 个有效字符（% + 字符 + %）
+        return Ok(Json(vec![]));
+    }
+
+    let tags = match (&query.category, &query.space_id) {
+        (Some(cat), Some(sid)) => {
+            sqlx::query_as::<_, Tag>(
+                r#"
+                SELECT * FROM tags
+                WHERE name ILIKE $1 AND category = $2 AND (space_id IS NULL OR space_id = $3)
+                ORDER BY use_count DESC, name
+                LIMIT 10
+                "#,
+            )
+            .bind(&pattern)
+            .bind(cat)
+            .bind(sid)
+            .fetch_all(&state.pool)
+            .await
+        }
+        (Some(cat), None) => {
+            sqlx::query_as::<_, Tag>(
+                r#"
+                SELECT * FROM tags
+                WHERE name ILIKE $1 AND category = $2 AND space_id IS NULL
+                ORDER BY use_count DESC, name
+                LIMIT 10
+                "#,
+            )
+            .bind(&pattern)
+            .bind(cat)
+            .fetch_all(&state.pool)
+            .await
+        }
+        (None, Some(sid)) => {
+            sqlx::query_as::<_, Tag>(
+                r#"
+                SELECT * FROM tags
+                WHERE name ILIKE $1 AND (space_id IS NULL OR space_id = $2)
+                ORDER BY category, use_count DESC, name
+                LIMIT 10
+                "#,
+            )
+            .bind(&pattern)
+            .bind(sid)
+            .fetch_all(&state.pool)
+            .await
+        }
+        (None, None) => {
+            sqlx::query_as::<_, Tag>(
+                r#"
+                SELECT * FROM tags
+                WHERE name ILIKE $1 AND space_id IS NULL
+                ORDER BY category, use_count DESC, name
+                LIMIT 10
+                "#,
+            )
+            .bind(&pattern)
+            .fetch_all(&state.pool)
+            .await
+        }
+    }
+    .map_err(|e| db_err(format!("联想查询失败: {}", e)))?;
 
     Ok(Json(tags))
 }

@@ -87,6 +87,11 @@ export interface QuestionDetail {
   grade: string | null
   semester: string | null
   source: string | null
+  // 结构化元数据
+  academic_year: string | null
+  grade_semester: string | null
+  exam_type: string | null
+  exam_region: string | null
   creator_id: string | null
   creator_name: string | null
   created_at: string
@@ -96,6 +101,7 @@ export interface QuestionDetail {
   space_id: string
   origin_question_id?: string | null
   knowledge_points: { id: string; name: string }[]
+  tags: TagSummary[]
   reviewer_ids?: string[]
   can_review?: boolean
 }
@@ -170,6 +176,20 @@ export interface KnowledgePoint {
   children: KnowledgePoint[]
 }
 
+// ─── 标签类型 ───
+
+export interface TagSummary {
+  id: string
+  name: string
+  category: 'core_competence' | 'method' | 'school'
+}
+
+export interface Tag extends TagSummary {
+  space_id: string | null
+  use_count: number
+  created_at: string
+}
+
 export interface QuestionStats {
   total: number
   draft: number
@@ -237,6 +257,26 @@ export const kpApi = {
   },
 }
 
+// ─── 标签 API ───
+
+export const tagsApi = {
+  list(category?: string, spaceId?: string) {
+    return client.get<Tag[]>('/tags', { params: { category, space_id: spaceId } })
+  },
+  suggest(q: string, category?: string, spaceId?: string) {
+    return client.get<Tag[]>('/tags/suggest', { params: { q, category, space_id: spaceId } })
+  },
+  create(name: string, category: string, spaceId?: string) {
+    return client.post<Tag>('/tags', { name, category, space_id: spaceId })
+  },
+  update(id: string, data: { name?: string; category?: string }) {
+    return client.put<Tag>(`/tags/${id}`, data)
+  },
+  remove(id: string) {
+    return client.delete(`/tags/${id}`)
+  },
+}
+
 // ─── AI 智能录入 ───
 
 export interface SubAnswer {
@@ -268,6 +308,13 @@ export interface ParsedAnswer {
   }
 }
 
+export interface KpMatch {
+  ai_name: string
+  matched_id: string | null
+  matched_name: string | null
+  score: number
+}
+
 export interface ParsedQuestion {
   question_type: 'choice' | 'fill' | 'solution'
   sub_type?: string
@@ -280,6 +327,7 @@ export interface ParsedQuestion {
   confidence: number
   warnings: string[]
   image_placeholders: string[]
+  kp_matches: KpMatch[]
 }
 
 export interface AiSettings {

@@ -93,6 +93,9 @@ pub struct CreateQuestionRequest {
     pub exam_region: Option<String>,
     // 标签 ID 列表（核心素养 + 解题方法 + 学校）
     pub tag_ids: Option<Vec<Uuid>>,
+    /// 自建标签（尚未入库的名称，后端 Upsert 后合并到 tag_ids）
+    #[serde(default)]
+    pub new_tags: Option<Vec<NewTagInput>>,
     pub knowledge_point_ids: Option<Vec<Uuid>>,
     /// 所属空间；缺省为当前用户个人空间
     pub space_id: Option<Uuid>,
@@ -119,7 +122,17 @@ pub struct UpdateQuestionRequest {
     pub exam_region: Option<String>,
     // 标签 ID 列表（核心素养 + 解题方法 + 学校）
     pub tag_ids: Option<Vec<Uuid>>,
+    /// 自建标签（尚未入库的名称，后端 Upsert 后合并到 tag_ids）
+    #[serde(default)]
+    pub new_tags: Option<Vec<NewTagInput>>,
     pub knowledge_point_ids: Option<Vec<Uuid>>,
+}
+
+/// 自建标签输入（前端提交尚未入库的标签）
+#[derive(Debug, Deserialize, Clone)]
+pub struct NewTagInput {
+    pub name: String,
+    pub category: String,
 }
 
 /// 题目列表查询参数

@@ -93,6 +93,7 @@ pub fn build_app(state: AppState) -> Router {
         // 标签管理
         .route("/tags", get(handlers::tags::list_tags))
         .route("/tags", post(handlers::tags::create_tag))
+        .route("/tags/suggest", get(handlers::tags::suggest_tags))
         .route("/tags/{id}", put(handlers::tags::update_tag))
         .route("/tags/{id}", delete(handlers::tags::delete_tag))
         // 统一应用认证中间件

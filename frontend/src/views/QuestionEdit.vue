@@ -48,25 +48,30 @@
           <div class="edit-col-inner">
             <!-- ==================== 第二层：描述性标签流 ==================== -->
             <div class="question-tags-wrapper">
-              <span v-if="form.region" class="attr-tag">
+              <span v-if="form.exam_region" class="attr-tag">
                 <AppIcon name="pin" :size="11" />
-                <span class="attr-tag-text">{{ form.region }}</span>
-                <button type="button" class="attr-tag-x" @click="form.region = ''"><AppIcon name="x" :size="10" /></button>
+                <span class="attr-tag-text">{{ form.exam_region }}</span>
+                <button type="button" class="attr-tag-x" @click="form.exam_region = ''"><AppIcon name="x" :size="10" /></button>
               </span>
               <span v-if="selectedKpName" class="attr-tag attr-tag-kp">
                 <AppIcon name="tag" :size="11" />
                 <span class="attr-tag-text">{{ selectedKpName }}</span>
                 <button type="button" class="attr-tag-x" @click="clearKp"><AppIcon name="x" :size="10" /></button>
               </span>
-              <span v-for="lit in form.literacy_tags" :key="'lit-' + lit" class="attr-tag attr-tag-literacy">
+              <span v-for="t in selectedCompetenceTags" :key="'comp-' + t.id" class="attr-tag attr-tag-literacy">
                 <AppIcon name="award" :size="11" />
-                <span class="attr-tag-text">{{ lit }}</span>
-                <button type="button" class="attr-tag-x" @click="toggleLiteracy(lit)"><AppIcon name="x" :size="10" /></button>
+                <span class="attr-tag-text">{{ t.name }}</span>
+                <button type="button" class="attr-tag-x" @click="toggleTagById(t)"><AppIcon name="x" :size="10" /></button>
               </span>
-              <span v-for="tag in form.tags" :key="'tag-' + tag" class="attr-tag attr-tag-method">
+              <span v-for="t in selectedMethodTags" :key="'method-' + t.id" class="attr-tag attr-tag-method">
                 <AppIcon name="bookmark" :size="11" />
-                <span class="attr-tag-text">{{ tag }}</span>
-                <button type="button" class="attr-tag-x" @click="toggleTag(tag)"><AppIcon name="x" :size="10" /></button>
+                <span class="attr-tag-text">{{ t.name }}</span>
+                <button type="button" class="attr-tag-x" @click="toggleTagById(t)"><AppIcon name="x" :size="10" /></button>
+              </span>
+              <span v-for="t in selectedSchoolTags" :key="'school-' + t.id" class="attr-tag attr-tag-method">
+                <AppIcon name="bookmark" :size="11" />
+                <span class="attr-tag-text">{{ t.name }}</span>
+                <button type="button" class="attr-tag-x" @click="toggleTagById(t)"><AppIcon name="x" :size="10" /></button>
               </span>
               <button type="button" class="attr-add-btn" @click="showAttrDialog = true">
                 <AppIcon name="plus" :size="13" />
@@ -321,37 +326,105 @@
     <AppModal v-model="showAttrDialog" title="属性面板">
       <div class="attr-dialog-body">
         <div class="attr-dialog-section">
-          <div class="attr-dialog-label"><AppIcon name="pin" :size="14" /> 地区 / 学校</div>
-          <input v-model="form.region" placeholder="如：北京、人大附中…" class="attr-dialog-input" />
+          <div class="attr-dialog-label"><AppIcon name="pin" :size="14" /> 考试地区</div>
+          <input v-model="form.exam_region" placeholder="如：北京、上海…" class="attr-dialog-input" />
         </div>
         <div class="attr-dialog-section">
           <div class="attr-dialog-label"><AppIcon name="tag" :size="14" /> 知识点</div>
           <div class="attr-dialog-hint">从左侧知识树中选择知识点，选中后将以标签形式显示在题干上方。</div>
         </div>
         <div class="attr-dialog-section">
-          <div class="attr-dialog-label"><AppIcon name="award" :size="14" /> 核心素养</div>
+          <div class="attr-dialog-label"><AppIcon name="award" :size="14" /> 核心素养（最多 {{ TAG_LIMITS.core_competence }} 个）</div>
           <div class="tag-chips">
             <button
-              v-for="lit in literacyTags"
-              :key="lit"
+              v-for="t in competenceTags"
+              :key="t.id"
               type="button"
               class="tag-chip"
-              :class="{ active: form.literacy_tags.includes(lit) }"
-              @click="toggleLiteracy(lit)"
-            >{{ lit }}</button>
+              :class="{ active: form.tagIds.includes(t.id) }"
+              @click="toggleTagById(t)"
+            >{{ t.name }}</button>
           </div>
         </div>
-        <div v-for="cat in tagCategories" :key="cat.name" class="attr-dialog-section">
-          <div class="attr-dialog-label">{{ cat.name }}</div>
+        <div class="attr-dialog-section">
+          <div class="attr-dialog-label">解题方法 / 数学思想（最多 {{ TAG_LIMITS.method }} 个）</div>
           <div class="tag-chips">
             <button
-              v-for="tag in cat.tags"
-              :key="tag"
+              v-for="t in methodTags"
+              :key="t.id"
               type="button"
               class="tag-chip"
-              :class="{ active: form.tags.includes(tag) }"
-              @click="toggleTag(tag)"
-            >{{ tag }}</button>
+              :class="{ active: form.tagIds.includes(t.id) }"
+              @click="toggleTagById(t)"
+            >{{ t.name }}</button>
+          </div>
+          <!-- typeahead 联想输入 -->
+          <div class="typeahead-wrap">
+            <input
+              v-model="suggestQuery"
+              class="attr-dialog-input"
+              placeholder="搜索或创建新方法标签…"
+              @input="suggestCategory = 'method'; onSuggestInput()"
+            />
+            <div v-if="suggestResults.length && suggestCategory === 'method'" class="typeahead-dropdown">
+              <button
+                v-for="t in suggestResults"
+                :key="t.id"
+                type="button"
+                class="typeahead-item"
+                @click="toggleTagById(t); suggestQuery = ''; suggestResults = []"
+              >
+                <span>{{ t.name }}</span>
+                <span class="typeahead-count">{{ t.use_count }} 次</span>
+              </button>
+            </div>
+            <button
+              v-if="suggestQuery.trim() && suggestCategory === 'method' && !suggestResults.some(t => t.name === suggestQuery.trim())"
+              type="button"
+              class="typeahead-create"
+              @click="createNewTag(suggestQuery.trim(), 'method')"
+            >+ 创建新标签「{{ suggestQuery.trim() }}」</button>
+          </div>
+        </div>
+        <div class="attr-dialog-section">
+          <div class="attr-dialog-label">学校（最多 {{ TAG_LIMITS.school }} 个）</div>
+          <div class="tag-chips">
+            <button
+              v-for="t in schoolTags"
+              :key="t.id"
+              type="button"
+              class="tag-chip"
+              :class="{ active: form.tagIds.includes(t.id) }"
+              @click="toggleTagById(t)"
+            >{{ t.name }}</button>
+            <span v-if="schoolTags.length === 0" class="text-sm text-muted">暂无学校标签，可在下方搜索创建</span>
+          </div>
+          <!-- 学校 typeahead -->
+          <div class="typeahead-wrap">
+            <input
+              v-model="suggestQuery"
+              class="attr-dialog-input"
+              placeholder="搜索或创建学校标签…"
+              @input="suggestCategory = 'school'; onSuggestInput()"
+            />
+            <div v-if="suggestResults.length && suggestCategory === 'school'" class="typeahead-dropdown">
+              <button
+                v-for="t in suggestResults"
+                :key="t.id"
+                type="button"
+                class="typeahead-item"
+                @click="toggleTagById(t); suggestQuery = ''; suggestResults = []"
+              >
+                <span>{{ t.name }}</span>
+                <span class="typeahead-count">{{ t.use_count }} 次</span>
+              </button>
+            </div>
+            <button
+              v-if="suggestQuery.trim() && suggestCategory === 'school' && !suggestResults.some(t => t.name === suggestQuery.trim())"
+              type="button"
+              class="typeahead-create"
+              @click="createNewTag(suggestQuery.trim(), 'school')"
+            >+ 创建新标签「{{ suggestQuery.trim() }}」</button>
           </div>
         </div>
       </div>
@@ -470,13 +543,23 @@
         </div>
       </div>
     </AppModal>
+
+    <!-- AI 覆盖二次确认 -->
+    <AppConfirm
+      v-model="aiDirtyConfirm"
+      title="AI 覆盖确认"
+      message="AI 解析将覆盖当前已填写的内容，是否继续？"
+      confirm-text="覆盖"
+      danger
+      @confirm="confirmAiOverwrite"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { questionApi, kpApi, spaceApi, aiApi, type KnowledgePoint, type SpaceMemberInfo, type ParsedQuestion } from '@/api/client'
+import { questionApi, kpApi, spaceApi, aiApi, tagsApi, type KnowledgePoint, type SpaceMemberInfo, type ParsedQuestion, type TagSummary, type Tag } from '@/api/client'
 import LatexRender from '@/components/LatexRender.vue'
 import { AppButton, AppBadge, AppModal, AppConfirm, AppEmpty, AppSelect, AppIcon } from '@/components/ui'
 import { useToast } from '@/composables/useToast'
@@ -502,59 +585,106 @@ const showHistory = ref(false)
 const showAttrDialog = ref(false)
 const grades = ['初一', '初二', '初三', '高一', '高二', '高三']
 
-// 标签分类数据：解题方法与数学思想
-const tagCategories = [
-  {
-    name: '解题方法',
-    tags: ['反证法', '数学归纳法', '枚举法', '构造法', '换元法', '配方法', '待定系数法', '面积法', '定义法', '综合法', '分析法'],
-  },
-  {
-    name: '数学思想',
-    tags: ['数形结合', '分类讨论', '化归与转化', '函数与方程', '整体思想', '极限思想', '模型思想', '统计思想'],
-  },
-  {
-    name: '常见技巧',
-    tags: ['极值点偏移', '隐零点', '零点分段', '放缩法', '参变分离', '齐次化', '设而不求', '韦达定理', '判别式法', '单调性分析'],
-  },
-  {
-    name: '分析方法',
-    tags: ['逆向分析', '正向推导', '穷举法', '图形分析', '代数变形', '三角代换', '向量法', '坐标法'],
-  },
-]
+// 标签分类数据：从后端 API 动态加载
+const methodTags = ref<Tag[]>([])        // 解题方法（含数学思想、技巧等，category=method）
+const competenceTags = ref<Tag[]>([])     // 核心素养（category=core_competence）
+const schoolTags = ref<Tag[]>([])         // 学校（category=school）
 
-// 核心素养标签
-const literacyTags = [
-  '数学抽象', '逻辑推理', '数学建模', '直观想象', '数学运算', '数据分析',
-]
-
-function toggleTag(tag: string) {
-  const idx = form.tags.indexOf(tag)
-  if (idx >= 0) { form.tags.splice(idx, 1) } else { form.tags.push(tag) }
+// 标签数量上限（防呆软限制）
+const TAG_LIMITS: Record<string, number> = {
+  core_competence: 3,
+  method: 5,
+  knowledge_point: 3,
+  school: 1,
 }
 
-function toggleLiteracy(lit: string) {
-  const idx = form.literacy_tags.indexOf(lit)
-  if (idx >= 0) { form.literacy_tags.splice(idx, 1) } else { form.literacy_tags.push(lit) }
+// 标签加载状态
+const tagsLoading = ref(false)
+async function loadTags() {
+  tagsLoading.value = true
+  try {
+    const [methodRes, compRes, schoolRes] = await Promise.all([
+      tagsApi.list('method'),
+      tagsApi.list('core_competence'),
+      tagsApi.list('school'),
+    ])
+    methodTags.value = methodRes.data
+    competenceTags.value = compRes.data
+    schoolTags.value = schoolRes.data
+  } catch { /* handled */ }
+  finally { tagsLoading.value = false }
 }
 
-// 扁平化知识树并按名称匹配知识点
-function flattenKpTree(tree: KnowledgePoint[]): KnowledgePoint[] {
-  const result: KnowledgePoint[] = []
-  for (const node of tree) {
-    result.push(node)
-    if (node.children?.length) result.push(...flattenKpTree(node.children))
+// 统一标签切换（基于 tag ID，含数量防呆）
+function toggleTagById(tag: TagSummary) {
+  const idx = form.tagIds.indexOf(tag.id)
+  if (idx >= 0) {
+    form.tagIds.splice(idx, 1)
+    return
   }
-  return result
+  // 防呆：检查该 category 数量上限
+  const count = form_tagList.value.filter(t => t.category === tag.category).length
+  const limit = TAG_LIMITS[tag.category] ?? 99
+  if (count >= limit) {
+    const labels: Record<string, string> = { core_competence: '核心素养', method: '解题方法', school: '学校' }
+    toast.warning(`${labels[tag.category] || '标签'}最多选择 ${limit} 个`)
+    return
+  }
+  form.tagIds.push(tag.id)
 }
 
-function matchKnowledgePoints(names: string[], tree: KnowledgePoint[]): KnowledgePoint | null {
-  if (!names.length || !tree.length) return null
-  const flat = flattenKpTree(tree)
-  for (const name of names) {
-    const found = flat.find(kp => kp.name === name || kp.name.includes(name) || name.includes(kp.name))
-    if (found) return found
+// 知识点数量防呆
+function checkKpLimit(): boolean {
+  const kpCount = selectedKpId.value ? 1 : 0
+  if (kpCount >= TAG_LIMITS.knowledge_point) {
+    toast.warning(`知识点最多选择 ${TAG_LIMITS.knowledge_point} 个`)
+    return false
   }
-  return null
+  return true
+}
+
+// 标签 typeahead 联想状态
+const suggestQuery = ref('')
+const suggestResults = ref<Tag[]>([])
+const suggestCategory = ref<'method' | 'school'>('method')
+const suggestLoading = ref(false)
+let suggestTimer: ReturnType<typeof setTimeout> | null = null
+
+function onSuggestInput() {
+  if (suggestTimer) clearTimeout(suggestTimer)
+  const q = suggestQuery.value.trim()
+  if (!q) {
+    suggestResults.value = []
+    return
+  }
+  suggestTimer = setTimeout(async () => {
+    suggestLoading.value = true
+    try {
+      const res = await tagsApi.suggest(q, suggestCategory.value)
+      suggestResults.value = res.data
+    } catch { suggestResults.value = [] }
+    finally { suggestLoading.value = false }
+  }, 200)
+}
+
+// 创建新标签（typeahead 无匹配时）
+async function createNewTag(name: string, category: 'method' | 'school') {
+  try {
+    const res = await tagsApi.create(name, category)
+    // 刷新对应列表
+    if (category === 'method') {
+      methodTags.value = [...methodTags.value, res.data]
+    } else {
+      schoolTags.value = [...schoolTags.value, res.data]
+    }
+    // 自动选中
+    form.tagIds.push(res.data.id)
+    toast.success(`已创建并选中标签「${name}」`)
+    suggestQuery.value = ''
+    suggestResults.value = []
+  } catch (e: any) {
+    toast.error(e.response?.data?.error || '创建标签失败')
+  }
 }
 
 const gradeOptions = grades.map((g) => ({ label: g, value: g }))
@@ -736,7 +866,7 @@ const form = reactive({
   semester: undefined as string | undefined,
   academic_year: '' as string,
   grade_semester: '' as string,
-  region: '' as string,
+  exam_region: '' as string,
   exam_type: '' as string,
   source: '原创',
   estimated_time: 5,
@@ -754,8 +884,7 @@ const form = reactive({
   gradingSteps: [] as { label: string; points: number; description: string }[],
   judgmentCorrect: true,
   knowledgePointIds: [] as string[],
-  tags: [] as string[],
-  literacy_tags: [] as string[],
+  tagIds: [] as string[],          // 统一标签 ID 列表（核心素养 + 解题方法 + 学校）
   reviewer: '' as string,
   reviewer_ids: [] as string[],
   internal_note: '',
@@ -763,6 +892,27 @@ const form = reactive({
   version: 1,
   hasUnsaved: false,
 })
+
+// 标签查找缓存：将 tagIds 映射为 TagSummary 对象（用于标签流显示和 category 分流）
+const allTagsMap = computed(() => {
+  const m = new Map<string, TagSummary>()
+  for (const t of methodTags.value) m.set(t.id, t)
+  for (const t of competenceTags.value) m.set(t.id, t)
+  for (const t of schoolTags.value) m.set(t.id, t)
+  return m
+})
+
+// 当前选中的标签列表（TagSummary 对象数组）
+const form_tagList = computed<TagSummary[]>(() => {
+  return form.tagIds
+    .map(id => allTagsMap.value.get(id))
+    .filter((t): t is TagSummary => !!t)
+})
+
+// 按 category 分流（便于标签流 UI 显示）
+const selectedCompetenceTags = computed(() => form_tagList.value.filter(t => t.category === 'core_competence'))
+const selectedMethodTags = computed(() => form_tagList.value.filter(t => t.category === 'method'))
+const selectedSchoolTags = computed(() => form_tagList.value.filter(t => t.category === 'school'))
 
 // ===== 返回检测 =====
 const leaveDialog = ref(false)
@@ -796,6 +946,22 @@ const aiMode = ref<'api' | 'markdown'>('api')
 const promptCopied = ref(false)
 // AI 结果应用期间跳过 watch 对 question_type 的重置（避免覆盖刚赋好的 sub_answers）
 const applyingAiResult = ref(false)
+
+// AI Dirty Check：检测表单是否有手动输入内容
+function isFormDirty(): boolean {
+  if (form.stem.trim()) return true
+  if (form.options.some(o => o.content.trim())) return true
+  if (form.solutions.some(s => s.trim())) return true
+  if (form.blanks.some(b => b.answer.trim())) return true
+  if (form.sub_answers.some(a => a.trim())) return true
+  if (form.tagIds.length > 0) return true
+  return false
+}
+
+// AI 覆盖二次确认弹窗
+const aiDirtyConfirm = ref(false)
+// 暂存待应用的 AI 结果（确认后执行）
+let pendingAiApply: ParsedQuestion | null = null
 
 function handleAi() {
   showAiDialog.value = true
@@ -842,6 +1008,27 @@ async function doAiParse() {
 function applyAiResult() {
   const q = aiResult.value
   if (!q) return
+
+  // Dirty Check：表单有手动输入内容时弹出二次确认
+  if (isFormDirty()) {
+    pendingAiApply = q
+    aiDirtyConfirm.value = true
+    return
+  }
+
+  doApplyAiResult(q)
+}
+
+// 确认覆盖后执行
+function confirmAiOverwrite() {
+  aiDirtyConfirm.value = false
+  if (pendingAiApply) {
+    doApplyAiResult(pendingAiApply)
+    pendingAiApply = null
+  }
+}
+
+function doApplyAiResult(q: ParsedQuestion) {
 
   // 标记 AI 应用中，阻止 watch(question_type) 重置 sub_answers 等
   applyingAiResult.value = true
@@ -902,11 +1089,12 @@ function applyAiResult() {
   form.solutions = q.analysis.map(a => a.content)
   aiGeneratedFields.value.add('solutions')
 
-  // 知识点匹配：AI 返回的知识点名称与知识树匹配
-  if (q.knowledge_points?.length && kpTree.value.length) {
-    const matched = matchKnowledgePoints(q.knowledge_points, kpTree.value)
-    if (matched) {
-      selectKp(matched.id, matched.name)
+  // 知识点匹配：使用后端返回的 kp_matches（高置信度自动选中）
+  if (q.kp_matches?.length) {
+    // 取第一个 score >= 0.95 的高置信度匹配自动选中
+    const highConfidenceMatch = q.kp_matches.find(m => m.score >= 0.95 && m.matched_id)
+    if (highConfidenceMatch) {
+      selectKp(highConfidenceMatch.matched_id!, highConfidenceMatch.matched_name!)
       aiGeneratedFields.value.add('knowledge_point')
     }
   }
@@ -1200,13 +1388,12 @@ function buildPayload() {
     semester: form.semester || null,
     academic_year: form.academic_year || null,
     grade_semester: form.grade_semester || null,
-    region: form.region || null,
+    exam_region: form.exam_region || null,
     exam_type: form.exam_type || null,
     source: form.source,
     analysis: form.solutions.filter(s => s.trim()).join('\n\n---\n\n') || null,
     knowledge_point_ids: kpIds.length > 0 ? kpIds : null,
-    tags: form.tags.length > 0 ? form.tags : null,
-    literacy_tags: form.literacy_tags.length > 0 ? form.literacy_tags : null,
+    tag_ids: form.tagIds.length > 0 ? form.tagIds : null,
   }
   switch (form.question_type) {
     case 'choice':
@@ -1301,7 +1488,7 @@ function doRestoreDraft() {
   if (!pendingDraft) return
   const fields = ['stem', 'question_type', 'sub_type', 'difficulty', 'default_score', 'grade', 'semester',
     'source', 'solutions', 'options', 'correctAnswer', 'blanks', 'solutionAnswer', 'sub_answers',
-    'gradingSteps', 'judgmentCorrect', 'knowledgePointIds', 'tags', 'literacy_tags', 'difficulty_coefficient', 'academic_year', 'grade_semester', 'region', 'exam_type', 'reviewer', 'reviewer_ids', 'internal_note']
+    'gradingSteps', 'judgmentCorrect', 'knowledgePointIds', 'tagIds', 'difficulty_coefficient', 'academic_year', 'grade_semester', 'exam_region', 'exam_type', 'reviewer', 'reviewer_ids', 'internal_note']
   for (const f of fields) {
     if (pendingDraft[f] !== undefined) (form as any)[f] = pendingDraft[f]
   }
@@ -1351,10 +1538,10 @@ async function loadQuestion() {
     form.semester = d.semester || undefined
     form.sub_type = (d as any).sub_type || ''
     form.difficulty_coefficient = (d as any).difficulty_coefficient ?? 0.5
-    form.academic_year = (d as any).academic_year || ''
-    form.grade_semester = (d as any).grade_semester || ''
-    form.region = (d as any).region || ''
-    form.exam_type = (d as any).exam_type || ''
+    form.academic_year = d.academic_year || ''
+    form.grade_semester = d.grade_semester || ''
+    form.exam_region = d.exam_region || ''
+    form.exam_type = d.exam_type || ''
     form.source = d.source || '原创'
     const raw = d.analysis || ''
     if (raw.includes('\n\n---\n\n')) {
@@ -1368,8 +1555,7 @@ async function loadQuestion() {
     form.status = d.status
     form.version = d.version
     form.knowledgePointIds = d.knowledge_points?.map(k => k.id) || []
-    form.tags = (d as any).tags || []
-    form.literacy_tags = (d as any).literacy_tags || []
+    form.tagIds = d.tags?.map(t => t.id) || []
     form.correctAnswer = ''
     form.blanks = [{ position: 1, answer: '' }]
     form.solutionAnswer = ''
@@ -1427,6 +1613,7 @@ onMounted(() => {
   window.addEventListener('beforeunload', handleBeforeUnload)
   loadKpTree()
   loadSpaceMembers()
+  loadTags()
   loadQuestion().then(() => {
     if (!isNew) restoreDraft()
   })
@@ -3017,6 +3204,72 @@ watch(() => form.question_type, () => {
   border-color: var(--accent);
   font-weight: 600;
   box-shadow: 0 1px 3px rgba(0, 122, 255, 0.3);
+}
+
+/* ============ Typeahead 联想输入 ============ */
+.typeahead-wrap {
+  position: relative;
+  margin-top: 10px;
+}
+
+.typeahead-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 10;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+  max-height: 200px;
+  overflow-y: auto;
+  margin-top: 4px;
+}
+
+.typeahead-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-primary);
+  text-align: left;
+  transition: background 0.15s;
+}
+
+.typeahead-item:hover {
+  background: var(--accent-light);
+}
+
+.typeahead-count {
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.typeahead-create {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  padding: 8px 12px;
+  border: 1px dashed var(--accent);
+  border-radius: 8px;
+  background: var(--accent-light);
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.typeahead-create:hover {
+  background: var(--accent);
+  color: #fff;
 }
 
 .form-actions {
