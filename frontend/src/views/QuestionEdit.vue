@@ -332,37 +332,43 @@
       <div class="attr-panel">
         <!-- 左侧分类导航 -->
         <nav class="attr-panel-nav">
+          <!-- 苹果风弹性滑块 -->
+          <div class="attr-nav-slider" :style="{ transform: `translateY(${attrSliderOffset}px)` }" />
           <button
+            ref="attrNavRefs"
             class="attr-nav-item"
             :class="{ active: attrPanelTab === 'kp' }"
-            @click="attrPanelTab = 'kp'"
+            @click="setAttrTab('kp')"
           >
             <AppIcon name="tag" :size="15" />
             <span>知识点</span>
             <span v-if="selectedKpId" class="attr-nav-badge">1</span>
           </button>
           <button
+            ref="attrNavRefs"
             class="attr-nav-item"
             :class="{ active: attrPanelTab === 'competence' }"
-            @click="attrPanelTab = 'competence'"
+            @click="setAttrTab('competence')"
           >
             <AppIcon name="award" :size="15" />
             <span>核心素养</span>
             <span v-if="selectedCompetenceTags.length" class="attr-nav-badge">{{ selectedCompetenceTags.length }}</span>
           </button>
           <button
+            ref="attrNavRefs"
             class="attr-nav-item"
             :class="{ active: attrPanelTab === 'method' }"
-            @click="attrPanelTab = 'method'"
+            @click="setAttrTab('method')"
           >
             <AppIcon name="bookmark" :size="15" />
             <span>解题方法</span>
             <span v-if="selectedMethodTags.length" class="attr-nav-badge">{{ selectedMethodTags.length }}</span>
           </button>
           <button
+            ref="attrNavRefs"
             class="attr-nav-item"
             :class="{ active: attrPanelTab === 'school' }"
-            @click="attrPanelTab = 'school'"
+            @click="setAttrTab('school')"
           >
             <AppIcon name="pin" :size="15" />
             <span>学校来源</span>
@@ -510,8 +516,33 @@
           </div>
         </div>
       </div>
-      <div class="form-actions">
-        <AppButton variant="primary" @click="showAttrDialog = false">完成</AppButton>
+      <!-- 底部全局已选预览条 -->
+      <div class="modal-selected-preview-bar">
+        <div class="preview-track">
+          <!-- 知识点 -->
+          <span v-if="selectedKpName" class="preview-pill preview-pill-kp">
+            <span class="preview-pill-icon">KP</span>
+            <span class="preview-pill-text">{{ selectedKpName }}</span>
+            <button type="button" class="preview-pill-x" @click="clearKp"><AppIcon name="x" :size="10" /></button>
+          </span>
+          <!-- 核心素养 -->
+          <span v-for="t in selectedCompetenceTags" :key="'pv-comp-' + t.id" class="preview-pill preview-pill-comp">
+            <span class="preview-pill-text">{{ t.name }}</span>
+            <button type="button" class="preview-pill-x" @click="toggleTagById(t)"><AppIcon name="x" :size="10" /></button>
+          </span>
+          <!-- 解题方法 -->
+          <span v-for="t in selectedMethodTags" :key="'pv-method-' + t.id" class="preview-pill preview-pill-method">
+            <span class="preview-pill-text">{{ t.name }}</span>
+            <button type="button" class="preview-pill-x" @click="toggleTagById(t)"><AppIcon name="x" :size="10" /></button>
+          </span>
+          <!-- 学校来源 -->
+          <span v-for="t in selectedSchoolTags" :key="'pv-school-' + t.id" class="preview-pill preview-pill-school">
+            <span class="preview-pill-text">{{ t.name }}</span>
+            <button type="button" class="preview-pill-x" @click="toggleTagById(t)"><AppIcon name="x" :size="10" /></button>
+          </span>
+          <span v-if="!selectedKpName && form_tagList.length === 0" class="preview-empty">暂未选择任何属性</span>
+        </div>
+        <AppButton variant="primary" size="sm" @click="showAttrDialog = false">完成</AppButton>
       </div>
     </AppModal>
 
@@ -729,6 +760,32 @@ watch(kpSearchQuery, (q) => {
 const showHistory = ref(false)
 const showAttrDialog = ref(false)
 const attrPanelTab = ref<'kp' | 'competence' | 'method' | 'school'>('kp')
+const attrNavRefs = ref<HTMLElement[]>([])
+const attrSliderOffset = ref(0)
+
+// Tab 索引映射
+const attrTabIndex: Record<string, number> = { kp: 0, competence: 1, method: 2, school: 3 }
+
+function setAttrTab(tab: 'kp' | 'competence' | 'method' | 'school') {
+  attrPanelTab.value = tab
+  nextTick(() => {
+    const idx = attrTabIndex[tab]
+    const el = attrNavRefs.value[idx]
+    if (el) {
+      // 滑块偏移 = 按钮 offsetTop - nav padding-top
+      const nav = el.parentElement
+      const navPaddingTop = nav ? parseInt(getComputedStyle(nav).paddingTop) : 0
+      attrSliderOffset.value = el.offsetTop - navPaddingTop
+    }
+  })
+}
+
+// 弹窗打开时初始化滑块位置
+watch(showAttrDialog, (open) => {
+  if (open) {
+    nextTick(() => setAttrTab(attrPanelTab.value))
+  }
+})
 const grades = ['初一', '初二', '初三', '高一', '高二', '高三']
 
 // 标签分类数据：从后端 API 动态加载
@@ -3360,11 +3417,31 @@ watch(() => form.question_type, () => {
   padding: 10px 8px;
   background: #f5f5f7;
   border-right: 1px solid rgba(0, 0, 0, 0.06);
+  position: relative;
 }
 
 [data-theme='dark'] .attr-panel-nav {
   background: rgba(255, 255, 255, 0.04);
   border-right-color: rgba(255, 255, 255, 0.06);
+}
+
+/* 弹性滑块 — 绝对定位白色圆角底块 */
+.attr-nav-slider {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  height: 36px;
+  background: #fff;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 0 0 0.5px rgba(0, 0, 0, 0.04);
+  transition: transform 0.35s cubic-bezier(0.25, 1, 0.5, 1);
+  pointer-events: none;
+  z-index: 0;
+}
+
+[data-theme='dark'] .attr-nav-slider {
+  background: rgba(255, 255, 255, 0.12);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
 }
 
 .attr-nav-item {
@@ -3378,32 +3455,21 @@ watch(() => form.question_type, () => {
   font-size: 14px;
   color: var(--text-secondary);
   text-align: left;
-  transition: background 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
+  transition: color 0.18s ease;
   font-family: inherit;
   border-radius: 8px;
   position: relative;
+  z-index: 1;
+  min-height: 36px;
 }
 
 .attr-nav-item:hover {
-  background: rgba(0, 0, 0, 0.04);
   color: var(--text-primary);
-}
-
-[data-theme='dark'] .attr-nav-item:hover {
-  background: rgba(255, 255, 255, 0.06);
 }
 
 .attr-nav-item.active {
-  background: #fff;
   color: var(--text-primary);
   font-weight: 600;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 0 0 0.5px rgba(0, 0, 0, 0.04);
-}
-
-[data-theme='dark'] .attr-nav-item.active {
-  background: rgba(255, 255, 255, 0.12);
-  color: #fff;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
 }
 
 .attr-nav-badge {
@@ -3751,6 +3817,111 @@ watch(() => form.question_type, () => {
   display: flex;
   justify-content: flex-end;
   margin-top: 16px;
+}
+
+/* ===== 底部全局已选预览条 ===== */
+.modal-selected-preview-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+[data-theme='dark'] .modal-selected-preview-bar {
+  border-top-color: rgba(255, 255, 255, 0.06);
+}
+
+.preview-track {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: 2px 0;
+}
+
+.preview-track::-webkit-scrollbar {
+  display: none;
+}
+
+.preview-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 4px 3px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  flex-shrink: 0;
+  animation: pill-in 0.2s ease;
+}
+
+@keyframes pill-in {
+  from { opacity: 0; transform: scale(0.9); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.preview-pill-kp {
+  background: rgba(175, 82, 222, 0.1);
+  color: var(--purple);
+}
+
+.preview-pill-comp {
+  background: rgba(175, 82, 222, 0.1);
+  color: var(--purple);
+}
+
+.preview-pill-method {
+  background: rgba(0, 113, 227, 0.1);
+  color: var(--accent);
+}
+
+.preview-pill-school {
+  background: rgba(255, 149, 0, 0.12);
+  color: #ff9500;
+}
+
+.preview-pill-icon {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  opacity: 0.7;
+}
+
+.preview-pill-text {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.preview-pill-x {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: currentColor;
+  cursor: pointer;
+  opacity: 0.5;
+  transition: opacity 0.12s, background 0.12s;
+}
+
+.preview-pill-x:hover {
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.1);
+}
+
+.preview-empty {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-style: italic;
 }
 
 /* ============ 工具类（局部兜底，全局已存在） ============ */

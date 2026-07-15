@@ -2,22 +2,26 @@
   <div>
     <div
       class="kp-picker-node"
-      :class="{ active: selectedKpId === node.id }"
-      :style="{ paddingLeft: level * 18 + 8 + 'px' }"
-      @click="emit('select', node)"
+      :class="{ active: selectedKpId === node.id, 'has-children': hasChildren }"
+      :style="{ paddingLeft: level * 16 + 8 + 'px' }"
+      @click="hasChildren ? emit('toggle-expand', node) : emit('select', node)"
     >
+      <!-- 树干引导虚线（子节点 level >= 1） -->
+      <span v-if="level > 0" class="kp-picker-tree-line" :style="{ left: (level - 1) * 16 + 14 + 'px' }" />
+      <!-- 展开折叠图标 -->
       <span
         v-if="hasChildren"
         class="kp-picker-chevron"
         :class="{ expanded: isExpanded }"
         @click.stop="emit('toggle-expand', node)"
       >
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
           <path d="m9 18 6-6-6-6" />
         </svg>
       </span>
-      <span v-else class="kp-picker-chevron-placeholder" />
-      <span class="kp-picker-name">{{ node.name }}</span>
+      <span v-else class="kp-picker-leaf-dot" />
+      <!-- 节点名称（点击选中） -->
+      <span class="kp-picker-name" @click.stop="emit('select', node)">{{ node.name }}</span>
       <span v-if="hasChildren" class="kp-picker-count">{{ node.children.length }}</span>
     </div>
     <Transition name="kp-picker-expand">
@@ -61,27 +65,47 @@ const isExpanded = computed(() => props.expanded[props.node.id] === true)
 .kp-picker-node {
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 5px 8px;
+  gap: 5px;
+  padding: 5px 10px;
   border-radius: 6px;
   cursor: pointer;
   font-size: 13px;
   color: var(--text-secondary);
   transition: background 0.12s, color 0.12s;
   user-select: none;
+  position: relative;
 }
 
 .kp-picker-node:hover {
-  background: var(--accent-light);
-  color: var(--accent);
+  background: rgba(0, 0, 0, 0.04);
+  color: var(--text-primary);
+}
+
+[data-theme='dark'] .kp-picker-node:hover {
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .kp-picker-node.active {
-  background: var(--accent);
-  color: #fff;
+  background: var(--purple-light);
+  color: var(--purple);
   font-weight: 600;
 }
 
+/* 树干引导虚线 */
+.kp-picker-tree-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  border-left: 1px dashed #e5e5ea;
+  pointer-events: none;
+}
+
+[data-theme='dark'] .kp-picker-tree-line {
+  border-left-color: rgba(255, 255, 255, 0.1);
+}
+
+/* Chevron 展开折叠图标 */
 .kp-picker-chevron {
   display: flex;
   align-items: center;
@@ -90,7 +114,7 @@ const isExpanded = computed(() => props.expanded[props.node.id] === true)
   height: 16px;
   flex-shrink: 0;
   color: var(--text-muted);
-  transition: transform 0.15s;
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   cursor: pointer;
 }
 
@@ -98,9 +122,16 @@ const isExpanded = computed(() => props.expanded[props.node.id] === true)
   transform: rotate(90deg);
 }
 
-.kp-picker-chevron-placeholder {
-  width: 16px;
+/* 叶子节点圆点 */
+.kp-picker-leaf-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  opacity: 0.3;
   flex-shrink: 0;
+  margin-left: 5px;
+  margin-right: 1px;
 }
 
 .kp-picker-name {
@@ -108,6 +139,7 @@ const isExpanded = computed(() => props.expanded[props.node.id] === true)
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  cursor: pointer;
 }
 
 .kp-picker-count {
@@ -120,8 +152,8 @@ const isExpanded = computed(() => props.expanded[props.node.id] === true)
 }
 
 .kp-picker-node.active .kp-picker-count {
-  background: rgba(255, 255, 255, 0.25);
-  color: rgba(255, 255, 255, 0.8);
+  background: rgba(175, 82, 222, 0.15);
+  color: var(--purple);
 }
 
 .kp-picker-children {
