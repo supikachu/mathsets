@@ -550,7 +550,20 @@ async fn resolve_ai_config(
         ModelKind::Text => ai_config.default_model_text.clone(),
         ModelKind::Vision => ai_config.default_model_vision.clone(),
     };
-    let (api_key, provider_name, base_url) = match ai_config.default_provider.as_str() {
+
+    // ⚠️ 智能路由：Vision 模式下根据模型名前缀选择正确的 provider
+    // 避免用 deepseek provider 发送 qwen-vl-plus 等视觉模型请求导致调用失败
+    let preferred_provider = match model_kind {
+        ModelKind::Text => ai_config.default_provider.clone(),
+        ModelKind::Vision => match default_model.as_str() {
+            m if m.starts_with("qwen") => "qwen".to_string(),
+            m if m.starts_with("gpt") => "openai".to_string(),
+            m if m.starts_with("deepseek") => "deepseek".to_string(),
+            _ => ai_config.default_provider.clone(),
+        },
+    };
+
+    let (api_key, provider_name, base_url) = match preferred_provider.as_str() {
         "deepseek" => (
             ai_config.deepseek_api_key.clone(),
             "deepseek",
@@ -573,7 +586,12 @@ async fn resolve_ai_config(
         ),
     };
 
-    let api_key = api_key.ok_or_else(|| "未配置 AI API Key，请到设置页配置或联系管理员".to_string())?;
+    let api_key = api_key.ok_or_else(|| {
+        format!(
+            "未配置 {} 的 API Key（视觉模型 {} 需要对应的 API Key），请在 .env 中设置或到设置页配置",
+            provider_name, default_model
+        )
+    })?;
 
     // 用户自定义模型覆盖平台默认
     let model = match model_kind {
