@@ -590,8 +590,8 @@
     <!-- AI 智能识别弹窗 -->
     <AppModal v-model="showAiDialog" title="AI 智能识别" size="lg">
       <div class="ai-dialog-body">
-        <!-- 输入区 -->
-        <div v-if="!aiResult" class="ai-input-section">
+        <!-- 输入区（仅当无单题结果且无批量结果时显示） -->
+        <div v-if="!aiResult && aiBatchResults.length === 0" class="ai-input-section">
           <!-- 模式切换 Tab -->
           <div class="ai-mode-tabs">
             <button :class="{ active: aiMode === 'api' }" @click="aiMode = 'api'">API 智能解析</button>
@@ -1593,8 +1593,10 @@ async function startImageParse(file: File) {
   doStartImageParse(file)
 }
 
-function executePendingUpload() {
+async function executePendingUpload() {
   snapshotOverwriteConfirm.value = false
+  // 用户确认丢弃旧数据 — 先清除 IndexedDB 中的旧快照，再执行上传
+  await clearBatchSnapshot()
   if (pendingUploadAction) {
     pendingUploadAction()
     pendingUploadAction = null
@@ -1633,11 +1635,14 @@ async function doImageParse(file: File) {
     const imageFile = blobToFile(compressed)
     const res = await withBackoffRetry(() => aiApi.parseImage(imageFile))
     const questions = res.data.data
-    handleBatchResults(questions.map((q, i) => ({
+    await handleBatchResults(questions.map((q, i) => ({
       question: q, page: 1, status: 'success' as const
     })), 'image')
   } catch (e: any) {
+    console.error('[doImageParse] 失败:', e?.message || e)
     toast.error(e?.response?.data?.error || e?.message || '图片识别失败')
+    // 失败时清除可能残留的旧快照，避免下次上传被快照弹窗拦截
+    await clearBatchSnapshot()
   }
 }
 
@@ -1690,7 +1695,7 @@ async function doPdfParse(file: File) {
     }
   }
 
-  handleBatchResults(batchItems, 'pdf', pages.length)
+  await handleBatchResults(batchItems, 'pdf', pages.length)
 }
 
 // 处理批量结果 — 保存到 IndexedDB 快照
@@ -1698,6 +1703,10 @@ async function handleBatchResults(items: BatchItem[], source: 'image' | 'pdf', t
   aiBatchResults.value = items
   aiBatchIndex.value = 0
   aiParsing.value = false
+  // 重置进度条 — 否则进度条永远显示"正在压缩…"
+  aiBatchProgress.value = { current: 0, total: 0, text: '' }
+  // 清除单题结果 — 否则 v-else-if="aiResult" 会拦截批量审阅面板的显示
+  aiResult.value = null
 
   // 补丁一：保存到 IndexedDB
   const successQuestions = items.filter(i => i.status === 'success').map(i => i.question!)
