@@ -1154,15 +1154,22 @@ onBeforeUnmount(() => {
   background: rgba(255, 255, 255, 0.12);
 }
 
-/* 结论高亮区 */
+/* 结论收尾段 — 融入卡片底色，纯文本强化 */
 .paper-conclusion {
-  margin-top: 12px;
-  padding: 10px 14px;
-  border-radius: var(--radius-md);
-  background: var(--accent-light);
-  border-left: 3px solid var(--accent);
+  margin-top: 24px;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  border: none;
+  box-shadow: none;
   font-size: 14px;
-  color: var(--text-primary);
+  font-weight: 600;
+  color: #1d1d1f;
+  line-height: 1.8;
+}
+
+[data-theme='dark'] .paper-conclusion {
+  color: #f5f5f7;
 }
 
 /* 淡入淡出过渡 */
