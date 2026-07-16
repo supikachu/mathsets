@@ -14,19 +14,49 @@ pub enum AiError {
 /// AI Provider trait
 #[async_trait]
 pub trait AiProvider: Send + Sync {
-    /// 文本解析
+    /// 文本解析（可传入自定义 system prompt）
+    async fn parse_text_with_prompt(
+        &self,
+        text: &str,
+        prompt: &str,
+        model: Option<&str>,
+    ) -> Result<String, AiError>;
+
+    /// 图片 OCR（base64 编码的图片数据，不含 data:image 前缀，可传入自定义 system prompt）
+    async fn parse_image_with_prompt(
+        &self,
+        image_base64: &str,
+        prompt: &str,
+        model: Option<&str>,
+    ) -> Result<String, AiError>;
+
+    /// 文本解析（默认实现，使用默认 prompt）
     async fn parse_text(
         &self,
         text: &str,
         model: Option<&str>,
-    ) -> Result<String, AiError>;
+    ) -> Result<String, AiError> {
+        self.parse_text_with_prompt(
+            text,
+            crate::ai::prompt::TEXT_PARSE_SYSTEM_PROMPT,
+            model,
+        )
+        .await
+    }
 
-    /// 图片 OCR（base64 编码的图片数据，不含 data:image 前缀）
+    /// 图片 OCR（默认实现，使用默认 prompt）
     async fn parse_image(
         &self,
         image_base64: &str,
         model: Option<&str>,
-    ) -> Result<String, AiError>;
+    ) -> Result<String, AiError> {
+        self.parse_image_with_prompt(
+            image_base64,
+            crate::ai::prompt::IMAGE_OCR_SYSTEM_PROMPT,
+            model,
+        )
+        .await
+    }
 }
 
 /// 工厂：根据 provider 名称创建实例

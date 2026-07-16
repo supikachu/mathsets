@@ -75,3 +75,11 @@ pub struct ParsedQuestion {
     #[serde(default)]
     pub kp_matches: Vec<KpMatch>,
 }
+
+/// 批量解析响应 — LLM 批量输出用 {"questions": [...]} 包裹
+/// 注意：实际批量解析走 serde_json::Value 逐题隔离（补丁十防连坐），
+/// 此结构仅用于类型参考和文档。
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct BatchParseResponse {
+    pub questions: Vec<ParsedQuestion>,
+}

@@ -6,10 +6,12 @@ pub mod handlers;
 pub mod models;
 
 use axum::{
+    extract::DefaultBodyLimit,
     middleware,
     routing::{delete, get, post, put},
     Router,
 };
+use tower::limit::GlobalConcurrencyLimitLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
@@ -86,10 +88,17 @@ pub fn build_app(state: AppState) -> Router {
         .route("/papers/{paper_id}/questions", post(handlers::papers::add_question_to_paper))
         .route("/papers/{paper_id}/questions/{question_id}", put(handlers::papers::update_paper_question))
         .route("/papers/{paper_id}/questions/{question_id}", delete(handlers::papers::remove_question_from_paper))
-        // AI 智能录入（阶段 A：文本解析 + 配置；parse_image 阶段 C 挂载）
+        // AI 智能录入
         .route("/ai/parse-text", post(handlers::ai::parse_text))
         .route("/ai/settings", get(handlers::ai::get_settings))
         .route("/ai/settings", put(handlers::ai::update_settings))
+        // parse-image 路由单独套全局限流层 + body 限制（补丁六后端：全局最多 10 个并发 OCR 请求）
+        .merge(
+            Router::new()
+                .route("/ai/parse-image", post(handlers::ai::parse_image))
+                .layer(GlobalConcurrencyLimitLayer::new(10))
+                .layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
+        )
         // 标签管理
         .route("/tags", get(handlers::tags::list_tags))
         .route("/tags", post(handlers::tags::create_tag))

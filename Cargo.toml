@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 # Web framework
-axum = "0.8"
+axum = { version = "0.8", features = ["multipart"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -41,6 +41,12 @@ aes-gcm = "0.10"
 base64 = "0.22"
 regex = "1"
 async-trait = "0.1"
+
+# Multipart 文件类型嗅探（零信任安全防护 — Magic Number 校验）
+infer = "0.16"
+
+# 并发限流中间件（parse-image 路由全局并发控制）
+tower = { version = "0.5", features = ["limit"] }
 
 [dev-dependencies]
 # Axum 测试工具（oneshot 调用 Router）

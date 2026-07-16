@@ -73,9 +73,10 @@ struct ImageUrl {
 
 #[async_trait]
 impl AiProvider for DeepSeekProvider {
-    async fn parse_text(
+    async fn parse_text_with_prompt(
         &self,
         text: &str,
+        prompt: &str,
         model: Option<&str>,
     ) -> Result<String, AiError> {
         let model_name = model.unwrap_or("deepseek-chat").to_string();
@@ -85,7 +86,7 @@ impl AiProvider for DeepSeekProvider {
             messages: vec![
                 ChatMessage {
                     role: "system",
-                    content: crate::ai::prompt::TEXT_PARSE_SYSTEM_PROMPT.to_string(),
+                    content: prompt.to_string(),
                 },
                 ChatMessage {
                     role: "user",
@@ -130,9 +131,10 @@ impl AiProvider for DeepSeekProvider {
             .ok_or_else(|| AiError::Upstream(status, "响应中无 choices".to_string()))
     }
 
-    async fn parse_image(
+    async fn parse_image_with_prompt(
         &self,
         image_base64: &str,
+        prompt: &str,
         model: Option<&str>,
     ) -> Result<String, AiError> {
         let model_name = model.unwrap_or("qwen-vl-plus").to_string();
@@ -143,7 +145,7 @@ impl AiProvider for DeepSeekProvider {
             "messages": [
                 {
                     "role": "system",
-                    "content": crate::ai::prompt::IMAGE_OCR_SYSTEM_PROMPT
+                    "content": prompt
                 },
                 {
                     "role": "user",
