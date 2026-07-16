@@ -54,7 +54,9 @@ export async function* pdfToImages(
   options?: PdfToImagesOptions,
 ): AsyncGenerator<PdfPageImage, void, unknown> {
   const arrayBuffer = await file.arrayBuffer()
-  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise
+  // 保留 loadingTask 引用 — destroy() 在 loadingTask 上，PDFDocumentProxy 只有 cleanup()
+  const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer })
+  const pdf = await loadingTask.promise
 
   const originalPages = pdf.numPages
   // ⚠️ 补丁十三：强制截断为 30 页
@@ -97,6 +99,7 @@ export async function* pdfToImages(
       options?.onProgress?.(i, total)
     }
   } finally {
-    await pdf.destroy()
+    // destroy() 在 PDFDocumentLoadingTask 上，不是 PDFDocumentProxy
+    await loadingTask.destroy()
   }
 }
