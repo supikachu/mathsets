@@ -596,6 +596,7 @@
           <div class="ai-mode-tabs">
             <button :class="{ active: aiMode === 'api' }" @click="aiMode = 'api'">API 智能解析</button>
             <button :class="{ active: aiMode === 'markdown' }" @click="aiMode = 'markdown'">Markdown 粘贴</button>
+            <button :class="{ active: aiMode === 'image' }" @click="aiMode = 'image'">图片/PDF 识别</button>
           </div>
 
           <!-- Markdown 模式：提示词复制区 -->
@@ -612,9 +613,42 @@
             </div>
           </div>
 
+          <!-- 图片/PDF 上传区 -->
+          <div v-if="aiMode === 'image'" class="ai-upload-section">
+            <div
+              class="ai-upload-area"
+              :class="{ dragover: aiUploadAreaHover }"
+              @dragover.prevent="aiUploadAreaHover = true"
+              @dragleave.prevent="aiUploadAreaHover = false"
+              @drop.prevent="handleFileDrop"
+              @click="fileInputRef?.click()"
+            >
+              <AppIcon name="upload" :size="48" />
+              <p class="ai-upload-hint">点击或拖拽上传图片/PDF 文件</p>
+              <p class="ai-upload-sub">支持 JPEG / PNG / WebP / PDF（最多 30 页）</p>
+              <input
+                ref="fileInputRef"
+                type="file"
+                accept="image/*,application/pdf"
+                style="display:none"
+                @change="handleFileSelect"
+              />
+            </div>
+            <div v-if="aiBatchProgress.total > 0" class="ai-batch-progress">
+              <div class="ai-progress-bar">
+                <div class="ai-progress-fill" :style="{ width: (aiBatchProgress.current / aiBatchProgress.total * 100) + '%' }"></div>
+              </div>
+              <span>{{ aiBatchProgress.text }}</span>
+            </div>
+            <div class="ai-actions">
+              <AppButton variant="ghost" @click="showAiDialog = false">取消</AppButton>
+            </div>
+          </div>
+
           <p v-if="aiMode === 'api'" class="ai-hint">粘贴题目文本（含题干、选项、答案、解析），AI 将自动识别结构并填入表单。</p>
-          <p v-else class="ai-hint">粘贴 AI 按推荐格式输出的 Markdown，系统将自动解析并填入表单。</p>
+          <p v-else-if="aiMode === 'markdown'" class="ai-hint">粘贴 AI 按推荐格式输出的 Markdown，系统将自动解析并填入表单。</p>
           <textarea
+            v-if="aiMode !== 'image'"
             v-model="aiText"
             class="ai-textarea"
             rows="10"
@@ -622,8 +656,8 @@
               ? '在此粘贴 AI 输出的 Markdown...'
               : '例如：\n已知函数 f(x) = 2x + 1，求 f(3) 的值。\n解：f(3) = 2×3 + 1 = 7'"
           ></textarea>
-          <div v-if="aiError" class="ai-error">{{ aiError }}</div>
-          <div class="ai-actions">
+          <div v-if="aiError && aiMode !== 'image'" class="ai-error">{{ aiError }}</div>
+          <div v-if="aiMode !== 'image'" class="ai-actions">
             <AppButton variant="ghost" @click="showAiDialog = false">取消</AppButton>
             <AppButton variant="primary" :loading="aiParsing" @click="doAiParse">
               <AppIcon name="sparkles" :size="16" /> {{ aiParsing ? '解析中…' : '开始识别' }}
@@ -632,7 +666,7 @@
         </div>
 
         <!-- 结果预览 -->
-        <div v-else class="ai-result-section">
+        <div v-else-if="aiResult" class="ai-result-section">
           <div class="ai-result-meta">
             <AppBadge :color="aiResult.confidence >= 0.8 ? 'green' : aiResult.confidence >= 0.5 ? 'yellow' : 'red'">
               置信度 {{ Math.round(aiResult.confidence * 100) }}%
@@ -674,6 +708,92 @@
             <AppButton variant="success" @click="applyAiResult"><AppIcon name="check" :size="16" /> 应用到表单</AppButton>
           </div>
         </div>
+
+        <!-- 批量审阅面板 -->
+        <div v-else class="ai-batch-section">
+          <div class="ai-batch-header">
+            <span class="ai-batch-title">批量审阅（{{ aiBatchIndex + 1 }} / {{ aiBatchResults.length }}）</span>
+            <div class="ai-batch-stats">
+              <AppBadge color="green">{{ aiBatchResults.filter(r => r.status === 'success').length }} 题成功</AppBadge>
+              <AppBadge v-if="aiBatchResults.filter(r => r.status === 'error').length" color="red">{{ aiBatchResults.filter(r => r.status === 'error').length }} 页失败</AppBadge>
+            </div>
+          </div>
+          <div class="ai-batch-body">
+            <!-- 左侧题目列表 -->
+            <div class="ai-batch-list">
+              <div
+                v-for="(item, idx) in aiBatchResults"
+                :key="idx"
+                class="ai-batch-card"
+                :class="{
+                  active: idx === aiBatchIndex,
+                  error: item.status === 'error',
+                  processed: isBatchProcessed(idx)
+                }"
+                @click="aiBatchIndex = idx"
+              >
+                <template v-if="item.status === 'success'">
+                  <span class="ai-batch-num">第{{ idx + 1 }}题</span>
+                  <span class="ai-batch-type">{{ ({ choice: '选择', fill: '填空', solution: '解答' } as Record<string, string>)[item.question!.question_type] }}</span>
+                  <span class="ai-batch-stem">{{ item.question!.stem.slice(0, 40) }}{{ item.question!.stem.length > 40 ? '…' : '' }}</span>
+                </template>
+                <template v-else>
+                  <span class="ai-batch-num">第{{ item.page }}页</span>
+                  <span class="ai-batch-error-icon">⚠ 解析失败</span>
+                  <span class="ai-batch-error-msg">{{ item.error }}</span>
+                </template>
+                <span v-if="isBatchProcessed(idx)" class="ai-batch-check">✓</span>
+              </div>
+            </div>
+            <!-- 右侧当前题预览 -->
+            <div class="ai-batch-preview">
+              <template v-if="aiBatchResults[aiBatchIndex]?.status === 'success'">
+                <div class="ai-preview-block">
+                  <div class="ai-preview-label">题干</div>
+                  <div class="ai-preview-content">{{ aiBatchResults[aiBatchIndex].question!.stem }}</div>
+                </div>
+                <div v-if="aiBatchResults[aiBatchIndex].question!.options?.length" class="ai-preview-block">
+                  <div class="ai-preview-label">选项</div>
+                  <div v-for="opt in aiBatchResults[aiBatchIndex].question!.options" :key="opt.label" class="ai-preview-option">
+                    <span class="ai-opt-label">{{ opt.label }}.</span> {{ opt.content }}
+                  </div>
+                </div>
+                <div class="ai-preview-block">
+                  <div class="ai-preview-label">答案</div>
+                  <div class="ai-preview-content">
+                    <span v-if="aiBatchResults[aiBatchIndex].question!.correct_answer.kind === 'choice'">{{ aiBatchResults[aiBatchIndex].question!.correct_answer.value.options?.join(', ') }}</span>
+                    <span v-else-if="aiBatchResults[aiBatchIndex].question!.correct_answer.kind === 'fill'">{{ aiBatchResults[aiBatchIndex].question!.correct_answer.value.blanks?.map(b => b.answer).join('、') }}</span>
+                    <span v-else>{{ aiBatchResults[aiBatchIndex].question!.correct_answer.value.subs?.map(s => s.content).join('；') }}</span>
+                  </div>
+                </div>
+                <div v-if="aiBatchResults[aiBatchIndex].question!.warnings.length" class="ai-warnings">
+                  <div v-for="(w, i) in aiBatchResults[aiBatchIndex].question!.warnings" :key="i" class="ai-warning-item">⚠ {{ w }}</div>
+                </div>
+                <div class="ai-batch-actions">
+                  <AppButton variant="ghost" size="sm" @click="mergeWithPrevious(aiBatchIndex)" v-if="aiBatchIndex > 0">
+                    <AppIcon name="arrow-up" :size="14" /> 向上合并
+                  </AppButton>
+                  <AppButton variant="ghost" size="sm" @click="skipBatchQuestion">跳过此题</AppButton>
+                  <AppButton variant="success" size="sm" @click="applyBatchQuestion">
+                    <AppIcon name="check" :size="14" /> 应用此题
+                  </AppButton>
+                </div>
+              </template>
+              <template v-else>
+                <div class="ai-batch-error-detail">
+                  <p class="ai-batch-error-title">⚠ 第{{ aiBatchResults[aiBatchIndex]?.page }}页解析失败</p>
+                  <p class="ai-batch-error-desc">{{ aiBatchResults[aiBatchIndex]?.error }}</p>
+                  <AppButton variant="primary" size="sm" :loading="aiParsing" @click="retryFailedPage(aiBatchIndex)">
+                    <AppIcon name="refresh" :size="14" /> 重新解析此页
+                  </AppButton>
+                </div>
+              </template>
+            </div>
+          </div>
+          <div class="ai-actions">
+            <AppButton variant="ghost" @click="closeBatchReview">完成/关闭</AppButton>
+          </div>
+        </div>
       </div>
     </AppModal>
 
@@ -685,6 +805,23 @@
       confirm-text="覆盖"
       danger
       @confirm="confirmAiOverwrite"
+    />
+    <!-- 快照覆盖警告（补丁八） -->
+    <AppConfirm
+      v-model="snapshotOverwriteConfirm"
+      title="发现未完成的批量录入"
+      message="检测到您还有未处理完的批量题目。继续上传新题目将清空之前的记录，是否继续？"
+      confirm-text="丢弃旧数据"
+      danger
+      @confirm="executePendingUpload"
+    />
+    <!-- 快照恢复弹窗 -->
+    <AppConfirm
+      v-model="snapshotRestoreConfirm"
+      title="恢复未完成的批量录入"
+      message="检测到上次有未完成的批量录入，是否继续？"
+      confirm-text="继续录入"
+      @confirm="restoreFromSnapshot"
     />
   </div>
 </template>
@@ -702,6 +839,10 @@ import { useSelectedKp } from '@/composables/useSelectedKp'
 import KpPickerNode from '@/components/KpPickerNode.vue'
 import { useLayoutState } from '@/composables/useLayoutState'
 import { parseMarkdownToQuestion, RECOMMENDED_PROMPT } from '@/utils/parseMarkdown'
+import { compressImage, blobToFile } from '@/utils/imageCompressor'
+import { runWithConcurrency, withBackoffRetry, type PoolResult } from '@/utils/concurrency'
+import { pdfToImages, type PdfPageImage } from '@/utils/pdfToImages'
+import { saveBatchSnapshot, loadBatchSnapshot, clearBatchSnapshot, hasUnfinishedSnapshot, type BatchSnapshot } from '@/utils/batchSnapshot'
 
 const route = useRoute()
 const router = useRouter()
@@ -1223,10 +1364,31 @@ watch([showAiDialog, showAttrDialog], ([aiOpen, attrOpen]) => {
 // AI 痕迹高亮：记录哪些字段被 AI 填充
 const aiGeneratedFields = ref<Set<string>>(new Set())
 // 解析模式：api 调用后端 / markdown 前端纯解析
-const aiMode = ref<'api' | 'markdown'>('api')
+const aiMode = ref<'api' | 'markdown' | 'image'>('api')
 const promptCopied = ref(false)
 // AI 结果应用期间跳过 watch 对 question_type 的重置（避免覆盖刚赋好的 sub_answers）
 const applyingAiResult = ref(false)
+
+// ===== 图片/PDF 批量识别 =====
+interface BatchItem {
+  question: ParsedQuestion | null  // null = 解析失败
+  page: number                     // 来源页码
+  error?: string                   // 失败时的错误信息
+  status: 'success' | 'error'
+}
+const aiBatchResults = ref<BatchItem[]>([])
+const aiBatchIndex = ref(0)  // 当前审阅的题目索引
+const aiBatchProgress = ref({ current: 0, total: 0, text: '' })
+const aiImageFile = ref<File | null>(null)
+const aiUploadAreaHover = ref(false)
+const fileInputRef = ref<HTMLInputElement | null>(null)
+// 快照覆盖警告弹窗（补丁八）
+const snapshotOverwriteConfirm = ref(false)
+let pendingUploadAction: (() => void) | null = null
+// 快照恢复弹窗
+const snapshotRestoreConfirm = ref(false)
+let pendingSnapshotRestore: BatchSnapshot | null = null
+const batchProcessedSet = ref<Set<number>>(new Set())
 
 // AI Dirty Check：检测表单是否有手动输入内容
 function isFormDirty(): boolean {
@@ -1397,6 +1559,357 @@ function doApplyAiResult(q: ParsedQuestion) {
   setTimeout(() => {
     aiGeneratedFields.value.clear()
   }, 8000)
+}
+
+// ===== 图片/PDF 批量识别 =====
+
+// 处理文件选择
+function handleFileSelect(e: Event) {
+  const input = e.target as HTMLInputElement
+  if (input.files?.[0]) {
+    startImageParse(input.files[0])
+  }
+}
+
+// 处理文件拖放
+function handleFileDrop(e: DragEvent) {
+  aiUploadAreaHover.value = false
+  const file = e.dataTransfer?.files?.[0]
+  if (file) {
+    startImageParse(file)
+  }
+}
+
+// 补丁八：上传前检查旧快照
+async function startImageParse(file: File) {
+  // 检查是否有未完成的旧快照
+  const oldSnapshot = await hasUnfinishedSnapshot()
+  if (oldSnapshot) {
+    pendingUploadAction = () => doStartImageParse(file)
+    snapshotOverwriteConfirm.value = true
+    return
+  }
+  doStartImageParse(file)
+}
+
+function executePendingUpload() {
+  snapshotOverwriteConfirm.value = false
+  if (pendingUploadAction) {
+    pendingUploadAction()
+    pendingUploadAction = null
+  }
+}
+
+async function doStartImageParse(file: File) {
+  aiImageFile.value = file
+  const isPdf = file.type === 'application/pdf'
+  try {
+    if (isPdf) {
+      await doPdfParse(file)
+    } else {
+      await doImageParse(file)
+    }
+  } catch (e: any) {
+    toast.error(e?.message || '文件解析失败')
+  } finally {
+    aiParsing.value = false
+    aiBatchProgress.value = { current: 0, total: 0, text: '' }
+  }
+}
+
+// 补丁十五：try/catch/finally 防假死
+async function doImageParse(file: File) {
+  aiParsing.value = true
+  aiBatchProgress.value = { current: 0, total: 1, text: '正在压缩并识别图片…' }
+  try {
+    const compressed = await compressImage(file)
+    const imageFile = blobToFile(compressed)
+    const res = await withBackoffRetry(() => aiApi.parseImage(imageFile))
+    const questions = res.data.data
+    handleBatchResults(questions.map((q, i) => ({
+      question: q, page: 1, status: 'success' as const
+    })), 'image')
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error || e?.message || '图片识别失败')
+  }
+}
+
+async function doPdfParse(file: File) {
+  aiParsing.value = true
+  aiBatchProgress.value = { current: 0, total: 0, text: '正在渲染 PDF…' }
+
+  // 收集所有页面的图片
+  const pages: PdfPageImage[] = []
+  for await (const pageImg of pdfToImages(file, {
+    onProgress: (cur, total) => {
+      aiBatchProgress.value = { current: cur, total, text: `正在渲染 PDF 第 ${cur}/${total} 页…` }
+    },
+    onTruncated: (orig, actual) => {
+      toast.warning(`PDF 文件过大（${orig} 页），为保证性能仅处理前 ${actual} 页`)
+    },
+  })) {
+    pages.push(pageImg)
+  }
+
+  aiBatchProgress.value = { current: 0, total: pages.length, text: `开始 OCR 识别（${pages.length} 页）…` }
+
+  // 并发 OCR 识别
+  const results = await runWithConcurrency(
+    pages,
+    async (pageImg) => {
+      // 将 dataUrl 转 Blob → 压缩 → 上传
+      const blob = await (await fetch(pageImg.dataUrl)).blob()
+      const compressed = await compressImage(blob)
+      const imageFile = blobToFile(compressed, `page-${pageImg.page}.webp`)
+      const res = await withBackoffRetry(() => aiApi.parseImage(imageFile))
+      return res.data.data
+    },
+    (cur, total) => {
+      aiBatchProgress.value = { current: cur, total, text: `OCR 识别中… ${cur}/${total} 页完成` }
+    },
+  )
+
+  // 处理并发结果（补丁三：拒绝静默吞错）
+  const batchItems: BatchItem[] = []
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i] as PoolResult<ParsedQuestion[]>
+    if (r.status === 'success' && r.data) {
+      // 一个页面可能返回多道题
+      for (const q of r.data) {
+        batchItems.push({ question: q, page: pages[i].page, status: 'success' })
+      }
+    } else {
+      batchItems.push({ question: null, page: pages[i].page, status: 'error', error: r.error })
+    }
+  }
+
+  handleBatchResults(batchItems, 'pdf', pages.length)
+}
+
+// 处理批量结果 — 保存到 IndexedDB 快照
+async function handleBatchResults(items: BatchItem[], source: 'image' | 'pdf', totalPages?: number) {
+  aiBatchResults.value = items
+  aiBatchIndex.value = 0
+  aiParsing.value = false
+
+  // 补丁一：保存到 IndexedDB
+  const successQuestions = items.filter(i => i.status === 'success').map(i => i.question!)
+  if (successQuestions.length > 0) {
+    await saveBatchSnapshot({
+      questions: successQuestions,
+      currentIndex: 0,
+      processedIds: [],
+      createdAt: Date.now(),
+      source,
+      totalPages,
+    })
+  }
+}
+
+// 标记某题已处理
+function isBatchProcessed(idx: number): boolean {
+  return batchProcessedSet.value.has(idx)
+}
+
+// 应用当前批量题目到表单
+function applyBatchQuestion() {
+  const item = aiBatchResults.value[aiBatchIndex.value]
+  if (!item || item.status !== 'success' || !item.question) return
+
+  doApplyAiResult(item.question)
+
+  // doApplyAiResult 会关闭弹窗，批量模式下需要重新打开
+  showAiDialog.value = true
+
+  // 标记已处理
+  batchProcessedSet.value.add(aiBatchIndex.value)
+
+  // 更新快照
+  updateBatchSnapshot()
+
+  // 自动跳到下一题
+  moveToNextBatch()
+}
+
+// 跳过当前题目
+function skipBatchQuestion() {
+  batchProcessedSet.value.add(aiBatchIndex.value)
+  updateBatchSnapshot()
+  moveToNextBatch()
+}
+
+function moveToNextBatch() {
+  // 找到下一个未处理的题目
+  for (let i = aiBatchIndex.value + 1; i < aiBatchResults.value.length; i++) {
+    if (!batchProcessedSet.value.has(i)) {
+      aiBatchIndex.value = i
+      return
+    }
+  }
+  // 没有下一个了，检查是否全部完成
+  const allProcessed = aiBatchResults.value.every((_, i) => batchProcessedSet.value.has(i))
+  if (allProcessed) {
+    toast.success('所有题目已处理完毕')
+    closeBatchReview()
+  } else {
+    // 回到第一个未处理的
+    for (let i = 0; i < aiBatchResults.value.length; i++) {
+      if (!batchProcessedSet.value.has(i)) {
+        aiBatchIndex.value = i
+        return
+      }
+    }
+  }
+}
+
+// 补丁十二：跨页合并 — 将当前题追加到前一题
+async function mergeWithPrevious(idx: number) {
+  if (idx <= 0) return
+  const current = aiBatchResults.value[idx]
+  const previous = aiBatchResults.value[idx - 1]
+  if (current.status !== 'success' || previous.status !== 'success') {
+    toast.warning('无法合并：前后题目必须都是成功解析状态')
+    return
+  }
+  if (!current.question || !previous.question) return
+
+  // 追加拼接（加换行符）
+  previous.question.stem += '\n' + current.question.stem
+  if (current.question.options?.length) {
+    previous.question.options = [
+      ...(previous.question.options || []),
+      ...current.question.options,
+    ]
+  }
+  if (current.question.analysis?.length) {
+    previous.question.analysis = [
+      ...(previous.question.analysis || []),
+      ...current.question.analysis,
+    ]
+  }
+  // 合并答案
+  if (current.question.correct_answer.kind === 'solution' && previous.question.correct_answer.kind === 'solution') {
+    const prevSubs = previous.question.correct_answer.value.subs || []
+    const curSubs = current.question.correct_answer.value.subs || []
+    previous.question.correct_answer.value.subs = [...prevSubs, ...curSubs]
+  }
+  previous.question.warnings.push(`已合并第 ${idx + 1} 题（跨页拼接）`)
+  previous.question.knowledge_points = [
+    ...new Set([...previous.question.knowledge_points, ...current.question.knowledge_points]),
+  ]
+
+  // 从数组中移除当前题
+  aiBatchResults.value.splice(idx, 1)
+  aiBatchIndex.value = idx - 1
+
+  // 更新快照
+  await updateBatchSnapshot()
+  toast.success('已合并到上一题')
+}
+
+// 重新解析失败页面（补丁三）
+async function retryFailedPage(idx: number) {
+  const item = aiBatchResults.value[idx]
+  if (!item || item.status !== 'error') return
+
+  aiParsing.value = true
+  try {
+    // 重新从原图片/PDF 获取该页数据并解析
+    if (!aiImageFile.value) {
+      toast.error('无法重新解析：原始文件已丢失')
+      return
+    }
+
+    const isPdf = aiImageFile.value.type === 'application/pdf'
+    let imageFile: File
+
+    if (isPdf) {
+      // 重新渲染该页
+      const pages: PdfPageImage[] = []
+      for await (const p of pdfToImages(aiImageFile.value)) {
+        pages.push(p)
+      }
+      const targetPage = pages.find(p => p.page === item.page)
+      if (!targetPage) {
+        toast.error('无法找到原始页面')
+        return
+      }
+      const blob = await (await fetch(targetPage.dataUrl)).blob()
+      const compressed = await compressImage(blob)
+      imageFile = blobToFile(compressed, `page-${item.page}.webp`)
+    } else {
+      const compressed = await compressImage(aiImageFile.value)
+      imageFile = blobToFile(compressed)
+    }
+
+    const res = await withBackoffRetry(() => aiApi.parseImage(imageFile))
+    const questions = res.data.data
+
+    // 替换失败项为新的成功结果
+    const newItems: BatchItem[] = questions.map(q => ({
+      question: q, page: item.page, status: 'success' as const
+    }))
+    aiBatchResults.value.splice(idx, 1, ...newItems)
+    aiBatchIndex.value = idx
+
+    await updateBatchSnapshot()
+    toast.success(`第 ${item.page} 页重新解析成功，识别出 ${questions.length} 道题`)
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error || e?.message || '重新解析失败')
+  } finally {
+    aiParsing.value = false
+  }
+}
+
+// 更新 IndexedDB 快照
+async function updateBatchSnapshot() {
+  const successQuestions = aiBatchResults.value
+    .filter(i => i.status === 'success' && !batchProcessedSet.value.has(aiBatchResults.value.indexOf(i)))
+    .map(i => i.question!)
+  if (successQuestions.length > 0) {
+    await saveBatchSnapshot({
+      questions: successQuestions,
+      currentIndex: aiBatchIndex.value,
+      processedIds: [...batchProcessedSet.value],
+      createdAt: Date.now(),
+      source: aiImageFile.value?.type === 'application/pdf' ? 'pdf' : 'image',
+    })
+  } else {
+    await clearBatchSnapshot()
+  }
+}
+
+// 关闭批量审阅
+async function closeBatchReview() {
+  // 检查是否全部处理完
+  const unprocessed = aiBatchResults.value.filter((_, i) => !batchProcessedSet.value.has(i)).length
+  if (unprocessed > 0) {
+    toast.info(`还有 ${unprocessed} 题未处理，下次可从快照恢复`)
+  } else {
+    await clearBatchSnapshot()
+  }
+  aiBatchResults.value = []
+  aiBatchIndex.value = 0
+  batchProcessedSet.value = new Set()
+  showAiDialog.value = false
+}
+
+// 恢复快照（onMounted 时调用）
+async function restoreFromSnapshot() {
+  snapshotRestoreConfirm.value = false
+  if (!pendingSnapshotRestore) return
+
+  aiBatchResults.value = pendingSnapshotRestore.questions.map((q, i) => ({
+    question: q,
+    page: i + 1,
+    status: 'success' as const,
+  }))
+  aiBatchIndex.value = pendingSnapshotRestore.currentIndex
+  batchProcessedSet.value = new Set(pendingSnapshotRestore.processedIds)
+  showAiDialog.value = true
+  aiMode.value = 'image'
+  pendingSnapshotRestore = null
+  toast.success(`已恢复 ${aiBatchResults.value.length} 道题的批量录入`)
 }
 
 // ===== 选项增删 =====
@@ -1918,6 +2431,14 @@ onMounted(() => {
     if (!isNew) restoreDraft()
   })
   if (isNew) restoreDraft()
+})
+// 补丁一：检查 IndexedDB 中是否有未完成的批量录入快照
+onMounted(async () => {
+  const snapshot = await hasUnfinishedSnapshot()
+  if (snapshot) {
+    pendingSnapshotRestore = snapshot
+    snapshotRestoreConfirm.value = true
+  }
 })
 onBeforeUnmount(() => {
   window.removeEventListener('beforeunload', handleBeforeUnload)
@@ -4382,4 +4903,67 @@ watch(() => form.question_type, () => {
   border-radius: var(--radius);
   transition: box-shadow 0.5s ease;
 }
+
+/* 图片/PDF 上传区 */
+.ai-upload-section { display: flex; flex-direction: column; gap: 16px; }
+.ai-upload-area {
+  border: 2px dashed var(--border-color, #ddd);
+  border-radius: 12px;
+  padding: 48px 24px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary, #888);
+}
+.ai-upload-area:hover, .ai-upload-area.dragover {
+  border-color: var(--primary-color, #6366f1);
+  background: var(--bg-hover, rgba(99, 102, 241, 0.05));
+}
+.ai-upload-hint { font-size: 15px; font-weight: 500; color: var(--text-primary, #333); margin: 0; }
+.ai-upload-sub { font-size: 13px; margin: 0; }
+
+/* 批量进度 */
+.ai-batch-progress { display: flex; align-items: center; gap: 12px; }
+.ai-progress-bar { flex: 1; height: 8px; background: var(--bg-muted, #eee); border-radius: 4px; overflow: hidden; }
+.ai-progress-fill { height: 100%; background: var(--primary-color, #6366f1); transition: width 0.3s; border-radius: 4px; }
+.ai-batch-progress span { font-size: 13px; color: var(--text-secondary, #888); white-space: nowrap; }
+
+/* 批量审阅面板 */
+.ai-batch-section { display: flex; flex-direction: column; gap: 16px; }
+.ai-batch-header { display: flex; justify-content: space-between; align-items: center; }
+.ai-batch-title { font-size: 16px; font-weight: 600; }
+.ai-batch-stats { display: flex; gap: 8px; }
+.ai-batch-body { display: flex; gap: 16px; min-height: 400px; }
+.ai-batch-list { width: 280px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; flex-shrink: 0; }
+.ai-batch-card {
+  padding: 10px 12px;
+  border: 1px solid var(--border-color, #eee);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.15s;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+.ai-batch-card:hover { border-color: var(--primary-color, #6366f1); }
+.ai-batch-card.active { border-color: var(--primary-color, #6366f1); background: var(--bg-hover, rgba(99, 102, 241, 0.05)); }
+.ai-batch-card.error { border-color: #ef4444; background: rgba(239, 68, 68, 0.05); }
+.ai-batch-card.processed { opacity: 0.5; }
+.ai-batch-num { font-weight: 600; color: var(--text-secondary, #888); }
+.ai-batch-type { font-size: 11px; padding: 2px 6px; border-radius: 4px; background: var(--bg-muted, #eee); }
+.ai-batch-stem { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary, #555); }
+.ai-batch-error-icon { color: #ef4444; font-weight: 600; }
+.ai-batch-error-msg { color: #ef4444; font-size: 12px; width: 100%; }
+.ai-batch-check { color: #22c55e; font-weight: bold; }
+.ai-batch-preview { flex: 1; overflow-y: auto; padding: 4px; }
+.ai-batch-actions { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+.ai-batch-error-detail { text-align: center; padding: 48px 24px; }
+.ai-batch-error-title { font-size: 18px; font-weight: 600; color: #ef4444; margin-bottom: 8px; }
+.ai-batch-error-desc { color: var(--text-secondary, #888); margin-bottom: 16px; }
 </style>

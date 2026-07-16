@@ -344,6 +344,14 @@ export const aiApi = {
   parseText(text: string) {
     return client.post<{ data: ParsedQuestion }>('/ai/parse-text', { text })
   },
+  parseImage(file: File) {
+    const formData = new FormData()
+    formData.append('image', file)
+    return client.post<{ data: ParsedQuestion[] }>('/ai/parse-image', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 120000, // OCR 请求可能较慢，超时设为 120s
+    })
+  },
   getSettings() {
     return client.get<AiSettings>('/ai/settings')
   },
