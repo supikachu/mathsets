@@ -9,6 +9,7 @@ import katex from 'katex'
 const props = defineProps<{
   text: string
   inline?: boolean
+  subQuestionBadge?: boolean
 }>()
 
 const container = ref<HTMLElement>()
@@ -39,6 +40,29 @@ function render() {
 
   // 1. 先转义整个文本，防止 XSS
   let html = escapeHtml(text)
+
+  // 1.5. 小问题号徽章：保护数学公式 → 替换题号 → 恢复公式
+  if (props.subQuestionBadge) {
+    const mathStore: string[] = []
+    // 暂存块级公式 $$...$$
+    html = html.replace(/\$\$(.+?)\$\$/gs, (m) => {
+      const i = mathStore.length
+      mathStore.push(m)
+      return `\x00MATH${i}\x00`
+    })
+    // 暂存行内公式 $...$
+    html = html.replace(/\$(.+?)\$/g, (m) => {
+      const i = mathStore.length
+      mathStore.push(m)
+      return `\x00MATH${i}\x00`
+    })
+    // 替换全角/半角括号题号为徽章
+    html = html.replace(/\((\d+)\)|（(\d+)）/g, (_, half, full) => {
+      return `<span class="sub-question-badge">${half || full}</span>`
+    })
+    // 恢复数学公式
+    html = html.replace(/\x00MATH(\d+)\x00/g, (_, i) => mathStore[parseInt(i)])
+  }
 
   // 2. 处理块级公式 $$...$$（在换行替换之前，避免公式内的 \n 被转为 <br>）
   html = html.replace(/\$\$(.+?)\$\$/gs, (_, formula) => {
@@ -87,8 +111,13 @@ function render() {
     return `<img src="${decodedUrl}" alt="${decodedAlt}" class="latex-img" loading="lazy" />`
   })
 
-  // 5. 最后处理换行（公式已渲染为 HTML，剩余的 \n 都是普通文本换行）
-  html = html.replace(/\n/g, '<br>')
+  // 5. 处理换行 — 小问徽章模式使用 <p> 段落包裹以拉开间距
+  if (props.subQuestionBadge && !props.inline) {
+    html = `<p>${html.replace(/\n/g, '</p><p>')}</p>`
+    html = html.replace(/<p>\s*<\/p>/g, '')
+  } else {
+    html = html.replace(/\n/g, '<br>')
+  }
 
   // 6. 行内图片修正：如果 img 前后是 <br> 或字符串首尾，则保持 block 样式；
   //    否则添加 inline 类。需要在 DOM 插入后处理。
@@ -114,7 +143,7 @@ function render() {
 }
 
 onMounted(render)
-watch(() => [props.text, props.inline], render)
+watch(() => [props.text, props.inline, props.subQuestionBadge], render)
 </script>
 
 <style>
@@ -130,11 +159,12 @@ watch(() => [props.text, props.inline], render)
   border-bottom: 1px dashed #e74c3c;
 }
 
-/* 行间公式（$$...$$）：覆盖 KaTeX 默认的 1em 上下 margin，
-   并重置 line-height 防止继承容器的 1.8 撑高公式块 */
+/* 行间公式（$$...$$）：充足的上下呼吸空间，防止长公式被截断 */
 .latex-render .katex-display {
-  margin: 4px 0;
+  margin: 16px 0;
   line-height: 1;
+  overflow-x: auto;
+  padding: 4px 0;
 }
 /* 行间公式自带上下 margin，隐藏公式前后的 <br> 避免额外空行。
    br:has(+ .katex-display) 隐藏公式前的 <br>，
@@ -165,5 +195,38 @@ watch(() => [props.text, props.inline], render)
 
 [data-theme='dark'] .latex-render img.latex-img {
   border-color: rgba(255, 255, 255, 0.08);
+}
+
+/* ============ 小问数字徽章 ============ */
+.latex-render .sub-question-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  background: #0071e3;
+  color: #ffffff;
+  border-radius: 50%;
+  font-size: 12px;
+  font-weight: 600;
+  margin-right: 8px;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 6px rgba(0, 113, 227, 0.3);
+  flex-shrink: 0;
+}
+
+[data-theme='dark'] .latex-render .sub-question-badge {
+  background: #0a84ff;
+  box-shadow: 0 2px 6px rgba(10, 132, 255, 0.3);
+}
+
+/* 小问徽章模式的段落间距 */
+.latex-render p {
+  margin: 0 0 16px;
+  line-height: 1.8;
+}
+
+.latex-render p:last-child {
+  margin-bottom: 0;
 }
 </style>

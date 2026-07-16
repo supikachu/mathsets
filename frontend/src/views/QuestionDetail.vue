@@ -43,10 +43,20 @@
                 </span>
               </div>
               <div class="paper-header-right">
-                <AppBadge :color="statusBadgeColor(q?.status || '')"><AppIcon :name="statusIcon(q?.status || '')" :size="13" /> {{ statusLabel(q?.status || '') }}</AppBadge>
-                <span class="paper-meta-tag">{{ q?.default_score }}分</span>
-                <span v-if="q?.grade" class="paper-meta-tag">{{ q.grade }}</span>
-                <span v-if="q?.semester" class="paper-meta-tag">{{ q.semester }}</span>
+                <span class="pill-badge">
+                  <AppIcon :name="statusIcon(q?.status || '')" :size="13" />
+                  <span>{{ statusLabel(q?.status || '') }}</span>
+                  <span class="pill-divider"></span>
+                  <span>{{ q?.default_score }}分</span>
+                  <template v-if="q?.grade">
+                    <span class="pill-divider"></span>
+                    <span>{{ q.grade }}</span>
+                  </template>
+                  <template v-if="q?.semester">
+                    <span class="pill-divider"></span>
+                    <span>{{ q.semester }}</span>
+                  </template>
+                </span>
               </div>
             </div>
 
@@ -73,48 +83,37 @@
               </div>
             </div>
 
-            <!-- 答案与解析打包区 -->
+            <!-- 答案与解析区 — 材质化卡片 -->
             <div v-if="hasAnswer || q?.analysis || hasGrading" class="answer-solution-block">
-              <!-- 答案区（选择题） -->
-              <div v-if="q?.question_type === 'choice' && correctLabels.length" class="as-row as-row-answer">
-                <span class="as-label">参考答案</span>
-                <div class="as-answer-content">
+              <!-- 参考答案卡片（莫兰迪极淡蓝底） -->
+              <div v-if="hasAnswer" class="answer-card">
+                <div class="card-section-title">参考答案</div>
+                <!-- 选择题答案 -->
+                <div v-if="q?.question_type === 'choice' && correctLabels.length" class="card-answer-content">
                   <span class="paper-correct-answer" v-for="a in correctLabels" :key="a">{{ a }}</span>
                 </div>
-              </div>
-
-              <!-- 填空题答案 -->
-              <div v-else-if="q?.question_type === 'fill' && hasAnswer" class="as-row">
-                <span class="as-label">参考答案</span>
-                <div class="as-answer-content as-fill-list">
+                <!-- 填空题答案 -->
+                <div v-else-if="q?.question_type === 'fill'" class="card-answer-content as-fill-list">
                   <span v-for="(item, i) in (q!.correct_answer as any[])" :key="i" class="as-fill-item">
-                    {{ i + 1 }}. <LatexRender :text="item.answer || String(item)" :inline="true" />
+                    {{ i + 1 }}. <LatexRender :text="item.answer || String(item)" :inline="true" :sub-question-badge="true" />
                   </span>
                 </div>
-              </div>
-
-              <!-- 解答题答案 -->
-              <div v-else-if="q?.question_type === 'solution' && hasAnswer" class="as-row">
-                <span class="as-label">参考答案</span>
-                <div class="as-answer-content">
-                  <LatexRender v-for="(ans, i) in (q!.correct_answer as string[])" :key="i" :text="ans" />
+                <!-- 解答题答案 -->
+                <div v-else-if="q?.question_type === 'solution'" class="card-answer-content">
+                  <LatexRender v-for="(ans, i) in (q!.correct_answer as string[])" :key="i" :text="ans" :sub-question-badge="true" />
                 </div>
-              </div>
-
-              <!-- 判断题答案 -->
-              <div v-else-if="q?.question_type === 'judgment'" class="as-row">
-                <span class="as-label">参考答案</span>
-                <div class="as-answer-content">
+                <!-- 判断题答案 -->
+                <div v-else-if="q?.question_type === 'judgment'" class="card-answer-content">
                   <span class="paper-judge-tag" :class="q?.correct_answer?.[0] === true ? 'judge-correct' : 'judge-wrong'">
                     {{ q?.correct_answer?.[0] === true ? '正确' : '错误' }}
                   </span>
                 </div>
               </div>
 
-              <!-- 解析（多解法分段切换） -->
-              <div v-if="q?.analysis" class="as-row as-row-analysis as-row-multi">
-                <div class="as-label-row">
-                  <span class="as-label">解析</span>
+              <!-- 解析卡片（苹果系统柔和灰底） -->
+              <div v-if="q?.analysis" class="analysis-card">
+                <div class="card-section-title-row">
+                  <span class="card-section-title">解析</span>
                   <div v-if="detailSolutions.length > 1" class="sol-seg">
                     <button
                       v-for="(s, i) in detailSolutions"
@@ -127,7 +126,7 @@
                 </div>
                 <div class="paper-analysis-content">
                   <Transition name="sol-fade" mode="out-in">
-                    <LatexRender :key="activeSolution" :text="splitSolution(detailSolutions[activeSolution]).body" />
+                    <LatexRender :key="activeSolution" :text="splitSolution(detailSolutions[activeSolution]).body" :sub-question-badge="true" />
                   </Transition>
                 </div>
                 <div v-if="splitSolution(detailSolutions[activeSolution]).conclusion" class="paper-conclusion">
@@ -135,9 +134,9 @@
                 </div>
               </div>
 
-              <!-- 评分标准 -->
-              <div v-if="hasGrading" class="as-row">
-                <span class="as-label">评分标准</span>
+              <!-- 评分标准卡片 -->
+              <div v-if="hasGrading" class="analysis-card">
+                <div class="card-section-title">评分标准</div>
                 <div class="as-grading-list">
                   <div v-for="(step, i) in (q!.grading_criteria as any[])" :key="i" class="paper-grading-step">
                     <span class="paper-grading-label">{{ step.label || `步骤${i + 1}` }}</span>
@@ -212,7 +211,7 @@ import { useAuthStore } from '@/stores/auth'
 import LatexRender from '@/components/LatexRender.vue'
 import { AppButton, AppBadge, AppModal, AppConfirm, AppIcon } from '@/components/ui'
 import { useToast } from '@/composables/useToast'
-import { typeLabel, typeBadgeColor, diffLabel, statusLabel, statusBadgeColor, statusIcon, formatTime } from '@/utils/questionDisplay'
+import { typeLabel, typeBadgeColor, statusLabel, statusIcon, formatTime } from '@/utils/questionDisplay'
 
 const route = useRoute()
 const router = useRouter()
@@ -757,79 +756,132 @@ onBeforeUnmount(() => {
   color: var(--danger, #ef4444);
 }
 
-/* 答案与解析打包区 — 视觉二阶层级 */
+/* ============ 悬浮胶囊（Pill Badge） ============ */
+.pill-badge {
+  background: #ffffff;
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 14px;
+  font-weight: 500;
+  color: #1d1d1f;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  transition: transform 0.3s cubic-bezier(0.25, 1, 0.5, 1), box-shadow 0.3s ease;
+  cursor: default;
+}
+
+.pill-badge:hover {
+  transform: translateY(-1px) scale(1.02);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.1), 0 2px 4px rgba(0, 0, 0, 0.06);
+}
+
+.pill-badge svg {
+  color: #86868b;
+  flex-shrink: 0;
+}
+
+.pill-divider {
+  width: 1px;
+  height: 14px;
+  background: rgba(0, 0, 0, 0.1);
+  flex-shrink: 0;
+}
+
+[data-theme='dark'] .pill-badge {
+  background: #2c2c2e;
+  color: #f5f5f7;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3), 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+[data-theme='dark'] .pill-divider {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+/* ============ 答案与解析材质化卡片 ============ */
 .answer-solution-block {
-  background: #f8f9fa;
-  border-radius: 8px;
-  padding: 18px 20px;
   margin-top: 4px;
 }
 
-[data-theme='dark'] .answer-solution-block {
-  background: rgba(255, 255, 255, 0.03);
+/* 参考答案卡片 — 莫兰迪极淡蓝底 */
+.answer-card {
+  background: #f4f8fc;
+  border-radius: 16px;
+  padding: 20px 24px;
+  margin-bottom: 24px;
+  border: none;
+  transition: all 0.3s ease;
 }
 
-.as-row {
-  display: flex;
-  gap: 16px;
-  margin-bottom: 14px;
+.answer-card:hover {
+  background: #edf3f9;
 }
 
-.as-row:last-child {
+[data-theme='dark'] .answer-card {
+  background: rgba(100, 160, 220, 0.08);
+}
+
+[data-theme='dark'] .answer-card:hover {
+  background: rgba(100, 160, 220, 0.12);
+}
+
+/* 解析卡片 — 苹果系统柔和灰底 */
+.analysis-card {
+  background: #f5f5f7;
+  border-radius: 16px;
+  padding: 20px 24px;
+  margin-bottom: 24px;
+  border: none;
+  transition: all 0.3s ease;
+}
+
+.analysis-card:last-child {
   margin-bottom: 0;
 }
 
-.as-row-analysis {
-  padding-top: 14px;
-  border-top: 1px solid rgba(0, 0, 0, 0.04);
+.analysis-card:hover {
+  background: #ebebef;
 }
 
-[data-theme='dark'] .as-row-analysis {
-  border-top-color: rgba(255, 255, 255, 0.06);
+[data-theme='dark'] .analysis-card {
+  background: rgba(255, 255, 255, 0.05);
 }
 
-/* 多解法行：label+seg 在顶部，内容在下方全宽 */
-.as-row-multi {
-  flex-direction: column;
-  gap: 10px;
+[data-theme='dark'] .analysis-card:hover {
+  background: rgba(255, 255, 255, 0.08);
 }
 
-.as-label-row {
+/* 卡片标题 — 苹果风格小标题 */
+.card-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #86868b;
+  margin-bottom: 12px;
+  letter-spacing: 0.5px;
+}
+
+.card-section-title-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  width: 100%;
+  margin-bottom: 12px;
 }
 
-.as-label-row .as-label {
-  width: auto;
+.card-section-title-row .card-section-title {
+  margin-bottom: 0;
 }
 
-.as-label {
-  width: 80px;
-  flex-shrink: 0;
-  text-align: left;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-muted);
-  padding-top: 1px;
-}
-
-.as-answer-content {
-  flex: 1;
+.card-answer-content {
   font-size: 14px;
-  line-height: 1.7;
+  line-height: 1.8;
   color: var(--text-primary);
 }
 
-.as-fill-list {
+.card-answer-content.as-fill-list {
+  display: flex;
   flex-direction: column;
   gap: 8px;
-}
-
-.as-fill-item {
-  font-size: 14px;
-  line-height: 1.7;
 }
 
 .as-grading-list {
