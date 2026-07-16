@@ -29,29 +29,6 @@
       </div>
     </div>
 
-    <!-- 学段分段控制器 -->
-    <div class="kp-segmented" role="tablist">
-      <div class="kp-segmented-indicator" :class="{ 'is-senior': level === 'senior' }" />
-      <button
-        class="kp-segment"
-        :class="{ active: level === 'junior' }"
-        role="tab"
-        @click="switchLevel('junior')"
-      >
-        <AppIcon name="book-open" :size="14" :stroke="1.8" />
-        <span>初中</span>
-      </button>
-      <button
-        class="kp-segment"
-        :class="{ active: level === 'senior' }"
-        role="tab"
-        @click="switchLevel('senior')"
-      >
-        <AppIcon name="compass" :size="14" :stroke="1.8" />
-        <span>高中</span>
-      </button>
-    </div>
-
     <div v-if="loading" class="loading-hint">加载中…</div>
     <AppEmpty v-else-if="displayedTree.length === 0" description="暂无知识点" icon="tag" />
 
@@ -137,7 +114,7 @@ defineProps<{ mobileOpen?: boolean }>()
 const emit = defineEmits<{ 'update:mobileOpen': [value: boolean] }>()
 
 const toast = useToast()
-const { selectedKpId, select, kpLevel, setLevel } = useSelectedKp()
+const { selectedKpId, select } = useSelectedKp()
 const space = useSpaceStore()
 
 const loading = ref(true)
@@ -145,7 +122,6 @@ const saving = ref(false)
 const adding = ref(false)
 const tree = ref<KnowledgePoint[]>([])
 const expanded = ref<Record<string, boolean>>({})
-const level = kpLevel
 const grades = ['初一', '初二', '初三', '高一', '高二', '高三']
 const gradeOptions = grades.map((g) => ({ label: g, value: g }))
 
@@ -171,38 +147,15 @@ const addForm = reactive({
 const deleteDialog = ref(false)
 const deletingNode = ref<KnowledgePoint | null>(null)
 
-// 递归查找节点
-function findNodeByName(nodes: KnowledgePoint[], name: string): KnowledgePoint | null {
-  for (const node of nodes) {
-    if (node.name === name) return node
-    if (node.children?.length) {
-      const found = findNodeByName(node.children, name)
-      if (found) return found
-    }
-  }
-  return null
-}
-
-// 当前学段对应的节点（初中 / 高中）
-const levelNode = computed<KnowledgePoint | null>(() => {
-  const targetName = level.value === 'junior' ? '初中' : '高中'
-  return findNodeByName(tree.value, targetName)
-})
-
-// 实际展示的树：学段节点的子树，若学段节点不存在则回退到全部根节点
-const displayedTree = computed<KnowledgePoint[]>(() => {
-  if (levelNode.value) {
-    return levelNode.value.children ?? []
-  }
-  return tree.value
-})
+// 实际展示的树：直接展示全部根节点（初中数学 / 高中数学 等）
+const displayedTree = computed<KnowledgePoint[]>(() => tree.value)
 
 // 添加弹窗标题
 const addDialogTitle = computed(() => {
   if (addParent.value) {
     return `在「${addParent.value.name}」下添加子节点`
   }
-  return level.value === 'junior' ? '添加初中知识点' : '添加高中知识点'
+  return '添加知识点'
 })
 
 async function fetchTree() {
@@ -210,25 +163,12 @@ async function fetchTree() {
   try {
     const res = await kpApi.tree(space.currentSpaceId || undefined)
     tree.value = res.data
-    // 设置默认展开状态
-    const targetName = level.value === 'junior' ? '初中' : '高中'
-    const lvNode = findNodeByName(tree.value, targetName)
-    setDefaultExpanded(lvNode?.children ?? tree.value)
+    setDefaultExpanded(tree.value)
   } catch {
     /* handled */
   } finally {
     loading.value = false
   }
-}
-
-function switchLevel(lv: 'junior' | 'senior') {
-  if (level.value === lv) return
-  setLevel(lv)
-  // 切换学段时清除知识点选中并重置展开状态
-  select(null)
-  const targetName = lv === 'junior' ? '初中' : '高中'
-  const lvNode = findNodeByName(tree.value, targetName)
-  setDefaultExpanded(lvNode?.children ?? tree.value)
 }
 
 function toggleExpand(node: KnowledgePoint) {
@@ -297,8 +237,8 @@ function openEdit(node: KnowledgePoint) {
 }
 
 function addRoot() {
-  // 当学段节点存在时，添加到学段节点下；否则添加为根节点
-  addParent.value = levelNode.value ?? null
+  // 直接添加为根节点
+  addParent.value = null
   addForm.name = ''
   addForm.grade = undefined
   addForm.sort_order = 0
@@ -468,84 +408,6 @@ onMounted(fetchTree)
 
 .kp-add-root:active {
   transform: scale(0.9);
-}
-
-/* 学段分段控制器 — iOS-style sliding indicator */
-.kp-segmented {
-  position: relative;
-  display: flex;
-  padding: 3px;
-  background: var(--bg-input);
-  border-radius: var(--radius-sm);
-  border: 0.5px solid var(--border-color);
-  margin-bottom: 12px;
-  box-shadow: inset 0 0.5px 1px rgba(0, 0, 0, 0.03);
-}
-
-.kp-segmented-indicator {
-  position: absolute;
-  top: 3px;
-  left: 3px;
-  width: calc(50% - 3px);
-  height: calc(100% - 6px);
-  background: var(--bg-card);
-  border-radius: 8px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 1px 1px rgba(0, 0, 0, 0.04);
-  transition: transform 0.42s cubic-bezier(0.34, 1.56, 0.64, 1);
-  z-index: 0;
-}
-
-.kp-segmented-indicator.is-senior {
-  transform: translateX(100%);
-}
-
-.kp-segment {
-  position: relative;
-  z-index: 1;
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  padding: 7px 0;
-  border: none;
-  background: transparent;
-  border-radius: 8px;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-secondary);
-  transition: color 0.2s ease, font-weight 0.2s ease;
-  letter-spacing: -0.01em;
-  cursor: pointer;
-}
-
-.kp-segment svg {
-  opacity: 0.6;
-  transition: opacity 0.2s ease, transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
-  transform: scale(0.9);
-}
-
-.kp-segment:hover:not(.active) {
-  color: var(--text-primary);
-}
-
-.kp-segment:hover:not(.active) svg {
-  opacity: 0.85;
-  transform: scale(1);
-}
-
-.kp-segment.active {
-  color: var(--accent);
-  font-weight: 600;
-}
-
-.kp-segment.active svg {
-  opacity: 1;
-  transform: scale(1);
-}
-
-.kp-segment:active {
-  transform: scale(0.96);
 }
 
 .loading-hint {

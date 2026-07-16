@@ -280,7 +280,7 @@ import {
 const router = useRouter()
 const toast = useToast()
 const space = useSpaceStore()
-const { selectedKpId, selectedKpName, clear, kpLevel } = useSelectedKp()
+const { selectedKpId, selectedKpName, clear } = useSelectedKp()
 const basket = useQuestionBasket()
 
 // ---- 筛选面板展开状态 ----
@@ -370,9 +370,7 @@ const statusOptions = [
 ]
 
 const gradeOptions = computed(() => {
-  const juniorGrades = ['初一', '初二', '初三']
-  const seniorGrades = ['高一', '高二', '高三']
-  const grades = kpLevel.value === 'junior' ? juniorGrades : seniorGrades
+  const grades = ['初一', '初二', '初三', '高一', '高二', '高三']
   return [
     { label: '不限', value: '__all' },
     ...grades.map((g) => ({ label: g, value: g })),
@@ -644,16 +642,6 @@ watch(selectedKpId, (id) => {
   query.knowledge_point_id = id ?? undefined
   page.value = 1
   fetchList()
-})
-
-// 学段切换时重置年级筛选，避免选了不存在的年级
-watch(kpLevel, (lv) => {
-  const validGrades = lv === 'junior' ? ['初一', '初二', '初三'] : ['高一', '高二', '高三']
-  if (query.grade && query.grade !== '__all' && !validGrades.includes(query.grade)) {
-    query.grade = '__all'
-    page.value = 1
-    fetchList()
-  }
 })
 
 watch(() => space.currentSpaceId, (newId) => {
