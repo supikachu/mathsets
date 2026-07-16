@@ -113,8 +113,24 @@ function render() {
 
   // 5. 处理换行 — 小问徽章模式使用 <p> 段落包裹以拉开间距
   if (props.subQuestionBadge && !props.inline) {
+    // 保护已渲染的 KaTeX HTML — 其输出可能包含 \n，直接替换会截断 DOM 导致乱码
+    const katexStore: string[] = []
+    html = html.replace(/<span class="katex[^"]*">[\s\S]*?<\/span>/g, (m) => {
+      const i = katexStore.length
+      katexStore.push(m)
+      return `\x00KATEX${i}\x00`
+    })
+    // 同样保护 img 标签
+    html = html.replace(/<img[^>]*>/g, (m) => {
+      const i = katexStore.length
+      katexStore.push(m)
+      return `\x00KATEX${i}\x00`
+    })
+    // 按换行分割段落
     html = `<p>${html.replace(/\n/g, '</p><p>')}</p>`
     html = html.replace(/<p>\s*<\/p>/g, '')
+    // 恢复 KaTeX HTML 和 img 标签
+    html = html.replace(/\x00KATEX(\d+)\x00/g, (_, i) => katexStore[parseInt(i)])
   } else {
     html = html.replace(/\n/g, '<br>')
   }
