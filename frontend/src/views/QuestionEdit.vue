@@ -814,6 +814,7 @@
       confirm-text="丢弃旧数据"
       danger
       @confirm="executePendingUpload"
+      @cancel="dismissSnapshotOverwrite"
     />
     <!-- 快照恢复弹窗 -->
     <AppConfirm
@@ -1600,6 +1601,11 @@ function executePendingUpload() {
   }
 }
 
+// 用户取消覆盖旧快照 — 清除 pending action，保留旧快照不动
+function dismissSnapshotOverwrite() {
+  pendingUploadAction = null
+}
+
 async function doStartImageParse(file: File) {
   aiImageFile.value = file
   const isPdf = file.type === 'application/pdf'
@@ -1620,9 +1626,10 @@ async function doStartImageParse(file: File) {
 // 补丁十五：try/catch/finally 防假死
 async function doImageParse(file: File) {
   aiParsing.value = true
-  aiBatchProgress.value = { current: 0, total: 1, text: '正在压缩并识别图片…' }
+  aiBatchProgress.value = { current: 0, total: 1, text: '正在压缩图片…' }
   try {
     const compressed = await compressImage(file)
+    aiBatchProgress.value = { current: 0, total: 1, text: '正在上传并识别图片（约 10-30 秒）…' }
     const imageFile = blobToFile(compressed)
     const res = await withBackoffRetry(() => aiApi.parseImage(imageFile))
     const questions = res.data.data

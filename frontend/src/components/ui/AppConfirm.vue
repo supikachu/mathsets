@@ -18,11 +18,13 @@ const props = withDefaults(
 const emit = defineEmits<{
   'update:modelValue': [value: boolean]
   confirm: []
+  cancel: []
 }>()
 
 function close() {
   if (props.loading) return
   emit('update:modelValue', false)
+  emit('cancel')
 }
 
 function onConfirm() {
