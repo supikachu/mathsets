@@ -73,7 +73,7 @@ fn map_ai_error(e: AiError) -> (StatusCode, Json<serde_json::Value>) {
         }
         AiError::Timeout => (
             StatusCode::GATEWAY_TIMEOUT,
-            Json(json!({"error": "AI 服务响应超时（60s）"})),
+            Json(json!({"error": "AI 服务响应超时（120s），请稍后重试或使用更小的图片"})),
         ),
     }
 }

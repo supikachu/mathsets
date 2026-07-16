@@ -15,7 +15,7 @@ pub struct DeepSeekProvider {
 impl DeepSeekProvider {
     pub fn new(api_key: String, base_url: String) -> Self {
         let client = Client::builder()
-            .timeout(Duration::from_secs(60))
+            .timeout(Duration::from_secs(120))
             .build()
             .expect("无法创建 reqwest Client");
         Self {

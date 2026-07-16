@@ -20,12 +20,37 @@ const FALLBACK_JPEG_QUALITY = 0.88
 /** 后端 Axum body limit 为 10MB，安全阈值 9MB */
 const SIZE_LIMIT = 9 * 1024 * 1024
 
-/** 将 File/Image 加载为 HTMLImageElement */
+/** 图片加载超时时间（毫秒） — 防止大图或损坏文件导致永久挂起 */
+const LOAD_IMAGE_TIMEOUT_MS = 30000
+
+/** 将 File/Image 加载为 HTMLImageElement（含超时保护） */
 function loadImage(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image()
-    img.onload = () => resolve(img)
-    img.onerror = () => reject(new Error('图片加载失败，文件可能已损坏'))
+    let settled = false
+
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true
+        img.src = '' // 中断加载
+        reject(new Error('图片加载超时（30s），文件可能过大或已损坏'))
+      }
+    }, LOAD_IMAGE_TIMEOUT_MS)
+
+    img.onload = () => {
+      if (!settled) {
+        settled = true
+        clearTimeout(timer)
+        resolve(img)
+      }
+    }
+    img.onerror = () => {
+      if (!settled) {
+        settled = true
+        clearTimeout(timer)
+        reject(new Error('图片加载失败，文件可能已损坏'))
+      }
+    }
     img.src = src
   })
 }

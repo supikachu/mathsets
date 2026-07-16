@@ -35,14 +35,14 @@ export async function withBackoffRetry<T>(fn: () => Promise<T>, retries = MAX_RE
     } catch (e: any) {
       lastError = e
       const status = e?.response?.status
-      // 仅对 429 和 5xx 进行退避重试
-      const shouldRetry = status === 429 || (status >= 500 && status < 600)
+      // 仅对 429（限流）进行退避重试 — 5xx 等其他错误重试无意义，反而让用户等更久
+      const shouldRetry = status === 429
       if (!shouldRetry || attempt === retries) {
         throw e
       }
       const delay = INITIAL_BACKOFF_MS * Math.pow(2, attempt)
       console.warn(
-        `请求失败 (HTTP ${status})，${delay / 1000}s 后重试 (${attempt + 1}/${retries})`,
+        `请求被限流 (HTTP 429)，${delay / 1000}s 后重试 (${attempt + 1}/${retries})`,
       )
       await new Promise((resolve) => setTimeout(resolve, delay))
     }
