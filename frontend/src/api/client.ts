@@ -347,8 +347,9 @@ export const aiApi = {
   parseImage(file: File) {
     const formData = new FormData()
     formData.append('image', file)
+    // ⚠️ 不要手动设置 Content-Type — axios + FormData 需要自动生成 boundary
+    // 手动设置会导致后端无法解析 Multipart 边界，请求永久挂起
     return client.post<{ data: ParsedQuestion[] }>('/ai/parse-image', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
       timeout: 120000, // OCR 请求可能较慢，超时设为 120s
     })
   },
