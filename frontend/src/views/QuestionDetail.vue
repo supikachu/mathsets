@@ -14,19 +14,19 @@
         </div>
         <div class="header-actions">
           <template v-if="q?.status === 'draft'">
-            <AppButton variant="primary" size="sm" @click="$router.push(`/questions/${q!.id}/edit`)">编辑</AppButton>
-            <AppButton variant="success" size="sm" :loading="submitting" @click="submitReview">提交审核</AppButton>
-            <button class="btn-soft-danger" @click="confirmDelete"><AppIcon name="trash" :size="16" /> 删除</button>
+            <button class="btn-soft-secondary" @click="$router.push(`/questions/${q!.id}/edit`)"><AppIcon name="pencil" :size="15" /> 编辑</button>
+            <button class="btn-soft-primary" :disabled="submitting" @click="submitReview">{{ submitting ? '提交中…' : '提交审核' }}</button>
+            <button class="btn-soft-danger" @click="confirmDelete"><AppIcon name="trash" :size="15" /> 删除</button>
           </template>
           <template v-else-if="q?.status === 'rejected'">
-            <AppButton variant="primary" size="sm" @click="$router.push(`/questions/${q!.id}/edit`)">重新编辑</AppButton>
+            <button class="btn-soft-secondary" @click="$router.push(`/questions/${q!.id}/edit`)"><AppIcon name="pencil" :size="15" /> 重新编辑</button>
           </template>
           <template v-else-if="q?.status === 'pending' && q?.can_review">
-            <AppButton variant="success" size="sm" @click="handleReview('approved')"><AppIcon name="check-circle" :size="16" /> 通过</AppButton>
-            <button class="btn-soft-danger" @click="handleReview('rejected')"><AppIcon name="x-circle" :size="16" /> 驳回</button>
+            <button class="btn-soft-success" @click="handleReview('approved')"><AppIcon name="check-circle" :size="15" /> 通过</button>
+            <button class="btn-soft-danger" @click="handleReview('rejected')"><AppIcon name="x-circle" :size="15" /> 驳回</button>
           </template>
           <template v-else-if="q?.status === 'published' && auth.isAdmin">
-            <AppButton variant="outline" size="sm" @click="toast.info('停用功能即将上线')"><AppIcon name="ban" :size="16" /> 停用</AppButton>
+            <button class="btn-soft-secondary" @click="toast.info('停用功能即将上线')"><AppIcon name="ban" :size="15" /> 停用</button>
           </template>
         </div>
       </header>
@@ -101,11 +101,11 @@
                     {{ i + 1 }}. <LatexRender :text="item.answer || String(item)" :inline="true" :sub-question-badge="true" />
                   </span>
                 </div>
-                <!-- 解答题答案 — 自动注入小问题号徽章 -->
+                <!-- 解答题答案 — 逐小问 Flex 隔离布局 -->
                 <div v-else-if="q?.question_type === 'solution'" class="card-answer-content">
-                  <div v-for="(ans, i) in (q!.correct_answer as string[])" :key="i" class="sub-answer-item">
+                  <div v-for="(ans, i) in (q!.correct_answer as string[])" :key="i" class="answer-item-row">
                     <span class="sub-question-badge">{{ i + 1 }}</span>
-                    <LatexRender :text="ans" :sub-question-badge="true" />
+                    <div class="answer-item-body"><LatexRender :text="ans" /></div>
                   </div>
                 </div>
                 <!-- 判断题答案 -->
@@ -565,22 +565,83 @@ onBeforeUnmount(() => {
 }
 
 /* 柔和危险按钮 — 浅红底+红文字 */
-.btn-soft-danger {
+.btn-soft-danger,
+.btn-soft-primary,
+.btn-soft-secondary,
+.btn-soft-success {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  padding: 7px 14px;
+  padding: 6px 16px;
   font-size: 13px;
   font-weight: 500;
   border-radius: 999px;
   border: none;
-  background: #fee2e2;
-  color: #dc2626;
   cursor: pointer;
   transition: all 0.2s ease;
   white-space: nowrap;
   letter-spacing: -0.01em;
+}
+
+/* 主操作 — 苹果蓝 */
+.btn-soft-primary {
+  background: #0071e3;
+  color: #ffffff;
+}
+
+.btn-soft-primary:hover {
+  background: #0077ed;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(0, 113, 227, 0.25);
+}
+
+.btn-soft-primary:active {
+  transform: scale(0.97);
+}
+
+.btn-soft-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* 次要操作 — 莫兰迪灰底 */
+.btn-soft-secondary {
+  background: #f5f5f7;
+  color: #1d1d1f;
+}
+
+.btn-soft-secondary:hover {
+  background: #e8e8ed;
+  transform: translateY(-1px);
+}
+
+.btn-soft-secondary:active {
+  transform: scale(0.97);
+}
+
+/* 成功操作 — 莫兰迪浅绿 */
+.btn-soft-success {
+  background: #e8f8ee;
+  color: #248a3d;
+}
+
+.btn-soft-success:hover {
+  background: #d4f0dd;
+  color: #1a7a2e;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(36, 138, 61, 0.15);
+}
+
+.btn-soft-success:active {
+  transform: scale(0.97);
+}
+
+/* 危险操作 — 浅红底 */
+.btn-soft-danger {
+  background: #fee2e2;
+  color: #dc2626;
 }
 
 .btn-soft-danger:hover {
@@ -594,6 +655,24 @@ onBeforeUnmount(() => {
   transform: scale(0.97);
 }
 
+[data-theme='dark'] .btn-soft-primary {
+  background: #0a84ff;
+}
+
+[data-theme='dark'] .btn-soft-secondary {
+  background: rgba(255, 255, 255, 0.08);
+  color: #f5f5f7;
+}
+
+[data-theme='dark'] .btn-soft-secondary:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+[data-theme='dark'] .btn-soft-success {
+  background: rgba(48, 209, 88, 0.15);
+  color: #30d158;
+}
+
 [data-theme='dark'] .btn-soft-danger {
   background: rgba(220, 38, 38, 0.15);
   color: #ff6961;
@@ -603,18 +682,9 @@ onBeforeUnmount(() => {
   background: rgba(220, 38, 38, 0.25);
 }
 
-/* 操作按钮圆润化 */
+/* 移除旧的 AppButton 覆盖 */
 .header-actions :deep(.btn) {
   border-radius: 999px;
-}
-
-/* 降低成功按钮饱和度 */
-.header-actions :deep(.btn-success) {
-  background: #34c759;
-}
-
-.header-actions :deep(.btn-success:hover) {
-  background: #2db84e;
 }
 
 /* ============ 内容区：Flex 双栏 ============ */
@@ -940,13 +1010,18 @@ onBeforeUnmount(() => {
   background: rgba(255, 255, 255, 0.08);
 }
 
-/* 卡片标题 — 苹果风格小标题 */
+/* 卡片标题 — 精致排版层级 */
 .card-section-title {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
-  color: #86868b;
-  margin-bottom: 12px;
-  letter-spacing: 0.5px;
+  color: #1d1d1f;
+  margin-bottom: 16px;
+  letter-spacing: -0.01em;
+  display: block;
+}
+
+[data-theme='dark'] .card-section-title {
+  color: #f5f5f7;
 }
 
 .card-section-title-row {
@@ -972,24 +1047,41 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 
-/* 解答题多小问答案项 */
-.sub-answer-item {
+/* 解答题多小问答案行 — Flex 隔离防挤压 */
+.answer-item-row {
   display: flex;
   align-items: flex-start;
-  gap: 0;
+  gap: 12px;
   margin-bottom: 16px;
-  line-height: 1.8;
+  line-height: 1.6;
 }
 
-.sub-answer-item:last-child {
+.answer-item-row:last-child {
   margin-bottom: 0;
 }
 
-.sub-answer-item > .sub-question-badge {
+/* 模板层级徽章（在 scoped 范围内，直接生效） */
+.answer-item-row > .sub-question-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  background: #0071e3;
+  color: #ffffff;
+  border-radius: 50%;
+  font-size: 12px;
+  font-weight: 600;
+  flex-shrink: 0;
   margin-top: 2px;
+  box-shadow: 0 2px 6px rgba(0, 113, 227, 0.3);
 }
 
-.sub-answer-item :deep(.latex-render) {
+[data-theme='dark'] .answer-item-row > .sub-question-badge {
+  background: #0a84ff;
+}
+
+.answer-item-body {
   flex: 1;
   min-width: 0;
 }
@@ -1188,7 +1280,7 @@ onBeforeUnmount(() => {
 
 .side-empty {
   font-size: 13px;
-  color: var(--text-muted);
+  color: #86868b;
 }
 
 .meta-list {
@@ -1205,12 +1297,22 @@ onBeforeUnmount(() => {
 }
 
 .meta-label {
-  color: var(--text-muted);
+  color: #86868b;
+  font-size: 13px;
 }
 
 .meta-val {
-  color: var(--text-primary);
+  color: #1d1d1f;
   font-weight: 500;
+  font-size: 13px;
+}
+
+[data-theme='dark'] .meta-label {
+  color: #86868b;
+}
+
+[data-theme='dark'] .meta-val {
+  color: #f5f5f7;
 }
 
 /* ============ 弹窗 ============ */

@@ -159,12 +159,13 @@ watch(() => [props.text, props.inline, props.subQuestionBadge], render)
   border-bottom: 1px dashed #e74c3c;
 }
 
-/* 行间公式（$$...$$）：收紧上下留白，使推导衔接更紧凑 */
+/* 行间公式（$$...$$）：左对齐+缩进，提升长篇推导的阅读连贯性 */
 .latex-render .katex-display {
   margin: 12px 0 !important;
   line-height: 1;
   overflow-x: auto;
-  padding: 4px 0;
+  padding: 4px 0 4px 32px;
+  text-align: left !important;
 }
 /* 行间公式自带上下 margin，隐藏公式前后的 <br> 避免额外空行。
    br:has(+ .katex-display) 隐藏公式前的 <br>，
