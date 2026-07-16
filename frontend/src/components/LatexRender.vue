@@ -159,9 +159,9 @@ watch(() => [props.text, props.inline, props.subQuestionBadge], render)
   border-bottom: 1px dashed #e74c3c;
 }
 
-/* 行间公式（$$...$$）：充足的上下呼吸空间，防止长公式被截断 */
+/* 行间公式（$$...$$）：收紧上下留白，使推导衔接更紧凑 */
 .latex-render .katex-display {
-  margin: 16px 0;
+  margin: 12px 0 !important;
   line-height: 1;
   overflow-x: auto;
   padding: 4px 0;

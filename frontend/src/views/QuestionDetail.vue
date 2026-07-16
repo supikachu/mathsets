@@ -6,24 +6,27 @@
       <!-- ============ 顶部吸顶导航 ============ -->
       <header class="detail-header">
         <div class="header-left">
-          <AppButton variant="ghost" size="sm" @click="backToList"><AppIcon name="chevron-left" :size="17" /> 返回列表</AppButton>
+          <button class="back-link" @click="backToList">
+            <AppIcon name="chevron-left" :size="18" :stroke="2" />
+            <span>返回列表</span>
+          </button>
           <h1 class="page-title">题目详情</h1>
         </div>
         <div class="header-actions">
           <template v-if="q?.status === 'draft'">
             <AppButton variant="primary" size="sm" @click="$router.push(`/questions/${q!.id}/edit`)">编辑</AppButton>
             <AppButton variant="success" size="sm" :loading="submitting" @click="submitReview">提交审核</AppButton>
-            <AppButton variant="danger" size="sm" @click="confirmDelete"><AppIcon name="trash" :size="17" /> 删除</AppButton>
+            <button class="btn-soft-danger" @click="confirmDelete"><AppIcon name="trash" :size="16" /> 删除</button>
           </template>
           <template v-else-if="q?.status === 'rejected'">
             <AppButton variant="primary" size="sm" @click="$router.push(`/questions/${q!.id}/edit`)">重新编辑</AppButton>
           </template>
           <template v-else-if="q?.status === 'pending' && q?.can_review">
-            <AppButton variant="success" size="sm" @click="handleReview('approved')"><AppIcon name="check-circle" :size="17" /> 通过</AppButton>
-            <AppButton variant="danger" size="sm" @click="handleReview('rejected')"><AppIcon name="x-circle" :size="17" /> 驳回</AppButton>
+            <AppButton variant="success" size="sm" @click="handleReview('approved')"><AppIcon name="check-circle" :size="16" /> 通过</AppButton>
+            <button class="btn-soft-danger" @click="handleReview('rejected')"><AppIcon name="x-circle" :size="16" /> 驳回</button>
           </template>
           <template v-else-if="q?.status === 'published' && auth.isAdmin">
-            <AppButton variant="outline" size="sm" @click="toast.info('停用功能即将上线')"><AppIcon name="ban" :size="17" /> 停用</AppButton>
+            <AppButton variant="outline" size="sm" @click="toast.info('停用功能即将上线')"><AppIcon name="ban" :size="16" /> 停用</AppButton>
           </template>
         </div>
       </header>
@@ -98,9 +101,12 @@
                     {{ i + 1 }}. <LatexRender :text="item.answer || String(item)" :inline="true" :sub-question-badge="true" />
                   </span>
                 </div>
-                <!-- 解答题答案 -->
+                <!-- 解答题答案 — 自动注入小问题号徽章 -->
                 <div v-else-if="q?.question_type === 'solution'" class="card-answer-content">
-                  <LatexRender v-for="(ans, i) in (q!.correct_answer as string[])" :key="i" :text="ans" :sub-question-badge="true" />
+                  <div v-for="(ans, i) in (q!.correct_answer as string[])" :key="i" class="sub-answer-item">
+                    <span class="sub-question-badge">{{ i + 1 }}</span>
+                    <LatexRender :text="ans" :sub-question-badge="true" />
+                  </div>
                 </div>
                 <!-- 判断题答案 -->
                 <div v-else-if="q?.question_type === 'judgment'" class="card-answer-content">
@@ -476,13 +482,13 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-/* ============ 页面根容器：锁死视口，禁止全局滚动 ============ */
+/* ============ 页面根容器 ============ */
 .detail-page {
   height: 100vh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: #f5f7fa;
+  background: #f5f5f7;
 }
 
 [data-theme='dark'] .detail-page {
@@ -503,15 +509,45 @@ onBeforeUnmount(() => {
   justify-content: space-between;
   flex-shrink: 0;
   padding: 12px 24px;
-  background: var(--bg-card);
-  border-bottom: 1px solid var(--border-color);
+  background: rgba(255, 255, 255, 0.72);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
   gap: 12px;
+}
+
+[data-theme='dark'] .detail-header {
+  background: rgba(30, 30, 30, 0.72);
+  border-bottom-color: rgba(255, 255, 255, 0.08);
 }
 
 .header-left {
   display: flex;
   align-items: center;
   gap: 12px;
+}
+
+/* 返回链接 — 苹果蓝文字 */
+.back-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #0071e3;
+  font-weight: 500;
+  font-size: 15px;
+  padding: 4px 4px 4px 0;
+  transition: opacity 0.2s;
+}
+
+.back-link:hover {
+  opacity: 0.7;
+}
+
+[data-theme='dark'] .back-link {
+  color: #0a84ff;
 }
 
 .page-title {
@@ -526,6 +562,59 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+/* 柔和危险按钮 — 浅红底+红文字 */
+.btn-soft-danger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 7px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: 999px;
+  border: none;
+  background: #fee2e2;
+  color: #dc2626;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+  letter-spacing: -0.01em;
+}
+
+.btn-soft-danger:hover {
+  background: #fecaca;
+  color: #b91c1c;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(220, 38, 38, 0.15);
+}
+
+.btn-soft-danger:active {
+  transform: scale(0.97);
+}
+
+[data-theme='dark'] .btn-soft-danger {
+  background: rgba(220, 38, 38, 0.15);
+  color: #ff6961;
+}
+
+[data-theme='dark'] .btn-soft-danger:hover {
+  background: rgba(220, 38, 38, 0.25);
+}
+
+/* 操作按钮圆润化 */
+.header-actions :deep(.btn) {
+  border-radius: 999px;
+}
+
+/* 降低成功按钮饱和度 */
+.header-actions :deep(.btn-success) {
+  background: #34c759;
+}
+
+.header-actions :deep(.btn-success:hover) {
+  background: #2db84e;
 }
 
 /* ============ 内容区：Flex 双栏 ============ */
@@ -558,18 +647,17 @@ onBeforeUnmount(() => {
 /* ============ 中间：沉浸式试卷卡片 ============ */
 .paper-card {
   background: #ffffff;
-  border-radius: 12px;
+  border-radius: 16px;
   padding: 28px 36px;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.03), 0 2px 8px rgba(0, 0, 0, 0.02);
-  border: 1px solid rgba(0, 0, 0, 0.04);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.03), 0 1px 3px rgba(0, 0, 0, 0.02);
+  border: none;
   margin: 16px 0;
   transition: box-shadow 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
 }
 
 [data-theme='dark'] .paper-card {
   background: #1c1c1e;
-  border-color: rgba(255, 255, 255, 0.06);
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3), 0 2px 8px rgba(0, 0, 0, 0.15);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3), 0 1px 3px rgba(0, 0, 0, 0.15);
 }
 
 /* 卡片头部属性栏 */
@@ -581,7 +669,7 @@ onBeforeUnmount(() => {
   gap: 8px;
   margin-bottom: 18px;
   padding-bottom: 14px;
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
 }
 
 [data-theme='dark'] .paper-header {
@@ -884,6 +972,28 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 
+/* 解答题多小问答案项 */
+.sub-answer-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 0;
+  margin-bottom: 16px;
+  line-height: 1.8;
+}
+
+.sub-answer-item:last-child {
+  margin-bottom: 0;
+}
+
+.sub-answer-item > .sub-question-badge {
+  margin-top: 2px;
+}
+
+.sub-answer-item :deep(.latex-render) {
+  flex: 1;
+  min-width: 0;
+}
+
 .as-grading-list {
   flex: 1;
   display: flex;
@@ -985,21 +1095,19 @@ onBeforeUnmount(() => {
   gap: 12px;
   padding: 8px 12px;
   background: #ffffff;
-  border: 1px solid #f0f0f0;
-  border-radius: 6px;
+  border: none;
+  border-radius: 10px;
   font-size: 13px;
   margin-top: 0;
   transition: all 0.2s ease;
 }
 
 .paper-grading-step:hover {
-  border-color: rgba(24, 144, 255, 0.3);
-  background: rgba(24, 144, 255, 0.02);
+  background: rgba(0, 113, 227, 0.04);
 }
 
 [data-theme='dark'] .paper-grading-step {
   background: rgba(255, 255, 255, 0.04);
-  border-color: rgba(255, 255, 255, 0.08);
 }
 
 .paper-grading-label {
@@ -1018,25 +1126,26 @@ onBeforeUnmount(() => {
 
 /* ============ 右侧卡片 ============ */
 .side-card {
-  background: var(--bg-card);
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
+  background: #ffffff;
+  border: none;
+  border-radius: 16px;
   padding: 16px 18px;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.03), 0 2px 8px rgba(0, 0, 0, 0.02);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.03), 0 1px 3px rgba(0, 0, 0, 0.02);
   transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
 }
 
 .side-card:hover {
   transform: translateY(-2px);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.06), 0 4px 12px rgba(0, 0, 0, 0.04);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.06), 0 2px 8px rgba(0, 0, 0, 0.03);
 }
 
 [data-theme='dark'] .side-card {
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3), 0 2px 8px rgba(0, 0, 0, 0.15);
+  background: #1c1c1e;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3), 0 1px 3px rgba(0, 0, 0, 0.15);
 }
 
 [data-theme='dark'] .side-card:hover {
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4), 0 4px 12px rgba(0, 0, 0, 0.2);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.2);
 }
 
 .side-card-title {
@@ -1048,7 +1157,11 @@ onBeforeUnmount(() => {
   color: var(--text-primary);
   margin-bottom: 12px;
   padding-bottom: 10px;
-  border-bottom: 1px solid var(--border-color);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+}
+
+[data-theme='dark'] .side-card-title {
+  border-bottom-color: rgba(255, 255, 255, 0.08);
 }
 
 .kp-tags {
