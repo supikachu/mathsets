@@ -114,7 +114,7 @@ function splitSolution(text: string): { body: string; conclusion: string } {
       </div>
 
       <!-- 试卷卡片（有输入时） -->
-      <div v-else class="paper-card bg-[var(--bg-card)] rounded-2xl shadow-md dark:shadow-none border border-transparent dark:border-[#3A3A3C]">
+      <div v-else class="paper-card math-content bg-[var(--bg-card)] rounded-2xl shadow-md dark:shadow-none border border-transparent dark:border-[#3A3A3C]">
         <div class="paper-card-header">
           <span class="paper-type-badge">{{ typeOptions.find(t => t.value === form.question_type)?.label }}</span>
           <span class="paper-difficulty">

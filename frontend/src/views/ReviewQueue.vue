@@ -1,6 +1,6 @@
 <template>
   <div style="padding: 20px 24px; height: 100%; overflow-y: auto;">
-    <div class="flex items-center justify-between mb-12">
+    <div class="flex items-center justify-between mb-3">
       <h1 class="page-title" style="margin-bottom: 0"><AppIcon name="shield-check" :size="24" /> 审核队列</h1>
       <AppBadge v-if="!loading" :color="list.length > 0 ? 'yellow' : 'gray'">
         待审核: {{ list.length }} 题
