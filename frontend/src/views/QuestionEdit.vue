@@ -672,7 +672,7 @@ function restoreDraft() {
   } catch { /* ignore */ }
 }
 
-function doRestoreDraft() {
+async function doRestoreDraft() {
   if (!pendingDraft) return
   const fields = ['stem', 'question_type', 'sub_type', 'difficulty', 'default_score', 'grade', 'semester',
     'source', 'solutions', 'options', 'correctAnswer', 'blanks', 'solutionAnswer', 'sub_answers',
@@ -683,6 +683,11 @@ function doRestoreDraft() {
   toast.success('草稿已恢复')
   pendingDraft = null
   restoreDialog.value = false
+  await nextTick()
+  resizeAllTextareas()
+  document.querySelectorAll('textarea').forEach(el => {
+    el.dispatchEvent(new Event('input'))
+  })
 }
 
 function discardDraft() {
