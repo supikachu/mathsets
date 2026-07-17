@@ -96,7 +96,7 @@ function splitSolution(text: string): { body: string; conclusion: string } {
 
 <template>
   <div class="preview-col border-none bg-transparent">
-    <div class="preview-col-inner p-0 overflow-y-auto">
+    <div class="preview-col-inner p-0">
       <!-- 骨架屏（无输入时） -->
       <div v-if="!form.stem && !form.solutions.some(s => s.trim()) && form.options.every(o => !o.content)" class="preview-skeleton">
         <div class="skeleton-line skeleton-title"></div>
@@ -114,7 +114,7 @@ function splitSolution(text: string): { body: string; conclusion: string } {
       </div>
 
       <!-- 试卷卡片（有输入时） -->
-      <div v-else class="paper-card sticky top-0 bg-[var(--bg-card)] rounded-2xl shadow-md dark:shadow-none border border-transparent dark:border-[#3A3A3C]">
+      <div v-else class="paper-card bg-[var(--bg-card)] rounded-2xl shadow-md dark:shadow-none border border-transparent dark:border-[#3A3A3C]">
         <div class="paper-card-header">
           <span class="paper-type-badge">{{ typeOptions.find(t => t.value === form.question_type)?.label }}</span>
           <span class="paper-difficulty">
@@ -193,12 +193,14 @@ function splitSolution(text: string): { body: string; conclusion: string } {
 .preview-col {
   flex: 1;
   min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
 }
 
 .preview-col-inner {
   flex: 1;
+  min-height: 0;
 }
 
 /* 试卷卡片 - 悬浮纸张效果 */
@@ -208,6 +210,12 @@ function splitSolution(text: string): { body: string; conclusion: string } {
   padding: 24px 28px;
   box-shadow: var(--shadow-md);
   border: none;
+  height: calc(100vh - 120px);
+  overflow-y: auto;
+}
+
+[data-theme='dark'] .paper-card {
+  border: 1px solid #3a3a3c;
 }
 
 .paper-card-header {
