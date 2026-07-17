@@ -524,6 +524,12 @@
   box-shadow: var(--shadow-lg);
   padding: 24px;
   animation: scaleIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+  border: 1px solid transparent;
+}
+
+[data-theme='dark'] .modal {
+  border-color: #3a3a3c;
+  box-shadow: none;
 }
 
 .modal-header {
@@ -544,7 +550,7 @@
   overflow: hidden;
   padding: 0;
   max-height: none;
-  background: #ffffff;
+  background: var(--bg-card);
 }
 
 .modal-rigid > .modal-header {

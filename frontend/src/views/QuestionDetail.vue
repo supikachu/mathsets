@@ -218,6 +218,7 @@ import LatexRender from '@/components/LatexRender.vue'
 import { AppButton, AppBadge, AppModal, AppConfirm, AppIcon } from '@/components/ui'
 import { useToast } from '@/composables/useToast'
 import { typeLabel, typeBadgeColor, statusLabel, statusIcon, formatTime } from '@/utils/questionDisplay'
+import { useOptionsLayout } from '@/composables/useOptionsLayout'
 
 const route = useRoute()
 const router = useRouter()
@@ -314,70 +315,10 @@ const hasGrading = computed(() => {
   return !!(g && Array.isArray(g) && g.length)
 })
 
-// ---- 选择题选项自适应网格布局（与列表页逻辑一致）----
-const OPTION_GAP = 16
+// ---- 选择题选项自适应网格布局（使用全局 Composable 提炼）----
 const optionsContainer = ref<HTMLElement | null>(null)
-const optionLayout = ref<'grid-4' | 'grid-2' | 'grid-1'>('grid-2')
-let resizeObserver: ResizeObserver | null = null
-let layoutTimer: ReturnType<typeof setTimeout> | null = null
-
+const { layout: optionLayout } = useOptionsLayout(optionsContainer, optionList, '.paper-opt')
 const optionLayoutClass = computed(() => optionLayout.value)
-
-function computeOptionLayout() {
-  const container = optionsContainer.value
-  if (!container) return
-  const containerWidth = container.clientWidth
-  if (containerWidth === 0) return
-
-  const optionEls = container.querySelectorAll<HTMLElement>('.paper-opt')
-  if (optionEls.length === 0) return
-
-  // 临时切换为 block 布局测量真实宽度
-  const prevDisplay = container.style.display
-  const prevCols = container.style.gridTemplateColumns
-  container.style.display = 'block'
-  container.style.gridTemplateColumns = ''
-
-  let maxWidth = 0
-  const prevStyles: { el: HTMLElement; display: string; width: string }[] = []
-  optionEls.forEach(el => {
-    prevStyles.push({ el, display: el.style.display, width: el.style.width })
-    el.style.display = 'inline-flex'
-    el.style.width = 'auto'
-    el.style.whiteSpace = 'nowrap'
-    const w = el.scrollWidth
-    if (w > maxWidth) maxWidth = w
-    el.style.whiteSpace = ''
-  })
-
-  prevStyles.forEach(({ el, display, width }) => {
-    el.style.display = display
-    el.style.width = width
-  })
-  container.style.display = prevDisplay
-  container.style.gridTemplateColumns = prevCols
-
-  if (maxWidth === 0) return
-
-  const slot = maxWidth + OPTION_GAP
-  if (slot * 4 <= containerWidth) {
-    optionLayout.value = 'grid-4'
-  } else if (slot * 2 <= containerWidth) {
-    optionLayout.value = 'grid-2'
-  } else {
-    optionLayout.value = 'grid-1'
-  }
-}
-
-function scheduleCompute() {
-  if (layoutTimer) clearTimeout(layoutTimer)
-  layoutTimer = setTimeout(() => computeOptionLayout(), 50)
-}
-
-// 题目数据变化后计算布局
-watch([q, optionList], () => {
-  nextTick(() => setTimeout(() => computeOptionLayout(), 120))
-})
 
 async function fetchDetail() {
   loading.value = true
@@ -463,21 +404,6 @@ const isMultiChoice = computed(() => {
 
 onMounted(async () => {
   await fetchDetail()
-  nextTick(() => {
-    setTimeout(() => computeOptionLayout(), 150)
-    if (optionsContainer.value) {
-      resizeObserver = new ResizeObserver(() => scheduleCompute())
-      resizeObserver.observe(optionsContainer.value)
-    }
-  })
-})
-
-onBeforeUnmount(() => {
-  if (resizeObserver) {
-    resizeObserver.disconnect()
-    resizeObserver = null
-  }
-  if (layoutTimer) clearTimeout(layoutTimer)
 })
 </script>
 

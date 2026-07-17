@@ -6,13 +6,43 @@
       <p class="dash-subtitle">这是你使用协同题库的第 <span class="dash-days">{{ daysSince }}</span> 天</p>
     </div>
 
+    <!-- ===== 核心指标卡片 ===== -->
+    <div class="metric-grid">
+      <div class="metric-card metric-total">
+        <div class="metric-content">
+          <span class="metric-title">总题数</span>
+          <span class="metric-value">{{ stats.total }}</span>
+        </div>
+        <div class="metric-icon-wrap">
+          <AppIcon name="database" :size="24" />
+        </div>
+      </div>
+      <div class="metric-card metric-pending">
+        <div class="metric-content">
+          <span class="metric-title">审核中</span>
+          <span class="metric-value">{{ stats.pending }}</span>
+        </div>
+        <div class="metric-icon-wrap">
+          <AppIcon name="clock" :size="24" />
+        </div>
+      </div>
+      <div class="metric-card metric-published">
+        <div class="metric-content">
+          <span class="metric-title">已入库</span>
+          <span class="metric-value">{{ stats.published }}</span>
+        </div>
+        <div class="metric-icon-wrap">
+          <AppIcon name="check-circle" :size="24" />
+        </div>
+      </div>
+    </div>
+
     <!-- ===== Bento Grid ===== -->
     <div class="bento-grid">
-      <!-- 题目总数 + 趋势折线图 -->
+      <!-- 新增趋势折线图 -->
       <div class="bento-card bento-trend">
         <div class="bento-head">
-          <span class="bento-title">题目总数</span>
-          <span class="bento-number">{{ stats.total }}</span>
+          <span class="bento-title">新增趋势</span>
         </div>
         <div class="trend-chart">
           <svg
@@ -434,11 +464,118 @@ async function fetchDashboardData() {
   padding: 24px 28px;
   height: 100%;
   overflow-y: auto;
-  background: #f4f7fc;
+  background: var(--bg-primary);
 }
 
 [data-theme='dark'] .dashboard {
   background: #000000;
+}
+
+/* ===== Metric Grid & Cards ===== */
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px;
+}
+
+@media (max-width: 768px) {
+  .metric-grid {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+}
+
+.metric-card {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 24px 28px;
+  border-radius: 24px; /* rounded-3xl */
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.02), 0 2px 8px rgba(0, 0, 0, 0.02);
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.metric-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.05), 0 4px 12px rgba(0, 0, 0, 0.04);
+}
+
+.metric-content {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.metric-title {
+  font-size: 14px;
+  font-weight: 550;
+  color: var(--text-secondary);
+}
+
+.metric-value {
+  font-size: 32px;
+  font-weight: 800;
+  color: var(--text-primary);
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+}
+
+.metric-icon-wrap {
+  width: 48px;
+  height: 48px;
+  border-radius: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.3s;
+}
+
+.metric-card:hover .metric-icon-wrap {
+  transform: scale(1.08);
+}
+
+/* Apple style light/dark specific gradients */
+.metric-total {
+  background: linear-gradient(135deg, rgba(0, 122, 255, 0.12), rgba(0, 122, 255, 0.03));
+  border: 1px solid rgba(0, 122, 255, 0.15);
+}
+.metric-total .metric-icon-wrap {
+  background: rgba(0, 122, 255, 0.12);
+  color: var(--accent);
+}
+
+.metric-pending {
+  background: linear-gradient(135deg, rgba(255, 149, 0, 0.12), rgba(255, 149, 0, 0.03));
+  border: 1px solid rgba(255, 149, 0, 0.15);
+}
+.metric-pending .metric-icon-wrap {
+  background: rgba(255, 149, 0, 0.12);
+  color: #ff9500;
+}
+
+.metric-published {
+  background: linear-gradient(135deg, rgba(52, 199, 89, 0.12), rgba(52, 199, 89, 0.03));
+  border: 1px solid rgba(52, 199, 89, 0.15);
+}
+.metric-published .metric-icon-wrap {
+  background: rgba(52, 199, 89, 0.12);
+  color: #34c759;
+}
+
+[data-theme='dark'] .metric-card {
+  box-shadow: none;
+}
+[data-theme='dark'] .metric-total {
+  background: linear-gradient(135deg, rgba(10, 132, 255, 0.18), rgba(10, 132, 255, 0.05));
+  border-color: rgba(10, 132, 255, 0.25);
+}
+[data-theme='dark'] .metric-pending {
+  background: linear-gradient(135deg, rgba(255, 159, 10, 0.18), rgba(255, 159, 10, 0.05));
+  border-color: rgba(255, 159, 10, 0.25);
+}
+[data-theme='dark'] .metric-published {
+  background: linear-gradient(135deg, rgba(48, 209, 88, 0.18), rgba(48, 209, 88, 0.05));
+  border-color: rgba(48, 209, 88, 0.25);
 }
 
 /* ===== Welcome ===== */
@@ -513,11 +650,13 @@ async function fetchDashboardData() {
 }
 
 [data-theme='dark'] .bento-card {
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3), 0 2px 8px rgba(0, 0, 0, 0.2);
+  border-color: #3a3a3c;
+  box-shadow: none;
 }
 
 [data-theme='dark'] .bento-card:hover {
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4), 0 4px 12px rgba(0, 0, 0, 0.3);
+  border-color: #3a3a3c;
+  box-shadow: none;
 }
 
 .bento-head {

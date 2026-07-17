@@ -132,16 +132,16 @@
                   <AppIcon name="bookmark" :size="12" :stroke="2" />
                   {{ card.source }}
                 </span>
-                <span class="q-tag" :class="`q-tag--${card.question_type}`">
+                <AppBadge :color="typeBadgeColor(card.question_type)">
                   {{ typeLabel(card.question_type) }}
-                </span>
-                <span class="q-tag" :class="`q-tag--${card.difficulty}`">
+                </AppBadge>
+                <AppBadge :color="diffBadgeColor(card.difficulty)">
                   {{ diffLabel(card.difficulty) }}
-                </span>
-                <span class="q-tag q-tag--neutral">
+                </AppBadge>
+                <AppBadge :color="statusBadgeColor(card.status)" class="flex items-center gap-1">
                   <AppIcon :name="statusIcon(card.status)" :size="11" :stroke="2" />
                   {{ statusLabel(card.status) }}
-                </span>
+                </AppBadge>
               </div>
               <span class="q-card-time">{{ formatTime(card.updated_at) }}</span>
             </div>
@@ -264,16 +264,19 @@ import { useRouter } from 'vue-router'
 import { questionApi, type QuestionSummary, type QuestionDetail, type QuestionQuery } from '@/api/client'
 import LatexRender from '@/components/LatexRender.vue'
 import ThemeToggle from '@/components/ThemeToggle.vue'
-import { AppButton, AppSelect, AppEmpty, AppPagination, AppIcon } from '@/components/ui'
+import { AppButton, AppSelect, AppEmpty, AppPagination, AppIcon, AppBadge } from '@/components/ui'
 import { useSelectedKp } from '@/composables/useSelectedKp'
 import { useQuestionBasket } from '@/composables/useQuestionBasket'
 import { useToast } from '@/composables/useToast'
 import { useSpaceStore } from '@/stores/space'
 import {
   typeLabel,
+  typeBadgeColor,
   diffLabel,
+  diffBadgeColor,
   statusLabel,
   statusIcon,
+  statusBadgeColor,
   formatTime,
 } from '@/utils/questionDisplay'
 
@@ -655,6 +658,7 @@ onBeforeUnmount(() => {
   if (searchTimer) clearTimeout(searchTimer)
   if (layoutDebounce) clearTimeout(layoutDebounce)
   resizeObservers.forEach(ro => ro.disconnect())
+  clear() // 修复状态驻留隐患：离开列表页面时重置全局共享知识点，防止污染其他视图
 })
 </script>
 
@@ -938,6 +942,7 @@ onBeforeUnmount(() => {
   flex: 1;
   overflow-y: auto;
   padding: 16px 20px;
+  background: var(--bg-primary);
 }
 
 /* ===== Header Actions ===== */
@@ -1023,28 +1028,40 @@ onBeforeUnmount(() => {
 .q-card-list {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px; /* gap-4 */
 }
 
 /* ===== Question Card ===== */
 .q-card {
   background: var(--bg-card);
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border-color);
+  border-radius: 16px; /* rounded-2xl */
+  border: 1px solid transparent;
   box-shadow: var(--shadow-sm);
   overflow: hidden;
-  transition: box-shadow 0.3s cubic-bezier(0.4, 0, 0.2, 1),
-              transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
 }
 
 .q-card:hover {
-  box-shadow: var(--shadow-card-hover);
-  transform: translateY(-1px);
+  transform: translateY(-4px); /* hover:-translate-y-1 */
+  box-shadow: var(--shadow-md);
 }
 
 .q-card.is-expanded {
   box-shadow: var(--shadow-md);
-  border-color: var(--border-strong);
+}
+
+[data-theme='dark'] .q-card {
+  border-color: #3a3a3c;
+  box-shadow: none;
+}
+
+[data-theme='dark'] .q-card:hover {
+  border-color: #3a3a3c;
+  box-shadow: none;
+}
+
+[data-theme='dark'] .q-card.is-expanded {
+  box-shadow: none;
 }
 
 /* ---- Row 1: Header ---- */

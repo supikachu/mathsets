@@ -318,11 +318,11 @@ function categoryLabel(c: string): string {
   return map[c] || c
 }
 
-function categoryColor(c: string): 'blue' | 'green' | 'orange' | 'gray' {
-  const map: Record<string, 'blue' | 'green' | 'orange' | 'gray'> = {
+function categoryColor(c: string): 'blue' | 'green' | 'yellow' | 'gray' {
+  const map: Record<string, 'blue' | 'green' | 'yellow' | 'gray'> = {
     core_competence: 'blue',
     method: 'green',
-    school: 'orange',
+    school: 'yellow',
   }
   return map[c] || 'gray'
 }

@@ -19,6 +19,10 @@
             <AppIcon :name="item.icon" :size="19" />
             <span>{{ item.label }}</span>
           </router-link>
+          <div class="nav-toggle-item">
+            <span class="nav-toggle-label">外观模式</span>
+            <ThemeToggle />
+          </div>
         </div>
 
         <!-- 下方：用户信息卡片（独立，与导航卡片之间透出背景色） -->
@@ -462,5 +466,20 @@ onUnmounted(() => document.removeEventListener('click', onDocumentClick))
   .layout-root :deep(.bottom-nav) {
     display: none;
   }
+}
+
+.nav-toggle-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 10px 4px;
+  margin-top: 12px;
+  border-top: 1px solid var(--divider);
+}
+
+.nav-toggle-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
 }
 </style>

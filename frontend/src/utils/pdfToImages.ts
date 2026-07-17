@@ -83,7 +83,7 @@ export async function* pdfToImages(
       canvas.width = viewport.width
       canvas.height = viewport.height
 
-      await page.render({ canvasContext: ctx, viewport }).promise
+      await page.render({ canvasContext: ctx, viewport, canvas }).promise
 
       const dataUrl = canvas.toDataURL('image/jpeg', 0.85)
 
