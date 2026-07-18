@@ -8,8 +8,11 @@ use uuid::Uuid;
 
 use crate::auth::middleware::AuthUser;
 use crate::auth::permissions::{
-    can_access_space, ensure_public_space, get_space, is_admin, is_space_member,
+    can_access_space, ensure_personal_space, ensure_public_space, get_space, is_admin,
+    is_space_member,
 };
+use crate::handlers::questions::{build_detail, db_err, save_version};
+use crate::models::question::{Question, QuestionStatus, TransferQuestionRequest};
 use crate::models::space::{
     AddSpaceMemberRequest, CreateTeamSpaceRequest, Space, SpaceDetail, SpaceKind, SpaceMemberInfo,
     SpaceSummary, UpdateSpaceMemberRequest, UpdateSpaceRequest,
@@ -600,4 +603,251 @@ pub async fn require_space_member(
     }
 
     Ok(space)
+}
+
+// ---------------------------------------------------------------------------
+// 跨空间克隆题目（深拷贝 + 强制 Draft + origin_question_id 链路）
+// ---------------------------------------------------------------------------
+
+/// POST /api/v1/questions/:id/clone — 跨空间克隆题目
+///
+/// 业务规则：
+/// - 将传入 `question_id` 的源题深拷贝到 `target_space_id`
+/// - 若请求体中缺省 `target_space_id`，则默认克隆到当前用户的 Personal 空间
+/// - 克隆产生的新题目 `status` 强制重置为 `Draft`
+/// - 准确记录 `origin_question_id` 指向源题
+/// - 统计字段（paper_count/attempt_count/favorite_count）清零，accuracy_rate 置 NULL
+/// - 拷贝知识点关联与标签关联（标签 use_count 同步递增）
+/// - 通过事务保证原子性，tx.commit() 后才返回新题详情
+pub async fn clone_question(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthUser>,
+    Path(question_id): Path<Uuid>,
+    Json(req): Json<TransferQuestionRequest>,
+) -> Result<(StatusCode, Json<crate::models::question::QuestionDetail>), (StatusCode, Json<serde_json::Value>)> {
+    // ── 1. 加载源题 ──
+    let src = sqlx::query_as::<_, Question>("SELECT * FROM questions WHERE id = $1")
+        .bind(question_id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| db_err(format!("查询源题失败: {}", e)))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "源题不存在"}))))?;
+
+    // ── 2. 校验对源空间的访问权 ──
+    let src_space = get_space(&state.pool, src.space_id)
+        .await
+        .map_err(|e| db_err(format!("查询源空间失败: {}", e)))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "源空间不存在"}))))?;
+
+    if !can_access_space(&state.pool, &auth, &src_space)
+        .await
+        .map_err(|e| db_err(format!("权限检查失败: {}", e)))?
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "无权访问源题所在空间"})),
+        ));
+    }
+
+    // 公共库未发布题：仅管理员可克隆（防止未发布题目被提前扩散）
+    if src_space.kind == SpaceKind::Public
+        && src.status != QuestionStatus::Published
+        && !is_admin(&auth.role)
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "仅可克隆公共库中已发布的题目"})),
+        ));
+    }
+
+    // ── 3. 解析目标空间（缺省为当前用户个人空间） ──
+    let target_space_id = match req.target_space_id {
+        Some(tid) => tid,
+        None => {
+            let display = sqlx::query_scalar::<_, String>(
+                "SELECT display_name FROM users WHERE id = $1",
+            )
+            .bind(auth.id)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(|e| db_err(format!("查询用户失败: {}", e)))?
+            .unwrap_or_else(|| "用户".into());
+            ensure_personal_space(&state.pool, auth.id, &display)
+                .await
+                .map_err(|e| db_err(format!("创建个人空间失败: {}", e)))?
+        }
+    };
+
+    let target_space = get_space(&state.pool, target_space_id)
+        .await
+        .map_err(|e| db_err(format!("查询目标空间失败: {}", e)))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "目标空间不存在"}))))?;
+
+    // ── 4. 目标空间写入权限校验 ──
+    // 公共库只能通过「贡献」接口写入，禁止直接克隆
+    if target_space.kind == SpaceKind::Public {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "公共库只能通过贡献接口写入"})),
+        ));
+    }
+
+    if !crate::auth::permissions::can_write_in_space(&state.pool, &auth, &target_space)
+        .await
+        .map_err(|e| db_err(format!("权限检查失败: {}", e)))?
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "无权写入目标空间"})),
+        ));
+    }
+
+    // ── 5. 事务内深拷贝（强制 Draft + origin_question_id） ──
+    let new_id = clone_question_internal(
+        &state.pool,
+        &src,
+        target_space_id,
+        auth.id,
+        Some(src.id),
+    )
+    .await
+    .map_err(|e| db_err(format!("克隆失败: {}", e)))?;
+
+    // ── 6. 重新查询并构建详情 ──
+    let question = sqlx::query_as::<_, Question>("SELECT * FROM questions WHERE id = $1")
+        .bind(new_id)
+        .fetch_one(&state.pool)
+        .await
+        .map_err(|e| db_err(format!("查询新题失败: {}", e)))?;
+
+    let detail = build_detail(&state.pool, &auth, question, None)
+        .await
+        .map_err(|e| db_err(format!("构建详情失败: {}", e)))?;
+
+    Ok((StatusCode::CREATED, Json(detail)))
+}
+
+/// 内部：跨空间深拷贝题目（Draft 状态 + 完整字段拷贝 + 知识点/标签关联复制）
+///
+/// 与 `handlers::questions::copy_question` 的区别：
+/// - `copy_question` 用于贡献/导入公共库，status 强制为 'published'
+/// - 本函数用于跨空间克隆，status 强制为 'draft'，统计字段清零
+/// - 本函数额外复制标签关联（use_count 同步递增），保证字段拷贝完整性
+async fn clone_question_internal(
+    pool: &sqlx::PgPool,
+    src: &Question,
+    target_space_id: Uuid,
+    creator_id: Uuid,
+    origin_id: Option<Uuid>,
+) -> Result<Uuid, sqlx::Error> {
+    let id = Uuid::new_v4();
+    let now = chrono::Utc::now();
+
+    let mut tx = pool.begin().await?;
+
+    // ── 拷贝题目本体（除 id/space_id/status/统计/version/审计字段外，全部保留源值） ──
+    sqlx::query(
+        r#"
+        INSERT INTO questions (
+            id, stem, stem_text, images, question_type, difficulty, default_score, status,
+            options, correct_answer, analysis, grading_criteria, grade, semester, source,
+            academic_year, exam_type, exam_region,
+            grade_level, semester_new, cognitive_level, difficulty_score, estimated_minutes,
+            parent_id, sub_order,
+            paper_count, attempt_count, accuracy_rate, favorite_count,
+            creator_id, created_at, updated_at, version, space_id, origin_question_id
+        )
+        VALUES (
+            $1, $2, $3, $4, $5, $6, $7, 'draft'::question_status,
+            $8, $9, $10, $11, $12, $13, $14,
+            $15, $16, $17,
+            $18, $19, $20, $21, $22,
+            $23, $24,
+            0, 0, NULL, 0,
+            $25, $26, $27, 1, $28, $29
+        )
+        "#,
+    )
+    .bind(id)
+    .bind(&src.stem)
+    .bind(&src.stem_text)
+    .bind(&src.images)
+    .bind(&src.question_type)
+    .bind(&src.difficulty)
+    .bind(src.default_score)
+    .bind(&src.options)
+    .bind(&src.correct_answer)
+    .bind(&src.analysis)
+    .bind(&src.grading_criteria)
+    .bind(&src.grade)
+    .bind(&src.semester)
+    .bind(&src.source)
+    .bind(&src.academic_year)
+    .bind(&src.exam_type)
+    .bind(&src.exam_region)
+    .bind(&src.grade_level)
+    .bind(&src.semester_new)
+    .bind(&src.cognitive_level)
+    .bind(src.difficulty_score)
+    .bind(src.estimated_minutes)
+    .bind(src.parent_id)
+    .bind(src.sub_order)
+    .bind(creator_id)
+    .bind(now)
+    .bind(now)
+    .bind(target_space_id)
+    .bind(origin_id)
+    .execute(&mut *tx)
+    .await?;
+
+    // ── 拷贝知识点关联 ──
+    let kp_ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT knowledge_point_id FROM question_knowledge_points WHERE question_id = $1",
+    )
+    .bind(src.id)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    for kp_id in &kp_ids {
+        sqlx::query(
+            "INSERT INTO question_knowledge_points (question_id, knowledge_point_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        )
+        .bind(id)
+        .bind(kp_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    // ── 拷贝标签关联（use_count 同步递增） ──
+    let tag_ids: Vec<Uuid> =
+        sqlx::query_scalar("SELECT tag_id FROM question_tags_relation WHERE question_id = $1")
+            .bind(src.id)
+            .fetch_all(&mut *tx)
+            .await?;
+
+    for tag_id in &tag_ids {
+        sqlx::query(
+            r#"
+            INSERT INTO question_tags_relation (question_id, tag_id)
+            VALUES ($1, $2)
+            ON CONFLICT DO NOTHING
+            "#,
+        )
+        .bind(id)
+        .bind(tag_id)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query("UPDATE tags SET use_count = use_count + 1 WHERE id = $1")
+            .bind(tag_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    // ── 写入版本快照（v1） ──
+    save_version(&mut tx, id, 1, Some(creator_id)).await?;
+
+    // ── 提交事务 ──
+    tx.commit().await?;
+    Ok(id)
 }

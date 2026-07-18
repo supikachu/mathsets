@@ -110,6 +110,11 @@ pub fn build_app(state: AppState) -> Router {
             "/questions/{id}/import",
             post(handlers::questions::import_question),
         )
+        // 跨空间克隆题目（深拷贝 + 强制 Draft + origin_question_id）
+        .route(
+            "/questions/{id}/clone",
+            post(handlers::spaces::clone_question),
+        )
         // 试卷 CRUD
         .route("/papers", get(handlers::papers::list_papers))
         .route("/papers", post(handlers::papers::create_paper))

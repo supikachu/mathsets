@@ -25,7 +25,7 @@ use crate::AppState;
 // 辅助函数
 // ---------------------------------------------------------------------------
 
-async fn save_version(
+pub(crate) async fn save_version(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     question_id: Uuid,
     version: i32,
@@ -240,7 +240,7 @@ async fn replace_reviewers(
     Ok(())
 }
 
-async fn build_detail(
+pub(crate) async fn build_detail(
     pool: &sqlx::PgPool,
     auth: &AuthUser,
     question: Question,
@@ -275,7 +275,7 @@ async fn build_detail(
     Ok(detail)
 }
 
-fn db_err(msg: impl Into<String>) -> (StatusCode, Json<serde_json::Value>) {
+pub(crate) fn db_err(msg: impl Into<String>) -> (StatusCode, Json<serde_json::Value>) {
     let msg_str = msg.into();
     tracing::error!("数据库错误: {}", msg_str);
     (

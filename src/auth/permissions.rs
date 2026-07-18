@@ -1,11 +1,19 @@
+use axum::{
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Json,
+};
+use serde_json::json;
 use sqlx::PgPool;
+use thiserror::Error;
 use uuid::Uuid;
 
 use crate::auth::middleware::AuthUser;
-use crate::models::question::QuestionStatus;
+use crate::models::question::{Question, QuestionStatus};
 use crate::models::space::{Space, SpaceKind, SpaceSettings};
+use crate::models::user::{GlobalRole, User};
 
-/// 系统管理员
+/// 系统管理员（兼容旧 role 字符串）
 pub fn is_admin(role: &str) -> bool {
     role == "Admin" || role.eq_ignore_ascii_case("admin")
 }
@@ -263,5 +271,110 @@ pub async fn can_review_question(
             Ok(true)
         }
         SpaceKind::Public => Ok(false),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 发布权限（Maker-Checker 核心引擎）
+// ---------------------------------------------------------------------------
+
+/// 发布鉴权业务错误 — 与 sqlx::Error 区分，便于 handler 直接 `?` 传播并统一响应
+#[derive(Debug, Error)]
+pub enum PermissionError {
+    /// 录审分离违规：团队空间下创建者尝试审核自己的题目
+    #[error("录审分离违规：创建者不能审核自己录入的题目")]
+    MakerCheckerViolation,
+
+    /// 缺少所需权限（携带具体权限标识，便于前端展示）
+    #[error("无权操作：缺少 {0} 权限")]
+    MissingPrivilege(String),
+
+    /// 数据库查询失败（内部错误，不暴露细节给前端）
+    #[error("数据库查询失败")]
+    Database(#[from] sqlx::Error),
+}
+
+impl IntoResponse for PermissionError {
+    fn into_response(self) -> Response {
+        let (status, code) = match &self {
+            PermissionError::MakerCheckerViolation => (
+                StatusCode::FORBIDDEN,
+                "ERR_MAKER_CHECKER_VIOLATION",
+            ),
+            PermissionError::MissingPrivilege(_) => (StatusCode::FORBIDDEN, "ERR_FORBIDDEN"),
+            PermissionError::Database(_) => {
+                tracing::error!("权限检查数据库错误: {:?}", self);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "ERR_INTERNAL_SERVER",
+                )
+            }
+        };
+        let message = self.to_string();
+        (status, Json(json!({ "error": message, "code": code }))).into_response()
+    }
+}
+
+/// 是否可发布该题（Maker-Checker 核心鉴权）
+///
+/// 教研流转法则（严密不漏）：
+/// 1. `GlobalRole::SuperAdmin` 一票通过权（最高优先级，直接返回 true）
+/// 2. `SpaceKind::Personal`：允许自审 — 仅当 `question.creator_id == user.id`
+///    且空间 settings.allow_creator_self_review 为 true
+/// 3. `SpaceKind::Team`：强制录审分离
+///    - 若 `question.creator_id == user.id` → 返回 `Err(MakerCheckerViolation)`
+///    - 否则查询当前用户在该 space 的角色，要求具有 Owner 或 Reviewer 权限
+/// 4. `SpaceKind::Public`：公共库仅可通过「贡献」接口写入，禁止直接发布
+pub async fn can_publish_question(
+    pool: &PgPool,
+    user: &User,
+    question: &Question,
+    space: &Space,
+) -> Result<bool, PermissionError> {
+    // ── 法则 1：SuperAdmin 一票通过 ──
+    if user.global_role == GlobalRole::SuperAdmin {
+        return Ok(true);
+    }
+
+    match space.kind {
+        SpaceKind::Personal => {
+            // ── 法则 2：个人空间自审 ──
+            let settings = space.settings_parsed();
+            if question.creator_id == user.id && settings.allow_creator_self_review {
+                Ok(true)
+            } else {
+                Err(PermissionError::MissingPrivilege("personal_self_review".into()))
+            }
+        }
+        SpaceKind::Team => {
+            // ── 法则 3a：录审分离硬拦截 ──
+            if question.creator_id == user.id {
+                return Err(PermissionError::MakerCheckerViolation);
+            }
+
+            // ── 法则 3b：查询当前用户在该 space 的角色 ──
+            let role_str: Option<String> = sqlx::query_scalar(
+                "SELECT role FROM space_members WHERE space_id = $1 AND user_id = $2",
+            )
+            .bind(space.id)
+            .bind(user.id)
+            .fetch_optional(pool)
+            .await?;
+
+            match role_str.as_deref() {
+                Some("owner") | Some("reviewer") => Ok(true),
+                Some(other) => Err(PermissionError::MissingPrivilege(format!(
+                    "space_role={}",
+                    other
+                ))),
+                None => {
+                    Err(PermissionError::MissingPrivilege("space_member".into()))
+                }
+            }
+        }
+        SpaceKind::Public => {
+            // ── 法则 4：公共库禁止直接发布 ──
+            Err(PermissionError::MissingPrivilege("public_publish".into()))
+        }
     }
 }
