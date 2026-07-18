@@ -114,7 +114,7 @@ function splitSolution(text: string): { body: string; conclusion: string } {
       </div>
 
       <!-- 试卷卡片（有输入时） -->
-      <div v-else class="paper-card math-content bg-[var(--bg-card)] rounded-2xl shadow-md dark:shadow-none border border-transparent dark:border-[#3A3A3C]">
+      <div v-else class="paper-card math-content pb-32 bg-[var(--bg-card)] rounded-2xl shadow-md dark:shadow-none border border-transparent dark:border-[#3A3A3C]">
         <div class="paper-card-header">
           <span class="paper-type-badge">{{ typeOptions.find(t => t.value === form.question_type)?.label }}</span>
           <span class="paper-difficulty">
@@ -207,7 +207,7 @@ function splitSolution(text: string): { body: string; conclusion: string } {
 .paper-card {
   background: var(--bg-card);
   border-radius: 16px;
-  padding: 24px 28px;
+  padding: 24px 28px 128px 28px;
   box-shadow: var(--shadow-md);
   border: none;
   height: calc(100vh - 120px);
@@ -392,15 +392,16 @@ function splitSolution(text: string): { body: string; conclusion: string } {
   background: rgba(255, 255, 255, 0.12);
 }
 
-/* 结论高亮区 */
+/* 结论区 - 极简引用样式（去除大面积背景框，改用轻量左侧边框高亮） */
 .paper-conclusion {
-  margin-top: 12px;
-  padding: 10px 14px;
-  border-radius: var(--radius-md);
-  background: var(--accent-light);
+  margin-top: 14px;
+  padding: 4px 0 4px 12px;
   border-left: 3px solid var(--accent);
-  font-size: 14px;
+  background: transparent;
+  font-size: 13.5px;
+  line-height: 1.6;
   color: var(--text-primary);
+  font-weight: 500;
 }
 
 /* 淡入淡出过渡 */
