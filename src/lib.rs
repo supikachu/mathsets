@@ -98,9 +98,19 @@ pub fn build_app(state: AppState) -> Router {
         .route("/questions/{id}", get(handlers::questions::get_question))
         .route("/questions/{id}", put(handlers::questions::update_question))
         .route("/questions/{id}", delete(handlers::questions::delete_question))
-        // 审核
-        .route("/questions/{id}/submit", post(handlers::questions::submit_question))
-        .route("/questions/{id}/review", post(handlers::questions::review_question))
+        // 教研状态机（Draft → Pending → Published / Rejected → Draft）
+        .route(
+            "/questions/{id}/submit",
+            post(handlers::questions::submit_for_review),
+        )
+        .route(
+            "/questions/{id}/approve",
+            post(handlers::questions::approve_question),
+        )
+        .route(
+            "/questions/{id}/reject",
+            post(handlers::questions::reject_question),
+        )
         // 公共库流通
         .route(
             "/questions/{id}/contribute",

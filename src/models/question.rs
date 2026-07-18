@@ -435,12 +435,11 @@ impl From<(Question, Vec<KnowledgePointSummary>)> for QuestionDetail {
     }
 }
 
-/// 提交审核请求
+/// 驳回请求（reject_question 专用）
 #[derive(Debug, Deserialize)]
-pub struct SubmitReviewRequest {
-    pub comment: Option<String>,
-    /// 指定审题人（可多人）；空或省略则走空间默认规则
-    pub reviewer_ids: Option<Vec<Uuid>>,
+pub struct RejectRequest {
+    /// 驳回原因（可选，记录到日志便于审计追踪）
+    pub reject_reason: Option<String>,
 }
 
 /// 贡献到公共库 / 从公共导入
@@ -448,13 +447,6 @@ pub struct SubmitReviewRequest {
 pub struct TransferQuestionRequest {
     /// 导入时的目标空间；贡献到公共时可省略
     pub target_space_id: Option<Uuid>,
-}
-
-/// 审核请求
-#[derive(Debug, Deserialize)]
-pub struct ReviewActionRequest {
-    pub action: String, // "approved" 或 "rejected"
-    pub comment: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
