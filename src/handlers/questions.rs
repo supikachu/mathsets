@@ -18,6 +18,7 @@ use crate::models::question::{
     TransferQuestionRequest, UpdateQuestionRequest,
 };
 use crate::models::space::SpaceKind;
+use crate::models::user::User;
 use crate::models::PageResult;
 use crate::AppState;
 
@@ -559,6 +560,51 @@ pub async fn create_question(
     let version = 1;
 
     let mut tx = state.pool.begin().await.map_err(|e| db_err(format!("开启事务失败: {}", e)))?;
+
+    // ── OCR 配额扣减与跨日重置（事务内，与题目写入保证绝对原子性） ──
+    // 仅当录入方式为 "ocr" 时触发；manual / ai_parse / 缺省均跳过
+    if req.input_method.as_deref() == Some("ocr") {
+        // FOR UPDATE 行锁 — 防止并发请求超额扣减
+        let user_row = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1 FOR UPDATE")
+            .bind(auth_user.id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| db_err(format!("查询用户配额失败: {}", e)))?;
+
+        let now_utc = chrono::Utc::now();
+        // 跨日重置：当前时间已过重置点 → used 清零，reset_at 顺延至明天
+        let (used, reset_at) = if now_utc > user_row.ocr_quota_reset_at {
+            (0i32, now_utc + chrono::Duration::days(1))
+        } else {
+            (user_row.ocr_quota_used, user_row.ocr_quota_reset_at)
+        };
+
+        // 配额不足 — 403 拦截（tx 在 drop 时自动回滚，不污染任何数据）
+        if used >= user_row.ocr_quota_daily {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "error": "今日 OCR 配额已用尽，请明日重置后再试",
+                    "code": "ERR_OCR_QUOTA_EXCEEDED",
+                    "quota_daily": user_row.ocr_quota_daily,
+                    "quota_used": used,
+                    "reset_at": reset_at
+                })),
+            ));
+        }
+
+        // 配额充足 — 扣减 1 并写回（同事务内）
+        let new_used = used + 1;
+        sqlx::query(
+            "UPDATE users SET ocr_quota_used = $1, ocr_quota_reset_at = $2 WHERE id = $3",
+        )
+        .bind(new_used)
+        .bind(reset_at)
+        .bind(auth_user.id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| db_err(format!("更新 OCR 配额失败: {}", e)))?;
+    }
 
     sqlx::query(
         r#"

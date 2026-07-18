@@ -204,6 +204,8 @@ pub struct CreateQuestionRequest {
     pub knowledge_point_ids: Option<Vec<Uuid>>,
     /// 所属空间；缺省为当前用户个人空间
     pub space_id: Option<Uuid>,
+    /// 录入方式（"manual" | "ocr" | "ai_parse"）— 仅 "ocr" 触发配额扣减
+    pub input_method: Option<String>,
     // DEPRECATED 旧字段 — 仍接受前端传入以兼容，但后续将移除
     pub grade: Option<String>,
     pub semester: Option<String>,
