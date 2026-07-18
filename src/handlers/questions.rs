@@ -264,7 +264,7 @@ async fn build_detail(
             pool,
             auth,
             &space,
-            question.creator_id,
+            question.creator_id.into(),
             &question.status,
             question.id,
         )
@@ -382,7 +382,7 @@ pub async fn list_questions(
 
     let mut builder = sqlx::QueryBuilder::new(
         "SELECT q.id, q.stem, q.question_type, q.difficulty, q.default_score, q.status, q.grade, \
-         q.creator_id, u.display_name AS creator_name, q.created_at, q.updated_at, q.version, q.space_id \
+         q.grade_level, q.creator_id, u.display_name AS creator_name, q.created_at, q.updated_at, q.version, q.space_id \
          FROM questions q LEFT JOIN users u ON u.id = q.creator_id WHERE 1=1",
     );
     apply_access_filters(&mut builder, &auth, &query);
@@ -565,10 +565,14 @@ pub async fn create_question(
         INSERT INTO questions (id, stem, question_type, difficulty, default_score, status,
             options, correct_answer, analysis, grading_criteria, grade, semester, source,
             academic_year, grade_semester, exam_type, exam_region,
+            grade_level, semester_new, cognitive_level, difficulty_score, estimated_minutes,
+            images, parent_id, sub_order,
             creator_id, created_at, updated_at, version, space_id)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
             $14, $15, $16, $17,
-            $18, $19, $20, $21, $22)
+            $18, $19, $20, $21, $22,
+            $23, $24, $25,
+            $26, $27, $28, $29, $30)
         "#,
     )
     .bind(id)
@@ -588,6 +592,14 @@ pub async fn create_question(
     .bind(&req.grade_semester)
     .bind(&req.exam_type)
     .bind(&req.exam_region)
+    .bind(&req.grade_level)
+    .bind(&req.semester_new)
+    .bind(&req.cognitive_level)
+    .bind(req.difficulty_score)
+    .bind(req.estimated_minutes)
+    .bind(&req.images)
+    .bind(&req.parent_id)
+    .bind(req.sub_order)
     .bind(creator_id)
     .bind(now)
     .bind(now)
@@ -673,16 +685,12 @@ pub async fn get_question(
         return Err((StatusCode::FORBIDDEN, Json(json!({"error": "无权查看该题目"}))));
     }
 
-    let creator_name = if let Some(cid) = question.creator_id {
-        sqlx::query_scalar::<_, String>("SELECT display_name FROM users WHERE id = $1")
-            .bind(cid)
-            .fetch_optional(&state.pool)
-            .await
-            .ok()
-            .flatten()
-    } else {
-        None
-    };
+    let creator_name = sqlx::query_scalar::<_, String>("SELECT display_name FROM users WHERE id = $1")
+        .bind(question.creator_id)
+        .fetch_optional(&state.pool)
+        .await
+        .ok()
+        .flatten();
 
     let detail = build_detail(&state.pool, &auth, question, creator_name)
         .await
@@ -714,7 +722,7 @@ pub async fn update_question(
         &state.pool,
         &auth_user,
         &space,
-        existing.creator_id,
+        existing.creator_id.into(),
         &existing.status,
     )
     .await
@@ -753,11 +761,19 @@ pub async fn update_question(
             grade_semester = COALESCE($13, grade_semester),
             exam_type = COALESCE($14, exam_type),
             exam_region = COALESCE($15, exam_region),
+            grade_level = COALESCE($16, grade_level),
+            semester_new = COALESCE($17, semester_new),
+            cognitive_level = COALESCE($18, cognitive_level),
+            difficulty_score = COALESCE($19, difficulty_score),
+            estimated_minutes = COALESCE($20, estimated_minutes),
+            images = COALESCE($21, images),
+            parent_id = COALESCE($22, parent_id),
+            sub_order = COALESCE($23, sub_order),
             status = 'draft'::question_status,
-            updated_by = $16,
-            updated_at = $17,
-            version = $18
-        WHERE id = $19 AND version = $20
+            updated_by = $24,
+            updated_at = $25,
+            version = $26
+        WHERE id = $27 AND version = $28
         "#,
     )
     .bind(&req.stem)
@@ -775,6 +791,14 @@ pub async fn update_question(
     .bind(&req.grade_semester)
     .bind(&req.exam_type)
     .bind(&req.exam_region)
+    .bind(&req.grade_level)
+    .bind(&req.semester_new)
+    .bind(&req.cognitive_level)
+    .bind(req.difficulty_score)
+    .bind(req.estimated_minutes)
+    .bind(&req.images)
+    .bind(&req.parent_id)
+    .bind(req.sub_order)
     .bind(auth_user.id)
     .bind(now)
     .bind(new_version)
@@ -871,7 +895,7 @@ pub async fn delete_question(
         &state.pool,
         &auth_user,
         &space,
-        existing.creator_id,
+        existing.creator_id.into(),
         &existing.status,
     )
     .await
@@ -907,7 +931,7 @@ pub async fn submit_question(
         .map_err(|e| db_err(format!("查询题目失败: {}", e)))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "题目不存在"}))))?;
 
-    if existing.creator_id.map(|uid| uid != auth_user.id).unwrap_or(true) && !is_admin(&auth_user.role)
+    if existing.creator_id != auth_user.id && !is_admin(&auth_user.role)
     {
         return Err((
             StatusCode::FORBIDDEN,
@@ -986,7 +1010,7 @@ pub async fn review_question(
         &state.pool,
         &auth_user,
         &space,
-        existing.creator_id,
+        existing.creator_id.into(),
         &existing.status,
         existing.id,
     )
@@ -1210,19 +1234,27 @@ async fn copy_question(
     sqlx::query(
         r#"
         INSERT INTO questions (
-            id, stem, question_type, difficulty, default_score, status,
+            id, stem, stem_text, images, question_type, difficulty, default_score, status,
             options, correct_answer, analysis, grading_criteria, grade, semester, source,
+            academic_year, exam_type, exam_region,
+            grade_level, semester_new, cognitive_level, difficulty_score, estimated_minutes,
+            parent_id, sub_order,
             creator_id, created_at, updated_at, version, space_id, origin_question_id
         )
         VALUES (
-            $1, $2, $3, $4, $5, 'published'::question_status,
-            $6, $7, $8, $9, $10, $11, $12,
-            $13, $14, $15, 1, $16, $17
+            $1, $2, $3, $4, $5, $6, $7, 'published'::question_status,
+            $8, $9, $10, $11, $12, $13, $14,
+            $15, $16, $17,
+            $18, $19, $20, $21, $22,
+            $23, $24,
+            $25, $26, $27, 1, $28, $29
         )
         "#,
     )
     .bind(id)
     .bind(&src.stem)
+    .bind(&src.stem_text)
+    .bind(&src.images)
     .bind(&src.question_type)
     .bind(&src.difficulty)
     .bind(src.default_score)
@@ -1233,6 +1265,16 @@ async fn copy_question(
     .bind(&src.grade)
     .bind(&src.semester)
     .bind(&src.source)
+    .bind(&src.academic_year)
+    .bind(&src.exam_type)
+    .bind(&src.exam_region)
+    .bind(&src.grade_level)
+    .bind(&src.semester_new)
+    .bind(&src.cognitive_level)
+    .bind(src.difficulty_score)
+    .bind(src.estimated_minutes)
+    .bind(&src.parent_id)
+    .bind(src.sub_order)
     .bind(creator_id)
     .bind(now)
     .bind(now)

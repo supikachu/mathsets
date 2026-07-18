@@ -23,10 +23,13 @@ async fn main() {
     // 连接数据库
     let pool = db::create_pool(&config.database_url, config.database_max_connections).await;
 
-    // 运行迁移
-    db::run_migrations(&pool).await;
-
-    tracing::info!("数据库迁移完成");
+    // 运行数据库自动迁移
+    tracing::info!("开始执行数据库结构迁移...");
+    sqlx::migrate!("./migrations")
+        .run(&pool)
+        .await
+        .expect("数据库迁移执行失败！");
+    tracing::info!("数据库迁移全部完成！");
 
     // 确保公共空间存在
     if let Err(e) = mathset::auth::permissions::ensure_public_space(&pool).await {
