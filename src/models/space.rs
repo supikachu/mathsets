@@ -2,6 +2,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+// ---------------------------------------------------------------------------
+// 枚举
+// ---------------------------------------------------------------------------
+
 /// 空间类型
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq)]
 #[sqlx(type_name = "space_kind", rename_all = "lowercase")]
@@ -12,13 +16,46 @@ pub enum SpaceKind {
     Public,
 }
 
+/// 空间上下文角色（与全局 GlobalRole 独立）
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq)]
+#[sqlx(type_name = "space_role", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+pub enum SpaceRole {
+    Owner,
+    Editor,
+    Reviewer,
+    Viewer,
+}
+
+impl SpaceRole {
+    /// 是否有录入/编辑题目的权限
+    pub fn can_write(&self) -> bool {
+        matches!(self, SpaceRole::Owner | SpaceRole::Editor | SpaceRole::Reviewer)
+    }
+
+    /// 是否有审核发布的权限
+    pub fn can_review(&self) -> bool {
+        matches!(self, SpaceRole::Owner | SpaceRole::Reviewer)
+    }
+
+    /// 是否为空间管理员
+    pub fn is_owner(&self) -> bool {
+        matches!(self, SpaceRole::Owner)
+    }
+}
+
 /// 空间默认设置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpaceSettings {
+    /// 个人空间：允许创建者自审自发
     #[serde(default = "default_true")]
     pub allow_creator_self_review: bool,
+    /// 团队空间：需要具有 review 职责才能审核
     #[serde(default)]
     pub require_review_duty: bool,
+    /// 团队空间：强制录审分离（Maker-Checker Rule）
+    #[serde(default = "default_true")]
+    pub enforce_maker_checker: bool,
 }
 
 fn default_true() -> bool {
@@ -30,9 +67,14 @@ impl Default for SpaceSettings {
         Self {
             allow_creator_self_review: true,
             require_review_duty: false,
+            enforce_maker_checker: true,
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// 空间
+// ---------------------------------------------------------------------------
 
 /// 空间（数据库行）
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -52,12 +94,12 @@ impl Space {
     }
 }
 
-/// 空间成员
+/// 空间成员（数据库行）
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct SpaceMember {
     pub space_id: Uuid,
     pub user_id: Uuid,
-    pub role: String,
+    pub role: SpaceRole,
     pub duties: Vec<String>,
     pub joined_at: DateTime<Utc>,
 }

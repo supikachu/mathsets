@@ -187,6 +187,8 @@ pub async fn register(
         username: req.username,
         display_name: req.display_name,
         role: crate::models::user::UserRole::User,
+        global_role: crate::models::user::GlobalRole::Teacher,
+        avatar_url: None,
         is_active: true,
         created_at: now,
     };
@@ -260,6 +262,8 @@ pub async fn login(
             user_id: user.id,
             display_name: user.display_name,
             role: user.role,
+            global_role: user.global_role,
+            avatar_url: user.avatar_url,
         }),
     ))
 }
