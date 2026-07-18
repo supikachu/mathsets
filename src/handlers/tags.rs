@@ -17,9 +17,14 @@ use crate::AppState;
 // ---------------------------------------------------------------------------
 
 fn db_err(msg: impl Into<String>) -> (StatusCode, Json<serde_json::Value>) {
+    let msg_str = msg.into();
+    tracing::error!("数据库错误: {}", msg_str);
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({"error": msg.into()})),
+        Json(json!({
+            "error": "服务器内部错误，请稍后重试",
+            "code": "ERR_INTERNAL_SERVER"
+        })),
     )
 }
 

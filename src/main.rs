@@ -1,4 +1,3 @@
-use std::net::SocketAddr;
 use tracing_subscriber::EnvFilter;
 
 use mathset::build_app;
@@ -22,7 +21,7 @@ async fn main() {
     let config = AppConfig::from_env();
 
     // 连接数据库
-    let pool = db::create_pool(&config.database_url).await;
+    let pool = db::create_pool(&config.database_url, config.database_max_connections).await;
 
     // 运行迁移
     db::run_migrations(&pool).await;
@@ -35,23 +34,21 @@ async fn main() {
     }
 
     // 构建共享状态
-    let state = mathset::AppState {
+    let state = mathset::AppState::new(
         pool,
-        jwt_secret: config.jwt_secret.clone(),
-        jwt_expiry_hours: config.jwt_expiry_hours,
-        ai_config: config.ai.clone(),
-    };
+        config.jwt_secret.clone(),
+        config.jwt_expiry_hours,
+        config.ai.clone(),
+    );
 
     // 构建路由
     let app = build_app(state);
 
     // 启动服务器
-    let addr = SocketAddr::new(
-        config.host.parse().expect("HOST 格式错误"),
-        config.port,
-    );
-    tracing::info!("🚀 服务启动于 http://{}", addr);
+    tracing::info!("🚀 服务启动于 http://{}:{}", config.host, config.port);
 
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    let listener = tokio::net::TcpListener::bind((config.host.as_str(), config.port))
+        .await
+        .unwrap_or_else(|e| panic!("无法监听端口 {}:{}: {}", config.host, config.port, e));
     axum::serve(listener, app).await.unwrap();
 }

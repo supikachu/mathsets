@@ -276,9 +276,14 @@ async fn build_detail(
 }
 
 fn db_err(msg: impl Into<String>) -> (StatusCode, Json<serde_json::Value>) {
+    let msg_str = msg.into();
+    tracing::error!("数据库错误: {}", msg_str);
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({"error": msg.into()})),
+        Json(json!({
+            "error": "服务器内部错误，请稍后重试",
+            "code": "ERR_INTERNAL_SERVER"
+        })),
     )
 }
 
@@ -725,11 +730,12 @@ pub async fn update_question(
     }
 
     let now = chrono::Utc::now();
-    let new_version = existing.version + 1;
+    let old_version = existing.version;
+    let new_version = old_version + 1;
 
     let mut tx = state.pool.begin().await.map_err(|e| db_err(format!("开启事务失败: {}", e)))?;
 
-    sqlx::query(
+    let query_result = sqlx::query(
         r#"
         UPDATE questions SET
             stem = COALESCE($1, stem),
@@ -751,7 +757,7 @@ pub async fn update_question(
             updated_by = $16,
             updated_at = $17,
             version = $18
-        WHERE id = $19
+        WHERE id = $19 AND version = $20
         "#,
     )
     .bind(&req.stem)
@@ -773,9 +779,20 @@ pub async fn update_question(
     .bind(now)
     .bind(new_version)
     .bind(id)
+    .bind(old_version)
     .execute(&mut *tx)
     .await
     .map_err(|e| db_err(format!("更新题目失败: {}", e)))?;
+
+    if query_result.rows_affected() == 0 {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "题目已被他人修改，请刷新页面重新编辑",
+                "code": "ERR_CONCURRENT_UPDATE"
+            })),
+        ));
+    }
 
     if let Some(ref kp_ids) = req.knowledge_point_ids {
         update_knowledge_points(&mut tx, id, kp_ids)

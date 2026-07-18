@@ -87,8 +87,19 @@ pub async fn register(
         ));
     }
 
-    // 密码哈希
-    let password_hash = bcrypt::hash(&req.password, bcrypt::DEFAULT_COST).map_err(|e| {
+    // 密码哈希 — 卸载到 blocking 线程池，防止阻塞 Tokio 工作线程
+    let password_plain = req.password.clone();
+    let password_hash = tokio::task::spawn_blocking(move || {
+        bcrypt::hash(&password_plain, bcrypt::DEFAULT_COST)
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("系统任务调度失败: {}", e)})),
+        )
+    })?
+    .map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("密码加密失败: {}", e)})),
@@ -212,8 +223,15 @@ pub async fn login(
     })?;
 
     println!("[backend/login] user found: {:?}, verifying password", user.username);
-    // 验证密码
-    let valid = bcrypt::verify(&req.password, &user.password_hash).unwrap_or(false);
+    // 验证密码 — 卸载到 blocking 线程池，防止阻塞 Tokio 工作线程
+    let password_plain = req.password.clone();
+    let password_hash_stored = user.password_hash.clone();
+    let valid = tokio::task::spawn_blocking(move || {
+        bcrypt::verify(&password_plain, &password_hash_stored).unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false);
+
     if !valid {
         println!("[backend/login] password verification failed for user: {:?}", req.username);
         return Err((

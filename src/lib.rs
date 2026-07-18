@@ -17,13 +17,46 @@ use tower_http::trace::TraceLayer;
 
 use crate::db::DbPool;
 
-/// 应用共享状态
-#[derive(Clone)]
-pub struct AppState {
+use std::sync::Arc;
+
+/// 应用共享状态内部数据
+pub struct AppStateInner {
     pub pool: DbPool,
     pub jwt_secret: String,
     pub jwt_expiry_hours: i64,
     pub ai_config: crate::config::AiConfig,
+}
+
+/// 应用共享状态（通过 Arc 包裹，Clone 成本为 O(1)）
+#[derive(Clone)]
+pub struct AppState {
+    pub inner: Arc<AppStateInner>,
+}
+
+impl std::ops::Deref for AppState {
+    type Target = AppStateInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl AppState {
+    pub fn new(
+        pool: DbPool,
+        jwt_secret: String,
+        jwt_expiry_hours: i64,
+        ai_config: crate::config::AiConfig,
+    ) -> Self {
+        Self {
+            inner: Arc::new(AppStateInner {
+                pool,
+                jwt_secret,
+                jwt_expiry_hours,
+                ai_config,
+            }),
+        }
+    }
 }
 
 /// 构建应用 Router，用于 main 启动和集成测试

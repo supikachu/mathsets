@@ -2,6 +2,7 @@
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub database_url: String,
+    pub database_max_connections: u32,
     pub jwt_secret: String,
     pub jwt_expiry_hours: i64,
     pub host: String,
@@ -63,6 +64,10 @@ impl AppConfig {
         Self {
             database_url: std::env::var("DATABASE_URL")
                 .expect("DATABASE_URL 环境变量未设置"),
+            database_max_connections: std::env::var("DATABASE_MAX_CONNECTIONS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(50),
             jwt_secret: std::env::var("JWT_SECRET")
                 .unwrap_or_else(|_| "mathset-dev-secret-key".to_string()),
             jwt_expiry_hours: std::env::var("JWT_EXPIRY_HOURS")
