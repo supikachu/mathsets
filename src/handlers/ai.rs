@@ -41,7 +41,7 @@ pub struct ParseImageResponse {
 
 /// AI 模型类型 — 决定 resolve_ai_config 返回 text 还是 vision 模型配置
 #[derive(Clone, Copy)]
-enum ModelKind {
+pub(crate) enum ModelKind {
     Text,
     Vision,
 }
@@ -511,7 +511,7 @@ pub async fn parse_image(
 
 /// 解析 AI 配置：用户个人 Key 优先，否则平台默认
 /// model_kind 决定返回 text 还是 vision 模型
-async fn resolve_ai_config(
+pub(crate) async fn resolve_ai_config(
     auth: &AuthUser,
     state: &AppState,
     model_kind: ModelKind,

@@ -44,6 +44,11 @@ async fn main() {
         config.ai.clone(),
     );
 
+    // 启动 AI 解析 worker 后台协程
+    // 拾取 pending 任务 → 调用 LLM → 落库为新题目（草稿）→ 标记任务 completed/failed
+    tokio::spawn(mathset::workers::ai_parse_worker::start_worker(state.clone()));
+    tracing::info!("🤖 AI 解析 worker 已在后台启动");
+
     // 构建路由
     let app = build_app(state);
 

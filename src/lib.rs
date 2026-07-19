@@ -4,6 +4,7 @@ pub mod config;
 pub mod db;
 pub mod handlers;
 pub mod models;
+pub mod workers;
 
 use axum::{
     extract::DefaultBodyLimit,
