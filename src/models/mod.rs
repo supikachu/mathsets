@@ -1,4 +1,5 @@
 pub mod ai_setting;
+pub mod ai_task;
 pub mod paper;
 pub mod question;
 pub mod space;
