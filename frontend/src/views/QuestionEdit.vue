@@ -21,6 +21,23 @@
         </div>
       </header>
 
+      <!-- ==================== 批量录题 Tab 切换栏（仅 questionList.length > 1 显示）==================== -->
+      <div v-if="questionList.length > 1" class="batch-tabs">
+        <div class="batch-tabs-track">
+          <button
+            v-for="(item, idx) in questionList"
+            :key="idx"
+            class="batch-tab"
+            :class="{ 'is-active': idx === activeIndex }"
+            @click="switchToTab(idx)"
+          >
+            <span class="batch-tab-index">题目 {{ idx + 1 }}</span>
+            <span v-if="item.stem" class="batch-tab-preview">{{ stripStemPreview(item.stem) }}</span>
+            <span v-else class="batch-tab-empty">（空）</span>
+          </button>
+        </div>
+      </div>
+
       <!-- ==================== 第一层：核心控制元数据栏 ==================== -->
       <MetaBar
         v-model:questionType="form.question_type"
@@ -209,6 +226,7 @@
       v-model:aiGeneratedFields="aiGeneratedFields"
       :form="form"
       @applied="onAiApplied"
+      @batch-parsed="handleBatchParsed"
     />
 
     <!-- 离开确认 -->
@@ -237,7 +255,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { questionApi, kpApi, spaceApi, tagsApi, type KnowledgePoint, type SpaceMemberInfo, type Tag } from '@/api/client'
+import { questionApi, kpApi, spaceApi, tagsApi, type KnowledgePoint, type SpaceMemberInfo, type Tag, type ParsedQuestion } from '@/api/client'
 import { AppButton, AppBadge, AppModal, AppConfirm, AppIcon } from '@/components/ui'
 import { useToast } from '@/composables/useToast'
 import { useSpaceStore } from '@/stores/space'
@@ -277,6 +295,13 @@ const showAiDialog = ref(false)
 const aiGeneratedFields = ref<Set<string>>(new Set())
 const applyingAiResult = ref(false)
 const aiDialogRef = ref<InstanceType<typeof AiRecognizeDialog> | null>(null)
+
+// ===== 批量录题工作台模式 =====
+// questionList 存放每道题的快照（plain object），activeIndex 指向当前编辑的题目
+// 当 questionList.length > 1 时显示顶部 Tab 切换栏；否则保持原有单题模式
+const questionList = ref<any[]>([])
+const activeIndex = ref(0)
+const isSwitchingTab = ref(false)
 
 // Selected Knowledge Points list
 const attrSelectedKps = ref<{ id: string; name: string }[]>([])
@@ -638,9 +663,10 @@ async function handleSave(submitAfter: boolean) {
 }
 
 // Draft autosave
+// 【闸门】切换 Tab 期间不写草稿（避免 applyFormSnapshot 触发的批量字段变更被误判为修改）
 let autoSaveTimer: ReturnType<typeof setTimeout> | null = null
 watch(() => ({ ...form }), () => {
-  if (isLoading.value) return
+  if (isLoading.value || isSwitchingTab.value) return
   form.hasUnsaved = true
   if (autoSaveTimer) clearTimeout(autoSaveTimer)
   autoSaveTimer = setTimeout(() => {
@@ -650,6 +676,31 @@ watch(() => ({ ...form }), () => {
     } catch { /* quota exceeded */ }
   }, 3000)
 }, { deep: true })
+
+// ===== 批量模式：Tab 切换时保存当前题快照 → 加载目标题快照 =====
+watch(activeIndex, async (newIdx, oldIdx) => {
+  if (isSwitchingTab.value) return
+  if (newIdx === oldIdx) return
+  if (questionList.value.length <= 1) return
+
+  isSwitchingTab.value = true
+  try {
+    // 1. 保存当前题到旧索引槽位
+    if (oldIdx >= 0 && oldIdx < questionList.value.length) {
+      questionList.value[oldIdx] = captureFormSnapshot()
+    }
+    // 2. 加载目标题到 form
+    const target = questionList.value[newIdx]
+    if (target) {
+      applyFormSnapshot(target)
+      // 等待响应式更新与被闸门屏蔽的 watcher 完成
+      await nextTick()
+      resizeAllTextareas()
+    }
+  } finally {
+    isSwitchingTab.value = false
+  }
+})
 
 // Draft restore
 const restoreDialog = ref(false)
@@ -813,6 +864,260 @@ async function loadQuestion() {
   }
 }
 
+// ============================================================
+// ===== 批量录题工作台：快照捕获 / 回放 / Tab 切换 / Mock =====
+// ============================================================
+
+// 捕获当前 form 的快照（深拷贝，包含 attrSelectedKps 用于每题独立保存）
+function captureFormSnapshot(): any {
+  return {
+    ...JSON.parse(JSON.stringify(form)),
+    attrSelectedKps: JSON.parse(JSON.stringify(attrSelectedKps.value)),
+  }
+}
+
+// 将快照应用回 form（每个字段显式赋值，避免 delete+assign 引发响应式抖动）
+function applyFormSnapshot(s: any) {
+  form.stem = s.stem ?? ''
+  form.question_type = s.question_type ?? 'choice'
+  form.sub_type = s.sub_type ?? ''
+  form.difficulty = s.difficulty ?? 'medium'
+  form.difficulty_coefficient = s.difficulty_coefficient ?? 0.5
+  form.default_score = s.default_score ?? 5
+  form.grade = s.grade
+  form.semester = s.semester
+  form.academic_year = s.academic_year ?? ''
+  form.grade_semester = s.grade_semester ?? ''
+  form.exam_region = s.exam_region ?? ''
+  form.exam_type = s.exam_type ?? ''
+  form.source = s.source ?? '原创'
+  form.estimated_time = s.estimated_time ?? 5
+  form.solutions = Array.isArray(s.solutions) ? [...s.solutions] : ['']
+  form.options = Array.isArray(s.options)
+    ? s.options.map((o: any) => ({ ...o }))
+    : [
+        { label: 'A', content: '' },
+        { label: 'B', content: '' },
+        { label: 'C', content: '' },
+        { label: 'D', content: '' },
+      ]
+  form.correctAnswer = s.correctAnswer ?? ''
+  form.blanks = Array.isArray(s.blanks)
+    ? s.blanks.map((b: any) => ({ ...b }))
+    : [{ position: 1, answer: '' }]
+  form.solutionAnswer = s.solutionAnswer ?? ''
+  form.sub_answers = Array.isArray(s.sub_answers) ? [...s.sub_answers] : ['']
+  form.gradingSteps = Array.isArray(s.gradingSteps) ? [...s.gradingSteps] : []
+  form.judgmentCorrect = s.judgmentCorrect ?? true
+  form.knowledgePointIds = Array.isArray(s.knowledgePointIds) ? [...s.knowledgePointIds] : []
+  form.tagIds = Array.isArray(s.tagIds) ? [...s.tagIds] : []
+  form.reviewer = s.reviewer ?? ''
+  form.reviewer_ids = Array.isArray(s.reviewer_ids) ? [...s.reviewer_ids] : []
+  form.internal_note = s.internal_note ?? ''
+  form.status = s.status ?? ''
+  form.version = s.version ?? 1
+  form.hasUnsaved = false // 切换后的目标题视为未修改
+
+  // 每题独立保存 attrSelectedKps
+  attrSelectedKps.value = Array.isArray(s.attrSelectedKps)
+    ? s.attrSelectedKps.map((k: any) => ({ ...k }))
+    : []
+}
+
+// 切换到指定 Tab（保存当前题 → 加载目标题）
+function switchToTab(idx: number) {
+  if (idx === activeIndex.value) return
+  if (idx < 0 || idx >= questionList.value.length) return
+  activeIndex.value = idx
+}
+
+// Tab 预览文本：去掉 LaTeX 标记 / Markdown 图片 / 换行，截断到 14 字符
+function stripStemPreview(stem: string): string {
+  if (!stem) return ''
+  return stem
+    .replace(/\$\$[\s\S]+?\$\$/g, '')
+    .replace(/\$[^$]+\$/g, '')
+    .replace(/!\[[^\]]*\]\([^)]+\)/g, '')
+    .replace(/[\n\r]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 14)
+}
+
+// 临时 Mock：在 URL 加 ?batch=test 即可注入两道测试题，立即看到 Tab 切换效果
+function loadBatchMockData() {
+  questionList.value = [
+    {
+      stem: '【题目 1】已知集合 $A = \\{x \\mid x^2 - 5x + 6 = 0\\}$，集合 $B = \\{2, 3, 4\\}$，求 $A \\cap B$。',
+      question_type: 'solution',
+      sub_type: '',
+      difficulty: 'easy',
+      difficulty_coefficient: 0.85,
+      default_score: 5,
+      solutions: ['由 $x^2 - 5x + 6 = 0$ 解得 $x = 2$ 或 $x = 3$，故 $A = \\{2, 3\\}$，$A \\cap B = \\{2, 3\\}$。'],
+      sub_answers: ['$A \\cap B = \\{2, 3\\}$'],
+      correctAnswer: '',
+      options: [
+        { label: 'A', content: '' },
+        { label: 'B', content: '' },
+        { label: 'C', content: '' },
+        { label: 'D', content: '' },
+      ],
+      blanks: [{ position: 1, answer: '' }],
+      attrSelectedKps: [],
+      knowledgePointIds: [],
+      tagIds: [],
+      reviewer_ids: [],
+      source: '原创',
+      academic_year: '',
+      grade_semester: '',
+      exam_region: '',
+      exam_type: '',
+    },
+    {
+      stem: '【题目 2】化简 $\\sqrt{12} - \\sqrt{3}$，并求其值。',
+      question_type: 'solution',
+      sub_type: '',
+      difficulty: 'medium',
+      difficulty_coefficient: 0.55,
+      default_score: 5,
+      solutions: ['$\\sqrt{12} - \\sqrt{3} = 2\\sqrt{3} - \\sqrt{3} = \\sqrt{3}$。'],
+      sub_answers: ['$\\sqrt{3}$'],
+      correctAnswer: '',
+      options: [
+        { label: 'A', content: '' },
+        { label: 'B', content: '' },
+        { label: 'C', content: '' },
+        { label: 'D', content: '' },
+      ],
+      blanks: [{ position: 1, answer: '' }],
+      attrSelectedKps: [],
+      knowledgePointIds: [],
+      tagIds: [],
+      reviewer_ids: [],
+      source: '原创',
+      academic_year: '',
+      grade_semester: '',
+      exam_region: '',
+      exam_type: '',
+    },
+  ]
+  activeIndex.value = 0
+  // 直接将第一道题应用到 form（绕过 watcher，避免误触发 autosave）
+  applyFormSnapshot(questionList.value[0])
+  nextTick(() => resizeAllTextareas())
+}
+
+// ============================================================
+// 对接 AI 批量识别：把 ParsedQuestion[] 转换为 form 快照数组
+// ============================================================
+function parsedQuestionToSnapshot(q: ParsedQuestion): any {
+  // 计算 difficulty_coefficient（与 AiRecognizeDialog.doApplyAiResult 保持一致）
+  let difficultyCoefficient = 0.5
+  if (q.difficulty) {
+    const diffMap: Record<string, number> = { easy: 2, medium: 3, hard: 4 }
+    const diffStars = diffMap[q.difficulty] || 3
+    difficultyCoefficient = [0.9, 0.75, 0.55, 0.35, 0.2][diffStars - 1] ?? 0.55
+  }
+
+  // 计算 correctAnswer / blanks / sub_answers
+  let correctAnswer: any = ''
+  let blanks: { position: number; answer: string }[] = [{ position: 1, answer: '' }]
+  let sub_answers: string[] = ['']
+
+  if (q.question_type === 'choice' && q.correct_answer.kind === 'choice' && q.correct_answer.value.options) {
+    const opts = q.correct_answer.value.options
+    if (q.sub_type === 'multi' || opts.length > 1) {
+      correctAnswer = opts
+    } else {
+      correctAnswer = opts[0] || ''
+    }
+  } else if (q.question_type === 'fill' && q.correct_answer.kind === 'fill' && q.correct_answer.value.blanks) {
+    blanks = q.correct_answer.value.blanks.map(b => ({ position: b.position, answer: b.answer }))
+  } else if (q.question_type === 'solution' && q.correct_answer.kind === 'solution' && q.correct_answer.value.subs) {
+    sub_answers = q.correct_answer.value.subs.map(s => s.content)
+  }
+
+  // 计算 knowledgePointIds / attrSelectedKps（高置信度匹配）
+  let knowledgePointIds: string[] = []
+  let attrSelectedKps: { id: string; name: string }[] = []
+  if (q.kp_matches?.length) {
+    const highConfidenceMatch = q.kp_matches.find(m => m.score >= 0.95 && m.matched_id)
+    if (highConfidenceMatch) {
+      knowledgePointIds = [highConfidenceMatch.matched_id!]
+      attrSelectedKps = [{ id: highConfidenceMatch.matched_id!, name: highConfidenceMatch.matched_name! }]
+    }
+  }
+
+  return {
+    stem: q.stem,
+    question_type: q.question_type,
+    sub_type: q.sub_type || '',
+    difficulty: q.difficulty || 'medium',
+    difficulty_coefficient: difficultyCoefficient,
+    default_score: 5,
+    grade: undefined,
+    semester: undefined,
+    academic_year: '',
+    grade_semester: '',
+    exam_region: '',
+    exam_type: '',
+    options: q.question_type === 'choice' && q.options
+      ? q.options.map(o => ({ label: o.label, content: o.content }))
+      : [
+          { label: 'A', content: '' },
+          { label: 'B', content: '' },
+          { label: 'C', content: '' },
+          { label: 'D', content: '' },
+        ],
+    correctAnswer,
+    blanks,
+    sub_answers,
+    solutionAnswer: '',
+    solutions: q.analysis.map(a => a.content),
+    gradingSteps: [],
+    judgmentCorrect: true,
+    knowledgePointIds,
+    tagIds: [],
+    reviewer_ids: [],
+    reviewer: '',
+    internal_note: '',
+    status: '',
+    version: 1,
+    hasUnsaved: true,
+    source: '原创',
+    estimated_time: 5,
+    attrSelectedKps,
+  }
+}
+
+// 接收 AiRecognizeDialog 的批量识别结果，填充 questionList 进入多题工作台
+function handleBatchParsed(questions: ParsedQuestion[]) {
+  if (!questions || questions.length === 0) {
+    toast.warning('未识别到任何题目')
+    return
+  }
+
+  // 把 ParsedQuestion[] 转换为 form 快照数组
+  questionList.value = questions.map(q => parsedQuestionToSnapshot(q))
+  activeIndex.value = 0
+
+  // 应用第一题到 form（通过 isSwitchingTab 闸住副作用 watcher）
+  isSwitchingTab.value = true
+  try {
+    applyFormSnapshot(questionList.value[0])
+    nextTick(() => {
+      resizeAllTextareas()
+      isSwitchingTab.value = false
+    })
+  } catch (e) {
+    isSwitchingTab.value = false
+    console.error('[handleBatchParsed] 应用第一题失败:', e)
+  }
+
+  toast.success(`已加载 ${questions.length} 道题，进入批量录入工作台`)
+}
+
 // Window unload checks
 function handleBeforeUnload(e: BeforeUnloadEvent) {
   if (form.hasUnsaved) { e.preventDefault(); e.returnValue = '' }
@@ -827,6 +1132,23 @@ onMounted(() => {
     if (!isNew) restoreDraft()
   })
   if (isNew) restoreDraft()
+
+  // ===== 临时测试入口：URL 加 ?batch=test 即可注入两道 Mock 题目，立即看到 Tab 切换效果 =====
+  if (route.query.batch === 'test') {
+    loadBatchMockData()
+    return
+  }
+
+  // ===== 从其他页面跳转过来时，读取 history.state.parsedQuestions 进入多题工作台 =====
+  // 用法：router.push({ path: '/questions/new', state: { parsedQuestions: [...] } })
+  const stateQuestions = (window.history.state as any)?.parsedQuestions
+  if (Array.isArray(stateQuestions) && stateQuestions.length > 0) {
+    handleBatchParsed(stateQuestions as ParsedQuestion[])
+    // 消费后清理 state，避免刷新时重复加载
+    try {
+      window.history.replaceState({ ...window.history.state, parsedQuestions: undefined }, '')
+    } catch { /* ignore */ }
+  }
 })
 
 onMounted(async () => {
@@ -843,6 +1165,8 @@ onBeforeUnmount(() => {
 })
 
 watch(() => form.question_type, () => {
+  // 【闸门】切换 Tab 期间不重置答案字段（applyFormSnapshot 已显式赋值，避免被覆盖）
+  if (isSwitchingTab.value) return
   if (isNew && !applyingAiResult.value) {
     form.sub_type = ''
     form.correctAnswer = ''
@@ -1322,5 +1646,77 @@ watch(() => form.question_type, () => {
 [data-theme='dark'] .edit-col {
   border-color: #3a3a3c;
   box-shadow: none;
+}
+
+/* ============ 批量录题 Tab 切换栏 ============ */
+.batch-tabs {
+  flex-shrink: 0;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 4px;
+  display: flex;
+  overflow-x: auto;
+  overscroll-behavior: contain;
+}
+
+.batch-tabs-track {
+  display: inline-flex;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.batch-tab {
+  padding: 6px 14px;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  font-size: 12.5px;
+  font-weight: 550;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+  transition: background 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.batch-tab:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.batch-tab.is-active {
+  background: var(--accent);
+  color: #ffffff;
+  box-shadow: 0 1px 4px rgba(0, 122, 255, 0.25);
+}
+
+.batch-tab-index {
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.batch-tab-preview {
+  font-size: 11.5px;
+  opacity: 0.75;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.batch-tab.is-active .batch-tab-preview {
+  opacity: 0.9;
+}
+
+.batch-tab-empty {
+  font-size: 11.5px;
+  opacity: 0.5;
+  font-style: italic;
+}
+
+[data-theme='dark'] .batch-tab.is-active {
+  box-shadow: 0 1px 4px rgba(10, 132, 255, 0.35);
 }
 </style>

@@ -38,7 +38,7 @@ pub trait AiProvider: Send + Sync {
     ) -> Result<String, AiError> {
         self.parse_text_with_prompt(
             text,
-            crate::ai::prompt::TEXT_PARSE_SYSTEM_PROMPT,
+            &crate::ai::prompt::TEXT_PARSE_FULL_PROMPT,
             model,
         )
         .await
@@ -52,7 +52,7 @@ pub trait AiProvider: Send + Sync {
     ) -> Result<String, AiError> {
         self.parse_image_with_prompt(
             image_base64,
-            crate::ai::prompt::IMAGE_OCR_SYSTEM_PROMPT,
+            &crate::ai::prompt::IMAGE_OCR_FULL_PROMPT,
             model,
         )
         .await

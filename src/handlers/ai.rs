@@ -9,7 +9,7 @@ use serde_json::json;
 
 use crate::ai::cleaner::clean_and_parse;
 use crate::ai::kp_matcher::match_knowledge_points;
-use crate::ai::prompt::BATCH_IMAGE_OCR_SYSTEM_PROMPT;
+use crate::ai::prompt::BATCH_IMAGE_OCR_FULL_PROMPT;
 use crate::ai::provider::{create_provider, AiError};
 use crate::ai::types::{AnalysisMethod, ParsedQuestion};
 use crate::auth::middleware::AuthUser;
@@ -497,7 +497,7 @@ pub async fn parse_image(
 
     let provider = create_provider(&provider_name, &api_key, &base_url);
     let raw_json = provider
-        .parse_image_with_prompt(&image_b64, BATCH_IMAGE_OCR_SYSTEM_PROMPT, model.as_deref())
+        .parse_image_with_prompt(&image_b64, &BATCH_IMAGE_OCR_FULL_PROMPT, model.as_deref())
         .await
         .map_err(map_ai_error)?;
 

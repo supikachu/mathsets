@@ -16,6 +16,7 @@ impl DeepSeekProvider {
     pub fn new(api_key: String, base_url: String) -> Self {
         let client = Client::builder()
             .timeout(Duration::from_secs(120))
+            .no_proxy() // 临时强制直连，绕过系统代理（排查 2s 超时）
             .build()
             .expect("无法创建 reqwest Client");
         Self {
@@ -109,7 +110,8 @@ impl AiProvider for DeepSeekProvider {
         let resp = match resp {
             Ok(r) => r,
             Err(e) if e.is_timeout() => return Err(AiError::Timeout),
-            Err(e) => return Err(AiError::Upstream(0, e.to_string())),
+            // 用 Debug 格式输出完整 source 链（TLS / TCP / DNS 等底层错误）
+            Err(e) => return Err(AiError::Upstream(0, format!("{:?}", e))),
         };
 
         let status = resp.status().as_u16();
@@ -121,7 +123,7 @@ impl AiProvider for DeepSeekProvider {
         let chat_resp: ChatResponse = resp
             .json()
             .await
-            .map_err(|e| AiError::Upstream(status, e.to_string()))?;
+            .map_err(|e| AiError::Upstream(status, format!("{:?}", e)))?;
 
         chat_resp
             .choices
@@ -175,7 +177,8 @@ impl AiProvider for DeepSeekProvider {
         let resp = match resp {
             Ok(r) => r,
             Err(e) if e.is_timeout() => return Err(AiError::Timeout),
-            Err(e) => return Err(AiError::Upstream(0, e.to_string())),
+            // 用 Debug 格式输出完整 source 链（TLS / TCP / DNS 等底层错误）
+            Err(e) => return Err(AiError::Upstream(0, format!("{:?}", e))),
         };
 
         let status = resp.status().as_u16();
@@ -187,7 +190,7 @@ impl AiProvider for DeepSeekProvider {
         let chat_resp: ChatResponse = resp
             .json()
             .await
-            .map_err(|e| AiError::Upstream(status, e.to_string()))?;
+            .map_err(|e| AiError::Upstream(status, format!("{:?}", e)))?;
 
         chat_resp
             .choices

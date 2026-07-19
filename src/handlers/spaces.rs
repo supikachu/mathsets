@@ -24,13 +24,16 @@ pub async fn list_spaces(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthUser>,
 ) -> Result<Json<Vec<SpaceSummary>>, (StatusCode, Json<serde_json::Value>)> {
-    let _ = ensure_public_space(&state.pool).await.map_err(|e| {
-        (
+    // 阶段 0：确保公共空间存在
+    if let Err(e) = ensure_public_space(&state.pool).await {
+        tracing::error!("list_spaces ensure_public_space 失败: {:?}", e);
+        return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("初始化公共空间失败: {}", e)})),
-        )
-    })?;
+        ));
+    }
 
+    // 阶段 1：查询用户可访问的空间列表
     let rows = sqlx::query_as::<_, SpaceSummary>(
         r#"
         SELECT s.id, s.kind, s.name, s.owner_user_id,
@@ -43,12 +46,12 @@ pub async fn list_spaces(
                END AS member_count,
                CASE
                  WHEN s.kind = 'personal' AND s.owner_user_id = $1 THEN 'owner'
-                 WHEN s.kind = 'public' THEN 'member'
+                 WHEN s.kind = 'public' THEN 'viewer'
                  ELSE (
                    SELECT sm.role FROM space_members sm
                    WHERE sm.space_id = s.id AND sm.user_id = $1
                  )
-               END AS my_role,
+               END::text AS my_role,
                s.created_at
         FROM spaces s
         WHERE s.kind = 'public'
@@ -72,6 +75,15 @@ pub async fn list_spaces(
     .fetch_all(&state.pool)
     .await
     .map_err(|e| {
+        // 【最佳实践】用 Debug format 输出完整 sqlx::Error 调用栈，
+        // 包含 ColumnNotFound / TypeMismatch / PoolDisconnected 等底层信息，
+        // 防止真正的底层 SQL 错误被 Display format 吞噬
+        tracing::error!(
+            "list_spaces 查询失败 (user_id={}, role={}): {:?}",
+            auth.id,
+            auth.role,
+            e
+        );
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("查询空间失败: {}", e)})),

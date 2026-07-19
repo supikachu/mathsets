@@ -50,8 +50,13 @@ pub async fn require_auth(
                 .into_response()
         })?;
 
-    // 3. 验证 JWT
-    let claims = verify_token(token, &state.jwt_secret).map_err(|_| {
+    // 3. 验证 JWT — 用 Debug format 暴露完整错误链，避免底层错误被吞噬
+    let claims = verify_token(token, &state.jwt_secret).map_err(|e| {
+        tracing::warn!(
+            "JWT 验证失败, token_prefix='{}...', error={:?}",
+            token.chars().take(20).collect::<String>(),
+            e
+        );
         (
             axum::http::StatusCode::UNAUTHORIZED,
             Json(json!({"error": "Token 无效或已过期"})),
