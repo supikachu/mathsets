@@ -137,8 +137,9 @@ async fn process_one_task(state: &AppState) -> Result<bool, String> {
 /// 成功返回新题目的 ID；失败返回错误信息字符串。
 async fn execute_task(state: &AppState, task: &AiParseTask) -> Result<Uuid, String> {
     // 1. 加载 creator 信息（resolve_ai_config 需要 AuthUser）
+    //    注意：users.role 是 user_role 枚举类型，必须用 ::text 强制转换才能作为 String 解码
     let user_row: Option<(String, String, Option<String>)> = sqlx::query_as(
-        "SELECT username, role, display_name FROM users WHERE id = $1",
+        "SELECT username, role::text, display_name FROM users WHERE id = $1",
     )
     .bind(task.creator_id)
     .fetch_optional(&state.pool)

@@ -13,7 +13,7 @@ async fn copy_default_knowledge_tree(
     pool: &sqlx::PgPool,
     target_space_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    // 查询所有全局知识点（space_id IS NULL）
+    // 查询所有全局知识点（space_id IS NULL），按 sort_order 排序保证父节点先于子节点插入
     let global_kps = sqlx::query_as::<_, (Uuid, Option<Uuid>, String, Option<String>, i32)>(
         "SELECT id, parent_id, name, grade, sort_order FROM knowledge_points WHERE space_id IS NULL ORDER BY sort_order, name",
     )
@@ -33,9 +33,11 @@ async fn copy_default_knowledge_tree(
     }
 
     // 逐条插入（parent_id 使用映射后的新 ID）
+    // 注意：若 parent_id 引用了非全局知识点（数据异常），则降级为顶层节点（NULL），
+    // 避免外键约束报错阻断注册流程
     for (old_id, old_parent, name, grade, sort_order) in &global_kps {
         let new_id = id_map[old_id];
-        let new_parent = old_parent.map(|p| id_map[&p]);
+        let new_parent = old_parent.and_then(|p| id_map.get(&p).copied());
         sqlx::query(
             r#"
             INSERT INTO knowledge_points (id, parent_id, name, grade, sort_order, created_at, space_id)
