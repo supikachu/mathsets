@@ -361,4 +361,37 @@ export const aiApi = {
   },
 }
 
+// ─── AI 异步解析任务队列 ───
+
+/// 任务状态枚举（与后端 ai_task_status 对齐）
+export type AiTaskStatus = 'pending' | 'processing' | 'completed' | 'failed'
+
+/// 提交解析任务的响应体（HTTP 202）
+export interface SubmitParseTaskResponse {
+  task_id: string
+  status: AiTaskStatus
+  created_at: string
+}
+
+/// 任务详情查询的响应体（HTTP 200）
+export interface AiParseTaskDetail {
+  id: string
+  status: AiTaskStatus
+  question_id: string | null
+  error_message: string | null
+  created_at: string
+  updated_at: string
+}
+
+export const aiTaskApi = {
+  /// 提交一段 OCR 生肉文本到异步解析队列
+  submitParseTask(raw_text: string) {
+    return client.post<SubmitParseTaskResponse>('/ai/parse', { raw_text })
+  },
+  /// 根据 task_id 查询任务详情（状态、question_id、error_message 等）
+  getTaskStatus(task_id: string) {
+    return client.get<AiParseTaskDetail>(`/ai/parse/${task_id}`)
+  },
+}
+
 
