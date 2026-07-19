@@ -1,4 +1,5 @@
 pub mod ai;
+pub mod ai_tasks;
 pub mod auth;
 pub mod health;
 pub mod knowledge_points;

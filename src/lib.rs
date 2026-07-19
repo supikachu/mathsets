@@ -140,6 +140,9 @@ pub fn build_app(state: AppState) -> Router {
         .route("/ai/parse-text", post(handlers::ai::parse_text))
         .route("/ai/settings", get(handlers::ai::get_settings))
         .route("/ai/settings", put(handlers::ai::update_settings))
+        // AI 异步解析任务队列（POST 入队 + GET 查询状态）
+        .route("/ai/parse", post(handlers::ai_tasks::submit_parse_task))
+        .route("/ai/parse/{id}", get(handlers::ai_tasks::get_task_status))
         // parse-image 路由单独套全局限流层 + body 限制（补丁六后端：全局最多 10 个并发 OCR 请求）
         .merge(
             Router::new()
