@@ -18,6 +18,11 @@ export default defineConfig({
         target: 'http://127.0.0.1:3000',
         changeOrigin: true,
       },
+      // 用户头像等上传文件 — 直接由后端 ServeDir 提供
+      '/uploads': {
+        target: 'http://127.0.0.1:3000',
+        changeOrigin: true,
+      },
     },
   },
 })

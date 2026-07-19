@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import { authApi, type LoginRequest, type LoginResponse } from '@/api/client'
+import { authApi, userApi, type LoginRequest, type LoginResponse } from '@/api/client'
 
 function safeParseUser(): LoginResponse | null {
   try {
@@ -20,6 +20,17 @@ export const useAuthStore = defineStore('auth', () => {
   const displayName = computed(() => user.value?.display_name || '')
   const userId = computed(() => user.value?.user_id || '')
   const isAdmin = computed(() => role.value === 'Admin' || role.value === 'admin')
+  /// 用户头像 URL（null 时调用方应 fallback 到首字母）
+  const avatarUrl = computed(() => user.value?.avatar_url || null)
+
+  /// 将当前 user 状态持久化到 localStorage（保持 token 与 user 的一致性）
+  function persistUser() {
+    if (user.value) {
+      localStorage.setItem('user', JSON.stringify(user.value))
+    } else {
+      localStorage.removeItem('user')
+    }
+  }
 
   async function login(data: LoginRequest) {
     const res = await authApi.login(data)
@@ -27,7 +38,7 @@ export const useAuthStore = defineStore('auth', () => {
     token.value = u.token
     user.value = u
     localStorage.setItem('token', u.token)
-    localStorage.setItem('user', JSON.stringify(u))
+    persistUser()
     // 登录后刷新空间列表
     try {
       const { useSpaceStore } = await import('@/stores/space')
@@ -50,6 +61,36 @@ export const useAuthStore = defineStore('auth', () => {
     window.location.href = '/login'
   }
 
+  /// 更新个人资料（昵称 / 邮箱）
+  /// 成功后同步更新本地的 user 状态 + localStorage，让导航栏热更新
+  async function updateProfile(data: { display_name?: string; email?: string }) {
+    const res = await userApi.updateMe(data)
+    const profile = res.data
+    // 同步更新本地 LoginResponse 状态（仅 display_name / avatar_url，role 等保持不变）
+    if (user.value) {
+      user.value = {
+        ...user.value,
+        display_name: profile.display_name,
+        // avatar_url 可能不在原 LoginResponse 中，这里一并同步
+        avatar_url: profile.avatar_url,
+      }
+      persistUser()
+    }
+    return profile
+  }
+
+  /// 上传头像并同步更新本地状态
+  /// 调用方传入已压缩好的 File 对象
+  async function uploadAvatar(file: File) {
+    const res = await userApi.uploadAvatar(file)
+    const avatarUrl = res.data.avatar_url
+    if (user.value) {
+      user.value = { ...user.value, avatar_url: avatarUrl }
+      persistUser()
+    }
+    return avatarUrl
+  }
+
   return {
     token,
     user,
@@ -58,7 +99,10 @@ export const useAuthStore = defineStore('auth', () => {
     displayName,
     userId,
     isAdmin,
+    avatarUrl,
     login,
     logout,
+    updateProfile,
+    uploadAvatar,
   }
 })

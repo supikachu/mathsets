@@ -67,6 +67,11 @@ const router = createRouter({
           component: () => import('@/views/TagManagement.vue'),
           meta: { requiresAdmin: true },
         },
+        {
+          path: 'profile',
+          name: 'Profile',
+          component: () => import('@/views/Profile.vue'),
+        },
       ],
     },
     {

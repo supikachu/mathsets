@@ -46,6 +46,10 @@ export interface LoginResponse {
   user_id: string
   display_name: string
   role: string
+  /// 双轨制身份：与 role 配合（后端 LoginResponse 已含此字段，前端类型补全）
+  global_role?: 'super_admin' | 'teacher'
+  /// 用户头像 URL（可能为 null）
+  avatar_url?: string | null
 }
 
 export interface RegisterRequest {
@@ -391,6 +395,55 @@ export const aiTaskApi = {
   /// 根据 task_id 查询任务详情（状态、question_id、error_message 等）
   getTaskStatus(task_id: string) {
     return client.get<AiParseTaskDetail>(`/ai/parse/${task_id}`)
+  },
+}
+
+// ─── 用户中心（Profile） ───
+
+/// 用户额度信息
+export interface UserQuota {
+  ocr_quota_daily: number
+  ocr_quota_used: number
+  ocr_quota_remaining: number
+  ocr_quota_reset_at: string
+  ai_token_quota: number
+}
+
+/// 当前登录用户的完整个人资料
+export interface UserProfile {
+  id: string
+  username: string
+  email: string
+  display_name: string
+  role: string
+  global_role: 'super_admin' | 'teacher'
+  is_active: boolean
+  avatar_url: string | null
+  quota: UserQuota
+  created_at: string
+  updated_at: string
+}
+
+export const userApi = {
+  /// 获取当前登录用户的完整资料（含 quota）
+  getMe() {
+    return client.get<UserProfile>('/users/me')
+  },
+  /// 更新昵称 / 邮箱（username 锁定不可修改）
+  updateMe(data: { display_name?: string; email?: string }) {
+    return client.put<UserProfile>('/users/me', data)
+  },
+  /// 修改密码（成功后前端必须清除 token 并跳转登录页）
+  changePassword(data: { old_password: string; new_password: string }) {
+    return client.put<{ message: string }>('/users/password', data)
+  },
+  /// 上传头像 — 必须用 FormData，不要手动设 Content-Type
+  uploadAvatar(file: File) {
+    const formData = new FormData()
+    formData.append('avatar', file)
+    return client.post<{ avatar_url: string }>('/users/avatar', formData, {
+      timeout: 30000,
+    })
   },
 }
 

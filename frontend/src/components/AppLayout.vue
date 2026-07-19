@@ -28,7 +28,15 @@
             class="sidebar-user-trigger"
             @click="showUserMenu = !showUserMenu"
           >
-            <span class="user-avatar">{{ avatarLetter }}</span>
+            <span class="user-avatar-wrap">
+              <img
+                v-if="avatarSrc"
+                :src="avatarSrc"
+                class="user-avatar-img"
+                alt="头像"
+              />
+              <span v-else class="user-avatar-letter">{{ avatarLetter }}</span>
+            </span>
             <div class="sidebar-user-info">
               <span class="sidebar-user-name">{{ auth.displayName }}</span>
               <span class="sidebar-user-role">{{ roleLabel }}</span>
@@ -38,7 +46,11 @@
 
           <Transition name="user-pop">
             <div v-if="showUserMenu" class="sidebar-user-dropdown">
-              <button type="button" class="user-menu-item" @click="handleLogout">
+              <button type="button" class="user-menu-item menu-item-profile" @click="goProfile">
+                <AppIcon name="user" :size="16" />
+                个人中心
+              </button>
+              <button type="button" class="user-menu-item menu-item-logout" @click="handleLogout">
                 <AppIcon name="logout" :size="16" />
                 退出登录
               </button>
@@ -118,6 +130,9 @@ const avatarLetter = computed(() =>
   (auth.displayName || '?').charAt(0).toUpperCase(),
 )
 
+/// 头像 URL — 来自 Pinia store，profile 页修改后自动热更新
+const avatarSrc = computed(() => auth.avatarUrl)
+
 const roleLabel = computed(() => {
   const map: Record<string, string> = {
     Admin: '系统管理员',
@@ -150,6 +165,11 @@ function isActive(path: string) {
 function handleLogout() {
   showUserMenu.value = false
   auth.logout()
+}
+
+function goProfile() {
+  showUserMenu.value = false
+  router.push('/profile')
 }
 
 function onDocumentClick(e: MouseEvent) {
@@ -293,18 +313,29 @@ onUnmounted(() => document.removeEventListener('click', onDocumentClick))
   background: var(--bg-hover);
 }
 
-.user-avatar {
+.user-avatar-wrap {
   width: 32px;
   height: 32px;
   border-radius: 50%;
+  overflow: hidden;
+  flex-shrink: 0;
   background: var(--accent-gradient);
-  color: #fff;
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+.user-avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover; /* ⚠️ 防非正方形图片被拉伸 */
+  border-radius: 50%;
+}
+
+.user-avatar-letter {
+  color: #fff;
   font-size: 14px;
   font-weight: 700;
-  flex-shrink: 0;
 }
 
 .sidebar-user-info {
@@ -363,11 +394,19 @@ onUnmounted(() => document.removeEventListener('click', onDocumentClick))
   padding: 9px 12px;
   border-radius: var(--radius-xs);
   font-size: 13px;
-  color: var(--danger);
+  color: var(--text-primary);
   transition: var(--transition-fast);
 }
 
+.menu-item-logout {
+  color: var(--danger);
+}
+
 .user-menu-item:hover {
+  background: var(--bg-hover);
+}
+
+.menu-item-logout:hover {
   background: var(--danger-light);
 }
 
