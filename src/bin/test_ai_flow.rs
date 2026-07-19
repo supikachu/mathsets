@@ -46,6 +46,7 @@ async fn main() {
         config.jwt_secret.clone(),
         config.jwt_expiry_hours,
         config.ai.clone(),
+        config.upload_dir.clone(),
     );
 
     // 5. 启动 AI Worker 后台协程

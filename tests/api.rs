@@ -25,6 +25,7 @@ async fn create_test_app() -> Option<axum::Router> {
         "test-secret-for-integration-tests".to_string(),
         24,
         mathset::config::AiConfig::from_env(),
+        "./uploads".to_string(),
     );
     Some(build_app(state))
 }

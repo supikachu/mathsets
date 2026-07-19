@@ -36,12 +36,25 @@ async fn main() {
         tracing::warn!("初始化公共空间失败: {}", e);
     }
 
+    // 确保上传目录存在（头像文件落盘位置）
+    let upload_avatars_dir = std::path::Path::new(&config.upload_dir).join("avatars");
+    if let Err(e) = std::fs::create_dir_all(&upload_avatars_dir) {
+        tracing::warn!(
+            "创建上传目录失败 {:?}: {}",
+            upload_avatars_dir,
+            e
+        );
+    } else {
+        tracing::info!("📁 上传目录就绪: {:?}", upload_avatars_dir);
+    }
+
     // 构建共享状态
     let state = mathset::AppState::new(
         pool,
         config.jwt_secret.clone(),
         config.jwt_expiry_hours,
         config.ai.clone(),
+        config.upload_dir.clone(),
     );
 
     // 启动 AI 解析 worker 后台协程

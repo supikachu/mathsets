@@ -16,6 +16,9 @@
 # Temp SQL files
 .pg_reload.sql
 
+# 用户上传文件（头像等）— 不纳入版本控制
+/uploads/
+
 # Frontend
 frontend/node_modules/
 frontend/dist/

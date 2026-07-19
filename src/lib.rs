@@ -14,6 +14,7 @@ use axum::{
 };
 use tower::limit::GlobalConcurrencyLimitLayer;
 use tower_http::cors::CorsLayer;
+use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
 use crate::db::DbPool;
@@ -26,6 +27,8 @@ pub struct AppStateInner {
     pub jwt_secret: String,
     pub jwt_expiry_hours: i64,
     pub ai_config: crate::config::AiConfig,
+    /// 文件上传根目录（如 ./uploads），头像等用户文件落盘位置
+    pub upload_dir: String,
 }
 
 /// 应用共享状态（通过 Arc 包裹，Clone 成本为 O(1)）
@@ -48,6 +51,7 @@ impl AppState {
         jwt_secret: String,
         jwt_expiry_hours: i64,
         ai_config: crate::config::AiConfig,
+        upload_dir: String,
     ) -> Self {
         Self {
             inner: Arc::new(AppStateInner {
@@ -55,6 +59,7 @@ impl AppState {
                 jwt_secret,
                 jwt_expiry_hours,
                 ai_config,
+                upload_dir,
             }),
         }
     }
@@ -89,6 +94,18 @@ pub fn build_app(state: AppState) -> Router {
         )
         // 当前用户信息
         .route("/auth/me", get(handlers::auth::me))
+        // 用户中心（个人资料 + 头像 + 密码）
+        .route(
+            "/users/me",
+            get(handlers::users::get_my_profile).put(handlers::users::update_my_profile),
+        )
+        .route("/users/password", put(handlers::users::change_password))
+        // 头像上传单独套 2MB 限制
+        .merge(
+            Router::new()
+                .route("/users/avatar", post(handlers::users::upload_avatar))
+                .layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
+        )
         // 管理员用户管理
         .route("/admin/users", get(handlers::auth::list_users))
         // 题目统计（必须在 {id} 之前注册）
@@ -173,6 +190,8 @@ pub fn build_app(state: AppState) -> Router {
         .route("/api/v1/auth/login", post(handlers::auth::login))
         // API v1 保护模块（需要 JWT）
         .nest("/api/v1", protected_routes)
+        // 静态文件服务（用户头像等）— 无需认证，直接通过 URL 访问
+        .nest_service("/uploads", ServeDir::new(&state.upload_dir))
         // 全局中间件
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())

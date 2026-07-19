@@ -7,3 +7,4 @@ pub mod papers;
 pub mod questions;
 pub mod spaces;
 pub mod tags;
+pub mod users;

@@ -8,6 +8,8 @@ pub struct AppConfig {
     pub host: String,
     pub port: u16,
     pub ai: AiConfig,
+    /// 用户上传文件根目录（头像等），默认 ./uploads
+    pub upload_dir: String,
 }
 
 /// AI 服务配置（平台默认 Key + 加密密钥 + 默认模型）
@@ -80,6 +82,8 @@ impl AppConfig {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(3000),
             ai: AiConfig::from_env(),
+            upload_dir: std::env::var("UPLOAD_DIR")
+                .unwrap_or_else(|_| "./uploads".to_string()),
         }
     }
 }
