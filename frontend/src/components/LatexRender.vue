@@ -34,67 +34,75 @@ function escapeHtml(s: string): string {
     .replace(/'/g, '&#39;')
 }
 
+/**
+ * 渲染单个公式为 KaTeX HTML。
+ * 【关键】传入的 formula 必须是 raw string（未经 HTML 转义），
+ * 这样 KaTeX 才能正确识别 \sqrt、\frac、\text 等 LaTeX 命令。
+ * 任何反斜杠都不应在传给 KaTeX 之前被处理。
+ */
+function renderKatex(formula: string, displayMode: boolean): string {
+  try {
+    const raw = normalizeEmptyset(formula.trim())
+    return katex.renderToString(raw, {
+      displayMode,
+      throwOnError: false,
+      macros: katexMacros,
+    })
+  } catch {
+    return `<span class="katex-error">${escapeHtml(formula)}</span>`
+  }
+}
+
 function render() {
   if (!container.value) return
   const text = props.text || ''
 
-  // 1. 先转义整个文本，防止 XSS
-  let html = escapeHtml(text)
+  // ============================================================
+  // 安全渲染生命周期（严格三阶段）：
+  //   阶段 1: 提取公式 → 文本中只剩纯字母数字占位符
+  //   阶段 2: 对纯文本做 escapeHtml + 换行格式化（此时无 KaTeX HTML）
+  //   阶段 3: 最后才调用 katex.renderToString，输出绝不参与任何 .replace
+  //
+  // 【为什么不能用正则保护 KaTeX HTML】
+  //   旧实现先渲染 KaTeX 再用 /<span class="katex[^"]*">[\s\S]*?<\/span>/g
+  //   保护其输出。但 KaTeX 生成的是嵌套 <span> 结构，非贪婪匹配在遇到第一个
+  //   </span> 时就会停止，导致内部的 <svg>/<path> 完全暴露，依然被注入 <br>。
+  //   彻底解决：调换执行顺序，让 katex.renderToString 成为最后一步。
+  // ============================================================
 
-  // 1.5. 小问题号徽章：保护数学公式 → 替换题号 → 恢复公式
+  // ---- 阶段 1: 提取公式，留下纯字母数字占位符 ----
+  // 使用 __MATH_PLACEHOLDER_N__ 作为占位符（仅字母+下划线+数字），
+  // 不会被 escapeHtml 改写，也不会被小问徽章正则误匹配。
+  const mathStore: { formula: string; displayMode: boolean }[] = []
+  let html = text
+
+  // 先提取块级公式 $$...$$ （使用 [\s\S] 支持跨行公式）
+  html = html.replace(/\$\$([\s\S]+?)\$\$/g, (_, formula) => {
+    const i = mathStore.length
+    mathStore.push({ formula, displayMode: true })
+    return `__MATH_PLACEHOLDER_${i}__`
+  })
+
+  // 再提取行内公式 $...$ （使用 [\s\S] 支持跨行公式）
+  html = html.replace(/\$([\s\S]+?)\$/g, (_, formula) => {
+    const i = mathStore.length
+    mathStore.push({ formula, displayMode: false })
+    return `__MATH_PLACEHOLDER_${i}__`
+  })
+
+  // ---- 阶段 2: 对纯文本做 escapeHtml + 换行格式化 ----
+  //    此时文本中只有普通内容 + 占位符，无任何 KaTeX HTML，
+  //    可以安全地执行任何字符串替换。
+  html = escapeHtml(html)
+
+  // 小问徽章处理（占位符是 __MATH_PLACEHOLDER_N__，不含括号数字，不会被误匹配）
   if (props.subQuestionBadge) {
-    const mathStore: string[] = []
-    // 暂存块级公式 $$...$$
-    html = html.replace(/\$\$(.+?)\$\$/gs, (m) => {
-      const i = mathStore.length
-      mathStore.push(m)
-      return `\x00MATH${i}\x00`
-    })
-    // 暂存行内公式 $...$
-    html = html.replace(/\$(.+?)\$/g, (m) => {
-      const i = mathStore.length
-      mathStore.push(m)
-      return `\x00MATH${i}\x00`
-    })
-    // 替换全角/半角括号题号为徽章
     html = html.replace(/\((\d+)\)|（(\d+)）/g, (_, half, full) => {
       return `<span class="sub-question-badge">${half || full}</span>`
     })
-    // 恢复数学公式
-    html = html.replace(/\x00MATH(\d+)\x00/g, (_, i) => mathStore[parseInt(i)])
   }
 
-  // 2. 处理块级公式 $$...$$（在换行替换之前，避免公式内的 \n 被转为 <br>）
-  html = html.replace(/\$\$(.+?)\$\$/gs, (_, formula) => {
-    try {
-      const raw = formula
-        .replace(/&amp;/g, '&')
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>')
-        .replace(/&quot;/g, '"')
-        .replace(/&#39;/g, "'")
-      return katex.renderToString(normalizeEmptyset(raw.trim()), { displayMode: true, throwOnError: false, macros: katexMacros })
-    } catch {
-      return `<span class="katex-error">${formula}</span>`
-    }
-  })
-
-  // 3. 处理行内公式 $...$
-  html = html.replace(/\$(.+?)\$/g, (_, formula) => {
-    try {
-      const raw = formula
-        .replace(/&amp;/g, '&')
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>')
-        .replace(/&quot;/g, '"')
-        .replace(/&#39;/g, "'")
-      return katex.renderToString(normalizeEmptyset(raw.trim()), { displayMode: false, throwOnError: false, macros: katexMacros })
-    } catch {
-      return `<span class="katex-error">${formula}</span>`
-    }
-  })
-
-  // 4. 处理 Markdown 图片语法 ![alt](url)
+  // 处理 Markdown 图片语法 ![alt](url)
   html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (match, alt, url) => {
     const decodedUrl = url
       .replace(/&amp;/g, '&')
@@ -111,35 +119,31 @@ function render() {
     return `<img src="${decodedUrl}" alt="${decodedAlt}" class="latex-img" loading="lazy" />`
   })
 
-  // 5. 处理换行 — 小问徽章模式使用 <p> 段落包裹以拉开间距
+  // 处理换行 — 此时 KaTeX 尚未渲染，img 标签也不会被影响
   if (props.subQuestionBadge && !props.inline) {
-    // 保护已渲染的 KaTeX HTML — 其输出可能包含 \n，直接替换会截断 DOM 导致乱码
-    const katexStore: string[] = []
-    html = html.replace(/<span class="katex[^"]*">[\s\S]*?<\/span>/g, (m) => {
-      const i = katexStore.length
-      katexStore.push(m)
-      return `\x00KATEX${i}\x00`
-    })
-    // 同样保护 img 标签
-    html = html.replace(/<img[^>]*>/g, (m) => {
-      const i = katexStore.length
-      katexStore.push(m)
-      return `\x00KATEX${i}\x00`
-    })
-    // 按换行分割段落
+    // 小问徽章模式：用 <p> 段落包裹以拉开段落间距
     html = `<p>${html.replace(/\n/g, '</p><p>')}</p>`
     html = html.replace(/<p>\s*<\/p>/g, '')
-    // 恢复 KaTeX HTML 和 img 标签
-    html = html.replace(/\x00KATEX(\d+)\x00/g, (_, i) => katexStore[parseInt(i)])
   } else {
+    // 普通模式：\n → <br>
     html = html.replace(/\n/g, '<br>')
   }
 
-  // 6. 行内图片修正：如果 img 前后是 <br> 或字符串首尾，则保持 block 样式；
-  //    否则添加 inline 类。需要在 DOM 插入后处理。
+  // ---- 阶段 3: 最后才渲染 KaTeX，直接替换占位符 ----
+  //    katex.renderToString 的输出直接拼入 html，绝不参与任何 .replace。
+  //    这样 SVG <path> 的 d 属性中的 \n 不会被替换为 <br>，根号得以保留。
+  for (let i = 0; i < mathStore.length; i++) {
+    const { formula, displayMode } = mathStore[i]
+    const katexHtml = renderKatex(formula, displayMode)
+    // 使用 split + join 避免正则特殊字符问题（占位符是纯字母数字，正则也安全，
+    // 但 split/join 更直观且绝不触发任何意外匹配）
+    html = html.split(`__MATH_PLACEHOLDER_${i}__`).join(katexHtml)
+  }
+
+  // 设置 innerHTML
   container.value.innerHTML = html
 
-  // 7. 后处理：区分块级和行内图片
+  // 后处理：区分块级和行内图片
   const imgs = container.value.querySelectorAll('img.latex-img')
   imgs.forEach((img) => {
     const prev = img.previousSibling

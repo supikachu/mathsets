@@ -665,9 +665,11 @@ onBeforeUnmount(() => {
 <style scoped>
 /* ===== Apple风格吸顶工具栏 ===== */
 .ql-page {
+  position: absolute; /* 绝对定位撑满父级 .view.active，避免 100vh 与上方导航栏叠加溢出 */
+  inset: 0;
   display: flex;
   flex-direction: column;
-  height: 100%;
+  overflow: hidden; /* 锁定外层高度，彻底掐断全局滚动条 */
 }
 
 .ql-sticky-bar {
@@ -937,10 +939,12 @@ onBeforeUnmount(() => {
   box-shadow: 0 1px 4px rgba(0, 122, 255, 0.2);
 }
 
-/* ===== 可滚动列表区域 ===== */
+/* ===== 可滚动列表区域（独立滚动域） ===== */
 .ql-scroll-area {
   flex: 1;
+  min-height: 0; /* Flex 子项允许收缩，使 flex:1 + overflow-y:auto 生效 */
   overflow-y: auto;
+  overscroll-behavior: contain; /* 切断滚动链：防止列表触底触发外层滚动/橡皮筋 */
   padding: 16px 20px;
   background: var(--bg-primary);
 }
@@ -1511,5 +1515,13 @@ onBeforeUnmount(() => {
     width: 100%;
     justify-content: flex-end;
   }
+}
+</style>
+
+<!-- 非 scoped 样式：打通父级高度链，让 .ql-page 的 absolute/inset:0 能撑满 .view.active -->
+<style>
+.view.active {
+  height: 100%;
+  position: relative; /* 配合子元素 .ql-page 的 absolute inset:0 撑满 */
 }
 </style>

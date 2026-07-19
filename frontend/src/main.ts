@@ -1,6 +1,5 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
-import 'katex/dist/katex.min.css'
 import { initTheme } from '@/composables/useTheme'
 import App from './App.vue'
 import router from './router'

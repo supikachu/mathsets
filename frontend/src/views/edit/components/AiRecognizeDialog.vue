@@ -54,8 +54,8 @@ const emit = defineEmits<{
 const toast = useToast()
 const { select: selectKp } = useSelectedKp()
 
-// AI Mode tab: 'api' | 'markdown' | 'image'
-const aiMode = ref<'api' | 'markdown' | 'image'>('api')
+// AI Mode tab: 'markdown' | 'image'
+const aiMode = ref<'markdown' | 'image'>('markdown')
 const aiText = ref('')
 const aiError = ref('')
 const aiParsing = ref(false)
@@ -72,11 +72,9 @@ const fileInputRef = ref<HTMLInputElement | null>(null)
 const batchProcessedSet = ref<Set<number>>(new Set())
 
 // Confirmations
-const aiDirtyConfirm = ref(false)
 const snapshotOverwriteConfirm = ref(false)
 const snapshotRestoreConfirm = ref(false)
 let pendingUploadAction: (() => void) | null = null
-let pendingAiApply: ParsedQuestion | null = null
 let pendingSnapshotRestore: BatchSnapshot | null = null
 
 // Copied functions
@@ -91,33 +89,19 @@ async function copyPrompt() {
   }
 }
 
-function isFormDirty(): boolean {
-  if (props.form.stem.trim()) return true
-  if (props.form.options.some(o => o.content.trim())) return true
-  if (props.form.solutions.some(s => s.trim())) return true
-  if (props.form.blanks.some(b => b.answer.trim())) return true
-  if (props.form.sub_answers.some(a => a.trim())) return true
-  if (props.form.tagIds.length > 0) return true
-  return false
-}
-
-async function doAiParse() {
+function doAiParse() {
   if (!aiText.value.trim()) {
     toast.warning('请输入题目文本')
     return
   }
-  aiParsing.value = true
   aiError.value = ''
   aiResult.value = null
+  aiParsing.value = true
   try {
-    if (aiMode.value === 'markdown') {
-      aiResult.value = parseMarkdownToQuestion(aiText.value)
-    } else {
-      const res = await aiApi.parseText(aiText.value)
-      aiResult.value = res.data.data
-    }
+    // Markdown 模式：纯前端解析（不调用后端）
+    aiResult.value = parseMarkdownToQuestion(aiText.value)
   } catch (e: any) {
-    aiError.value = e.response?.data?.error || e.message || 'AI 解析失败'
+    aiError.value = e.message || 'Markdown 解析失败'
   } finally {
     aiParsing.value = false
   }
@@ -126,22 +110,8 @@ async function doAiParse() {
 function applyAiResult() {
   const q = aiResult.value
   if (!q) return
-
-  if (isFormDirty()) {
-    pendingAiApply = q
-    aiDirtyConfirm.value = true
-    return
-  }
-
+  // 直接覆盖反填 — 用户点击「应用到表单」即视为明确覆盖意图
   doApplyAiResult(q)
-}
-
-function confirmAiOverwrite() {
-  aiDirtyConfirm.value = false
-  if (pendingAiApply) {
-    doApplyAiResult(pendingAiApply)
-    pendingAiApply = null
-  }
 }
 
 function doApplyAiResult(q: ParsedQuestion) {
@@ -558,23 +528,45 @@ defineExpose({
         <div v-if="!aiResult && aiBatchResults.length === 0" class="ai-input-section">
           <!-- 模式切换 Tab -->
           <div class="ai-mode-tabs">
-            <button :class="{ active: aiMode === 'api' }" @click="aiMode = 'api'">API 智能解析</button>
             <button :class="{ active: aiMode === 'markdown' }" @click="aiMode = 'markdown'">Markdown 粘贴</button>
             <button :class="{ active: aiMode === 'image' }" @click="aiMode = 'image'">图片/PDF 识别</button>
           </div>
 
-          <!-- Markdown 模式：提示词复制区 -->
-          <div v-if="aiMode === 'markdown'" class="ai-prompt-section">
-            <div class="ai-prompt-header">
-              <span class="ai-prompt-title">第一步：复制提示词</span>
-              <AppButton variant="outline" size="sm" @click="copyPrompt">
-                <AppIcon name="copy" :size="14" /> {{ promptCopied ? '已复制' : '复制提示词' }}
-              </AppButton>
+          <!-- Markdown 模式：引导卡片（折叠式提示词） -->
+          <div v-if="aiMode === 'markdown'" class="ai-guide-card">
+            <!-- 步骤指示 -->
+            <div class="ai-guide-steps">
+              <div class="ai-guide-step">
+                <span class="ai-step-num">1</span>
+                <span class="ai-step-text">复制下方标准提示词并发送给 AI</span>
+              </div>
+              <div class="ai-guide-step">
+                <span class="ai-step-num">2</span>
+                <span class="ai-step-text">将 AI 生成的 Markdown 粘贴到下方文本框</span>
+              </div>
             </div>
-            <div class="ai-prompt-preview">{{ RECOMMENDED_PROMPT }}</div>
-            <div class="ai-steps">
-              ① 复制提示词 → ② 打开 AI 网页上传题目图片并粘贴提示词 → ③ 复制 AI 输出 → ④ 粘贴到下方
-            </div>
+
+            <!-- 折叠的提示词详情 -->
+            <details class="ai-prompt-details">
+              <summary class="ai-prompt-summary">
+                <span class="ai-prompt-summary-text">
+                  <AppIcon name="chevron-down" :size="14" />
+                  <span>查看完整提示词</span>
+                </span>
+              </summary>
+              <div class="ai-prompt-preview">{{ RECOMMENDED_PROMPT }}</div>
+            </details>
+
+            <!-- 一键复制按钮（含成功态视觉反馈） -->
+            <AppButton
+              class="ai-copy-btn"
+              :variant="promptCopied ? 'success' : 'primary'"
+              size="md"
+              @click="copyPrompt"
+            >
+              <AppIcon :name="promptCopied ? 'check-circle' : 'copy'" :size="16" />
+              {{ promptCopied ? '已复制，去粘贴到 AI' : '一键复制标准 Prompt' }}
+            </AppButton>
           </div>
 
           <!-- 图片/PDF 上传区 -->
@@ -609,32 +601,28 @@ defineExpose({
             </div>
           </div>
 
-          <p v-if="aiMode === 'api'" class="ai-hint">粘贴题目文本（含题干、选项、答案、解析），AI 将自动识别结构并填入表单。</p>
-          <p v-else-if="aiMode === 'markdown'" class="ai-hint">粘贴 AI 按推荐格式输出的 Markdown，系统将自动解析并填入表单。</p>
-          <textarea
-            v-if="aiMode !== 'image'"
-            v-model="aiText"
-            class="ai-textarea"
-            rows="10"
-            :placeholder="aiMode === 'markdown'
-              ? '在此粘贴 AI 输出的 Markdown...'
-              : '例如：\n已知函数 f(x) = 2x + 1，求 f(3) 的值。\n解：f(3) = 2×3 + 1 = 7'"
-          ></textarea>
-          <div v-if="aiError && aiMode !== 'image'" class="ai-error">{{ aiError }}</div>
-          <div v-if="aiMode !== 'image'" class="ai-actions">
-            <AppButton variant="ghost" @click="show = false">取消</AppButton>
-            <AppButton variant="primary" :loading="aiParsing" @click="doAiParse">
-              <AppIcon name="sparkles" :size="16" /> {{ aiParsing ? '解析中…' : '开始识别' }}
-            </AppButton>
-          </div>
+          <!-- Markdown 模式：文本输入区 -->
+          <template v-if="aiMode === 'markdown'">
+            <p class="ai-hint">粘贴 AI 按推荐格式输出的 Markdown，系统将自动解析并填入表单。</p>
+            <textarea
+              v-model="aiText"
+              class="ai-textarea"
+              rows="10"
+              placeholder="在此粘贴 AI 输出的 Markdown..."
+            ></textarea>
+            <div v-if="aiError" class="ai-error">{{ aiError }}</div>
+            <div class="ai-actions">
+              <AppButton variant="ghost" @click="show = false">取消</AppButton>
+              <AppButton variant="primary" :loading="aiParsing" @click="doAiParse">
+                <AppIcon name="sparkles" :size="16" /> {{ aiParsing ? '解析中…' : '开始识别' }}
+              </AppButton>
+            </div>
+          </template>
         </div>
 
         <!-- 结果预览 -->
         <div v-else-if="aiResult" class="ai-result-section">
           <div class="ai-result-meta">
-            <AppBadge :color="aiResult.confidence >= 0.8 ? 'green' : aiResult.confidence >= 0.5 ? 'yellow' : 'red'">
-              置信度 {{ Math.round(aiResult.confidence * 100) }}%
-            </AppBadge>
             <span class="ai-result-type">{{ ({ choice: '选择题', fill: '填空题', solution: '解答题' } as Record<string, string>)[aiResult.question_type] }}</span>
           </div>
           <div v-if="aiResult.warnings.length" class="ai-warnings">
@@ -761,15 +749,6 @@ defineExpose({
       </div>
     </AppModal>
 
-    <!-- AI 覆盖二次确认 -->
-    <AppConfirm
-      v-model="aiDirtyConfirm"
-      title="AI 覆盖确认"
-      message="AI 解析将覆盖当前已填写的内容，是否继续？"
-      confirm-text="覆盖"
-      danger
-      @confirm="confirmAiOverwrite"
-    />
     <!-- 快照覆盖警告 -->
     <AppConfirm
       v-model="snapshotOverwriteConfirm"
@@ -828,26 +807,86 @@ defineExpose({
   font-weight: 600;
 }
 
-.ai-prompt-section {
+/* ===== Markdown 模式：引导卡片 ===== */
+.ai-guide-card {
   background: var(--bg-secondary, var(--bg-input));
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 12px;
+  padding: 16px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 12px;
 }
 
-.ai-prompt-header {
+.ai-guide-steps {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
+  flex-direction: column;
+  gap: 10px;
 }
 
-.ai-prompt-title {
+.ai-guide-step {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   font-size: 13px;
-  font-weight: 600;
   color: var(--text-primary);
+  line-height: 1.4;
+}
+
+.ai-step-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--purple);
+  color: white;
+  font-size: 12px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.ai-prompt-details {
+  background: var(--bg-input);
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.ai-prompt-summary {
+  display: flex;
+  align-items: center;
+  padding: 10px 12px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-weight: 500;
+  list-style: none;
+  user-select: none;
+}
+
+.ai-prompt-summary::-webkit-details-marker {
+  display: none;
+}
+
+.ai-prompt-summary:hover {
+  color: var(--text-primary);
+}
+
+.ai-prompt-summary-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ai-prompt-details[open] .ai-prompt-summary .app-icon {
+  transform: rotate(180deg);
+  transition: transform 0.2s ease;
+}
+
+.ai-prompt-summary .app-icon {
+  transition: transform 0.2s ease;
 }
 
 .ai-prompt-preview {
@@ -855,19 +894,18 @@ defineExpose({
   font-size: 12px;
   line-height: 1.5;
   color: var(--text-secondary);
-  background: var(--bg-input);
-  border-radius: 6px;
-  padding: 10px;
-  max-height: 200px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+  max-height: 220px;
   overflow-y: auto;
   white-space: pre-wrap;
   word-break: break-word;
 }
 
-.ai-steps {
-  font-size: 12px;
-  color: var(--text-secondary);
-  line-height: 1.5;
+/* 一键复制按钮 — 宽度自适应，文字居中 */
+.ai-copy-btn {
+  align-self: stretch;
+  justify-content: center;
 }
 
 .ai-hint {
