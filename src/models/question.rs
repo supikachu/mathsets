@@ -2,9 +2,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-// ---------------------------------------------------------------------------
-// 枚举
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// 枚举类型
+// ===========================================================================
 
 /// 题型
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq)]
@@ -12,18 +12,49 @@ use uuid::Uuid;
 #[serde(rename_all = "lowercase")]
 pub enum QuestionType {
     Choice,
+    /// 多选题（B2 新增）
+    Multiple,
     Fill,
     Solution,
 }
 
-/// 难度（粗粒度枚举，用于快速筛选）
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq)]
-#[sqlx(type_name = "difficulty", rename_all = "lowercase")]
-#[serde(rename_all = "lowercase")]
-pub enum Difficulty {
-    Easy,
-    Medium,
-    Hard,
+/// 难度（1-5 星制，B2 重构）
+///
+/// B1 迁移：从旧 enum (Easy/Medium/Hard) 转为 i16 (1-5)。
+/// 迁移公式：easy=2, medium=3, hard=4。
+///
+/// 使用 newtype + `#[sqlx(transparent)]` 让 sqlx 直接代理 i16 编解码，
+/// 序列化为 JSON 数字（如 `2`），反序列化接受数字。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, sqlx::Type)]
+#[sqlx(transparent)]
+#[serde(transparent)]
+pub struct Difficulty(pub i16);
+
+impl Difficulty {
+    /// 构造难度，校验 1-5 范围
+    pub fn new(value: i16) -> Result<Self, String> {
+        if (1..=5).contains(&value) {
+            Ok(Self(value))
+        } else {
+            Err(format!("difficulty must be 1-5, got {}", value))
+        }
+    }
+
+    pub fn value(&self) -> i16 {
+        self.0
+    }
+}
+
+impl From<Difficulty> for i16 {
+    fn from(d: Difficulty) -> Self {
+        d.0
+    }
+}
+
+impl std::fmt::Display for Difficulty {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
 }
 
 /// 题目状态
@@ -75,76 +106,112 @@ pub enum CognitiveLevel {
     Create,
 }
 
-// ---------------------------------------------------------------------------
-// 题目
-// ---------------------------------------------------------------------------
+/// 考试类型（B2 新增，B1 已将 VARCHAR 迁移为 enum）
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq)]
+#[sqlx(type_name = "exam_type", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+pub enum ExamType {
+    Midterm,
+    Final,
+    Gaokao,
+    Mock,
+    Entrance,
+    Daily,
+    Other,
+}
 
-/// 题目（数据库行）
+/// 标签类别（B2 新增，B1 已将 VARCHAR 迁移为 enum）
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq)]
+#[sqlx(type_name = "tag_category", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+pub enum TagCategory {
+    /// 核心素养
+    CoreCompetence,
+    /// 解题方法 / 数学思想
+    Method,
+    /// 学校来源
+    School,
+    /// 应用场景
+    Scene,
+    /// 易错点
+    ErrorProne,
+}
+
+/// 知识树类型（B2 新增）
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq)]
+#[sqlx(type_name = "knowledge_tree_kind", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+pub enum KnowledgeTreeKind {
+    /// 知识树（核心，按数学学科结构）
+    Knowledge,
+    /// 能力树（核心素养 + 布鲁姆）
+    Ability,
+    /// 章节树（教材版本，如人教版/北师大版）
+    Chapter,
+}
+
+/// 知识点关联来源（B2 新增，用于 AI 智能打标审计）
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq)]
+#[sqlx(type_name = "knowledge_link_source", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+pub enum KnowledgeLinkSource {
+    /// 手工标注
+    Manual,
+    /// AI 自动标注
+    Ai,
+}
+
+// ===========================================================================
+// 题目
+// ===========================================================================
+
+/// 题目（数据库行）— B2 重构：移除已 DROP 的旧字段，新增 metadata JSONB
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Question {
     pub id: Uuid,
 
     // ── 内容 ──────────────────────────────────────
-    /// 题干原始文本（LaTeX / Markdown）
     pub stem: String,
-    /// 题干纯文本（去公式标记，用于全文检索与列表摘要）
     pub stem_text: Option<String>,
-    /// 配图数组 [{"url": "...", "alt": "..."}]
     pub images: Option<serde_json::Value>,
 
     // ── 题型与答案 ────────────────────────────────
     pub question_type: QuestionType,
-    /// 选项列表（选择题专用 JSONB）
     pub options: Option<serde_json::Value>,
-    /// 正确答案
     pub correct_answer: serde_json::Value,
-    /// 解析 / 解题过程
     pub analysis: Option<String>,
-    /// 评分标准（解答题专用 JSONB）
     pub grading_criteria: Option<serde_json::Value>,
 
     // ── 难度与评估 ────────────────────────────────
-    /// 粗粒度难度标签（快速筛选）
+    /// 难度 1-5（5 星制）
     pub difficulty: Difficulty,
-    /// 精细难度系数 1-10
     pub difficulty_score: Option<i16>,
-    /// 默认分值
     pub default_score: i32,
-    /// 预估作答时间（分钟）
     pub estimated_minutes: Option<i16>,
-    /// 认知层次（布鲁姆分类法）
     pub cognitive_level: Option<CognitiveLevel>,
 
     // ── 教研分类 ──────────────────────────────────
-    /// 适用年级（枚举化）
     pub grade_level: Option<GradeLevel>,
-    /// 学期（枚举化）— 对应 SQL 列 semester_new
-    pub semester_new: Option<SemesterType>,
+    /// 学期（B1 已将 semester_new RENAME 为 semester）
+    pub semester: Option<SemesterType>,
 
     // ── 来源元数据 ────────────────────────────────
     /// 出处备注（自由文本：书名、网址、"原创"等）
     pub source: Option<String>,
-    /// 学年 (如 "2024-2025")
-    pub academic_year: Option<String>,
-    /// 考试类型 (期中/期末/高考/模拟)
-    pub exam_type: Option<String>,
-    /// 考试地区
-    pub exam_region: Option<String>,
+    /// 考试类型（B2 改为 enum）
+    pub exam_type: Option<ExamType>,
+    /// 长尾元数据 JSONB（B2 新增）：academic_year, exam_region, paper_name,
+    /// paper_page, textbook_version 等长尾字段统一存此 JSON
+    pub metadata: serde_json::Value,
 
     // ── 复合题结构 ────────────────────────────────
-    /// 父题 ID（NULL = 独立题或父题本身）
     pub parent_id: Option<Uuid>,
-    /// 在父题下的排序序号
     pub sub_order: Option<i16>,
 
     // ── 统计缓存（反规范化） ──────────────────────
-    /// 被组卷次数
     pub paper_count: i32,
-    /// 累计作答次数
     pub attempt_count: i32,
-    /// 累计正确率 (0.0000 ~ 1.0000)
     pub accuracy_rate: Option<rust_decimal::Decimal>,
-    /// 被收藏次数
     pub favorite_count: i32,
 
     // ── 归属与审计 ────────────────────────────────
@@ -156,20 +223,9 @@ pub struct Question {
     pub updated_by: Option<Uuid>,
     pub updated_at: DateTime<Utc>,
     pub version: i32,
-
-    // ── 已废弃字段（兼容期保留，后续版本 DROP） ──
-    /// DEPRECATED: 使用 grade_level 替代
-    #[serde(skip_serializing)]
-    pub grade: Option<String>,
-    /// DEPRECATED: 使用 semester_new 替代
-    #[serde(skip_serializing)]
-    pub semester: Option<String>,
-    /// DEPRECATED: 使用 grade_level + semester_new 替代
-    #[serde(skip_serializing)]
-    pub grade_semester: Option<String>,
 }
 
-/// 创建题目请求
+/// 创建题目请求（B2 重构）
 #[derive(Debug, Deserialize)]
 pub struct CreateQuestionRequest {
     pub stem: String,
@@ -182,12 +238,12 @@ pub struct CreateQuestionRequest {
     pub grading_criteria: Option<serde_json::Value>,
     // 来源元数据
     pub source: Option<String>,
-    pub academic_year: Option<String>,
-    pub exam_type: Option<String>,
-    pub exam_region: Option<String>,
-    // 教研维度（新）
+    pub exam_type: Option<ExamType>,
+    /// 长尾元数据（academic_year, exam_region, paper_name 等）
+    pub metadata: Option<serde_json::Value>,
+    // 教研维度
     pub grade_level: Option<GradeLevel>,
-    pub semester_new: Option<SemesterType>,
+    pub semester: Option<SemesterType>,
     pub cognitive_level: Option<CognitiveLevel>,
     pub difficulty_score: Option<i16>,
     pub estimated_minutes: Option<i16>,
@@ -196,23 +252,21 @@ pub struct CreateQuestionRequest {
     // 复合题
     pub parent_id: Option<Uuid>,
     pub sub_order: Option<i16>,
-    // 标签 ID 列表（核心素养 + 解题方法 + 学校）
+    // 标签 ID 列表（核心素养 + 解题方法 + 学校 + 场景 + 易错点）
     pub tag_ids: Option<Vec<Uuid>>,
     /// 自建标签（尚未入库的名称，后端 Upsert 后合并到 tag_ids）
     #[serde(default)]
     pub new_tags: Option<Vec<NewTagInput>>,
-    pub knowledge_point_ids: Option<Vec<Uuid>>,
-    /// 所属空间；缺省为当前用户个人空间
+    // 知识点节点 ID 列表（B2 替代旧 knowledge_point_ids）
+    pub knowledge_node_ids: Option<Vec<Uuid>>,
+    /// 主知识点节点 ID（每题最多 1 个 primary）
+    pub primary_knowledge_node_id: Option<Uuid>,
     pub space_id: Option<Uuid>,
     /// 录入方式（"manual" | "ocr" | "ai_parse"）— 仅 "ocr" 触发配额扣减
     pub input_method: Option<String>,
-    // DEPRECATED 旧字段 — 仍接受前端传入以兼容，但后续将移除
-    pub grade: Option<String>,
-    pub semester: Option<String>,
-    pub grade_semester: Option<String>,
 }
 
-/// 更新题目请求
+/// 更新题目请求（B2 重构）
 #[derive(Debug, Deserialize)]
 pub struct UpdateQuestionRequest {
     pub stem: Option<String>,
@@ -225,12 +279,11 @@ pub struct UpdateQuestionRequest {
     pub grading_criteria: Option<serde_json::Value>,
     // 来源元数据
     pub source: Option<String>,
-    pub academic_year: Option<String>,
-    pub exam_type: Option<String>,
-    pub exam_region: Option<String>,
-    // 教研维度（新）
+    pub exam_type: Option<ExamType>,
+    pub metadata: Option<serde_json::Value>,
+    // 教研维度
     pub grade_level: Option<GradeLevel>,
-    pub semester_new: Option<SemesterType>,
+    pub semester: Option<SemesterType>,
     pub cognitive_level: Option<CognitiveLevel>,
     pub difficulty_score: Option<i16>,
     pub estimated_minutes: Option<i16>,
@@ -239,45 +292,54 @@ pub struct UpdateQuestionRequest {
     // 复合题
     pub parent_id: Option<Uuid>,
     pub sub_order: Option<i16>,
-    // 标签 ID 列表（核心素养 + 解题方法 + 学校）
+    // 标签
     pub tag_ids: Option<Vec<Uuid>>,
-    /// 自建标签（尚未入库的名称，后端 Upsert 后合并到 tag_ids）
     #[serde(default)]
     pub new_tags: Option<Vec<NewTagInput>>,
-    pub knowledge_point_ids: Option<Vec<Uuid>>,
-    // DEPRECATED 旧字段 — 仍接受前端传入以兼容，但后续将移除
-    pub grade: Option<String>,
-    pub semester: Option<String>,
-    pub grade_semester: Option<String>,
+    pub knowledge_node_ids: Option<Vec<Uuid>>,
+    pub primary_knowledge_node_id: Option<Uuid>,
 }
 
-/// 自建标签输入（前端提交尚未入库的标签）
+/// 自建标签输入（B2 重构：category 改为 enum，新增 parent_id 支持层级）
 #[derive(Debug, Deserialize, Clone)]
 pub struct NewTagInput {
     pub name: String,
-    pub category: String,
+    pub category: TagCategory,
+    /// 可选父标签 ID（支持层级）
+    pub parent_id: Option<Uuid>,
 }
 
-/// 题目列表查询参数
+/// 题目列表查询参数（B2 重构：新增多知识点/多标签/范围过滤）
 #[derive(Debug, Deserialize)]
 pub struct QuestionQuery {
     pub status: Option<QuestionStatus>,
     pub question_type: Option<QuestionType>,
+    /// 按难度精确匹配（1-5）
     pub difficulty: Option<Difficulty>,
-    pub grade: Option<String>,
+    /// 按难度范围过滤（与 difficulty 互斥，min/max 同时存在时生效）
+    pub difficulty_min: Option<i16>,
+    pub difficulty_max: Option<i16>,
     pub grade_level: Option<GradeLevel>,
-    pub knowledge_point_id: Option<Uuid>,
+    pub semester: Option<SemesterType>,
+    pub cognitive_level: Option<CognitiveLevel>,
+    pub exam_type: Option<ExamType>,
+    /// 多知识点过滤（默认 OR 关系：命中任一即返回）
+    pub knowledge_node_ids: Option<Vec<Uuid>>,
+    /// 是否包含所选知识点的所有子孙节点（LTREE 子树查询，B3 实现）
+    #[serde(default)]
+    pub include_descendants: bool,
+    /// 多标签过滤（默认 OR 关系）
+    pub tag_ids: Option<Vec<Uuid>>,
     pub creator_id: Option<Uuid>,
     pub keyword: Option<String>,
     pub page: Option<u32>,
     pub page_size: Option<u32>,
-    /// 按空间过滤
     pub space_id: Option<Uuid>,
     /// 仅返回当前用户可审核的待审题
     pub reviewable_by_me: Option<bool>,
 }
 
-/// 题目列表响应项
+/// 题目列表响应项（B2 重构：移除已 DROP 的 grade 字段）
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct QuestionSummary {
     pub id: Uuid,
@@ -286,7 +348,6 @@ pub struct QuestionSummary {
     pub difficulty: Difficulty,
     pub default_score: i32,
     pub status: QuestionStatus,
-    pub grade: Option<String>,
     pub grade_level: Option<GradeLevel>,
     pub creator_id: Uuid,
     pub creator_name: Option<String>,
@@ -305,7 +366,6 @@ impl From<Question> for QuestionSummary {
             difficulty: q.difficulty,
             default_score: q.default_score,
             status: q.status,
-            grade: q.grade,
             grade_level: q.grade_level,
             creator_id: q.creator_id,
             creator_name: None,
@@ -317,7 +377,7 @@ impl From<Question> for QuestionSummary {
     }
 }
 
-/// 题目详情响应（含知识点和审核记录）
+/// 题目详情响应（B2 重构：knowledge_points → knowledge_nodes，新增 metadata）
 #[derive(Debug, Serialize)]
 pub struct QuestionDetail {
     pub id: Uuid,
@@ -343,13 +403,12 @@ pub struct QuestionDetail {
 
     // ── 教研分类 ──
     pub grade_level: Option<GradeLevel>,
-    pub semester_new: Option<SemesterType>,
+    pub semester: Option<SemesterType>,
 
     // ── 来源元数据 ──
     pub source: Option<String>,
-    pub academic_year: Option<String>,
-    pub exam_type: Option<String>,
-    pub exam_region: Option<String>,
+    pub exam_type: Option<ExamType>,
+    pub metadata: serde_json::Value,
 
     // ── 复合题结构 ──
     pub parent_id: Option<Uuid>,
@@ -373,50 +432,42 @@ pub struct QuestionDetail {
     pub version: i32,
 
     // ── 关联数据 ──
-    pub knowledge_points: Vec<KnowledgePointSummary>,
-    /// 关联标签（核心素养 + 解题方法 + 学校）
+    /// 知识点节点列表（替代旧 knowledge_points）
+    pub knowledge_nodes: Vec<KnowledgeNodeSummary>,
+    /// 关联标签（核心素养 + 解题方法 + 学校 + 场景 + 易错点）
     pub tags: Vec<TagSummary>,
     pub reviewer_ids: Vec<Uuid>,
     pub can_review: bool,
 }
 
-impl From<(Question, Vec<KnowledgePointSummary>)> for QuestionDetail {
-    fn from((q, kps): (Question, Vec<KnowledgePointSummary>)) -> Self {
+impl From<(Question, Vec<KnowledgeNodeSummary>)> for QuestionDetail {
+    fn from((q, kns): (Question, Vec<KnowledgeNodeSummary>)) -> Self {
         Self {
             id: q.id,
-            // 内容
             stem: q.stem,
             stem_text: q.stem_text,
             images: q.images,
-            // 题型与答案
             question_type: q.question_type,
             options: q.options,
             correct_answer: q.correct_answer,
             analysis: q.analysis,
             grading_criteria: q.grading_criteria,
-            // 难度与评估
             difficulty: q.difficulty,
             difficulty_score: q.difficulty_score,
             default_score: q.default_score,
             estimated_minutes: q.estimated_minutes,
             cognitive_level: q.cognitive_level,
-            // 教研分类
             grade_level: q.grade_level,
-            semester_new: q.semester_new,
-            // 来源元数据
+            semester: q.semester,
             source: q.source,
-            academic_year: q.academic_year,
             exam_type: q.exam_type,
-            exam_region: q.exam_region,
-            // 复合题结构
+            metadata: q.metadata,
             parent_id: q.parent_id,
             sub_order: q.sub_order,
-            // 统计缓存
             paper_count: q.paper_count,
             attempt_count: q.attempt_count,
             accuracy_rate: q.accuracy_rate,
             favorite_count: q.favorite_count,
-            // 归属与审计
             status: q.status,
             space_id: q.space_id,
             origin_question_id: q.origin_question_id,
@@ -426,8 +477,7 @@ impl From<(Question, Vec<KnowledgePointSummary>)> for QuestionDetail {
             updated_by: q.updated_by,
             updated_at: q.updated_at,
             version: q.version,
-            // 关联数据
-            knowledge_points: kps,
+            knowledge_nodes: kns,
             tags: vec![],
             reviewer_ids: vec![],
             can_review: false,
@@ -449,41 +499,86 @@ pub struct TransferQuestionRequest {
     pub target_space_id: Option<Uuid>,
 }
 
-// ---------------------------------------------------------------------------
-// 知识点
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// 知识树与知识点（B2 全新设计，替代旧 KnowledgePoint 系列）
+// ===========================================================================
 
-/// 知识点（数据库行）
+/// 知识树（多树支持：知识树 / 能力树 / 章节树）
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
-pub struct KnowledgePoint {
+pub struct KnowledgeTree {
     pub id: Uuid,
-    pub parent_id: Option<Uuid>,
+    /// 树编码（全局唯一）：math_knowledge / math_ability / math_chapter_renjiiao
+    pub code: String,
     pub name: String,
-    pub grade: Option<String>,
-    pub sort_order: i32,
-    pub created_at: DateTime<Utc>,
+    pub kind: KnowledgeTreeKind,
+    /// NULL = 全局预置；非 NULL = 空间私有
     pub space_id: Option<Uuid>,
+    pub version: i32,
+    pub description: Option<String>,
+    pub is_active: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
-/// 知识点树节点（带 children）
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KnowledgePointTreeNode {
+/// 知识点节点（数据库行）— 物化路径 + 邻接表双轨
+///
+/// `path` 字段在 SQL 中是 LTREE 类型，sqlx 不直接支持 LTREE，
+/// handler 层 SELECT 时需显式转换 `path::text AS path` 以用 String 接收。
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct KnowledgeNode {
     pub id: Uuid,
+    pub tree_id: Uuid,
     pub parent_id: Option<Uuid>,
+    /// 节点独立 code（仅当前层级标识，如 "3" 或 "quadratic"），
+    /// 层次关系由 path 字段表达
+    pub code: Option<String>,
+    /// LTREE 物化路径，如 'n1.n12.n123'
+    pub path: String,
+    pub depth: i16,
     pub name: String,
-    pub grade: Option<String>,
+    /// 同义词数组 JSONB，如 [{"alias":"抛物线函数","locale":"zh"}]
+    /// 用于 AI 智能打标的模糊匹配
+    pub aliases: serde_json::Value,
+    pub description: Option<String>,
     pub sort_order: i32,
-    pub children: Vec<KnowledgePointTreeNode>,
+    /// 反规范化缓存：关联题目数
+    pub question_count: i32,
+    pub is_active: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
-impl From<KnowledgePoint> for KnowledgePointTreeNode {
-    fn from(kp: KnowledgePoint) -> Self {
+/// 知识点树节点（带 children，用于前端树形展示）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeNodeTreeNode {
+    pub id: Uuid,
+    pub tree_id: Uuid,
+    pub parent_id: Option<Uuid>,
+    pub code: Option<String>,
+    pub path: String,
+    pub depth: i16,
+    pub name: String,
+    pub aliases: serde_json::Value,
+    pub description: Option<String>,
+    pub sort_order: i32,
+    pub question_count: i32,
+    pub children: Vec<KnowledgeNodeTreeNode>,
+}
+
+impl From<KnowledgeNode> for KnowledgeNodeTreeNode {
+    fn from(n: KnowledgeNode) -> Self {
         Self {
-            id: kp.id,
-            parent_id: kp.parent_id,
-            name: kp.name,
-            grade: kp.grade,
-            sort_order: kp.sort_order,
+            id: n.id,
+            tree_id: n.tree_id,
+            parent_id: n.parent_id,
+            code: n.code,
+            path: n.path,
+            depth: n.depth,
+            name: n.name,
+            aliases: n.aliases,
+            description: n.description,
+            sort_order: n.sort_order,
+            question_count: n.question_count,
             children: vec![],
         }
     }
@@ -491,35 +586,89 @@ impl From<KnowledgePoint> for KnowledgePointTreeNode {
 
 /// 知识点摘要（用于题目详情中的关联展示）
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
-pub struct KnowledgePointSummary {
+pub struct KnowledgeNodeSummary {
     pub id: Uuid,
+    pub tree_id: Uuid,
     pub name: String,
+    /// 物化路径（handler 层 SELECT 时用 `path::text`）
+    pub path: String,
+    pub depth: i16,
+    /// 是否主知识点（每题最多 1 个 is_primary=true）
+    pub is_primary: bool,
+    /// AI 匹配置信度（0.0000-1.0000）
+    pub ai_confidence: Option<rust_decimal::Decimal>,
+    /// 关联来源（manual / ai）
+    pub source: KnowledgeLinkSource,
 }
 
-/// 创建知识点请求
+/// 题目-知识点关联（数据库行）
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct QuestionKnowledgeNode {
+    pub question_id: Uuid,
+    pub node_id: Uuid,
+    pub is_primary: bool,
+    /// 相关度评分 0-100
+    pub relevance_score: Option<i16>,
+    /// AI 匹配置信度（0.0000-1.0000）
+    pub ai_confidence: Option<rust_decimal::Decimal>,
+    pub source: KnowledgeLinkSource,
+    pub created_at: DateTime<Utc>,
+}
+
+/// 创建知识树请求
 #[derive(Debug, Deserialize)]
-pub struct CreateKnowledgePointRequest {
-    pub parent_id: Option<Uuid>,
+pub struct CreateKnowledgeTreeRequest {
+    pub code: String,
     pub name: String,
-    pub grade: Option<String>,
-    pub sort_order: Option<i32>,
+    pub kind: Option<KnowledgeTreeKind>,
     pub space_id: Option<Uuid>,
+    pub description: Option<String>,
 }
 
-/// 更新知识点请求
+/// 更新知识树请求
 #[derive(Debug, Deserialize)]
-pub struct UpdateKnowledgePointRequest {
-    pub parent_id: Option<Uuid>,
+pub struct UpdateKnowledgeTreeRequest {
     pub name: Option<String>,
-    pub grade: Option<String>,
+    pub description: Option<String>,
+    pub is_active: Option<bool>,
+}
+
+/// 创建知识点节点请求
+#[derive(Debug, Deserialize)]
+pub struct CreateKnowledgeNodeRequest {
+    pub tree_id: Uuid,
+    pub parent_id: Option<Uuid>,
+    /// 节点独立 code（仅当前层级标识，不含父级路径段）
+    pub code: Option<String>,
+    pub name: String,
+    /// 同义词数组，如 ["抛物线函数", "quadratic_function"]
+    #[serde(default)]
+    pub aliases: Option<serde_json::Value>,
+    pub description: Option<String>,
     pub sort_order: Option<i32>,
 }
 
-// ---------------------------------------------------------------------------
-// 审核记录
-// ---------------------------------------------------------------------------
+/// 更新知识点节点请求
+#[derive(Debug, Deserialize)]
+pub struct UpdateKnowledgeNodeRequest {
+    pub name: Option<String>,
+    pub code: Option<String>,
+    pub aliases: Option<serde_json::Value>,
+    pub description: Option<String>,
+    pub sort_order: Option<i32>,
+    pub is_active: Option<bool>,
+}
 
-/// 审核记录
+/// 移动知识点节点请求（改 parent_id，后端重算 path 与 depth）
+#[derive(Debug, Deserialize)]
+pub struct MoveKnowledgeNodeRequest {
+    pub new_parent_id: Option<Uuid>,
+}
+
+// ===========================================================================
+// 审核记录
+// ===========================================================================
+
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ReviewRecord {
     pub id: Uuid,
@@ -530,47 +679,102 @@ pub struct ReviewRecord {
     pub created_at: DateTime<Utc>,
 }
 
-// ---------------------------------------------------------------------------
-// 标签
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// 标签（B2 重构：增加层级 + 枚举 category + aliases）
+// ===========================================================================
 
 /// 标签摘要（用于题目详情中的关联展示）
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct TagSummary {
     pub id: Uuid,
     pub name: String,
-    pub category: String,
+    pub category: TagCategory,
 }
 
-/// 标签（数据库行）
+/// 标签（数据库行，B2 支持层级 + aliases）
+///
+/// `path` 字段在 SQL 中是 LTREE 类型，handler 层 SELECT 时需 `path::text AS path`。
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Tag {
     pub id: Uuid,
+    pub parent_id: Option<Uuid>,
     pub name: String,
-    pub category: String,
+    pub category: TagCategory,
+    /// LTREE 物化路径
+    pub path: String,
+    /// 同义词数组 JSONB
+    pub aliases: serde_json::Value,
+    pub description: Option<String>,
     pub space_id: Option<Uuid>,
     pub use_count: i32,
+    pub is_active: bool,
     pub created_at: DateTime<Utc>,
+}
+
+/// 标签树节点（带 children，用于前端树形展示）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TagTreeNode {
+    pub id: Uuid,
+    pub parent_id: Option<Uuid>,
+    pub name: String,
+    pub category: TagCategory,
+    pub path: String,
+    pub aliases: serde_json::Value,
+    pub use_count: i32,
+    pub children: Vec<TagTreeNode>,
+}
+
+impl From<Tag> for TagTreeNode {
+    fn from(t: Tag) -> Self {
+        Self {
+            id: t.id,
+            parent_id: t.parent_id,
+            name: t.name,
+            category: t.category,
+            path: t.path,
+            aliases: t.aliases,
+            use_count: t.use_count,
+            children: vec![],
+        }
+    }
 }
 
 /// 创建标签请求
 #[derive(Debug, Deserialize)]
 pub struct CreateTagRequest {
     pub name: String,
-    pub category: String,
+    pub category: TagCategory,
+    /// 可选父标签 ID（支持层级）
+    pub parent_id: Option<Uuid>,
+    #[serde(default)]
+    pub aliases: Option<serde_json::Value>,
+    pub description: Option<String>,
     pub space_id: Option<Uuid>,
 }
 
-/// 更新标签请求（部分更新）
+/// 更新标签请求（部分更新；不允许修改 category 以保证树一致性）
 #[derive(Debug, Deserialize)]
 pub struct UpdateTagRequest {
     pub name: Option<String>,
-    pub category: Option<String>,
+    pub aliases: Option<serde_json::Value>,
+    pub description: Option<String>,
+    pub is_active: Option<bool>,
 }
 
-/// 标签查询参数
+/// 移动标签请求（改 parent_id，后端重算 path）
+#[derive(Debug, Deserialize)]
+pub struct MoveTagRequest {
+    pub new_parent_id: Option<Uuid>,
+}
+
+/// 标签查询参数（B2 增强：支持树形返回与按 parent_id 过滤）
 #[derive(Debug, Deserialize)]
 pub struct TagQuery {
-    pub category: Option<String>,
+    pub category: Option<TagCategory>,
     pub space_id: Option<Uuid>,
+    /// 是否返回树形结构（带 children）；false 时返回平铺列表
+    #[serde(default)]
+    pub as_tree: bool,
+    /// 按父节点过滤（NULL = 仅根节点）
+    pub parent_id: Option<Uuid>,
 }

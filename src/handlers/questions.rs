@@ -14,9 +14,9 @@ use crate::auth::permissions::{
     is_admin, list_reviewers, PermissionError,
 };
 use crate::models::question::{
-    CreateQuestionRequest, KnowledgePointSummary, Question, QuestionDetail, QuestionQuery,
-    QuestionStatus, QuestionSummary, RejectRequest, TagSummary, TransferQuestionRequest,
-    UpdateQuestionRequest,
+    CreateQuestionRequest, KnowledgeNodeSummary, Question, QuestionDetail,
+    QuestionQuery, QuestionStatus, QuestionSummary, RejectRequest, TagSummary,
+    TransferQuestionRequest, UpdateQuestionRequest,
 };
 use crate::models::space::SpaceKind;
 use crate::models::user::{GlobalRole, User};
@@ -58,40 +58,68 @@ pub(crate) async fn save_version(
     Ok(())
 }
 
-async fn update_knowledge_points(
+pub(crate) async fn update_knowledge_nodes(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     question_id: Uuid,
-    kp_ids: &[Uuid],
+    node_ids: &[Uuid],
+    primary_node_id: Option<Uuid>,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("DELETE FROM question_knowledge_points WHERE question_id = $1")
+    sqlx::query("DELETE FROM question_knowledge_nodes WHERE question_id = $1")
         .bind(question_id)
         .execute(&mut **tx)
         .await?;
 
-    for kp_id in kp_ids {
+    for node_id in node_ids {
+        let is_primary = primary_node_id == Some(*node_id);
         sqlx::query(
-            "INSERT INTO question_knowledge_points (question_id, knowledge_point_id) VALUES ($1, $2)",
+            r#"
+            INSERT INTO question_knowledge_nodes
+              (question_id, node_id, is_primary, source, created_at)
+            VALUES ($1, $2, $3, 'manual', NOW())
+            ON CONFLICT (question_id, node_id) DO NOTHING
+            "#,
         )
         .bind(question_id)
-        .bind(kp_id)
+        .bind(node_id)
+        .bind(is_primary)
         .execute(&mut **tx)
         .await?;
+    }
+
+    // 确保 primary 唯一性：若 primary_node_id 不在 node_ids 中，单独插入
+    if let Some(primary_id) = primary_node_id {
+        if !node_ids.contains(&primary_id) {
+            sqlx::query(
+                r#"
+                INSERT INTO question_knowledge_nodes
+                  (question_id, node_id, is_primary, source, created_at)
+                VALUES ($1, $2, TRUE, 'manual', NOW())
+                ON CONFLICT (question_id, node_id) DO UPDATE SET is_primary = TRUE
+                "#,
+            )
+            .bind(question_id)
+            .bind(primary_id)
+            .execute(&mut **tx)
+            .await?;
+        }
     }
 
     Ok(())
 }
 
-async fn get_question_knowledge_points(
+async fn get_question_knowledge_nodes(
     pool: &sqlx::PgPool,
     question_id: Uuid,
-) -> Result<Vec<KnowledgePointSummary>, sqlx::Error> {
-    sqlx::query_as::<_, KnowledgePointSummary>(
+) -> Result<Vec<KnowledgeNodeSummary>, sqlx::Error> {
+    sqlx::query_as::<_, KnowledgeNodeSummary>(
         r#"
-        SELECT kp.id, kp.name
-        FROM knowledge_points kp
-        JOIN question_knowledge_points qkp ON qkp.knowledge_point_id = kp.id
-        WHERE qkp.question_id = $1
-        ORDER BY kp.sort_order, kp.name
+        SELECT kn.id, kn.tree_id, kn.name,
+               kn.path::text AS path, kn.depth,
+               qkn.is_primary, qkn.ai_confidence, qkn.source
+        FROM knowledge_nodes kn
+        JOIN question_knowledge_nodes qkn ON qkn.node_id = kn.id
+        WHERE qkn.question_id = $1
+        ORDER BY qkn.is_primary DESC, kn.sort_order, kn.name
         "#,
     )
     .bind(question_id)
@@ -218,7 +246,7 @@ pub(crate) async fn build_detail(
     question: Question,
     creator_name: Option<String>,
 ) -> Result<QuestionDetail, sqlx::Error> {
-    let kps = get_question_knowledge_points(pool, question.id)
+    let kns = get_question_knowledge_nodes(pool, question.id)
         .await
         .unwrap_or_default();
     let tags = get_question_tags(pool, question.id)
@@ -226,7 +254,7 @@ pub(crate) async fn build_detail(
         .unwrap_or_default();
     let reviewer_ids = list_reviewers(pool, question.id).await.unwrap_or_default();
 
-    let mut detail = QuestionDetail::from((question.clone(), kps));
+    let mut detail = QuestionDetail::from((question.clone(), kns));
     detail.tags = tags;
     detail.creator_name = creator_name;
     detail.reviewer_ids = reviewer_ids;
@@ -353,7 +381,7 @@ pub async fn list_questions(
         .map_err(|e| db_err(format!("统计题目总数失败: {}", e)))?;
 
     let mut builder = sqlx::QueryBuilder::new(
-        "SELECT q.id, q.stem, q.question_type, q.difficulty, q.default_score, q.status, q.grade, \
+        "SELECT q.id, q.stem, q.question_type, q.difficulty, q.default_score, q.status, \
          q.grade_level, q.creator_id, u.display_name AS creator_name, q.created_at, q.updated_at, q.version, q.space_id \
          FROM questions q LEFT JOIN users u ON u.id = q.creator_id WHERE 1=1",
     );
@@ -464,20 +492,66 @@ fn apply_question_filters<'a>(
         builder.push(" AND q.question_type = ");
         builder.push_bind(qt);
     }
-    if let Some(ref diff) = query.difficulty {
+    // 难度过滤：优先用精确 difficulty，否则用 difficulty_min/max 范围
+    if let Some(diff) = query.difficulty {
         builder.push(" AND q.difficulty = ");
         builder.push_bind(diff);
+    } else if query.difficulty_min.is_some() || query.difficulty_max.is_some() {
+        if let Some(min) = query.difficulty_min {
+            builder.push(" AND q.difficulty >= ");
+            builder.push_bind(min);
+        }
+        if let Some(max) = query.difficulty_max {
+            builder.push(" AND q.difficulty <= ");
+            builder.push_bind(max);
+        }
     }
-    if let Some(ref grade) = query.grade {
-        builder.push(" AND q.grade = ");
-        builder.push_bind(grade);
+    if let Some(ref grade_level) = query.grade_level {
+        builder.push(" AND q.grade_level = ");
+        builder.push_bind(grade_level);
     }
-    if let Some(ref kp_id) = query.knowledge_point_id {
-        builder.push(
-            " AND q.id IN (SELECT question_id FROM question_knowledge_points WHERE knowledge_point_id = ",
-        );
-        builder.push_bind(kp_id);
-        builder.push(")");
+    if let Some(ref semester) = query.semester {
+        builder.push(" AND q.semester = ");
+        builder.push_bind(semester);
+    }
+    if let Some(ref cognitive_level) = query.cognitive_level {
+        builder.push(" AND q.cognitive_level = ");
+        builder.push_bind(cognitive_level);
+    }
+    if let Some(ref exam_type) = query.exam_type {
+        builder.push(" AND q.exam_type = ");
+        builder.push_bind(exam_type);
+    }
+    // 知识点节点多选过滤：支持 LTREE 子树包含（include_descendants=true）
+    if let Some(ref node_ids) = query.knowledge_node_ids {
+        if !node_ids.is_empty() {
+            if query.include_descendants {
+                // LTREE 子树查询：命中任一选中节点或其子孙节点
+                // EXISTS 写法：题目关联的某个节点 kn，存在选中节点 root 使 kn.path <@ root.path
+                builder.push(" AND EXISTS (SELECT 1 FROM question_knowledge_nodes qkn \
+                              JOIN knowledge_nodes kn ON kn.id = qkn.node_id \
+                              WHERE qkn.question_id = q.id \
+                              AND EXISTS (SELECT 1 FROM knowledge_nodes root \
+                                          WHERE root.id = ANY(");
+                builder.push_bind(node_ids.clone());
+                builder.push(") AND kn.path <@ root.path))");
+            } else {
+                // 精确匹配：题目关联的节点在 node_ids 中
+                builder.push(" AND EXISTS (SELECT 1 FROM question_knowledge_nodes qkn \
+                              WHERE qkn.question_id = q.id AND qkn.node_id = ANY(");
+                builder.push_bind(node_ids.clone());
+                builder.push("))");
+            }
+        }
+    }
+    // 标签多选过滤（OR 关系）
+    if let Some(ref tag_ids) = query.tag_ids {
+        if !tag_ids.is_empty() {
+            builder.push(" AND EXISTS (SELECT 1 FROM question_tags_relation qtr \
+                          WHERE qtr.question_id = q.id AND qtr.tag_id = ANY(");
+            builder.push_bind(tag_ids.clone());
+            builder.push("))");
+        }
     }
     if let Some(ref creator) = query.creator_id {
         builder.push(" AND q.creator_id = ");
@@ -580,16 +654,14 @@ pub async fn create_question(
     sqlx::query(
         r#"
         INSERT INTO questions (id, stem, question_type, difficulty, default_score, status,
-            options, correct_answer, analysis, grading_criteria, grade, semester, source,
-            academic_year, grade_semester, exam_type, exam_region,
-            grade_level, semester_new, cognitive_level, difficulty_score, estimated_minutes,
+            options, correct_answer, analysis, grading_criteria, source, exam_type, metadata,
+            grade_level, semester, cognitive_level, difficulty_score, estimated_minutes,
             images, parent_id, sub_order,
             creator_id, created_at, updated_at, version, space_id)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-            $14, $15, $16, $17,
-            $18, $19, $20, $21, $22,
-            $23, $24, $25,
-            $26, $27, $28, $29, $30)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, COALESCE($13, '{}'::jsonb),
+            $14, $15, $16, $17, $18,
+            $19, $20, $21,
+            $22, $23, $24, $25, $26)
         "#,
     )
     .bind(id)
@@ -602,15 +674,11 @@ pub async fn create_question(
     .bind(&req.correct_answer)
     .bind(&req.analysis)
     .bind(&req.grading_criteria)
-    .bind(&req.grade)
-    .bind(&req.semester)
     .bind(&req.source)
-    .bind(&req.academic_year)
-    .bind(&req.grade_semester)
     .bind(&req.exam_type)
-    .bind(&req.exam_region)
+    .bind(&req.metadata)
     .bind(&req.grade_level)
-    .bind(&req.semester_new)
+    .bind(&req.semester)
     .bind(&req.cognitive_level)
     .bind(req.difficulty_score)
     .bind(req.estimated_minutes)
@@ -626,10 +694,15 @@ pub async fn create_question(
     .await
     .map_err(|e| db_err(format!("创建题目失败: {}", e)))?;
 
-    if let Some(ref kp_ids) = req.knowledge_point_ids {
-        update_knowledge_points(&mut tx, id, kp_ids)
+    if let Some(ref node_ids) = req.knowledge_node_ids {
+        update_knowledge_nodes(&mut tx, id, node_ids, req.primary_knowledge_node_id)
             .await
             .map_err(|e| db_err(format!("关联知识点失败: {}", e)))?;
+    } else if let Some(primary_id) = req.primary_knowledge_node_id {
+        // 只指定主知识点，无其他关联
+        update_knowledge_nodes(&mut tx, id, &[], Some(primary_id))
+            .await
+            .map_err(|e| db_err(format!("关联主知识点失败: {}", e)))?;
     }
 
     // 合并已有 tag_ids + 自建 new_tags（Upsert 后取 ID）
@@ -771,26 +844,22 @@ pub async fn update_question(
             correct_answer = COALESCE($6, correct_answer),
             analysis = COALESCE($7, analysis),
             grading_criteria = COALESCE($8, grading_criteria),
-            grade = COALESCE($9, grade),
-            semester = COALESCE($10, semester),
-            source = COALESCE($11, source),
-            academic_year = COALESCE($12, academic_year),
-            grade_semester = COALESCE($13, grade_semester),
-            exam_type = COALESCE($14, exam_type),
-            exam_region = COALESCE($15, exam_region),
-            grade_level = COALESCE($16, grade_level),
-            semester_new = COALESCE($17, semester_new),
-            cognitive_level = COALESCE($18, cognitive_level),
-            difficulty_score = COALESCE($19, difficulty_score),
-            estimated_minutes = COALESCE($20, estimated_minutes),
-            images = COALESCE($21, images),
-            parent_id = COALESCE($22, parent_id),
-            sub_order = COALESCE($23, sub_order),
+            source = COALESCE($9, source),
+            exam_type = COALESCE($10, exam_type),
+            metadata = COALESCE($11, metadata),
+            grade_level = COALESCE($12, grade_level),
+            semester = COALESCE($13, semester),
+            cognitive_level = COALESCE($14, cognitive_level),
+            difficulty_score = COALESCE($15, difficulty_score),
+            estimated_minutes = COALESCE($16, estimated_minutes),
+            images = COALESCE($17, images),
+            parent_id = COALESCE($18, parent_id),
+            sub_order = COALESCE($19, sub_order),
             status = 'draft'::question_status,
-            updated_by = $24,
-            updated_at = $25,
-            version = $26
-        WHERE id = $27 AND version = $28
+            updated_by = $20,
+            updated_at = $21,
+            version = $22
+        WHERE id = $23 AND version = $24
         "#,
     )
     .bind(&req.stem)
@@ -801,15 +870,11 @@ pub async fn update_question(
     .bind(&req.correct_answer)
     .bind(&req.analysis)
     .bind(&req.grading_criteria)
-    .bind(&req.grade)
-    .bind(&req.semester)
     .bind(&req.source)
-    .bind(&req.academic_year)
-    .bind(&req.grade_semester)
     .bind(&req.exam_type)
-    .bind(&req.exam_region)
+    .bind(&req.metadata)
     .bind(&req.grade_level)
-    .bind(&req.semester_new)
+    .bind(&req.semester)
     .bind(&req.cognitive_level)
     .bind(req.difficulty_score)
     .bind(req.estimated_minutes)
@@ -835,10 +900,14 @@ pub async fn update_question(
         ));
     }
 
-    if let Some(ref kp_ids) = req.knowledge_point_ids {
-        update_knowledge_points(&mut tx, id, kp_ids)
+    if let Some(ref node_ids) = req.knowledge_node_ids {
+        update_knowledge_nodes(&mut tx, id, node_ids, req.primary_knowledge_node_id)
             .await
             .map_err(|e| db_err(format!("更新知识点关联失败: {}", e)))?;
+    } else if let Some(primary_id) = req.primary_knowledge_node_id {
+        update_knowledge_nodes(&mut tx, id, &[], Some(primary_id))
+            .await
+            .map_err(|e| db_err(format!("更新主知识点关联失败: {}", e)))?;
     }
 
     // 合并已有 tag_ids + 自建 new_tags（Upsert 后取 ID）
@@ -1418,19 +1487,17 @@ async fn copy_question(
         r#"
         INSERT INTO questions (
             id, stem, stem_text, images, question_type, difficulty, default_score, status,
-            options, correct_answer, analysis, grading_criteria, grade, semester, source,
-            academic_year, exam_type, exam_region,
-            grade_level, semester_new, cognitive_level, difficulty_score, estimated_minutes,
+            options, correct_answer, analysis, grading_criteria, source, exam_type, metadata,
+            grade_level, semester, cognitive_level, difficulty_score, estimated_minutes,
             parent_id, sub_order,
             creator_id, created_at, updated_at, version, space_id, origin_question_id
         )
         VALUES (
             $1, $2, $3, $4, $5, $6, $7, 'published'::question_status,
-            $8, $9, $10, $11, $12, $13, $14,
-            $15, $16, $17,
-            $18, $19, $20, $21, $22,
-            $23, $24,
-            $25, $26, $27, 1, $28, $29
+            $8, $9, $10, $11, $12, $13, COALESCE($14, '{}'::jsonb),
+            $15, $16, $17, $18, $19,
+            $20, $21,
+            $22, $23, $24, 1, $25, $26
         )
         "#,
     )
@@ -1445,14 +1512,11 @@ async fn copy_question(
     .bind(&src.correct_answer)
     .bind(&src.analysis)
     .bind(&src.grading_criteria)
-    .bind(&src.grade)
-    .bind(&src.semester)
     .bind(&src.source)
-    .bind(&src.academic_year)
     .bind(&src.exam_type)
-    .bind(&src.exam_region)
+    .bind(&src.metadata)
     .bind(&src.grade_level)
-    .bind(&src.semester_new)
+    .bind(&src.semester)
     .bind(&src.cognitive_level)
     .bind(src.difficulty_score)
     .bind(src.estimated_minutes)
@@ -1466,23 +1530,19 @@ async fn copy_question(
     .execute(&mut *tx)
     .await?;
 
-    // 复制知识点关联
-    let kp_ids: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT knowledge_point_id FROM question_knowledge_points WHERE question_id = $1",
+    // 复制知识点节点关联（保留 is_primary 与 source）
+    sqlx::query(
+        r#"
+        INSERT INTO question_knowledge_nodes (question_id, node_id, is_primary, ai_confidence, source, created_at)
+        SELECT $1, node_id, is_primary, ai_confidence, source, NOW()
+        FROM question_knowledge_nodes
+        WHERE question_id = $2
+        "#,
     )
+    .bind(id)
     .bind(src.id)
-    .fetch_all(&mut *tx)
+    .execute(&mut *tx)
     .await?;
-
-    for kp_id in kp_ids {
-        sqlx::query(
-            "INSERT INTO question_knowledge_points (question_id, knowledge_point_id) VALUES ($1, $2)",
-        )
-        .bind(id)
-        .bind(kp_id)
-        .execute(&mut *tx)
-        .await?;
-    }
 
     save_version(&mut tx, id, 1, Some(creator_id)).await?;
     tx.commit().await?;

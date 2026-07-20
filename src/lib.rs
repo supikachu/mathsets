@@ -81,17 +81,22 @@ pub fn build_app(state: AppState) -> Router {
             "/spaces/{id}/members/{user_id}",
             delete(handlers::spaces::remove_member),
         )
-        // 知识点树
-        .route("/knowledge-points", get(handlers::knowledge_points::list_knowledge_points))
-        .route("/knowledge-points", post(handlers::knowledge_points::create_knowledge_point))
-        .route(
-            "/knowledge-points/{id}",
-            put(handlers::knowledge_points::update_knowledge_point),
-        )
-        .route(
-            "/knowledge-points/{id}",
-            delete(handlers::knowledge_points::delete_knowledge_point),
-        )
+        // 知识树（KnowledgeTree）— B3 新增：多棵树容器（数学知识/能力/教材章节）
+        .route("/knowledge-trees", get(handlers::knowledge_trees::list_knowledge_trees))
+        .route("/knowledge-trees", post(handlers::knowledge_trees::create_knowledge_tree))
+        .route("/knowledge-trees/{id}", put(handlers::knowledge_trees::update_knowledge_tree))
+        .route("/knowledge-trees/{id}", delete(handlers::knowledge_trees::delete_knowledge_tree))
+        // 知识点节点（KnowledgeNode）— B3 新增：基于 LTREE 的物化路径树
+        .route("/knowledge-trees/{tree_id}/nodes", get(handlers::knowledge_nodes::list_nodes_by_tree))
+        .route("/knowledge-trees/{tree_id}/nodes/tree", get(handlers::knowledge_nodes::get_node_tree))
+        .route("/knowledge-nodes", post(handlers::knowledge_nodes::create_node))
+        .route("/knowledge-nodes/{id}", get(handlers::knowledge_nodes::get_node))
+        .route("/knowledge-nodes/{id}", put(handlers::knowledge_nodes::update_node))
+        .route("/knowledge-nodes/{id}", delete(handlers::knowledge_nodes::delete_node))
+        .route("/knowledge-nodes/{id}/descendants", get(handlers::knowledge_nodes::get_descendants))
+        .route("/knowledge-nodes/{id}/move", post(handlers::knowledge_nodes::move_node))
+        // AI 智能打标 — B3 新增：LLM 提取 + pg_trgm/JSONB 三级模糊匹配
+        .route("/questions/ai-tagging", post(handlers::ai_tagging::ai_tagging))
         // 当前用户信息
         .route("/auth/me", get(handlers::auth::me))
         // 用户中心（个人资料 + 头像 + 密码）

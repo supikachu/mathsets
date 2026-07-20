@@ -762,21 +762,19 @@ async fn clone_question_internal(
         r#"
         INSERT INTO questions (
             id, stem, stem_text, images, question_type, difficulty, default_score, status,
-            options, correct_answer, analysis, grading_criteria, grade, semester, source,
-            academic_year, exam_type, exam_region,
-            grade_level, semester_new, cognitive_level, difficulty_score, estimated_minutes,
+            options, correct_answer, analysis, grading_criteria, source, exam_type, metadata,
+            grade_level, semester, cognitive_level, difficulty_score, estimated_minutes,
             parent_id, sub_order,
             paper_count, attempt_count, accuracy_rate, favorite_count,
             creator_id, created_at, updated_at, version, space_id, origin_question_id
         )
         VALUES (
             $1, $2, $3, $4, $5, $6, $7, 'draft'::question_status,
-            $8, $9, $10, $11, $12, $13, $14,
-            $15, $16, $17,
-            $18, $19, $20, $21, $22,
-            $23, $24,
+            $8, $9, $10, $11, $12, $13, COALESCE($14, '{}'::jsonb),
+            $15, $16, $17, $18, $19,
+            $20, $21,
             0, 0, NULL, 0,
-            $25, $26, $27, 1, $28, $29
+            $22, $23, $24, 1, $25, $26
         )
         "#,
     )
@@ -791,14 +789,11 @@ async fn clone_question_internal(
     .bind(&src.correct_answer)
     .bind(&src.analysis)
     .bind(&src.grading_criteria)
-    .bind(&src.grade)
-    .bind(&src.semester)
     .bind(&src.source)
-    .bind(&src.academic_year)
     .bind(&src.exam_type)
-    .bind(&src.exam_region)
+    .bind(&src.metadata)
     .bind(&src.grade_level)
-    .bind(&src.semester_new)
+    .bind(&src.semester)
     .bind(&src.cognitive_level)
     .bind(src.difficulty_score)
     .bind(src.estimated_minutes)
@@ -812,23 +807,19 @@ async fn clone_question_internal(
     .execute(&mut *tx)
     .await?;
 
-    // ── 拷贝知识点关联 ──
-    let kp_ids: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT knowledge_point_id FROM question_knowledge_points WHERE question_id = $1",
+    // ── 拷贝知识点节点关联（保留 is_primary/ai_confidence/source） ──
+    sqlx::query(
+        r#"
+        INSERT INTO question_knowledge_nodes (question_id, node_id, is_primary, ai_confidence, source, created_at)
+        SELECT $1, node_id, is_primary, ai_confidence, source, NOW()
+        FROM question_knowledge_nodes
+        WHERE question_id = $2
+        "#,
     )
+    .bind(id)
     .bind(src.id)
-    .fetch_all(&mut *tx)
+    .execute(&mut *tx)
     .await?;
-
-    for kp_id in &kp_ids {
-        sqlx::query(
-            "INSERT INTO question_knowledge_points (question_id, knowledge_point_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-        )
-        .bind(id)
-        .bind(kp_id)
-        .execute(&mut *tx)
-        .await?;
-    }
 
     // ── 拷贝标签关联（use_count 同步递增） ──
     let tag_ids: Vec<Uuid> =

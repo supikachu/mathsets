@@ -8,11 +8,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::ai::cleaner::clean_and_parse;
-use crate::ai::kp_matcher::match_knowledge_points;
 use crate::ai::prompt::BATCH_IMAGE_OCR_FULL_PROMPT;
 use crate::ai::provider::{create_provider, AiError};
 use crate::ai::types::{AnalysisMethod, ParsedQuestion};
 use crate::auth::middleware::AuthUser;
+use crate::handlers::ai_tagging::match_knowledge_nodes;
 use crate::models::ai_setting::{
     decrypt_api_key, encrypt_api_key, parse_master_key, AiSettingsResponse, UpdateAiSettingsRequest,
     UserAiSetting,
@@ -51,7 +51,7 @@ pub(crate) enum ModelKind {
 // ---------------------------------------------------------------------------
 
 /// 将 AiError 映射为 HTTP 错误响应（从 parse_text handler 提取复用）
-fn map_ai_error(e: AiError) -> (StatusCode, Json<serde_json::Value>) {
+pub(crate) fn map_ai_error(e: AiError) -> (StatusCode, Json<serde_json::Value>) {
     tracing::warn!("AI 调用失败: {:?}", e);
     match e {
         AiError::NoApiKey => (
@@ -92,7 +92,7 @@ async fn post_process_single(
     })?;
 
     // 校验 question_type 合法
-    if !["choice", "fill", "solution"].contains(&parsed.question_type.as_str()) {
+    if !["choice", "fill", "solution", "multiple"].contains(&parsed.question_type.as_str()) {
         return Err((
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(json!({"error": format!("未知题型: {}", parsed.question_type)})),
@@ -108,22 +108,32 @@ async fn post_process_single(
         parsed.warnings.push("AI 返回解析为空，请手动补充".into());
     }
 
-    // 知识点模糊匹配
+    // 知识点模糊匹配（B3 重构：调用 ai_tagging 的 SQL 三级匹配）
     if !parsed.knowledge_points.is_empty() {
-        let tree = crate::handlers::knowledge_points::fetch_tree(pool, None).await;
-        if !tree.is_empty() {
-            let matches = match_knowledge_points(&parsed.knowledge_points, &tree);
-            for m in &matches {
-                if m.score < 0.95 && m.matched_name.is_some() {
-                    parsed.warnings.push(format!(
-                        "知识点「{}」模糊匹配到「{}」(相似度 {:.0}%)",
-                        m.ai_name,
-                        m.matched_name.as_deref().unwrap(),
-                        m.score * 100.0
-                    ));
+        match match_knowledge_nodes(pool, &parsed.knowledge_points, None).await {
+            Ok((matched, _unmatched)) => {
+                for m in &matched {
+                    if m.score < 0.95 {
+                        parsed.warnings.push(format!(
+                            "知识点「{}」模糊匹配到「{}」(相似度 {:.0}%)",
+                            m.ai_name, m.node_name, m.score * 100.0
+                        ));
+                    }
                 }
+                // 转换为简化的 KpMatch 视图
+                parsed.kp_matches = matched
+                    .iter()
+                    .map(|m| crate::ai::kp_matcher::KpMatch {
+                        ai_name: m.ai_name.clone(),
+                        matched_id: Some(m.node_id),
+                        matched_name: Some(m.node_name.clone()),
+                        score: m.score,
+                    })
+                    .collect();
             }
-            parsed.kp_matches = matches;
+            Err(e) => {
+                tracing::warn!("知识点匹配失败（不影响解析结果）: {:?}", e.1);
+            }
         }
     }
 
@@ -182,14 +192,13 @@ async fn post_process_batch(
             )
         })?;
 
-    let tree = crate::handlers::knowledge_points::fetch_tree(pool, None).await;
     let mut results = Vec::new();
 
     for (i, q_val) in questions_val.iter().enumerate() {
         match serde_json::from_value::<ParsedQuestion>(q_val.clone()) {
             Ok(mut q) => {
                 // 校验 question_type
-                if !["choice", "fill", "solution"].contains(&q.question_type.as_str()) {
+                if !["choice", "fill", "solution", "multiple"].contains(&q.question_type.as_str()) {
                     tracing::warn!("第 {} 题题型无效: {}，跳过", i + 1, q.question_type);
                     continue;
                 }
@@ -201,20 +210,36 @@ async fn post_process_batch(
                     }];
                     q.warnings.push("AI 返回解析为空，请手动补充".into());
                 }
-                // 知识点匹配
-                if !q.knowledge_points.is_empty() && !tree.is_empty() {
-                    let matches = match_knowledge_points(&q.knowledge_points, &tree);
-                    for m in &matches {
-                        if m.score < 0.95 && m.matched_name.is_some() {
-                            q.warnings.push(format!(
-                                "知识点「{}」模糊匹配到「{}」(相似度 {:.0}%)",
-                                m.ai_name,
-                                m.matched_name.as_deref().unwrap(),
-                                m.score * 100.0
-                            ));
+                // 知识点匹配（B3 重构：SQL 三级匹配，失败不影响整体解析）
+                if !q.knowledge_points.is_empty() {
+                    match match_knowledge_nodes(pool, &q.knowledge_points, None).await {
+                        Ok((matched, _)) => {
+                            for m in &matched {
+                                if m.score < 0.95 {
+                                    q.warnings.push(format!(
+                                        "知识点「{}」模糊匹配到「{}」(相似度 {:.0}%)",
+                                        m.ai_name, m.node_name, m.score * 100.0
+                                    ));
+                                }
+                            }
+                            q.kp_matches = matched
+                                .iter()
+                                .map(|m| crate::ai::kp_matcher::KpMatch {
+                                    ai_name: m.ai_name.clone(),
+                                    matched_id: Some(m.node_id),
+                                    matched_name: Some(m.node_name.clone()),
+                                    score: m.score,
+                                })
+                                .collect();
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "第 {} 题知识点匹配失败（不影响解析）: {:?}",
+                                i + 1,
+                                e.1
+                            );
                         }
                     }
-                    q.kp_matches = matches;
                 }
                 results.push(q);
             }

@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::auth::middleware::AuthUser;
 use crate::auth::permissions::is_admin;
-use crate::models::question::{CreateTagRequest, Tag, TagQuery, UpdateTagRequest};
+use crate::models::question::{CreateTagRequest, Tag, TagCategory, TagQuery, UpdateTagRequest};
 use crate::AppState;
 
 // ---------------------------------------------------------------------------
@@ -28,6 +28,53 @@ fn db_err(msg: impl Into<String>) -> (StatusCode, Json<serde_json::Value>) {
     )
 }
 
+/// 将 UUID 转为 LTREE 兼容的路径段（去掉横杠，避免 LTREE 标签非法字符）
+fn uuid_to_ltree_segment(id: Uuid) -> String {
+    id.to_string().replace('-', "_")
+}
+
+/// 计算子标签的 LTREE path，并校验父节点存在且 category 一致
+///
+/// 一次查询同时取 parent.path 和 parent.category：
+/// - 父节点不存在 → 400
+/// - 父子 category 不一致 → 400（防止 core_competence 下挂 school 子标签等脏数据）
+async fn compute_tag_path(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    id: Uuid,
+    parent_id: Option<Uuid>,
+    child_category: &TagCategory,
+) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
+    let segment = uuid_to_ltree_segment(id);
+    if let Some(pid) = parent_id {
+        // 一次查询同时取 path::text 和 category，避免二次查询父节点
+        let row: Option<(String, TagCategory)> =
+            sqlx::query_as("SELECT path::text, category FROM tags WHERE id = $1")
+                .bind(pid)
+                .fetch_optional(&mut **tx)
+                .await
+                .map_err(|e| db_err(format!("查询父标签失败: {}", e)))?;
+
+        let (parent_path, parent_category) = row.ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "指定的父标签不存在"})),
+            )
+        })?;
+
+        // 强制校验：父子标签 category 必须一致
+        if &parent_category != child_category {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "父子标签的类别必须一致"})),
+            ));
+        }
+
+        Ok(format!("{}.{}", parent_path, segment))
+    } else {
+        Ok(segment)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // CRUD
 // ---------------------------------------------------------------------------
@@ -42,11 +89,14 @@ pub async fn list_tags(
     let _ = auth_user;
 
     // 构建动态查询：全局标签始终可见，指定空间时额外包含该空间标签
+    // 注意：tags.path 是 LTREE 类型，必须用 path::text AS path 才能解码为 String
     let tags = match (&query.category, &query.space_id) {
         (Some(cat), Some(sid)) => {
             sqlx::query_as::<_, Tag>(
                 r#"
-                SELECT * FROM tags
+                SELECT id, parent_id, name, category, path::text AS path,
+                       aliases, description, space_id, use_count, is_active, created_at
+                FROM tags
                 WHERE category = $1 AND (space_id IS NULL OR space_id = $2)
                 ORDER BY use_count DESC, name
                 "#,
@@ -59,7 +109,9 @@ pub async fn list_tags(
         (Some(cat), None) => {
             sqlx::query_as::<_, Tag>(
                 r#"
-                SELECT * FROM tags
+                SELECT id, parent_id, name, category, path::text AS path,
+                       aliases, description, space_id, use_count, is_active, created_at
+                FROM tags
                 WHERE category = $1 AND space_id IS NULL
                 ORDER BY use_count DESC, name
                 "#,
@@ -71,7 +123,9 @@ pub async fn list_tags(
         (None, Some(sid)) => {
             sqlx::query_as::<_, Tag>(
                 r#"
-                SELECT * FROM tags
+                SELECT id, parent_id, name, category, path::text AS path,
+                       aliases, description, space_id, use_count, is_active, created_at
+                FROM tags
                 WHERE space_id IS NULL OR space_id = $1
                 ORDER BY category, use_count DESC, name
                 "#,
@@ -83,7 +137,9 @@ pub async fn list_tags(
         (None, None) => {
             sqlx::query_as::<_, Tag>(
                 r#"
-                SELECT * FROM tags
+                SELECT id, parent_id, name, category, path::text AS path,
+                       aliases, description, space_id, use_count, is_active, created_at
+                FROM tags
                 WHERE space_id IS NULL
                 ORDER BY category, use_count DESC, name
                 "#,
@@ -101,7 +157,8 @@ pub async fn list_tags(
 #[derive(Debug, Deserialize)]
 pub struct SuggestQuery {
     pub q: String,
-    pub category: Option<String>,
+    /// 标签类别（TagCategory 枚举，反序列化时自动校验合法性）
+    pub category: Option<TagCategory>,
     pub space_id: Option<Uuid>,
 }
 
@@ -120,11 +177,14 @@ pub async fn suggest_tags(
     }
     let pattern = format!("%{}%", q_trimmed);
 
+    // 注意：tags.path 是 LTREE，SELECT 时必须 path::text AS path
     let tags = match (&query.category, &query.space_id) {
         (Some(cat), Some(sid)) => {
             sqlx::query_as::<_, Tag>(
                 r#"
-                SELECT * FROM tags
+                SELECT id, parent_id, name, category, path::text AS path,
+                       aliases, description, space_id, use_count, is_active, created_at
+                FROM tags
                 WHERE name ILIKE $1 AND category = $2 AND (space_id IS NULL OR space_id = $3)
                 ORDER BY use_count DESC, name
                 LIMIT 10
@@ -139,7 +199,9 @@ pub async fn suggest_tags(
         (Some(cat), None) => {
             sqlx::query_as::<_, Tag>(
                 r#"
-                SELECT * FROM tags
+                SELECT id, parent_id, name, category, path::text AS path,
+                       aliases, description, space_id, use_count, is_active, created_at
+                FROM tags
                 WHERE name ILIKE $1 AND category = $2 AND space_id IS NULL
                 ORDER BY use_count DESC, name
                 LIMIT 10
@@ -153,7 +215,9 @@ pub async fn suggest_tags(
         (None, Some(sid)) => {
             sqlx::query_as::<_, Tag>(
                 r#"
-                SELECT * FROM tags
+                SELECT id, parent_id, name, category, path::text AS path,
+                       aliases, description, space_id, use_count, is_active, created_at
+                FROM tags
                 WHERE name ILIKE $1 AND (space_id IS NULL OR space_id = $2)
                 ORDER BY category, use_count DESC, name
                 LIMIT 10
@@ -167,7 +231,9 @@ pub async fn suggest_tags(
         (None, None) => {
             sqlx::query_as::<_, Tag>(
                 r#"
-                SELECT * FROM tags
+                SELECT id, parent_id, name, category, path::text AS path,
+                       aliases, description, space_id, use_count, is_active, created_at
+                FROM tags
                 WHERE name ILIKE $1 AND space_id IS NULL
                 ORDER BY category, use_count DESC, name
                 LIMIT 10
@@ -185,20 +251,17 @@ pub async fn suggest_tags(
 
 /// POST /api/v1/tags — 新建标签
 /// 任意登录用户可创建自定义标签；全局预置标签（space_id = NULL）仅管理员可建
+///
+/// B3 重构：
+/// - 移除手写 `valid_categories` 校验（TagCategory 枚举反序列化时已自动校验）
+/// - 新增 parent_id / aliases / description 字段
+/// - LTREE path 在 handler 层计算：根 = uuid_segment；子 = parent.path || '.' || uuid_segment
+/// - aliases 缺省 `'[]'::jsonb`，is_active 缺省 TRUE
 pub async fn create_tag(
     State(state): State<AppState>,
     Extension(auth_user): Extension<AuthUser>,
     Json(req): Json<CreateTagRequest>,
 ) -> Result<(StatusCode, Json<Tag>), (StatusCode, Json<serde_json::Value>)> {
-    // 校验 category 合法性
-    let valid_categories = ["core_competence", "method", "school"];
-    if !valid_categories.contains(&req.category.as_str()) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": format!("无效的标签类别: {}，合法值: core_competence | method | school", req.category)})),
-        ));
-    }
-
     // 全局标签（space_id = NULL）仅管理员可创建
     if req.space_id.is_none() && !is_admin(&auth_user.role) {
         return Err((
@@ -209,20 +272,36 @@ pub async fn create_tag(
 
     let id = Uuid::new_v4();
     let now = chrono::Utc::now();
+    let aliases = req.aliases.unwrap_or_else(|| serde_json::json!([]));
+
+    let mut tx = state
+        .pool
+        .begin()
+        .await
+        .map_err(|e| db_err(format!("开启事务失败: {}", e)))?;
+
+    // 计算 LTREE path 并校验父节点合法性（存在性 + category 一致性）
+    let path = compute_tag_path(&mut tx, id, req.parent_id, &req.category).await?;
 
     let tag = sqlx::query_as::<_, Tag>(
         r#"
-        INSERT INTO tags (id, name, category, space_id, use_count, created_at)
-        VALUES ($1, $2, $3, $4, 0, $5)
-        RETURNING id, name, category, space_id, use_count, created_at
+        INSERT INTO tags (id, parent_id, name, category, path, aliases, description,
+                          space_id, use_count, is_active, created_at)
+        VALUES ($1, $2, $3, $4, text2ltree($5), $6, $7, $8, 0, TRUE, $9)
+        RETURNING id, parent_id, name, category, path::text AS path,
+                  aliases, description, space_id, use_count, is_active, created_at
         "#,
     )
     .bind(id)
+    .bind(req.parent_id)
     .bind(&req.name)
     .bind(&req.category)
+    .bind(&path)
+    .bind(&aliases)
+    .bind(&req.description)
     .bind(req.space_id)
     .bind(now)
-    .fetch_one(&state.pool)
+    .fetch_one(&mut *tx)
     .await
     .map_err(|e| {
         // 唯一约束冲突
@@ -236,10 +315,19 @@ pub async fn create_tag(
         }
     })?;
 
+    tx.commit()
+        .await
+        .map_err(|e| db_err(format!("提交事务失败: {}", e)))?;
+
     Ok((StatusCode::CREATED, Json(tag)))
 }
 
-/// PUT /api/v1/tags/:id — 更新标签名称或类别
+/// PUT /api/v1/tags/:id — 更新标签（name / aliases / description / is_active）
+///
+/// B3 重构：
+/// - 不允许修改 category（保证树一致性，B2 已从 UpdateTagRequest 移除 category 字段）
+/// - 移除手写 `valid_categories` 校验
+/// - SELECT/RETURNING 使用 path::text AS path 适配 LTREE
 pub async fn update_tag(
     State(state): State<AppState>,
     Extension(auth_user): Extension<AuthUser>,
@@ -248,34 +336,36 @@ pub async fn update_tag(
 ) -> Result<Json<Tag>, (StatusCode, Json<serde_json::Value>)> {
     let _ = auth_user;
 
-    let existing = sqlx::query_as::<_, Tag>("SELECT * FROM tags WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&state.pool)
-        .await
-        .map_err(|e| db_err(format!("查询标签失败: {}", e)))?
-        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "标签不存在"}))))?;
+    let existing = sqlx::query_as::<_, Tag>(
+        r#"
+        SELECT id, parent_id, name, category, path::text AS path,
+               aliases, description, space_id, use_count, is_active, created_at
+        FROM tags WHERE id = $1
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| db_err(format!("查询标签失败: {}", e)))?
+    .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "标签不存在"}))))?;
 
     let new_name = req.name.unwrap_or(existing.name);
-    let new_category = req.category.unwrap_or(existing.category);
-
-    // 校验 category 合法性
-    let valid_categories = ["core_competence", "method", "school"];
-    if !valid_categories.contains(&new_category.as_str()) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": format!("无效的标签类别: {}", new_category)})),
-        ));
-    }
+    let new_aliases = req.aliases.unwrap_or(existing.aliases);
+    let new_description = req.description.or(existing.description);
+    let new_is_active = req.is_active.unwrap_or(existing.is_active);
 
     let updated = sqlx::query_as::<_, Tag>(
         r#"
-        UPDATE tags SET name = $1, category = $2
-        WHERE id = $3
-        RETURNING id, name, category, space_id, use_count, created_at
+        UPDATE tags SET name = $1, aliases = $2, description = $3, is_active = $4
+        WHERE id = $5
+        RETURNING id, parent_id, name, category, path::text AS path,
+                  aliases, description, space_id, use_count, is_active, created_at
         "#,
     )
     .bind(&new_name)
-    .bind(&new_category)
+    .bind(&new_aliases)
+    .bind(&new_description)
+    .bind(new_is_active)
     .bind(id)
     .fetch_one(&state.pool)
     .await
@@ -359,16 +449,28 @@ pub async fn merge_tag(
         .map_err(|e| db_err(format!("开启事务失败: {}", e)))?;
 
     // 1. 验证两个标签都存在且同类别
-    let source: Option<Tag> = sqlx::query_as::<_, Tag>("SELECT * FROM tags WHERE id = $1")
-        .bind(source_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| db_err(format!("查询源标签失败: {}", e)))?;
-    let target: Option<Tag> = sqlx::query_as::<_, Tag>("SELECT * FROM tags WHERE id = $1")
-        .bind(req.target_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| db_err(format!("查询目标标签失败: {}", e)))?;
+    let source: Option<Tag> = sqlx::query_as::<_, Tag>(
+        r#"
+        SELECT id, parent_id, name, category, path::text AS path,
+               aliases, description, space_id, use_count, is_active, created_at
+        FROM tags WHERE id = $1
+        "#,
+    )
+    .bind(source_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| db_err(format!("查询源标签失败: {}", e)))?;
+    let target: Option<Tag> = sqlx::query_as::<_, Tag>(
+        r#"
+        SELECT id, parent_id, name, category, path::text AS path,
+               aliases, description, space_id, use_count, is_active, created_at
+        FROM tags WHERE id = $1
+        "#,
+    )
+    .bind(req.target_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| db_err(format!("查询目标标签失败: {}", e)))?;
 
     let source = source.ok_or_else(|| {
         (

@@ -7,7 +7,8 @@ use crate::ai::types::ParsedQuestion;
 use crate::auth::middleware::AuthUser;
 use crate::auth::permissions::ensure_personal_space;
 use crate::handlers::ai::{resolve_ai_config, ModelKind};
-use crate::handlers::questions::save_version;
+use crate::handlers::ai_tagging::match_knowledge_nodes;
+use crate::handlers::questions::{save_version, update_knowledge_nodes};
 use crate::models::ai_task::AiParseTask;
 use crate::models::question::{Difficulty, QuestionStatus, QuestionType};
 use crate::AppState;
@@ -172,17 +173,21 @@ async fn execute_task(state: &AppState, task: &AiParseTask) -> Result<Uuid, Stri
         .map_err(|e| format!("AI 返回 JSON 解析失败: {e}"))?;
 
     // 5. 转换为题目字段
+    // B3 重构：新增 "multiple" 题型分支
     let question_type = match parsed.question_type.as_str() {
         "choice" => QuestionType::Choice,
+        "multiple" => QuestionType::Multiple,
         "fill" => QuestionType::Fill,
         "solution" => QuestionType::Solution,
         other => return Err(format!("未知题型: {other}")),
     };
 
+    // B3 重构：Difficulty 已从 enum 改为 newtype `Difficulty(pub i16)`
+    // 迁移公式：easy=2, medium=3, hard=4
     let difficulty = match parsed.difficulty.as_deref() {
-        Some("easy") => Difficulty::Easy,
-        Some("hard") => Difficulty::Hard,
-        _ => Difficulty::Medium,
+        Some("easy") => Difficulty(2),
+        Some("hard") => Difficulty(4),
+        _ => Difficulty(3),
     };
 
     let options_json = parsed
@@ -215,6 +220,41 @@ async fn execute_task(state: &AppState, task: &AiParseTask) -> Result<Uuid, Stri
     .await
     .map_err(|e| format!("创建个人空间失败: {e}"))?;
 
+    // 6.5 知识点模糊匹配（B3 修复：批量录题不丢失知识点关联）
+    // 在事务前执行只读匹配查询；失败仅记录日志，不影响录题主流程
+    let (knowledge_node_ids, primary_node_id): (Vec<Uuid>, Option<Uuid>) =
+        if !parsed.knowledge_points.is_empty() {
+            match match_knowledge_nodes(&state.pool, &parsed.knowledge_points, None).await {
+                Ok((matched, _unmatched)) => {
+                    for m in &matched {
+                        if m.score < 0.95 {
+                            tracing::info!(
+                                "批量录题知识点「{}」模糊匹配到「{}」(相似度 {:.0}%)",
+                                m.ai_name,
+                                m.node_name,
+                                m.score * 100.0
+                            );
+                        }
+                    }
+                    // 主知识点：取相似度最高的一项
+                    let primary = matched
+                        .iter()
+                        .max_by(|a, b| {
+                            a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                        .map(|m| m.node_id);
+                    let ids: Vec<Uuid> = matched.iter().map(|m| m.node_id).collect();
+                    (ids, primary)
+                }
+                Err(e) => {
+                    tracing::warn!("批量录题知识点匹配失败（不影响录题）: {:?}", e.1);
+                    (vec![], None)
+                }
+            }
+        } else {
+            (vec![], None)
+        };
+
     // 7. 事务：插入题目 + 生成版本快照
     let id = Uuid::new_v4();
     let now = chrono::Utc::now();
@@ -226,54 +266,53 @@ async fn execute_task(state: &AppState, task: &AiParseTask) -> Result<Uuid, Stri
         .await
         .map_err(|e| format!("开启事务失败: {e}"))?;
 
+    // B3 重构：INSERT SQL 移除已 DROP 的旧字段（grade, academic_year, grade_semester,
+    // exam_region, semester_new），新增 stem_text 和 metadata（JSONB COALESCE 缺省）。
+    // exam_type 现在是 enum 列（NULL 表示未指定）；semester 由 semester_new RENAME 而来。
     sqlx::query(
         r#"
-        INSERT INTO questions (id, stem, question_type, difficulty, default_score, status,
-            options, correct_answer, analysis, grading_criteria, grade, semester, source,
-            academic_year, grade_semester, exam_type, exam_region,
-            grade_level, semester_new, cognitive_level, difficulty_score, estimated_minutes,
-            images, parent_id, sub_order,
-            creator_id, created_at, updated_at, version, space_id)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-            $14, $15, $16, $17,
-            $18, $19, $20, $21, $22,
-            $23, $24, $25,
-            $26, $27, $28, $29, $30)
+        INSERT INTO questions (id, stem, stem_text, images,
+            question_type, options, correct_answer, analysis, grading_criteria,
+            difficulty, difficulty_score, default_score, estimated_minutes, cognitive_level,
+            grade_level, semester, source, exam_type, metadata,
+            parent_id, sub_order,
+            status, space_id, origin_question_id,
+            creator_id, created_at, updated_by, updated_at, version)
+        VALUES ($1, $2, NULL, NULL,
+            $3, $4, $5, $6, NULL,
+            $7, NULL, $8, NULL, NULL,
+            NULL, NULL, NULL, NULL, COALESCE($9, '{}'::jsonb),
+            NULL, NULL,
+            $10, $11, NULL,
+            $12, $13, NULL, $14, $15)
         "#,
     )
     .bind(id)
     .bind(&parsed.stem)
     .bind(question_type)
-    .bind(difficulty)
-    .bind(5)
-    .bind(QuestionStatus::Draft)
     .bind(&options_json)
     .bind(&correct_answer_json)
     .bind(&analysis_str)
+    .bind(difficulty)
+    .bind(5)
     .bind(None::<serde_json::Value>)
-    .bind(None::<String>)
-    .bind(None::<String>)
-    .bind(None::<String>)
-    .bind(None::<String>)
-    .bind(None::<String>)
-    .bind(None::<String>)
-    .bind(None::<String>)
-    .bind(None::<crate::models::question::GradeLevel>)
-    .bind(None::<crate::models::question::SemesterType>)
-    .bind(None::<crate::models::question::CognitiveLevel>)
-    .bind(None::<i16>)
-    .bind(None::<i16>)
-    .bind(None::<serde_json::Value>)
-    .bind(None::<Uuid>)
-    .bind(None::<i16>)
+    .bind(QuestionStatus::Draft)
+    .bind(space_id)
     .bind(task.creator_id)
     .bind(now)
     .bind(now)
     .bind(version)
-    .bind(space_id)
     .execute(&mut *tx)
     .await
     .map_err(|e| format!("插入题目失败: {e}"))?;
+
+    // 8. 关联知识点（B3 修复：避免批量录题知识点丢失）
+    // 复用 questions.rs 的 update_knowledge_nodes，保证 AI 解析的知识点落库
+    if !knowledge_node_ids.is_empty() {
+        update_knowledge_nodes(&mut tx, id, &knowledge_node_ids, primary_node_id)
+            .await
+            .map_err(|e| format!("关联知识点失败: {e}"))?;
+    }
 
     save_version(&mut tx, id, version, Some(task.creator_id))
         .await
