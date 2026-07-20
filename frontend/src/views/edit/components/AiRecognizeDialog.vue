@@ -3,7 +3,6 @@ import { ref, watch, nextTick } from 'vue'
 import { aiApi, type ParsedQuestion } from '@/api/client'
 import { AppButton, AppModal, AppConfirm, AppIcon } from '@/components/ui'
 import { useToast } from '@/composables/useToast'
-import { useSelectedKp } from '@/composables/useSelectedKp'
 import { parseMarkdownToQuestion, RECOMMENDED_PROMPT } from '@/utils/parseMarkdown'
 import { compressImage, blobToFile } from '@/utils/imageCompressor'
 import { runWithConcurrency, withBackoffRetry, type PoolResult } from '@/utils/concurrency'
@@ -12,7 +11,7 @@ import { clearBatchSnapshot, hasUnfinishedSnapshot, type BatchSnapshot } from '@
 
 const show = defineModel<boolean>({ required: true })
 const applyingAiResult = defineModel<boolean>('applyingAiResult', { default: false })
-const attrSelectedKps = defineModel<{ id: string; name: string }[]>('attrSelectedKps', { required: true })
+const knowledgeNodeIds = defineModel<string[]>('knowledgeNodeIds', { required: true })
 const aiGeneratedFields = defineModel<Set<string>>('aiGeneratedFields', { required: true })
 
 const props = defineProps<{
@@ -35,7 +34,7 @@ const props = defineProps<{
     sub_answers: string[]
     solutions: string[]
     tagIds: string[]
-    knowledgePointIds: string[]
+    knowledgeNodeIds: string[]
     hasUnsaved: boolean
   }
 }>()
@@ -47,7 +46,6 @@ const emit = defineEmits<{
 }>()
 
 const toast = useToast()
-const { select: selectKp } = useSelectedKp()
 
 // AI Mode tab: 'markdown' | 'image'
 const aiMode = ref<'markdown' | 'image'>('markdown')
@@ -164,10 +162,9 @@ function doApplyAiResult(q: ParsedQuestion) {
   if (q.kp_matches?.length) {
     const highConfidenceMatch = q.kp_matches.find(m => m.score >= 0.95 && m.matched_id)
     if (highConfidenceMatch) {
-      selectKp(highConfidenceMatch.matched_id!, highConfidenceMatch.matched_name!)
-      attrSelectedKps.value = [{ id: highConfidenceMatch.matched_id!, name: highConfidenceMatch.matched_name! }]
-      props.form.knowledgePointIds = [highConfidenceMatch.matched_id!]
-      aiGeneratedFields.value.add('knowledge_point')
+      knowledgeNodeIds.value = [highConfidenceMatch.matched_id!]
+      props.form.knowledgeNodeIds = [highConfidenceMatch.matched_id!]
+      aiGeneratedFields.value.add('knowledge_node')
     }
   }
 

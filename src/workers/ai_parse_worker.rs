@@ -7,8 +7,8 @@ use crate::ai::types::ParsedQuestion;
 use crate::auth::middleware::AuthUser;
 use crate::auth::permissions::ensure_personal_space;
 use crate::handlers::ai::{resolve_ai_config, ModelKind};
-use crate::handlers::ai_tagging::match_knowledge_nodes;
-use crate::handlers::questions::{save_version, update_knowledge_nodes};
+use crate::handlers::ai_tagging::{match_knowledge_nodes, KnowledgeNodeMatch};
+use crate::handlers::questions::{save_version, upsert_ai_knowledge_nodes};
 use crate::models::ai_task::AiParseTask;
 use crate::models::question::{Difficulty, QuestionStatus, QuestionType};
 use crate::AppState;
@@ -222,7 +222,8 @@ async fn execute_task(state: &AppState, task: &AiParseTask) -> Result<Uuid, Stri
 
     // 6.5 知识点模糊匹配（B3 修复：批量录题不丢失知识点关联）
     // 在事务前执行只读匹配查询；失败仅记录日志，不影响录题主流程
-    let (knowledge_node_ids, primary_node_id): (Vec<Uuid>, Option<Uuid>) =
+    // 保留完整的 KnowledgeNodeMatch 列表（含 score），供 upsert_ai_knowledge_nodes 落库审计
+    let (ai_matches, primary_node_id): (Vec<KnowledgeNodeMatch>, Option<Uuid>) =
         if !parsed.knowledge_points.is_empty() {
             match match_knowledge_nodes(&state.pool, &parsed.knowledge_points, None).await {
                 Ok((matched, _unmatched)) => {
@@ -243,8 +244,7 @@ async fn execute_task(state: &AppState, task: &AiParseTask) -> Result<Uuid, Stri
                             a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal)
                         })
                         .map(|m| m.node_id);
-                    let ids: Vec<Uuid> = matched.iter().map(|m| m.node_id).collect();
-                    (ids, primary)
+                    (matched, primary)
                 }
                 Err(e) => {
                     tracing::warn!("批量录题知识点匹配失败（不影响录题）: {:?}", e.1);
@@ -307,9 +307,9 @@ async fn execute_task(state: &AppState, task: &AiParseTask) -> Result<Uuid, Stri
     .map_err(|e| format!("插入题目失败: {e}"))?;
 
     // 8. 关联知识点（B3 修复：避免批量录题知识点丢失）
-    // 复用 questions.rs 的 update_knowledge_nodes，保证 AI 解析的知识点落库
-    if !knowledge_node_ids.is_empty() {
-        update_knowledge_nodes(&mut tx, id, &knowledge_node_ids, primary_node_id)
+    // 使用 AI 专用 upsert：source='ai' + ai_confidence=score，完整保留审计数据
+    if !ai_matches.is_empty() {
+        upsert_ai_knowledge_nodes(&mut tx, id, &ai_matches, primary_node_id)
             .await
             .map_err(|e| format!("关联知识点失败: {e}"))?;
     }

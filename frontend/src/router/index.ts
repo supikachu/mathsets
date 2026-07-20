@@ -68,6 +68,12 @@ const router = createRouter({
           meta: { requiresAdmin: true },
         },
         {
+          path: 'settings/knowledge-trees',
+          name: 'KnowledgeTreeManagement',
+          component: () => import('@/views/KnowledgeTreeManagement.vue'),
+          meta: { requiresAdmin: true },
+        },
+        {
           path: 'profile',
           name: 'Profile',
           component: () => import('@/views/Profile.vue'),

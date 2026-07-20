@@ -38,38 +38,21 @@
         </div>
       </div>
 
-      <!-- ==================== 第一层：核心控制元数据栏 ==================== -->
-      <MetaBar
-        v-model:questionType="form.question_type"
-        v-model:difficulty="form.difficulty"
-        v-model:difficultyCoefficient="form.difficulty_coefficient"
-        v-model:academicYear="form.academic_year"
-        v-model:gradeSemester="form.grade_semester"
-        v-model:examType="form.exam_type"
-        v-model:examRegion="form.exam_region"
-      />
-
-      <!-- ==================== 主内容 双栏 ==================== -->
+      <!-- ==================== 主内容 三栏：编辑 + 预览 + 属性面板 ==================== -->
       <div class="main-content">
         <!-- 左栏：编辑 -->
         <div class="edit-col">
           <div class="edit-col-inner">
-            <!-- ==================== 第二层：描述性标签流 ==================== -->
+            <!-- ==================== 第二层：描述性标签流（只读概览，知识点在右侧面板编辑） ==================== -->
             <div class="question-tags-wrapper">
               <span v-if="form.exam_region" class="attr-tag">
                 <AppIcon name="pin" :size="11" />
                 <span class="attr-tag-text">{{ form.exam_region }}</span>
                 <button type="button" class="attr-tag-x" @click="form.exam_region = ''"><AppIcon name="x" :size="10" /></button>
               </span>
-              <span
-                v-for="(kp, idx) in attrSelectedKps"
-                :key="'kp-tag-' + kp.id"
-                class="attr-tag attr-tag-kp"
-                :class="{ 'attr-tag-kp-primary': idx === 0 }"
-              >
+              <span v-if="knowledgeNodeIds.length > 0" class="attr-tag attr-tag-kp attr-tag-kp-primary">
                 <AppIcon name="tag" :size="11" />
-                <span class="attr-tag-text">{{ kp.name }}</span>
-                <button type="button" class="attr-tag-x" @click="removeAttrKp(kp.id)"><AppIcon name="x" :size="10" /></button>
+                <span class="attr-tag-text">知识点 ×{{ knowledgeNodeIds.length }}</span>
               </span>
               <span v-for="t in selectedCompetenceTags" :key="'comp-' + t.id" class="attr-tag attr-tag-literacy">
                 <AppIcon name="award" :size="11" />
@@ -86,10 +69,6 @@
                 <span class="attr-tag-text">{{ t.name }}</span>
                 <button type="button" class="attr-tag-x" @click="toggleTagById(t)"><AppIcon name="x" :size="10" /></button>
               </span>
-              <button type="button" class="attr-add-btn" @click="showAttrDialog = true">
-                <AppIcon name="plus" :size="13" />
-                <span>添加属性</span>
-              </button>
             </div>
 
             <!-- 题干 -->
@@ -195,8 +174,19 @@
           </div>
         </div>
 
-        <!-- 右栏：试卷化预览 -->
+        <!-- 中栏：试卷化预览 -->
         <LivePreviewCard :form="form" />
+
+        <!-- 右栏：常驻属性面板（含 AI 智能打标） -->
+        <AttributeSidePanel
+          v-model:tagIds="form.tagIds"
+          v-model:knowledgeNodeIds="knowledgeNodeIds"
+          v-model:aiGeneratedFields="aiGeneratedFields"
+          :competenceTags="competenceTags"
+          :methodTags="methodTags"
+          :schoolTags="schoolTags"
+          :form="form"
+        />
       </div>
     </template>
 
@@ -205,24 +195,12 @@
       <div class="loading-hint">版本历史功能即将上线</div>
     </AppModal>
 
-    <!-- 属性编辑面板 -->
-    <AttributeModal
-      v-model="showAttrDialog"
-      v-model:tagIds="form.tagIds"
-      v-model:attrSelectedKps="attrSelectedKps"
-      :kpTree="kpTree"
-      :competenceTags="competenceTags"
-      :methodTags="methodTags"
-      :schoolTags="schoolTags"
-      :kpLoading="kpLoading"
-    />
-
     <!-- AI 识别审阅面板 -->
     <AiRecognizeDialog
       ref="aiDialogRef"
       v-model="showAiDialog"
       v-model:applyingAiResult="applyingAiResult"
-      v-model:attrSelectedKps="attrSelectedKps"
+      v-model:knowledgeNodeIds="knowledgeNodeIds"
       v-model:aiGeneratedFields="aiGeneratedFields"
       :form="form"
       @applied="onAiApplied"
@@ -255,22 +233,19 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { questionApi, kpApi, spaceApi, tagsApi, type KnowledgePoint, type SpaceMemberInfo, type Tag, type ParsedQuestion } from '@/api/client'
+import { questionApi, spaceApi, tagsApi, type SpaceMemberInfo, type Tag, type ParsedQuestion } from '@/api/client'
 import { AppButton, AppBadge, AppModal, AppConfirm, AppIcon } from '@/components/ui'
 import { useToast } from '@/composables/useToast'
 import { useSpaceStore } from '@/stores/space'
 import { useAuthStore } from '@/stores/auth'
-import { useSelectedKp } from '@/composables/useSelectedKp'
-import { useLayoutState } from '@/composables/useLayoutState'
 import { hasUnfinishedSnapshot } from '@/utils/batchSnapshot'
 
 // Imports of child components
-import MetaBar from './edit/components/MetaBar.vue'
 import EditFormChoice from './edit/components/EditFormChoice.vue'
 import EditFormFill from './edit/components/EditFormFill.vue'
 import EditFormSolution from './edit/components/EditFormSolution.vue'
 import LivePreviewCard from './edit/components/LivePreviewCard.vue'
-import AttributeModal from './edit/components/AttributeModal.vue'
+import AttributeSidePanel from './edit/components/AttributeSidePanel.vue'
 import AiRecognizeDialog from './edit/components/AiRecognizeDialog.vue'
 
 const route = useRoute()
@@ -278,19 +253,14 @@ const router = useRouter()
 const toast = useToast()
 const space = useSpaceStore()
 const auth = useAuthStore()
-const { select: selectKp, clear: clearKp } = useSelectedKp()
-const { isKpTreeCollapsed } = useLayoutState()
 
 const isNew = route.path.endsWith('/new')
 const loading = ref(false)
 const saving = ref(false)
 const submitting = ref(false)
 const isLoading = ref(false)
-const kpLoading = ref(false)
-const kpTree = ref<KnowledgePoint[]>([])
 
 const showHistory = ref(false)
-const showAttrDialog = ref(false)
 const showAiDialog = ref(false)
 const aiGeneratedFields = ref<Set<string>>(new Set())
 const applyingAiResult = ref(false)
@@ -303,25 +273,8 @@ const questionList = ref<any[]>([])
 const activeIndex = ref(0)
 const isSwitchingTab = ref(false)
 
-// Selected Knowledge Points list
-const attrSelectedKps = ref<{ id: string; name: string }[]>([])
-
-// Synchronize knowledge point state to parent form and global sidebar filters
-watch(attrSelectedKps, (newVal) => {
-  form.knowledgePointIds = newVal.map(k => k.id)
-  if (newVal.length > 0) {
-    selectKp(newVal[0].id, newVal[0].name)
-  } else {
-    clearKp()
-  }
-}, { deep: true })
-
-// AI Dialog visibility collapse layout helper
-watch([showAiDialog, showAttrDialog], ([aiOpen, attrOpen]) => {
-  if (aiOpen || attrOpen) {
-    isKpTreeCollapsed.value = true
-  }
-})
+// Selected Knowledge Node IDs（与 AttributeSidePanel v-model 双向绑定）
+const knowledgeNodeIds = ref<string[]>([])
 
 // Tag classification lists
 const methodTags = ref<Tag[]>([])
@@ -331,9 +284,9 @@ const schoolTags = ref<Tag[]>([])
 async function loadTags() {
   try {
     const [methodRes, compRes, schoolRes] = await Promise.all([
-      tagsApi.list('method'),
-      tagsApi.list('core_competence'),
-      tagsApi.list('school'),
+      tagsApi.list({ category: 'method' }),
+      tagsApi.list({ category: 'core_competence' }),
+      tagsApi.list({ category: 'school' }),
     ])
     methodTags.value = methodRes.data
     competenceTags.value = compRes.data
@@ -379,10 +332,6 @@ function toggleTagById(tag: Tag) {
     return
   }
   form.tagIds.push(tag.id)
-}
-
-function removeAttrKp(id: string) {
-  attrSelectedKps.value = attrSelectedKps.value.filter(k => k.id !== id)
 }
 
 // Navigation back checks
@@ -443,7 +392,7 @@ const form = reactive({
   sub_answers: [''] as string[],
   gradingSteps: [] as { label: string; points: number; description: string }[],
   judgmentCorrect: true,
-  knowledgePointIds: [] as string[],
+  knowledgeNodeIds: [] as string[],
   tagIds: [] as string[],
   reviewer: '' as string,
   reviewer_ids: [] as string[],
@@ -452,6 +401,25 @@ const form = reactive({
   version: 1,
   hasUnsaved: false,
 })
+
+// 同步 knowledgeNodeIds 到 form（供 buildPayload 使用）
+watch(knowledgeNodeIds, (v) => {
+  form.knowledgeNodeIds = v
+}, { deep: true })
+
+// 难度字符串枚举 ↔ 数字 1-5 转换
+function difficultyStringToNum(s: string): number {
+  if (s === 'easy') return 2
+  if (s === 'hard') return 4
+  return 3
+}
+
+function difficultyNumToString(n: number | null | undefined): string {
+  if (n == null) return 'medium'
+  if (n <= 2) return 'easy'
+  if (n === 3) return 'medium'
+  return 'hard'
+}
 
 const hasCorrectAnswer = computed(() => {
   if (Array.isArray(form.correctAnswer)) return form.correctAnswer.length > 0
@@ -586,23 +554,23 @@ function handleSolutionImageUpload(index: number) {
 
 // Payload construction
 function buildPayload() {
-  const kpIds = attrSelectedKps.value.map(k => k.id)
+  const metadata: Record<string, unknown> = {}
+  if (form.academic_year) metadata.academic_year = form.academic_year
+  if (form.grade_semester) metadata.grade_semester = form.grade_semester
+  if (form.exam_region) metadata.exam_region = form.exam_region
+
   const payload: any = {
     stem: form.stem,
     question_type: form.question_type,
     sub_type: form.sub_type || null,
-    difficulty: form.difficulty,
-    difficulty_coefficient: form.difficulty_coefficient,
+    difficulty: difficultyStringToNum(form.difficulty),
+    difficulty_score: form.difficulty_coefficient,
     default_score: form.default_score,
-    grade: form.grade || null,
-    semester: form.semester || null,
-    academic_year: form.academic_year || null,
-    grade_semester: form.grade_semester || null,
-    exam_region: form.exam_region || null,
-    exam_type: form.exam_type || null,
     source: form.source,
+    exam_type: form.exam_type || null,
+    metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
     analysis: form.solutions.filter(s => s.trim()).join('\n\n---\n\n') || null,
-    knowledge_point_ids: kpIds.length > 0 ? kpIds : null,
+    knowledge_node_ids: knowledgeNodeIds.value.length > 0 ? knowledgeNodeIds.value : null,
     tag_ids: form.tagIds,
   }
   switch (form.question_type) {
@@ -727,9 +695,14 @@ async function doRestoreDraft() {
   if (!pendingDraft) return
   const fields = ['stem', 'question_type', 'sub_type', 'difficulty', 'default_score', 'grade', 'semester',
     'source', 'solutions', 'options', 'correctAnswer', 'blanks', 'solutionAnswer', 'sub_answers',
-    'gradingSteps', 'judgmentCorrect', 'knowledgePointIds', 'tagIds', 'difficulty_coefficient', 'academic_year', 'grade_semester', 'exam_region', 'exam_type', 'reviewer', 'reviewer_ids', 'internal_note']
+    'gradingSteps', 'judgmentCorrect', 'tagIds', 'difficulty_coefficient', 'academic_year', 'grade_semester', 'exam_region', 'exam_type', 'reviewer', 'reviewer_ids', 'internal_note']
   for (const f of fields) {
     if (pendingDraft[f] !== undefined) (form as any)[f] = pendingDraft[f]
+  }
+  // knowledgeNodeIds 单独还原（独立 ref + form 字段同步）
+  if (Array.isArray(pendingDraft.knowledgeNodeIds)) {
+    knowledgeNodeIds.value = [...pendingDraft.knowledgeNodeIds]
+    form.knowledgeNodeIds = [...pendingDraft.knowledgeNodeIds]
   }
   toast.success('草稿已恢复')
   pendingDraft = null
@@ -751,15 +724,6 @@ function clearDraft() {
 }
 
 // Data loaders
-async function loadKpTree() {
-  kpLoading.value = true
-  try {
-    const res = await kpApi.tree()
-    kpTree.value = res.data
-  } catch { /* handled */ }
-  finally { kpLoading.value = false }
-}
-
 const spaceMembers = ref<SpaceMemberInfo[]>([])
 const isTeamSpace = computed(() => space.currentSpace?.kind === 'team')
 
@@ -778,17 +742,18 @@ async function loadQuestion() {
   try {
     const res = await questionApi.get(route.params.id as string)
     const d = res.data
+    const meta = (d.metadata || {}) as Record<string, any>
     form.stem = d.stem
     form.question_type = d.question_type
-    form.difficulty = d.difficulty
+    form.difficulty = difficultyNumToString(d.difficulty)
     form.default_score = d.default_score
-    form.grade = d.grade || undefined
+    form.grade = undefined
     form.semester = d.semester || undefined
     form.sub_type = (d as any).sub_type || ''
-    form.difficulty_coefficient = (d as any).difficulty_coefficient ?? 0.5
-    form.academic_year = d.academic_year || ''
-    form.grade_semester = d.grade_semester || ''
-    form.exam_region = d.exam_region || ''
+    form.difficulty_coefficient = d.difficulty_score ?? 0.5
+    form.academic_year = meta.academic_year || ''
+    form.grade_semester = meta.grade_semester || ''
+    form.exam_region = meta.exam_region || ''
     form.exam_type = d.exam_type || ''
     form.source = d.source || '原创'
     const raw = d.analysis || ''
@@ -801,16 +766,25 @@ async function loadQuestion() {
     }
     form.status = d.status
     form.version = d.version
-    form.knowledgePointIds = d.knowledge_points?.map(k => k.id) || []
-    attrSelectedKps.value = (d.knowledge_points || []).map(k => ({ id: k.id, name: k.name }))
-    if (attrSelectedKps.value.length > 0) {
-      selectKp(attrSelectedKps.value[0].id, attrSelectedKps.value[0].name)
-    }
+    knowledgeNodeIds.value = d.knowledge_nodes?.map(k => k.id) || []
+    form.knowledgeNodeIds = knowledgeNodeIds.value
     form.tagIds = d.tags?.map(t => t.id) || []
     if (d.tags?.length) {
       for (const t of d.tags) {
         if (!allTagsMap.value.has(t.id)) {
-          const fullTag: Tag = { ...t, space_id: null, use_count: 0, created_at: '' }
+          const fullTag: Tag = {
+            id: t.id,
+            name: t.name,
+            category: t.category,
+            parent_id: null,
+            path: '',
+            aliases: null,
+            description: null,
+            space_id: null,
+            use_count: 0,
+            is_active: true,
+            created_at: '',
+          }
           if (t.category === 'core_competence') competenceTags.value = [...competenceTags.value, fullTag]
           else if (t.category === 'method') methodTags.value = [...methodTags.value, fullTag]
           else if (t.category === 'school') schoolTags.value = [...schoolTags.value, fullTag]
@@ -868,11 +842,11 @@ async function loadQuestion() {
 // ===== 批量录题工作台：快照捕获 / 回放 / Tab 切换 / Mock =====
 // ============================================================
 
-// 捕获当前 form 的快照（深拷贝，包含 attrSelectedKps 用于每题独立保存）
+// 捕获当前 form 的快照（深拷贝，包含 knowledgeNodeIds 用于每题独立保存）
 function captureFormSnapshot(): any {
   return {
     ...JSON.parse(JSON.stringify(form)),
-    attrSelectedKps: JSON.parse(JSON.stringify(attrSelectedKps.value)),
+    knowledgeNodeIds: JSON.parse(JSON.stringify(knowledgeNodeIds.value)),
   }
 }
 
@@ -909,7 +883,7 @@ function applyFormSnapshot(s: any) {
   form.sub_answers = Array.isArray(s.sub_answers) ? [...s.sub_answers] : ['']
   form.gradingSteps = Array.isArray(s.gradingSteps) ? [...s.gradingSteps] : []
   form.judgmentCorrect = s.judgmentCorrect ?? true
-  form.knowledgePointIds = Array.isArray(s.knowledgePointIds) ? [...s.knowledgePointIds] : []
+  form.knowledgeNodeIds = Array.isArray(s.knowledgeNodeIds) ? [...s.knowledgeNodeIds] : []
   form.tagIds = Array.isArray(s.tagIds) ? [...s.tagIds] : []
   form.reviewer = s.reviewer ?? ''
   form.reviewer_ids = Array.isArray(s.reviewer_ids) ? [...s.reviewer_ids] : []
@@ -918,10 +892,8 @@ function applyFormSnapshot(s: any) {
   form.version = s.version ?? 1
   form.hasUnsaved = false // 切换后的目标题视为未修改
 
-  // 每题独立保存 attrSelectedKps
-  attrSelectedKps.value = Array.isArray(s.attrSelectedKps)
-    ? s.attrSelectedKps.map((k: any) => ({ ...k }))
-    : []
+  // 每题独立保存 knowledgeNodeIds
+  knowledgeNodeIds.value = Array.isArray(s.knowledgeNodeIds) ? [...s.knowledgeNodeIds] : []
 }
 
 // 切换到指定 Tab（保存当前题 → 加载目标题）
@@ -964,8 +936,7 @@ function loadBatchMockData() {
         { label: 'D', content: '' },
       ],
       blanks: [{ position: 1, answer: '' }],
-      attrSelectedKps: [],
-      knowledgePointIds: [],
+      knowledgeNodeIds: [],
       tagIds: [],
       reviewer_ids: [],
       source: '原创',
@@ -991,8 +962,7 @@ function loadBatchMockData() {
         { label: 'D', content: '' },
       ],
       blanks: [{ position: 1, answer: '' }],
-      attrSelectedKps: [],
-      knowledgePointIds: [],
+      knowledgeNodeIds: [],
       tagIds: [],
       reviewer_ids: [],
       source: '原创',
@@ -1038,14 +1008,12 @@ function parsedQuestionToSnapshot(q: ParsedQuestion): any {
     sub_answers = q.correct_answer.value.subs.map(s => s.content)
   }
 
-  // 计算 knowledgePointIds / attrSelectedKps（高置信度匹配）
-  let knowledgePointIds: string[] = []
-  let attrSelectedKps: { id: string; name: string }[] = []
+  // 计算 knowledgeNodeIds（高置信度匹配，沿用 kp_matches 字段）
+  let knowledgeNodeIds: string[] = []
   if (q.kp_matches?.length) {
     const highConfidenceMatch = q.kp_matches.find(m => m.score >= 0.95 && m.matched_id)
     if (highConfidenceMatch) {
-      knowledgePointIds = [highConfidenceMatch.matched_id!]
-      attrSelectedKps = [{ id: highConfidenceMatch.matched_id!, name: highConfidenceMatch.matched_name! }]
+      knowledgeNodeIds = [highConfidenceMatch.matched_id!]
     }
   }
 
@@ -1077,7 +1045,7 @@ function parsedQuestionToSnapshot(q: ParsedQuestion): any {
     solutions: q.analysis.map(a => a.content),
     gradingSteps: [],
     judgmentCorrect: true,
-    knowledgePointIds,
+    knowledgeNodeIds,
     tagIds: [],
     reviewer_ids: [],
     reviewer: '',
@@ -1087,7 +1055,6 @@ function parsedQuestionToSnapshot(q: ParsedQuestion): any {
     hasUnsaved: true,
     source: '原创',
     estimated_time: 5,
-    attrSelectedKps,
   }
 }
 
@@ -1125,7 +1092,6 @@ function handleBeforeUnload(e: BeforeUnloadEvent) {
 
 onMounted(() => {
   window.addEventListener('beforeunload', handleBeforeUnload)
-  loadKpTree()
   loadSpaceMembers()
   loadTags()
   loadQuestion().then(() => {
@@ -1161,7 +1127,6 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.removeEventListener('beforeunload', handleBeforeUnload)
   if (autoSaveTimer) clearTimeout(autoSaveTimer)
-  clearKp()
 })
 
 watch(() => form.question_type, () => {

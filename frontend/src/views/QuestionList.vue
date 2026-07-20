@@ -52,15 +52,17 @@
       <div class="ql-filter-collapse" :class="{ 'is-open': showFilter }">
         <div class="ql-filter-panel">
           <div class="ql-filter-row">
-            <span class="ql-filter-label">年级</span>
-            <div class="ql-filter-tags">
-              <button
-                v-for="opt in gradeOptions"
-                :key="opt.value"
-                class="ql-tag"
-                :class="{ active: !query.grade && opt.value === '__all' || query.grade === opt.value }"
-                @click="selectTag('grade', opt.value)"
-              >{{ opt.label }}</button>
+            <span class="ql-filter-label">知识点</span>
+            <div class="ql-filter-kp">
+              <KnowledgeTreeCascader
+                v-model="selectedKnowledgeNodeIds"
+                :max="5"
+                placeholder="选择知识点筛选（支持子树）…"
+              />
+              <label class="ql-filter-descendant">
+                <input type="checkbox" v-model="includeDescendants" />
+                <span>包含子孙节点</span>
+              </label>
             </div>
           </div>
           <div class="ql-filter-row">
@@ -102,12 +104,6 @@
         </div>
       </div>
 
-      <!-- 知识点筛选 chip -->
-      <div v-if="selectedKpId" class="kp-filter-chip">
-        <AppIcon name="tag" :size="14" />
-        <span>{{ selectedKpName }}</span>
-        <button class="chip-clear" @click="clearKp"><AppIcon name="x" :size="13" /></button>
-      </div>
     </div>
 
     <!-- ===== 可滚动列表区域 ===== -->
@@ -212,14 +208,14 @@
                   知识点
                 </span>
                 <span
-                  v-for="kp in card.knowledgePoints"
-                  :key="kp.id"
+                  v-for="kn in card.knowledgeNodes"
+                  :key="kn.id"
                   class="q-kp-chip"
                 >
-                  {{ kp.name }}
+                  {{ kn.name }}
                 </span>
-                <span v-if="card.knowledgePoints.length === 0" class="q-kp-empty">未关联</span>
-                <span v-if="card.grade" class="q-grade-chip">{{ card.grade }}</span>
+                <span v-if="card.knowledgeNodes.length === 0" class="q-kp-empty">未关联</span>
+                <span v-if="card.grade_level" class="q-grade-chip">{{ gradeLevelLabel(card.grade_level) }}</span>
               </div>
               <div class="q-actions">
                 <button class="q-action-btn q-action--ghost" @click="toggleAnalysis(card.id)">
@@ -259,13 +255,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick, type ComponentPublicInstance } from 'vue'
+import { ref, reactive, onMounted, onBeforeUnmount, watch, nextTick, type ComponentPublicInstance } from 'vue'
 import { useRouter } from 'vue-router'
-import { questionApi, type QuestionSummary, type QuestionDetail, type QuestionQuery } from '@/api/client'
+import { questionApi, type QuestionSummary, type QuestionDetail, type QuestionQuery, type GradeLevel, type KnowledgeNodeSummary } from '@/api/client'
 import LatexRender from '@/components/LatexRender.vue'
 import ThemeToggle from '@/components/ThemeToggle.vue'
+import KnowledgeTreeCascader from '@/components/KnowledgeTreeCascader.vue'
 import { AppButton, AppSelect, AppEmpty, AppPagination, AppIcon, AppBadge } from '@/components/ui'
-import { useSelectedKp } from '@/composables/useSelectedKp'
 import { useQuestionBasket } from '@/composables/useQuestionBasket'
 import { useToast } from '@/composables/useToast'
 import { useSpaceStore } from '@/stores/space'
@@ -283,8 +279,11 @@ import {
 const router = useRouter()
 const toast = useToast()
 const space = useSpaceStore()
-const { selectedKpId, selectedKpName, clear } = useSelectedKp()
 const basket = useQuestionBasket()
+
+// 知识点筛选（本地状态，触发 query.knowledge_node_ids 变化）
+const selectedKnowledgeNodeIds = ref<string[]>([])
+const includeDescendants = ref(true)
 
 // ---- 筛选面板展开状态 ----
 const showFilter = ref(false)
@@ -319,14 +318,14 @@ interface QuestionCard {
   question_type: string
   difficulty: string
   status: string
-  grade: string | null
+  grade_level: GradeLevel | null
   source: string | null
   updated_at: string
   version: number
   parsedOptions: { label: string; content: string }[]
   correctAnswer: string
   analysis: string | null
-  knowledgePoints: { id: string; name: string }[]
+  knowledgeNodes: KnowledgeNodeSummary[]
 }
 
 const cardList = ref<QuestionCard[]>([])
@@ -341,12 +340,34 @@ const query = reactive<QuestionQuery>({
   question_type: undefined,
   difficulty: undefined,
   status: undefined,
-  grade: undefined,
-  knowledge_point_id: selectedKpId.value ?? undefined,
+  knowledge_node_ids: [],
+  include_descendants: true,
   space_id: space.currentSpaceId || undefined,
   page: 1,
   page_size: pageSize,
 })
+
+// 难度数值 1-5 → 字符串（兼容 diffLabel/diffBadgeColor 显示函数）
+function difficultyNumToString(n: number): string {
+  if (n <= 2) return 'easy'
+  if (n === 3) return 'medium'
+  return 'hard'
+}
+
+// GradeLevel 枚举 → 中文标签
+function gradeLevelLabel(g: GradeLevel | null | undefined): string {
+  if (!g) return ''
+  const map: Record<GradeLevel, string> = {
+    grade_7: '初一',
+    grade_8: '初二',
+    grade_9: '初三',
+    grade_10: '高一',
+    grade_11: '高二',
+    grade_12: '高三',
+    other: '其他',
+  }
+  return map[g] || g
+}
 
 const typeOptions = [
   { label: '不限', value: '__all' },
@@ -358,9 +379,9 @@ const typeOptions = [
 
 const difficultyOptions = [
   { label: '不限', value: '__all' },
-  { label: '简单', value: 'easy' },
-  { label: '中等', value: 'medium' },
-  { label: '困难', value: 'hard' },
+  { label: '简单', value: 2 },
+  { label: '中等', value: 3 },
+  { label: '困难', value: 4 },
 ]
 
 const statusOptions = [
@@ -371,14 +392,6 @@ const statusOptions = [
   { label: '已发布', value: 'published' },
   { label: '已停用', value: 'disabled' },
 ]
-
-const gradeOptions = computed(() => {
-  const grades = ['初一', '初二', '初三', '高一', '高二', '高三']
-  return [
-    { label: '不限', value: '__all' },
-    ...grades.map((g) => ({ label: g, value: g })),
-  ]
-})
 
 let searchTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -395,7 +408,7 @@ function onSearchSubmit() {
   fetchList()
 }
 
-function selectTag(field: 'grade' | 'question_type' | 'difficulty' | 'status', value: string) {
+function selectTag(field: 'question_type' | 'difficulty' | 'status', value: string | number) {
   if (value === '__all') {
     ;(query as any)[field] = undefined
   } else {
@@ -594,16 +607,16 @@ async function fetchList() {
         id: s.id,
         stem: s.stem,
         question_type: s.question_type,
-        difficulty: s.difficulty,
+        difficulty: difficultyNumToString(s.difficulty),
         status: s.status,
-        grade: s.grade,
+        grade_level: s.grade_level,
         source: detail?.source ?? null,
         updated_at: s.updated_at,
         version: s.version,
         parsedOptions: parseOptions(detail?.options),
         correctAnswer: parseAnswer(detail?.correct_answer),
         analysis: detail?.analysis ?? null,
-        knowledgePoints: detail?.knowledge_points ?? [],
+        knowledgeNodes: detail?.knowledge_nodes ?? [],
       }
     })
   } catch {
@@ -615,10 +628,6 @@ async function fetchList() {
 
 function goDetail(row: { id: string }) {
   router.push(`/questions/${row.id}`)
-}
-
-function clearKp() {
-  clear()
 }
 
 function toggleAnalysis(id: string) {
@@ -641,10 +650,20 @@ function toggleBasket(id: string) {
   }
 }
 
-watch(selectedKpId, (id) => {
-  query.knowledge_point_id = id ?? undefined
+// 知识点筛选变化 → 同步到 query 并触发搜索
+watch(selectedKnowledgeNodeIds, (ids) => {
+  query.knowledge_node_ids = ids.length > 0 ? [...ids] : undefined
+  query.include_descendants = ids.length > 0 ? includeDescendants.value : undefined
   page.value = 1
   fetchList()
+})
+
+watch(includeDescendants, (v) => {
+  if (selectedKnowledgeNodeIds.value.length > 0) {
+    query.include_descendants = v
+    page.value = 1
+    fetchList()
+  }
 })
 
 watch(() => space.currentSpaceId, (newId) => {
@@ -658,7 +677,6 @@ onBeforeUnmount(() => {
   if (searchTimer) clearTimeout(searchTimer)
   if (layoutDebounce) clearTimeout(layoutDebounce)
   resizeObservers.forEach(ro => ro.disconnect())
-  clear() // 修复状态驻留隐患：离开列表页面时重置全局共享知识点，防止污染其他视图
 })
 </script>
 
@@ -990,35 +1008,29 @@ onBeforeUnmount(() => {
   font-weight: 700;
 }
 
-/* ===== Filter Chip ===== */
-.kp-filter-chip {
+/* ===== Knowledge node filter row ===== */
+.ql-filter-kp {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+}
+
+.ql-filter-descendant {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 5px 8px 5px 12px;
-  margin-bottom: 12px;
-  border-radius: var(--radius-full);
-  background: var(--accent-light);
-  color: var(--accent);
-  font-size: 13px;
-  font-weight: 500;
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
 }
 
-.chip-clear {
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: transparent;
-  color: var(--accent);
-  transition: var(--transition-fast);
-}
-
-.chip-clear:hover {
-  background: var(--accent);
-  color: #fff;
+.ql-filter-descendant input {
+  margin: 0;
+  cursor: pointer;
 }
 
 /* ===== Loading ===== */

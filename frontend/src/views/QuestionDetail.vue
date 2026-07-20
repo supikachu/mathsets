@@ -51,13 +51,13 @@
                   <span>{{ statusLabel(q?.status || '') }}</span>
                   <span class="pill-divider"></span>
                   <span>{{ q?.default_score }}分</span>
-                  <template v-if="q?.grade">
+                  <template v-if="q?.grade_level">
                     <span class="pill-divider"></span>
-                    <span>{{ q.grade }}</span>
+                    <span>{{ gradeLevelLabel(q.grade_level) }}</span>
                   </template>
                   <template v-if="q?.semester">
                     <span class="pill-divider"></span>
-                    <span>{{ q.semester }}</span>
+                    <span>{{ semesterLabel(q.semester) }}</span>
                   </template>
                 </span>
               </div>
@@ -160,8 +160,8 @@
           <!-- 知识点卡片 -->
           <div class="side-card">
             <div class="side-card-title"><AppIcon name="tag" :size="15" /> 知识点</div>
-            <div v-if="q?.knowledge_points?.length" class="kp-tags">
-              <span v-for="kp in q!.knowledge_points" :key="kp.id" class="kp-tag">{{ kp.name }}</span>
+            <div v-if="q?.knowledge_nodes?.length" class="kp-tags">
+              <span v-for="kn in q!.knowledge_nodes" :key="kn.id" class="kp-tag">{{ kn.name }}</span>
             </div>
             <div v-else class="side-empty">未关联知识点</div>
           </div>
@@ -211,7 +211,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { questionApi, type QuestionDetail } from '@/api/client'
+import { questionApi, type QuestionDetail, type GradeLevel, type SemesterType } from '@/api/client'
 import client from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
 import LatexRender from '@/components/LatexRender.vue'
@@ -231,11 +231,38 @@ const rejectDialog = ref(false)
 const rejectComment = ref('')
 const deleteDialog = ref(false)
 
-// 难度星数
+// 难度星数：后端返回 1-5 数值，直接用作星数
 const diffStars = computed(() => {
-  const map: Record<string, number> = { easy: 1, medium: 3, hard: 5 }
-  return map[q.value?.difficulty || ''] || 0
+  const d = q.value?.difficulty
+  if (typeof d === 'number') return d
+  return 0
 })
+
+// GradeLevel 枚举 → 中文标签
+function gradeLevelLabel(g: GradeLevel | null | undefined): string {
+  if (!g) return ''
+  const map: Record<GradeLevel, string> = {
+    grade_7: '初一',
+    grade_8: '初二',
+    grade_9: '初三',
+    grade_10: '高一',
+    grade_11: '高二',
+    grade_12: '高三',
+    other: '其他',
+  }
+  return map[g] || g
+}
+
+// SemesterType 枚举 → 中文标签
+function semesterLabel(s: SemesterType | null | undefined): string {
+  if (!s) return ''
+  const map: Record<SemesterType, string> = {
+    first: '上学期',
+    second: '下学期',
+    full_year: '全年',
+  }
+  return map[s] || s
+}
 
 // 安全提取选项列表（兼容数组/对象/JSON字符串）
 const optionList = computed(() => {

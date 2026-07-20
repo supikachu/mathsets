@@ -59,27 +59,6 @@
         </div>
       </nav>
 
-      <!-- 知识点树（中间栏）— 仅在题库/审核页面显示 -->
-      <template v-if="showKpTree">
-        <div
-          class="kp-tree-wrapper"
-          :class="{ collapsed: isKpTreeCollapsed }"
-        >
-          <KpTreePanel v-model:mobile-open="showTreeMobile" />
-          <!-- 紫色折叠手柄 — Hover 显现 -->
-          <button
-            class="kp-collapse-handle"
-            @click="toggleKpTree"
-            :title="isKpTreeCollapsed ? '展开知识点树' : '收起知识点树'"
-          >
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-              <path :d="isKpTreeCollapsed ? 'm15 18-6-6 6-6' : 'm9 18 6-6-6-6'" />
-            </svg>
-          </button>
-        </div>
-        <div v-if="showTreeMobile" class="tree-scrim" @click="showTreeMobile = false" />
-      </template>
-
       <!-- 主内容区 -->
       <div class="main-content">
         <div class="view active">
@@ -101,30 +80,15 @@ import { useSpaceStore } from '@/stores/space'
 import { useNavItems } from '@/composables/useNavItems'
 import { AppIcon } from '@/components/ui'
 import BottomNav from '@/components/BottomNav.vue'
-import KpTreePanel from '@/components/KpTreePanel.vue'
-import { useSelectedKp } from '@/composables/useSelectedKp'
-import { useLayoutState } from '@/composables/useLayoutState'
 
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 const space = useSpaceStore()
 const { items } = useNavItems()
-const { clear: clearSelectedKp } = useSelectedKp()
-const { isKpTreeCollapsed, isNavCollapsed } = useLayoutState()
-
-function toggleKpTree() {
-  isKpTreeCollapsed.value = !isKpTreeCollapsed.value
-}
 
 const showUserMenu = ref(false)
-const showTreeMobile = ref(false)
 const userMenuRef = ref<HTMLElement | null>(null)
-
-// 知识点树仅在题库和审核页面显示，工作台隐藏
-const showKpTree = computed(() => {
-  return route.path.startsWith('/questions') || route.path.startsWith('/review')
-})
 
 const avatarLetter = computed(() =>
   (auth.displayName || '?').charAt(0).toUpperCase(),
@@ -152,7 +116,6 @@ function spaceKindLabel(kind: string) {
 
 function onSpaceChange(id: string) {
   space.setCurrentSpace(id)
-  clearSelectedKp()
   if (route.path.startsWith('/questions') || route.path === '/review') {
     router.replace({ path: route.path, query: { ...route.query, _sp: id.slice(0, 8) } })
   }
@@ -196,75 +159,6 @@ onUnmounted(() => document.removeEventListener('click', onDocumentClick))
 </script>
 
 <style scoped>
-/* ===== 知识点树折叠包装 ===== */
-.kp-tree-wrapper {
-  position: relative;
-  display: flex;
-  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.25s ease;
-  overflow: visible;
-}
-
-.kp-tree-wrapper > :deep(.kp-tree-panel) {
-  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.25s ease, padding 0.3s ease;
-  overflow: hidden;
-}
-
-.kp-tree-wrapper.collapsed > :deep(.kp-tree-panel) {
-  width: 0 !important;
-  min-width: 0 !important;
-  opacity: 0;
-  pointer-events: none;
-  padding: 0 !important;
-  border: none !important;
-}
-
-/* 紫色折叠手柄 — 极微型线条按钮，仅 Hover 显现 */
-.kp-collapse-handle {
-  position: absolute;
-  top: 50%;
-  right: -7px;
-  transform: translateY(-50%);
-  z-index: 50;
-  width: 14px;
-  height: 48px;
-  border: none;
-  border-radius: 7px;
-  background: transparent;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  opacity: 0;
-  transition: opacity 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
-}
-
-.kp-tree-wrapper:hover .kp-collapse-handle,
-.kp-tree-wrapper.collapsed .kp-collapse-handle {
-  opacity: 1;
-}
-
-.kp-collapse-handle:hover {
-  background: var(--purple, #8b5cf6);
-  box-shadow: 0 0 12px rgba(139, 92, 246, 0.5), 0 0 4px rgba(139, 92, 246, 0.3);
-  color: #fff;
-}
-
-.kp-collapse-handle:not(:hover) {
-  color: var(--text-muted);
-  background: var(--bg-card);
-  box-shadow: 0 0 0 1px var(--border-color);
-}
-
-/* 折叠状态下手柄始终可见，贴在左侧 */
-.kp-tree-wrapper.collapsed .kp-collapse-handle {
-  right: -10px;
-}
-
-.kp-tree-wrapper.collapsed .kp-collapse-handle:not(:hover) {
-  background: var(--bg-card);
-  border: 1px solid var(--border-color);
-}
-
 .layout-root {
   width: 100vw;
   height: 100vh;
@@ -460,43 +354,9 @@ onUnmounted(() => document.removeEventListener('click', onDocumentClick))
     height: auto;
     overflow: visible;
   }
-
-  .tree-toggle {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 14px;
-    border-radius: var(--radius-sm);
-    background: var(--bg-card);
-    border: 1px solid var(--border-color);
-    box-shadow: var(--shadow-xs);
-    color: var(--text-secondary);
-    font-size: 13px;
-    font-weight: 500;
-    transition: var(--transition-fast);
-  }
-
-  .tree-toggle:hover {
-    background: var(--bg-hover);
-    color: var(--accent);
-  }
-
-  .tree-scrim {
-    position: fixed;
-    inset: 0;
-    background: var(--bg-modal);
-    backdrop-filter: var(--blur-modal);
-    -webkit-backdrop-filter: var(--blur-modal);
-    z-index: 170;
-    animation: fadeIn 0.2s ease;
-  }
 }
 
 @media (min-width: 769px) {
-  .tree-toggle {
-    display: none;
-  }
-
   .layout-root :deep(.bottom-nav) {
     display: none;
   }

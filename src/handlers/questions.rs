@@ -107,6 +107,73 @@ pub(crate) async fn update_knowledge_nodes(
     Ok(())
 }
 
+/// AI 专用的知识点关联 Upsert（B3 新增）
+///
+/// 与 `update_knowledge_nodes` 的差异：
+/// - `source = 'ai'`（审计追溯，区分人工/AI 标注）
+/// - 将 `KnowledgeNodeMatch.score`（f32）写入 `ai_confidence`（NUMERIC(5,4)）
+/// - `ON CONFLICT DO UPDATE`（覆盖已有 manual 关联的 source 与置信度）
+pub(crate) async fn upsert_ai_knowledge_nodes(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    question_id: Uuid,
+    matches: &[crate::handlers::ai_tagging::KnowledgeNodeMatch],
+    primary_node_id: Option<Uuid>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM question_knowledge_nodes WHERE question_id = $1")
+        .bind(question_id)
+        .execute(&mut **tx)
+        .await?;
+
+    for m in matches {
+        let is_primary = primary_node_id == Some(m.node_id);
+        // f32 → rust_decimal::Decimal（ai_confidence 列为 NUMERIC(5,4)）
+        let ai_confidence = {
+            use rust_decimal::prelude::FromPrimitive;
+            rust_decimal::Decimal::from_f32(m.score)
+        };
+
+        sqlx::query(
+            r#"
+            INSERT INTO question_knowledge_nodes
+              (question_id, node_id, is_primary, source, ai_confidence, created_at)
+            VALUES ($1, $2, $3, 'ai', $4, NOW())
+            ON CONFLICT (question_id, node_id) DO UPDATE SET
+              is_primary = EXCLUDED.is_primary,
+              source = 'ai',
+              ai_confidence = EXCLUDED.ai_confidence
+            "#,
+        )
+        .bind(question_id)
+        .bind(m.node_id)
+        .bind(is_primary)
+        .bind(ai_confidence)
+        .execute(&mut **tx)
+        .await?;
+    }
+
+    // 确保 primary 唯一性：若 primary_node_id 不在 matches 中，单独插入
+    if let Some(primary_id) = primary_node_id {
+        if !matches.iter().any(|m| m.node_id == primary_id) {
+            sqlx::query(
+                r#"
+                INSERT INTO question_knowledge_nodes
+                  (question_id, node_id, is_primary, source, created_at)
+                VALUES ($1, $2, TRUE, 'ai', NOW())
+                ON CONFLICT (question_id, node_id) DO UPDATE SET
+                  is_primary = TRUE,
+                  source = 'ai'
+                "#,
+            )
+            .bind(question_id)
+            .bind(primary_id)
+            .execute(&mut **tx)
+            .await?;
+        }
+    }
+
+    Ok(())
+}
+
 async fn get_question_knowledge_nodes(
     pool: &sqlx::PgPool,
     question_id: Uuid,

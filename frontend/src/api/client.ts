@@ -1,5 +1,8 @@
 import axios from 'axios'
-import { useToast } from '@/composables/useToast'
+
+// ===========================================================================
+// Axios 实例 & 拦截器（保持不变）
+// ===========================================================================
 
 const client = axios.create({
   baseURL: '/api/v1',
@@ -34,7 +37,68 @@ client.interceptors.response.use(
 
 export default client
 
-// ─── 类型定义 ───
+// ===========================================================================
+// 枚举类型（与后端 sqlx::Type rename_all 对齐）
+// ===========================================================================
+
+/// 题型（lowercase）
+export type QuestionType = 'choice' | 'multiple' | 'fill' | 'solution'
+
+/// 题目状态（lowercase）
+export type QuestionStatus = 'draft' | 'pending' | 'rejected' | 'published' | 'disabled'
+
+/// 难度：1-5 星制（B2 从 string enum 改为 i16 newtype）
+export type Difficulty = number
+
+/// 年级（snake_case）
+export type GradeLevel =
+  | 'grade_7'
+  | 'grade_8'
+  | 'grade_9'
+  | 'grade_10'
+  | 'grade_11'
+  | 'grade_12'
+  | 'other'
+
+/// 学期（snake_case）
+export type SemesterType = 'first' | 'second' | 'full_year'
+
+/// 认知层次 — 布鲁姆分类法（lowercase）
+export type CognitiveLevel =
+  | 'remember'
+  | 'understand'
+  | 'apply'
+  | 'analyze'
+  | 'evaluate'
+  | 'create'
+
+/// 考试类型（lowercase）
+export type ExamType =
+  | 'midterm'
+  | 'final'
+  | 'gaokao'
+  | 'mock'
+  | 'entrance'
+  | 'daily'
+  | 'other'
+
+/// 标签类别（snake_case）— B2 新增 scene + error_prone
+export type TagCategory =
+  | 'core_competence'
+  | 'method'
+  | 'school'
+  | 'scene'
+  | 'error_prone'
+
+/// 知识树类型（lowercase）
+export type KnowledgeTreeKind = 'knowledge' | 'ability' | 'chapter'
+
+/// 知识点关联来源（lowercase）— 审计用
+export type KnowledgeLinkSource = 'manual' | 'ai'
+
+// ===========================================================================
+// 认证
+// ===========================================================================
 
 export interface LoginRequest {
   username: string
@@ -46,9 +110,9 @@ export interface LoginResponse {
   user_id: string
   display_name: string
   role: string
-  /// 双轨制身份：与 role 配合（后端 LoginResponse 已含此字段，前端类型补全）
+  /// 双轨制身份：与 role 配合
   global_role?: 'super_admin' | 'teacher'
-  /// 用户头像 URL（可能为 null）
+  /// 用户头像 URL
   avatar_url?: string | null
 }
 
@@ -59,55 +123,100 @@ export interface RegisterRequest {
   display_name: string
 }
 
-// ─── 题目相关类型 ───
+export const authApi = {
+  login(data: LoginRequest) {
+    return client.post<LoginResponse>('/auth/login', data)
+  },
+  register(data: RegisterRequest) {
+    return client.post('/auth/register', data)
+  },
+  me() {
+    return client.get<LoginResponse>('/auth/me')
+  },
+}
 
+// ===========================================================================
+// 题目（B2/B3 重构）
+// ===========================================================================
+
+/// 题目列表项（B2：移除 grade，difficulty 改为 number，新增 grade_level）
 export interface QuestionSummary {
   id: string
   stem: string
-  question_type: 'choice' | 'fill' | 'solution' | 'judgment'
-  difficulty: 'easy' | 'medium' | 'hard'
+  question_type: QuestionType
+  /// 1-5 星制
+  difficulty: Difficulty
   default_score: number
-  status: 'draft' | 'pending' | 'rejected' | 'published' | 'disabled'
-  grade: string | null
-  creator_id: string | null
+  status: QuestionStatus
+  grade_level: GradeLevel | null
+  creator_id: string
   creator_name: string | null
   created_at: string
   updated_at: string
   version: number
-  space_id?: string
+  space_id: string
 }
 
+/// 题目详情（B2：新增 stem_text/images/metadata/exam_type/cognitive_level 等，
+/// 移除 grade/academic_year/grade_semester/exam_region，knowledge_points → knowledge_nodes）
 export interface QuestionDetail {
   id: string
+
+  // ── 内容 ──
   stem: string
-  question_type: string
-  difficulty: string
-  default_score: number
-  status: string
+  stem_text: string | null
+  images: unknown | null
+
+  // ── 题型与答案 ──
+  question_type: QuestionType
   options: { label: string; content: string }[] | null
-  correct_answer: any
+  correct_answer: unknown
   analysis: string | null
-  grading_criteria: any | null
-  grade: string | null
-  semester: string | null
+  grading_criteria: unknown | null
+
+  // ── 难度与评估 ──
+  difficulty: Difficulty
+  difficulty_score: number | null
+  default_score: number
+  estimated_minutes: number | null
+  cognitive_level: CognitiveLevel | null
+
+  // ── 教研分类 ──
+  grade_level: GradeLevel | null
+  semester: SemesterType | null
+
+  // ── 来源元数据 ──
   source: string | null
-  // 结构化元数据
-  academic_year: string | null
-  grade_semester: string | null
-  exam_type: string | null
-  exam_region: string | null
-  creator_id: string | null
+  exam_type: ExamType | null
+  /// 长尾元数据 JSONB（academic_year, exam_region, paper_name 等）
+  metadata: Record<string, unknown>
+
+  // ── 复合题结构 ──
+  parent_id: string | null
+  sub_order: number | null
+
+  // ── 统计缓存 ──
+  paper_count: number
+  attempt_count: number
+  accuracy_rate: number | null
+  favorite_count: number
+
+  // ── 归属与审计 ──
+  status: QuestionStatus
+  space_id: string
+  origin_question_id: string | null
+  creator_id: string
   creator_name: string | null
   created_at: string
   updated_by: string | null
   updated_at: string
   version: number
-  space_id: string
-  origin_question_id?: string | null
-  knowledge_points: { id: string; name: string }[]
+
+  // ── 关联数据 ──
+  knowledge_nodes: KnowledgeNodeSummary[]
   tags: TagSummary[]
-  reviewer_ids?: string[]
-  can_review?: boolean
+  reviewer_ids: string[]
+  can_review: boolean
 }
 
 export interface PageResult<T> {
@@ -117,12 +226,25 @@ export interface PageResult<T> {
   page_size: number
 }
 
+/// 题目查询参数（B2：新增多知识点/多标签/范围过滤，移除 grade/knowledge_point_id）
 export interface QuestionQuery {
-  status?: string
-  question_type?: string
-  difficulty?: string
-  grade?: string
-  knowledge_point_id?: string
+  status?: QuestionStatus
+  question_type?: QuestionType
+  /// 按难度精确匹配（1-5）
+  difficulty?: Difficulty
+  /// 按难度范围过滤（与 difficulty 互斥）
+  difficulty_min?: number
+  difficulty_max?: number
+  grade_level?: GradeLevel
+  semester?: SemesterType
+  cognitive_level?: CognitiveLevel
+  exam_type?: ExamType
+  /// 多知识点过滤（OR 关系）
+  knowledge_node_ids?: string[]
+  /// 是否包含子孙节点（LTREE 子树查询）
+  include_descendants?: boolean
+  /// 多标签过滤（OR 关系）
+  tag_ids?: string[]
   creator_id?: string
   keyword?: string
   page?: number
@@ -130,6 +252,133 @@ export interface QuestionQuery {
   space_id?: string
   reviewable_by_me?: boolean
 }
+
+/// 自建标签输入（B2：category 改为 enum，新增 parent_id）
+export interface NewTagInput {
+  name: string
+  category: TagCategory
+  parent_id?: string | null
+}
+
+/// 创建题目请求（B2：与后端 CreateQuestionRequest 对齐）
+export interface CreateQuestionRequest {
+  stem: string
+  question_type: QuestionType
+  difficulty: Difficulty
+  default_score?: number
+  options?: unknown
+  correct_answer: unknown
+  analysis?: string
+  grading_criteria?: unknown
+  source?: string
+  exam_type?: ExamType
+  metadata?: Record<string, unknown>
+  grade_level?: GradeLevel
+  semester?: SemesterType
+  cognitive_level?: CognitiveLevel
+  difficulty_score?: number
+  estimated_minutes?: number
+  images?: unknown
+  parent_id?: string
+  sub_order?: number
+  tag_ids?: string[]
+  new_tags?: NewTagInput[]
+  knowledge_node_ids?: string[]
+  primary_knowledge_node_id?: string
+  space_id?: string
+  input_method?: string
+}
+
+/// 更新题目请求（B2：与后端 UpdateQuestionRequest 对齐，所有字段可选）
+export interface UpdateQuestionRequest {
+  stem?: string
+  question_type?: QuestionType
+  difficulty?: Difficulty
+  default_score?: number
+  options?: unknown
+  correct_answer?: unknown
+  analysis?: string
+  grading_criteria?: unknown
+  source?: string
+  exam_type?: ExamType
+  metadata?: Record<string, unknown>
+  grade_level?: GradeLevel
+  semester?: SemesterType
+  cognitive_level?: CognitiveLevel
+  difficulty_score?: number
+  estimated_minutes?: number
+  images?: unknown
+  parent_id?: string
+  sub_order?: number
+  tag_ids?: string[]
+  new_tags?: NewTagInput[]
+  knowledge_node_ids?: string[]
+  primary_knowledge_node_id?: string
+}
+
+export interface QuestionStats {
+  total: number
+  draft: number
+  pending: number
+  rejected: number
+  published: number
+  disabled: number
+}
+
+function unwrapQuestionList(
+  data: PageResult<QuestionSummary> | QuestionSummary[],
+): QuestionSummary[] {
+  if (Array.isArray(data)) return data
+  return data?.items ?? []
+}
+
+export const questionApi = {
+  async list(params?: QuestionQuery) {
+    const res = await client.get<PageResult<QuestionSummary> | QuestionSummary[]>(
+      '/questions',
+      { params },
+    )
+    return { ...res, data: unwrapQuestionList(res.data as any) }
+  },
+  get(id: string) {
+    return client.get<QuestionDetail>(`/questions/${id}`)
+  },
+  create(data: CreateQuestionRequest) {
+    return client.post<QuestionDetail>('/questions', data)
+  },
+  update(id: string, data: UpdateQuestionRequest) {
+    return client.put<QuestionDetail>(`/questions/${id}`, data)
+  },
+  delete(id: string) {
+    return client.delete(`/questions/${id}`)
+  },
+  submit(id: string, body?: { reviewer_ids?: string[]; comment?: string }) {
+    return client.post(`/questions/${id}/submit`, body || {})
+  },
+  approve(id: string, body?: { comment?: string }) {
+    return client.post(`/questions/${id}/approve`, body || {})
+  },
+  reject(id: string, body?: { reject_reason?: string }) {
+    return client.post(`/questions/${id}/reject`, body || {})
+  },
+  contribute(id: string) {
+    return client.post<QuestionDetail>(`/questions/${id}/contribute`)
+  },
+  importTo(id: string, target_space_id?: string) {
+    return client.post<QuestionDetail>(`/questions/${id}/import`, { target_space_id })
+  },
+  /// 跨空间克隆（B3 新增路由）
+  clone(id: string, target_space_id?: string) {
+    return client.post<QuestionDetail>(`/questions/${id}/clone`, { target_space_id })
+  },
+  stats(params?: { space_id?: string }) {
+    return client.get<QuestionStats>('/questions/stats', { params })
+  },
+}
+
+// ===========================================================================
+// 空间
+// ===========================================================================
 
 export interface SpaceSummary {
   id: string
@@ -155,88 +404,9 @@ export interface SpaceDetail {
   kind: 'personal' | 'team' | 'public'
   name: string
   owner_user_id: string | null
-  settings: Record<string, any>
+  settings: Record<string, unknown>
   members: SpaceMemberInfo[]
   created_at: string
-}
-
-// ─── API 函数 ───
-
-export const authApi = {
-  login(data: LoginRequest) {
-    return client.post<LoginResponse>('/auth/login', data)
-  },
-  register(data: RegisterRequest) {
-    return client.post('/auth/register', data)
-  },
-}
-
-export interface KnowledgePoint {
-  id: string
-  parent_id: string | null
-  name: string
-  grade: string | null
-  sort_order: number
-  children: KnowledgePoint[]
-}
-
-// ─── 标签类型 ───
-
-export interface TagSummary {
-  id: string
-  name: string
-  category: 'core_competence' | 'method' | 'school'
-}
-
-export interface Tag extends TagSummary {
-  space_id: string | null
-  use_count: number
-  created_at: string
-}
-
-export interface QuestionStats {
-  total: number
-  draft: number
-  pending: number
-  rejected: number
-  published: number
-  disabled: number
-}
-
-function unwrapQuestionList(data: PageResult<QuestionSummary> | QuestionSummary[]): QuestionSummary[] {
-  if (Array.isArray(data)) return data
-  return data?.items ?? []
-}
-
-export const questionApi = {
-  async list(params?: QuestionQuery) {
-    const res = await client.get<PageResult<QuestionSummary> | QuestionSummary[]>('/questions', { params })
-    return { ...res, data: unwrapQuestionList(res.data as any) }
-  },
-  get(id: string) {
-    return client.get<QuestionDetail>(`/questions/${id}`)
-  },
-  create(data: any) {
-    return client.post<QuestionDetail>('/questions', data)
-  },
-  update(id: string, data: any) {
-    return client.put<QuestionDetail>(`/questions/${id}`, data)
-  },
-  submit(id: string, body?: { reviewer_ids?: string[]; comment?: string }) {
-    return client.post(`/questions/${id}/submit`, body || {})
-  },
-  review(id: string, body: { action: string; comment?: string }) {
-    return client.post(`/questions/${id}/review`, body)
-  },
-  contribute(id: string) {
-    return client.post<QuestionDetail>(`/questions/${id}/contribute`)
-  },
-  importTo(id: string, target_space_id?: string) {
-    return client.post<QuestionDetail>(`/questions/${id}/import`, { target_space_id })
-  },
-  stats(params?: { space_id?: string }) {
-    return client.get<QuestionStats>('/questions/stats', { params })
-  },
 }
 
 export const spaceApi = {
@@ -254,26 +424,239 @@ export const spaceApi = {
   },
 }
 
-export const kpApi = {
-  tree(spaceId?: string) {
-    const params = spaceId ? { space_id: spaceId } : {}
-    return client.get<KnowledgePoint[]>('/knowledge-points', { params })
+// ===========================================================================
+// 知识树 & 知识点节点（B2/B3 新增，替代旧 KnowledgePoint）
+// ===========================================================================
+
+/// 知识树（多树容器：知识树 / 能力树 / 章节树）
+export interface KnowledgeTree {
+  id: string
+  code: string
+  name: string
+  kind: KnowledgeTreeKind
+  /// NULL = 全局预置；非 NULL = 空间私有
+  space_id: string | null
+  version: number
+  description: string | null
+  is_active: boolean
+  created_at: string
+  updated_at: string
+}
+
+/// 知识点节点（数据库行）
+export interface KnowledgeNode {
+  id: string
+  tree_id: string
+  parent_id: string | null
+  /// 节点独立 code（仅当前层级标识）
+  code: string | null
+  /// LTREE 物化路径，如 'n1.n12.n123'
+  path: string
+  depth: number
+  name: string
+  /// 同义词数组 JSONB，如 [{"alias":"抛物线函数","locale":"zh"}]
+  aliases: unknown
+  description: string | null
+  sort_order: number
+  /// 反规范化缓存：关联题目数
+  question_count: number
+  is_active: boolean
+  created_at: string
+  updated_at: string
+}
+
+/// 知识点树节点（带 children，用于前端树形展示）
+export interface KnowledgeNodeTreeNode {
+  id: string
+  tree_id: string
+  parent_id: string | null
+  code: string | null
+  path: string
+  depth: number
+  name: string
+  aliases: unknown
+  description: string | null
+  sort_order: number
+  question_count: number
+  children: KnowledgeNodeTreeNode[]
+}
+
+/// 知识点摘要（用于题目详情中的关联展示）
+export interface KnowledgeNodeSummary {
+  id: string
+  tree_id: string
+  name: string
+  path: string
+  depth: number
+  /// 是否主知识点（每题最多 1 个）
+  is_primary: boolean
+  /// AI 匹配置信度（0.0-1.0）
+  ai_confidence: number | null
+  /// 关联来源（manual / ai）
+  source: KnowledgeLinkSource
+}
+
+export interface CreateKnowledgeTreeRequest {
+  code: string
+  name: string
+  kind?: KnowledgeTreeKind
+  space_id?: string
+  description?: string
+}
+
+export interface UpdateKnowledgeTreeRequest {
+  name?: string
+  description?: string
+  is_active?: boolean
+}
+
+export interface CreateKnowledgeNodeRequest {
+  tree_id: string
+  parent_id?: string | null
+  code?: string
+  name: string
+  aliases?: unknown
+  description?: string
+  sort_order?: number
+}
+
+export interface UpdateKnowledgeNodeRequest {
+  name?: string
+  code?: string
+  aliases?: unknown
+  description?: string
+  sort_order?: number
+  is_active?: boolean
+}
+
+export const knowledgeTreeApi = {
+  list() {
+    return client.get<KnowledgeTree[]>('/knowledge-trees')
+  },
+  create(data: CreateKnowledgeTreeRequest) {
+    return client.post<KnowledgeTree>('/knowledge-trees', data)
+  },
+  update(id: string, data: UpdateKnowledgeTreeRequest) {
+    return client.put<KnowledgeTree>(`/knowledge-trees/${id}`, data)
+  },
+  remove(id: string) {
+    return client.delete(`/knowledge-trees/${id}`)
   },
 }
 
-// ─── 标签 API ───
+export const knowledgeNodeApi = {
+  /// 按知识树列出所有节点（平铺）
+  listByTree(treeId: string) {
+    return client.get<KnowledgeNode[]>(`/knowledge-trees/${treeId}/nodes`)
+  },
+  /// 获取知识树的树形结构（带 children 递归）
+  getTree(treeId: string) {
+    return client.get<KnowledgeNodeTreeNode[]>(`/knowledge-trees/${treeId}/nodes/tree`)
+  },
+  create(data: CreateKnowledgeNodeRequest) {
+    return client.post<KnowledgeNode>('/knowledge-nodes', data)
+  },
+  get(id: string) {
+    return client.get<KnowledgeNode>(`/knowledge-nodes/${id}`)
+  },
+  update(id: string, data: UpdateKnowledgeNodeRequest) {
+    return client.put<KnowledgeNode>(`/knowledge-nodes/${id}`, data)
+  },
+  remove(id: string) {
+    return client.delete(`/knowledge-nodes/${id}`)
+  },
+  /// 获取子树（所有子孙节点）
+  descendants(id: string, includeSelf = false) {
+    return client.get<KnowledgeNode[]>(`/knowledge-nodes/${id}/descendants`, {
+      params: { include_self: includeSelf },
+    })
+  },
+  /// 移动节点（改 parent_id，后端重算 path 与 depth）
+  move(id: string, newParentId: string | null) {
+    return client.post(`/knowledge-nodes/${id}/move`, { new_parent_id: newParentId })
+  },
+}
+
+// ===========================================================================
+// 标签（B2/B3：增加层级 + 枚举 category + aliases）
+// ===========================================================================
+
+/// 标签摘要（用于题目详情中的关联展示）
+export interface TagSummary {
+  id: string
+  name: string
+  category: TagCategory
+}
+
+/// 标签（数据库行，B2 支持层级 + aliases）
+export interface Tag {
+  id: string
+  parent_id: string | null
+  name: string
+  category: TagCategory
+  /// LTREE 物化路径
+  path: string
+  /// 同义词数组 JSONB
+  aliases: unknown
+  description: string | null
+  space_id: string | null
+  use_count: number
+  is_active: boolean
+  created_at: string
+}
+
+/// 标签树节点（带 children）
+export interface TagTreeNode {
+  id: string
+  parent_id: string | null
+  name: string
+  category: TagCategory
+  path: string
+  aliases: unknown
+  use_count: number
+  children: TagTreeNode[]
+}
+
+export interface CreateTagRequest {
+  name: string
+  category: TagCategory
+  parent_id?: string | null
+  aliases?: unknown
+  description?: string
+  space_id?: string
+}
+
+/// 更新标签（不允许修改 category 以保证树一致性）
+export interface UpdateTagRequest {
+  name?: string
+  aliases?: unknown
+  description?: string
+  is_active?: boolean
+}
+
+/// 标签查询参数（B2 增强）
+export interface TagQuery {
+  category?: TagCategory
+  space_id?: string
+  /// 是否返回树形结构（带 children）
+  as_tree?: boolean
+  /// 按父节点过滤（null = 仅根节点）
+  parent_id?: string | null
+}
 
 export const tagsApi = {
-  list(category?: string, spaceId?: string) {
-    return client.get<Tag[]>('/tags', { params: { category, space_id: spaceId } })
+  list(params?: TagQuery) {
+    return client.get<Tag[]>('/tags', { params })
   },
-  suggest(q: string, category?: string, spaceId?: string) {
-    return client.get<Tag[]>('/tags/suggest', { params: { q, category, space_id: spaceId } })
+  suggest(q: string, category?: TagCategory, spaceId?: string) {
+    return client.get<Tag[]>('/tags/suggest', {
+      params: { q, category, space_id: spaceId },
+    })
   },
-  create(name: string, category: string, spaceId?: string) {
-    return client.post<Tag>('/tags', { name, category, space_id: spaceId })
+  create(data: CreateTagRequest) {
+    return client.post<Tag>('/tags', data)
   },
-  update(id: string, data: { name?: string; category?: string }) {
+  update(id: string, data: UpdateTagRequest) {
     return client.put<Tag>(`/tags/${id}`, data)
   },
   remove(id: string) {
@@ -284,7 +667,9 @@ export const tagsApi = {
   },
 }
 
-// ─── AI 智能录入 ───
+// ===========================================================================
+// AI 智能录入（parse-text / parse-image / settings）
+// ===========================================================================
 
 export interface SubAnswer {
   sub_id: number
@@ -323,8 +708,10 @@ export interface KpMatch {
 }
 
 export interface ParsedQuestion {
-  question_type: 'choice' | 'fill' | 'solution'
+  /// B3：新增 'multiple' 题型
+  question_type: 'choice' | 'multiple' | 'fill' | 'solution'
   sub_type?: string
+  /// AI 返回 "easy"/"medium"/"hard"，后端转换为 1-5
   difficulty?: string
   stem: string
   options?: ParsedOption[]
@@ -351,33 +738,91 @@ export const aiApi = {
   parseImage(file: File) {
     const formData = new FormData()
     formData.append('image', file)
-    // ⚠️ 不要手动设置 Content-Type — axios + FormData 需要自动生成 boundary
-    // 手动设置会导致后端无法解析 Multipart 边界，请求永久挂起
+    // 不要手动设置 Content-Type — axios + FormData 需要自动生成 boundary
     return client.post<{ data: ParsedQuestion[] }>('/ai/parse-image', formData, {
-      timeout: 120000, // OCR 请求可能较慢，超时设为 120s
+      timeout: 120000,
     })
   },
   getSettings() {
     return client.get<AiSettings>('/ai/settings')
   },
-  updateSettings(data: { provider?: string; api_key?: string; model_text?: string; model_vision?: string }) {
+  updateSettings(data: {
+    provider?: string
+    api_key?: string
+    model_text?: string
+    model_vision?: string
+  }) {
     return client.put<AiSettings>('/ai/settings', data)
   },
 }
 
-// ─── AI 异步解析任务队列 ───
+// ===========================================================================
+// AI 智能打标（B3 新增：LLM 提取 + 三级模糊匹配）
+// ===========================================================================
 
-/// 任务状态枚举（与后端 ai_task_status 对齐）
+/// AI 打标请求
+export interface AiTaggingRequest {
+  /// 题目文本（题干 + 选项 + 答案 + 解析，越完整越准确）
+  content: string
+  /// 可选空间 ID（限定在该空间的知识树 + 全局树内匹配）
+  space_id?: string
+}
+
+/// AI 打标返回的单个知识点匹配结果
+export interface KnowledgeNodeMatch {
+  /// AI 返回的原始名称
+  ai_name: string
+  /// 匹配到的知识点节点 UUID
+  node_id: string
+  /// 匹配到的知识点名称
+  node_name: string
+  /// 所属知识树 ID
+  tree_id: string
+  /// 物化路径（前端可用于展示层级）
+  path: string
+  /// 节点深度
+  depth: number
+  /// 匹配置信度（0.0-1.0）
+  score: number
+  /// 匹配类型：exact / alias / fuzzy
+  match_type: string
+}
+
+/// AI 打标响应
+export interface AiTaggingResponse {
+  /// 匹配成功的知识点节点列表
+  knowledge_nodes: KnowledgeNodeMatch[]
+  /// AI 推断的难度（1-5）
+  difficulty: number | null
+  /// AI 推断的题型
+  question_type: QuestionType | null
+  /// AI 推断的年级
+  grade_level: GradeLevel | null
+  /// AI 推断的认知层次
+  cognitive_level: CognitiveLevel | null
+  /// AI 返回但未匹配上的知识点名称（前端可提示用户手动选择）
+  unmatched_knowledge_points: string[]
+}
+
+export const aiTaggingApi = {
+  /// 智能打标：分析题目文本 → LLM 提取标签 → pg_trgm 三级匹配知识点 UUID
+  tag(data: AiTaggingRequest) {
+    return client.post<AiTaggingResponse>('/questions/ai-tagging', data)
+  },
+}
+
+// ===========================================================================
+// AI 异步解析任务队列
+// ===========================================================================
+
 export type AiTaskStatus = 'pending' | 'processing' | 'completed' | 'failed'
 
-/// 提交解析任务的响应体（HTTP 202）
 export interface SubmitParseTaskResponse {
   task_id: string
   status: AiTaskStatus
   created_at: string
 }
 
-/// 任务详情查询的响应体（HTTP 200）
 export interface AiParseTaskDetail {
   id: string
   status: AiTaskStatus
@@ -388,19 +833,18 @@ export interface AiParseTaskDetail {
 }
 
 export const aiTaskApi = {
-  /// 提交一段 OCR 生肉文本到异步解析队列
   submitParseTask(raw_text: string) {
     return client.post<SubmitParseTaskResponse>('/ai/parse', { raw_text })
   },
-  /// 根据 task_id 查询任务详情（状态、question_id、error_message 等）
   getTaskStatus(task_id: string) {
     return client.get<AiParseTaskDetail>(`/ai/parse/${task_id}`)
   },
 }
 
-// ─── 用户中心（Profile） ───
+// ===========================================================================
+// 用户中心（Profile）
+// ===========================================================================
 
-/// 用户额度信息
 export interface UserQuota {
   ocr_quota_daily: number
   ocr_quota_used: number
@@ -409,7 +853,6 @@ export interface UserQuota {
   ai_token_quota: number
 }
 
-/// 当前登录用户的完整个人资料
 export interface UserProfile {
   id: string
   username: string
@@ -425,19 +868,15 @@ export interface UserProfile {
 }
 
 export const userApi = {
-  /// 获取当前登录用户的完整资料（含 quota）
   getMe() {
     return client.get<UserProfile>('/users/me')
   },
-  /// 更新昵称 / 邮箱（username 锁定不可修改）
   updateMe(data: { display_name?: string; email?: string }) {
     return client.put<UserProfile>('/users/me', data)
   },
-  /// 修改密码（成功后前端必须清除 token 并跳转登录页）
   changePassword(data: { old_password: string; new_password: string }) {
     return client.put<{ message: string }>('/users/password', data)
   },
-  /// 上传头像 — 必须用 FormData，不要手动设 Content-Type
   uploadAvatar(file: File) {
     const formData = new FormData()
     formData.append('avatar', file)
@@ -446,5 +885,3 @@ export const userApi = {
     })
   },
 }
-
-
