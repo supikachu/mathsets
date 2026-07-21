@@ -29,6 +29,8 @@ import { useSpaceStore } from '@/stores/space'
 const tagIds = defineModel<string[]>('tagIds', { required: true })
 const knowledgeNodeIds = defineModel<string[]>('knowledgeNodeIds', { required: true })
 const aiGeneratedFields = defineModel<Set<string>>('aiGeneratedFields', { required: true })
+/** 面板折叠状态：父组件通过 v-model:collapsed 双向绑定 */
+const collapsed = defineModel<boolean>('collapsed', { default: false })
 
 // ─────────────────────────────────────────────────────────────────────
 // Props
@@ -341,27 +343,37 @@ watch(
 
 // 暴露给父组件：当 form 字段被用户手动修改时，可调用此方法清除对应高亮
 defineExpose({ clearFieldHighlight })
+
+// ─────────────────────────────────────────────────────────────────────
+// 折叠/展开
+// ─────────────────────────────────────────────────────────────────────
+function toggleCollapsed() {
+  collapsed.value = !collapsed.value
+}
 </script>
 
 <template>
-  <aside class="attr-side-panel">
-    <!-- ===== 顶部：标题 + AI 智能打标按钮 ===== -->
-    <header class="asp-header">
-      <div class="asp-title">
-        <AppIcon name="sliders" :size="15" />
-        <span>题目属性</span>
-      </div>
-      <AppButton
-        variant="primary"
-        size="sm"
-        :loading="aiTagging"
-        :disabled="aiTagging"
-        @click="runAiTagging"
-      >
-        <AppIcon name="sparkles" :size="14" />
-        <span>{{ aiTagging ? '打标中…' : 'AI 智能打标' }}</span>
-      </AppButton>
-    </header>
+  <div class="asp-wrapper" :class="{ 'is-collapsed': collapsed }">
+    <aside class="attr-side-panel">
+      <!-- ===== 顶部：标题 + AI 智能打标按钮 ===== -->
+      <header class="asp-header">
+        <div class="asp-title">
+          <AppIcon name="sliders" :size="15" />
+          <span>题目属性</span>
+        </div>
+        <div class="asp-header-actions">
+          <AppButton
+            variant="primary"
+            size="sm"
+            :loading="aiTagging"
+            :disabled="aiTagging"
+            @click="runAiTagging"
+          >
+            <AppIcon name="sparkles" :size="14" />
+            <span>{{ aiTagging ? '打标中…' : 'AI 智能打标' }}</span>
+          </AppButton>
+        </div>
+      </header>
 
     <!-- ===== 滚动主体 ===== -->
     <div class="asp-body">
@@ -609,14 +621,45 @@ defineExpose({ clearFieldHighlight })
         </div>
       </section>
     </div>
-  </aside>
+    </aside>
+
+    <!-- 左侧边缘把手 Toggle：与 KnowledgeTreeNav 右侧把手风格相同（尺寸、动画、着色统一） -->
+    <button
+      type="button"
+      class="asp-edge-handle"
+      :class="{ 'is-collapsed': collapsed }"
+      :title="collapsed ? '展开属性面板' : '收起属性面板'"
+      :aria-label="collapsed ? '展开属性面板' : '收起属性面板'"
+      @click="toggleCollapsed"
+    >
+      <AppIcon
+        name="chevron-right"
+        class="toggle-chevron"
+        :size="14"
+      />
+      <span class="toggle-tooltip">{{ collapsed ? '展开属性' : '收起属性' }}</span>
+    </button>
+  </div>
 </template>
 
 <style scoped>
-/* ===== 容器：320px 常驻右侧 ===== */
-.attr-side-panel {
-  width: 320px;
+/* ===== 外层 wrapper：负责宽度过渡，承载左侧把手按钮 ===== */
+.asp-wrapper {
+  position: relative;
   flex-shrink: 0;
+  height: 100%;
+  width: clamp(260px, 25vw, 320px);
+  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.asp-wrapper.is-collapsed {
+  width: 0;
+}
+
+/* ===== 实际面板：填满 wrapper，折叠时透明 + 禁用交互 ===== */
+.attr-side-panel {
+  width: 100%;
+  height: 100%;
   display: flex;
   flex-direction: column;
   background: var(--bg-card);
@@ -624,12 +667,95 @@ defineExpose({ clearFieldHighlight })
   border: 1px solid var(--border-color);
   box-shadow: var(--shadow-sm);
   overflow: hidden;
-  height: 100%;
+  transition: opacity 0.25s ease;
+}
+
+.asp-wrapper.is-collapsed .attr-side-panel {
+  opacity: 0;
+  pointer-events: none;
 }
 
 [data-theme='dark'] .attr-side-panel {
   border-color: #3a3a3c;
   box-shadow: none;
+}
+
+/* ===== 左侧边缘把手（Handle）Toggle：与 KnowledgeTreeNav 保持相同的精细化胶囊把手风格 ===== */
+.asp-edge-handle {
+  position: absolute;
+  top: 50%;
+  left: -11px;
+  transform: translateY(-50%);
+  width: 22px;
+  height: 38px;
+  border-radius: 19px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.06);
+  color: var(--text-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  z-index: 20;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  outline: none;
+}
+
+/* Icon 旋转效果 */
+.toggle-chevron {
+  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1), color 0.15s ease;
+}
+
+.asp-edge-handle.is-collapsed .toggle-chevron {
+  transform: rotate(180deg);
+}
+
+/* Hover 浮跃与色值高亮（完全贴合系统主题变量） */
+.asp-edge-handle:hover {
+  background: var(--bg-hover);
+  color: var(--accent);
+  border-color: var(--accent-light);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.08);
+  transform: translateY(-50%) scale(1.05);
+}
+
+/* Active 弹簧按压反馈 */
+.asp-edge-handle:active {
+  transform: translateY(-50%) scale(0.95);
+}
+
+/* 侧栏折叠时 handle 的定位适配 */
+.asp-wrapper.is-collapsed .asp-edge-handle {
+  left: -24px;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.12);
+}
+
+/* 悬浮微型 Prompt Tooltip */
+.toggle-tooltip {
+  position: absolute;
+  right: calc(100% + 6px);
+  top: 50%;
+  transform: translateY(-50%) translateX(4px);
+  white-space: nowrap;
+  background: var(--text-primary);
+  color: var(--bg-card);
+  font-size: 11px;
+  font-weight: 500;
+  padding: 3px 7px;
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transition: all 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.asp-edge-handle:hover .toggle-tooltip {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(-50%) translateX(0);
 }
 
 /* ===== 顶部 ===== */
@@ -655,6 +781,12 @@ defineExpose({ clearFieldHighlight })
 
 .asp-title :deep(.app-icon) {
   color: var(--text-secondary);
+}
+
+.asp-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 /* ===== 滚动主体 ===== */
@@ -955,12 +1087,6 @@ defineExpose({ clearFieldHighlight })
 }
 
 /* ===== 移动端：宽度自适应，但仍保持纵向栈 ===== */
-@media (max-width: 1100px) {
-  .attr-side-panel {
-    width: 280px;
-  }
-}
-
 @media (max-width: 900px) {
   .attr-side-panel {
     width: 100%;

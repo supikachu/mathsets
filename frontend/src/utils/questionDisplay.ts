@@ -5,7 +5,6 @@ export function typeLabel(t: string) {
     choice: '选择',
     fill: '填空',
     solution: '解答',
-    judgment: '判断',
   }
   return map[t] || t
 }
@@ -15,21 +14,32 @@ export function typeBadgeColor(t: string): 'blue' | 'yellow' | 'green' | 'gray' 
     choice: 'blue',
     fill: 'yellow',
     solution: 'green',
-    judgment: 'gray',
   }
   return map[t] || 'blue'
 }
 
-export function diffLabel(d: string) {
+export function diffLabel(d: string | number | null | undefined): string {
+  if (d == null) return ''
+  if (typeof d === 'number') {
+    if (d <= 2) return '简单'
+    if (d === 3) return '中等'
+    return '困难'
+  }
   const map: Record<string, string> = {
     easy: '简单',
     medium: '中等',
     hard: '困难',
   }
-  return map[d] || d
+  return map[d] || String(d)
 }
 
-export function diffBadgeColor(d: string): 'green' | 'yellow' | 'red' {
+export function diffBadgeColor(d: string | number | null | undefined): 'green' | 'yellow' | 'red' {
+  if (d == null) return 'yellow'
+  if (typeof d === 'number') {
+    if (d <= 2) return 'green'
+    if (d === 3) return 'yellow'
+    return 'red'
+  }
   const map: Record<string, 'green' | 'yellow' | 'red'> = {
     easy: 'green',
     medium: 'yellow',

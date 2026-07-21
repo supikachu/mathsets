@@ -23,14 +23,16 @@
             <AppBadge :color="typeBadgeColor(q.question_type)">
               {{ typeLabel(q.question_type) }}
             </AppBadge>
-            <AppBadge color="gray">{{ diffLabel(q.difficulty) }}</AppBadge>
-            <span class="text-sm text-muted">创建者: {{ q.creator_id?.substring(0, 8) || '—' }}</span>
+            <AppBadge :color="diffBadgeColor(q.difficulty)">
+              {{ diffLabel(q.difficulty) }}
+            </AppBadge>
+            <span class="text-sm text-muted">创建者: {{ q.creator_name || q.creator_id?.substring(0, 8) || '—' }}</span>
           </div>
           <span class="text-sm text-muted">{{ formatTime(q.updated_at) }}</span>
         </div>
         <div class="q-item-content line-clamp-2"><LatexRender :text="q.stem" :inline="true" /></div>
         <div class="q-item-actions" style="margin-top: 8px">
-          <AppButton variant="success" size="sm" :loading="reviewing === q.id" @click.stop="handleReview(q, 'approved')">通过</AppButton>
+          <AppButton variant="primary" size="sm" :loading="reviewing === q.id" @click.stop="handleReview(q, 'approved')">通过</AppButton>
           <AppButton variant="danger" size="sm" @click.stop="handleReview(q, 'rejected')">驳回</AppButton>
         </div>
       </div>
@@ -47,7 +49,7 @@
         />
       </div>
       <div class="form-actions">
-        <AppButton variant="ghost" @click="rejectDialog = false">取消</AppButton>
+        <AppButton variant="ghost" @click="cancelReject">取消</AppButton>
         <AppButton variant="primary" :loading="rejecting" @click="confirmReject">确认驳回</AppButton>
       </div>
     </AppModal>
@@ -61,7 +63,7 @@ import client from '@/api/client'
 import { AppBadge, AppButton, AppEmpty, AppModal, AppIcon } from '@/components/ui'
 import LatexRender from '@/components/LatexRender.vue'
 import { useToast } from '@/composables/useToast'
-import { typeLabel, typeBadgeColor, diffLabel, formatTime } from '@/utils/questionDisplay'
+import { typeLabel, typeBadgeColor, diffLabel, diffBadgeColor, formatTime } from '@/utils/questionDisplay'
 
 const toast = useToast()
 const list = ref<QuestionSummary[]>([])
@@ -88,6 +90,11 @@ function handleReview(q: QuestionSummary, action: string) {
   } else {
     confirmReview(q, action)
   }
+}
+
+function cancelReject() {
+  rejectDialog.value = false
+  rejectComment.value = ''
 }
 
 async function confirmReject() {

@@ -14,19 +14,19 @@
         </div>
         <div class="header-actions">
           <template v-if="q?.status === 'draft'">
-            <button class="btn-soft-secondary" @click="$router.push(`/questions/${q!.id}/edit`)"><AppIcon name="pencil" :size="15" /> 编辑</button>
-            <button class="btn-soft-primary" :disabled="submitting" @click="submitReview">{{ submitting ? '提交中…' : '提交审核' }}</button>
-            <button class="btn-soft-danger" @click="confirmDelete"><AppIcon name="trash" :size="15" /> 删除</button>
+            <AppButton variant="outline" size="sm" @click="$router.push(`/questions/${q!.id}/edit`)"><AppIcon name="pencil" :size="15" /> 编辑</AppButton>
+            <AppButton variant="primary" size="sm" :loading="submitting" :disabled="submitting" @click="submitReview">提交审核</AppButton>
+            <AppButton variant="danger" size="sm" @click="confirmDelete"><AppIcon name="trash" :size="15" /> 删除</AppButton>
           </template>
           <template v-else-if="q?.status === 'rejected'">
-            <button class="btn-soft-secondary" @click="$router.push(`/questions/${q!.id}/edit`)"><AppIcon name="pencil" :size="15" /> 重新编辑</button>
+            <AppButton variant="outline" size="sm" @click="$router.push(`/questions/${q!.id}/edit`)"><AppIcon name="pencil" :size="15" /> 重新编辑</AppButton>
           </template>
           <template v-else-if="q?.status === 'pending' && q?.can_review">
-            <button class="btn-soft-success" @click="handleReview('approved')"><AppIcon name="check-circle" :size="15" /> 通过</button>
-            <button class="btn-soft-danger" @click="handleReview('rejected')"><AppIcon name="x-circle" :size="15" /> 驳回</button>
+            <AppButton variant="primary" size="sm" @click="handleReview('approved')"><AppIcon name="check-circle" :size="15" /> 通过</AppButton>
+            <AppButton variant="danger" size="sm" @click="handleReview('rejected')"><AppIcon name="x-circle" :size="15" /> 驳回</AppButton>
           </template>
           <template v-else-if="q?.status === 'published' && auth.isAdmin">
-            <button class="btn-soft-secondary" @click="toast.info('停用功能即将上线')"><AppIcon name="ban" :size="15" /> 停用</button>
+            <AppButton variant="ghost" size="sm" @click="toast.info('停用功能即将上线')"><AppIcon name="ban" :size="15" /> 停用</AppButton>
           </template>
         </div>
       </header>
@@ -39,7 +39,6 @@
             <!-- 卡片头部属性栏 -->
             <div class="paper-header">
               <div class="paper-header-left">
-                <span v-if="q?.source" class="paper-source-tag">{{ q.source }}</span>
                 <AppBadge :color="typeBadgeColor(q?.question_type || '')">{{ typeLabel(q?.question_type || '') }}</AppBadge>
                 <span class="paper-difficulty">
                   <AppIcon v-for="n in 5" :key="n" name="star" :size="12" :class="{ active: diffStars >= n }" class="paper-star" />
@@ -49,8 +48,6 @@
                 <span class="pill-badge">
                   <AppIcon :name="statusIcon(q?.status || '')" :size="13" />
                   <span>{{ statusLabel(q?.status || '') }}</span>
-                  <span class="pill-divider"></span>
-                  <span>{{ q?.default_score }}分</span>
                   <template v-if="q?.grade_level">
                     <span class="pill-divider"></span>
                     <span>{{ gradeLevelLabel(q.grade_level) }}</span>
@@ -107,12 +104,6 @@
                     <span class="sub-question-badge">{{ i + 1 }}</span>
                     <div class="answer-item-body"><LatexRender :text="ans" /></div>
                   </div>
-                </div>
-                <!-- 判断题答案 -->
-                <div v-else-if="q?.question_type === 'judgment'" class="card-answer-content">
-                  <span class="paper-judge-tag" :class="q?.correct_answer?.[0] === true ? 'judge-correct' : 'judge-wrong'">
-                    {{ q?.correct_answer?.[0] === true ? '正确' : '错误' }}
-                  </span>
                 </div>
               </div>
 
@@ -707,15 +698,6 @@ onMounted(async () => {
   flex-wrap: wrap;
 }
 
-.paper-source-tag {
-  font-size: 12px;
-  font-weight: 600;
-  padding: 3px 10px;
-  border-radius: 6px;
-  background: var(--accent-light);
-  color: var(--accent);
-}
-
 .paper-difficulty {
   display: flex;
   gap: 1px;
@@ -842,29 +824,6 @@ onMounted(async () => {
 
 [data-theme='dark'] .paper-solution-answer {
   color: #f5f5f7;
-}
-
-/* 判断题 */
-.paper-judgment {
-  margin-bottom: 16px;
-}
-
-.paper-judge-tag {
-  display: inline-block;
-  padding: 4px 16px;
-  border-radius: 6px;
-  font-weight: 600;
-  font-size: 14px;
-}
-
-.judge-correct {
-  background: var(--success-light);
-  color: var(--success);
-}
-
-.judge-wrong {
-  background: var(--danger-light, rgba(239, 68, 68, 0.1));
-  color: var(--danger, #ef4444);
 }
 
 /* ============ 悬浮胶囊（Pill Badge） ============ */

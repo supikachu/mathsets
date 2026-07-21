@@ -201,17 +201,17 @@ function splitSolution(text: string): { body: string; conclusion: string } {
 .preview-col-inner {
   flex: 1;
   min-height: 0;
+  overflow-y: auto;
+  padding: 16px;
 }
 
 /* 试卷卡片 - 悬浮纸张效果 */
 .paper-card {
   background: var(--bg-card);
   border-radius: 16px;
-  padding: 24px 28px 128px 28px;
+  padding: 24px 28px 48px 28px;
   box-shadow: var(--shadow-md);
   border: none;
-  height: calc(100vh - 120px);
-  overflow-y: auto;
 }
 
 [data-theme='dark'] .paper-card {

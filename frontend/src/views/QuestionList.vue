@@ -1,5 +1,12 @@
 <template>
   <div class="ql-page">
+    <!-- ===== 主体：左侧知识树导航 + 右侧列表区 ===== -->
+    <div class="ql-body">
+      <!-- 左侧常驻知识树导航（替代旧的 KpTreePanel） -->
+      <KnowledgeTreeNav :selected-id="navNodeId" @select="handleKnowledgeNodeSelect" />
+
+      <!-- 右侧：工具栏 + 列表区 -->
+      <div class="ql-main">
     <!-- ===== Apple风格吸顶工具栏 ===== -->
     <div class="ql-sticky-bar">
       <div class="ql-toolbar">
@@ -23,8 +30,9 @@
           <input
             v-model="query.keyword"
             class="ql-search-input"
-            placeholder="搜索题目"
-            @keydown.enter="toggleFilter"
+            placeholder="搜索题目（输入即搜）"
+            @input="onSearchInput"
+            @keydown.enter="onSearchSubmit"
           />
           <button class="ql-search-go" @click="toggleFilter">
             <AppIcon name="filter" :size="14" />
@@ -51,20 +59,7 @@
       <!-- 筛选面板（点击搜索/筛选按钮时展开，紧贴搜索框下方） -->
       <div class="ql-filter-collapse" :class="{ 'is-open': showFilter }">
         <div class="ql-filter-panel">
-          <div class="ql-filter-row">
-            <span class="ql-filter-label">知识点</span>
-            <div class="ql-filter-kp">
-              <KnowledgeTreeCascader
-                v-model="selectedKnowledgeNodeIds"
-                :max="5"
-                placeholder="选择知识点筛选（支持子树）…"
-              />
-              <label class="ql-filter-descendant">
-                <input type="checkbox" v-model="includeDescendants" />
-                <span>包含子孙节点</span>
-              </label>
-            </div>
-          </div>
+          <!-- 基础筛选：题型 + 知识点（默认展示） -->
           <div class="ql-filter-row">
             <span class="ql-filter-label">题型</span>
             <div class="ql-filter-tags">
@@ -77,29 +72,61 @@
               >{{ opt.label }}</button>
             </div>
           </div>
-          <div class="ql-filter-row">
-            <span class="ql-filter-label">难度</span>
-            <div class="ql-filter-tags">
-              <button
-                v-for="opt in difficultyOptions"
-                :key="opt.value"
-                class="ql-tag"
-                :class="{ active: !query.difficulty && opt.value === '__all' || query.difficulty === opt.value }"
-                @click="selectTag('difficulty', opt.value)"
-              >{{ opt.label }}</button>
+
+          <!-- 高级筛选：难度 + 状态（点击展开） -->
+          <div class="ql-filter-advanced" :class="{ 'is-open': showAdvancedFilter }">
+            <div class="ql-filter-row">
+              <span class="ql-filter-label">难度</span>
+              <div class="ql-filter-tags">
+                <button
+                  v-for="opt in difficultyOptions"
+                  :key="opt.value"
+                  class="ql-tag"
+                  :class="{ active: !query.difficulty && opt.value === '__all' || query.difficulty === opt.value }"
+                  @click="selectTag('difficulty', opt.value)"
+                >{{ opt.label }}</button>
+              </div>
+            </div>
+            <div class="ql-filter-row">
+              <span class="ql-filter-label">状态</span>
+              <div class="ql-filter-tags">
+                <button
+                  v-for="opt in statusOptions"
+                  :key="opt.value"
+                  class="ql-tag"
+                  :class="{ active: !query.status && opt.value === '__all' || query.status === opt.value }"
+                  @click="selectTag('status', opt.value)"
+                >{{ opt.label }}</button>
+              </div>
             </div>
           </div>
-          <div class="ql-filter-row">
-            <span class="ql-filter-label">状态</span>
-            <div class="ql-filter-tags">
-              <button
-                v-for="opt in statusOptions"
-                :key="opt.value"
-                class="ql-tag"
-                :class="{ active: !query.status && opt.value === '__all' || query.status === opt.value }"
-                @click="selectTag('status', opt.value)"
-              >{{ opt.label }}</button>
-            </div>
+
+          <!-- 高级筛选切换按钮 + 已选筛选条件提示 -->
+          <div class="ql-filter-footer">
+            <button
+              type="button"
+              class="ql-advanced-toggle"
+              :class="{ active: showAdvancedFilter }"
+              @click="showAdvancedFilter = !showAdvancedFilter"
+            >
+              <AppIcon
+                :name="showAdvancedFilter ? 'chevron-up' : 'chevron-down'"
+                :size="12"
+              />
+              <span>高级筛选</span>
+              <span v-if="advancedFilterActiveCount > 0" class="ql-advanced-badge">
+                {{ advancedFilterActiveCount }}
+              </span>
+            </button>
+            <button
+              v-if="hasAnyFilter"
+              type="button"
+              class="ql-clear-all"
+              @click="clearAllFilters"
+            >
+              <AppIcon name="x" :size="12" />
+              清空筛选
+            </button>
           </div>
         </div>
       </div>
@@ -111,10 +138,28 @@
       <div v-if="loading" class="loading-hint">加载中…</div>
 
       <template v-else>
-        <AppEmpty v-if="cardList.length === 0" description="没有找到匹配的题目" />
+        <!-- 空状态：居中缺省页 + 清空筛选快捷按钮 -->
+        <div v-if="cardList.length === 0" class="ql-empty-state">
+          <div class="ql-empty-icon">
+            <AppIcon name="search" :size="36" :stroke="1.5" />
+          </div>
+          <div class="ql-empty-title">没有找到匹配的题目</div>
+          <div class="ql-empty-desc">
+            尝试调整搜索关键词或筛选条件
+          </div>
+          <button
+            v-if="hasAnyFilter"
+            type="button"
+            class="ql-empty-action"
+            @click="clearAllFilters"
+          >
+            <AppIcon name="x" :size="14" />
+            清空筛选条件
+          </button>
+        </div>
 
         <!-- ===== 题目卡片列表 ===== -->
-        <div class="q-card-list">
+        <div v-else class="q-card-list">
           <div
             v-for="card in cardList"
             :key="card.id"
@@ -251,17 +296,19 @@
         />
       </template>
     </div>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, onBeforeUnmount, watch, nextTick, type ComponentPublicInstance } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick, type ComponentPublicInstance } from 'vue'
 import { useRouter } from 'vue-router'
 import { questionApi, type QuestionSummary, type QuestionDetail, type QuestionQuery, type GradeLevel, type KnowledgeNodeSummary } from '@/api/client'
 import LatexRender from '@/components/LatexRender.vue'
 import ThemeToggle from '@/components/ThemeToggle.vue'
-import KnowledgeTreeCascader from '@/components/KnowledgeTreeCascader.vue'
-import { AppButton, AppSelect, AppEmpty, AppPagination, AppIcon, AppBadge } from '@/components/ui'
+import KnowledgeTreeNav from '@/components/KnowledgeTreeNav.vue'
+import { AppButton, AppSelect, AppPagination, AppIcon, AppBadge } from '@/components/ui'
 import { useQuestionBasket } from '@/composables/useQuestionBasket'
 import { useToast } from '@/composables/useToast'
 import { useSpaceStore } from '@/stores/space'
@@ -281,12 +328,21 @@ const toast = useToast()
 const space = useSpaceStore()
 const basket = useQuestionBasket()
 
-// 知识点筛选（本地状态，触发 query.knowledge_node_ids 变化）
-const selectedKnowledgeNodeIds = ref<string[]>([])
-const includeDescendants = ref(true)
+// 左侧知识树导航选中的节点 ID（空字符串 = 全部题目）
+const navNodeId = ref('')
+
+// 左侧树节点点击 → 同步到 query 并触发表格刷新（默认包含子孙节点）
+function handleKnowledgeNodeSelect(nodeId: string) {
+  navNodeId.value = nodeId
+  query.knowledge_node_ids = nodeId ? [nodeId] : undefined
+  query.include_descendants = nodeId ? true : undefined
+  page.value = 1
+  fetchList()
+}
 
 // ---- 筛选面板展开状态 ----
 const showFilter = ref(false)
+const showAdvancedFilter = ref(false)
 
 function toggleFilter() {
   showFilter.value = !showFilter.value
@@ -295,6 +351,37 @@ function toggleFilter() {
     page.value = 1
     fetchList()
   }
+}
+
+// 已激活的高级筛选项数量（用于切换按钮徽标）
+const advancedFilterActiveCount = computed(() => {
+  let n = 0
+  if (query.difficulty != null) n++
+  if (query.status != null) n++
+  return n
+})
+
+// 是否有任何筛选条件被激活（用于显示"清空筛选"按钮）
+const hasAnyFilter = computed(() => {
+  return !!(
+    query.keyword ||
+    query.question_type ||
+    query.difficulty ||
+    query.status ||
+    (query.knowledge_node_ids && query.knowledge_node_ids.length > 0)
+  )
+})
+
+function clearAllFilters() {
+  query.keyword = ''
+  query.question_type = undefined
+  query.difficulty = undefined
+  query.status = undefined
+  query.knowledge_node_ids = undefined
+  query.include_descendants = undefined
+  navNodeId.value = ''
+  page.value = 1
+  fetchList()
 }
 
 function spaceKindLabel(kind: string) {
@@ -374,7 +461,6 @@ const typeOptions = [
   { label: '选择题', value: 'choice' },
   { label: '填空题', value: 'fill' },
   { label: '解答题', value: 'solution' },
-  { label: '判断题', value: 'judgment' },
 ]
 
 const difficultyOptions = [
@@ -650,21 +736,7 @@ function toggleBasket(id: string) {
   }
 }
 
-// 知识点筛选变化 → 同步到 query 并触发搜索
-watch(selectedKnowledgeNodeIds, (ids) => {
-  query.knowledge_node_ids = ids.length > 0 ? [...ids] : undefined
-  query.include_descendants = ids.length > 0 ? includeDescendants.value : undefined
-  page.value = 1
-  fetchList()
-})
-
-watch(includeDescendants, (v) => {
-  if (selectedKnowledgeNodeIds.value.length > 0) {
-    query.include_descendants = v
-    page.value = 1
-    fetchList()
-  }
-})
+// 左侧导航节点变化已由 handleKnowledgeNodeSelect 处理，无需 watch
 
 watch(() => space.currentSpaceId, (newId) => {
   query.space_id = newId || undefined
@@ -688,6 +760,23 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   overflow: hidden; /* 锁定外层高度，彻底掐断全局滚动条 */
+}
+
+/* ===== 主体：左侧知识树 + 右侧列表区 ===== */
+.ql-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+
+/* 右侧主区：工具栏 + 滚动列表 */
+.ql-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .ql-sticky-bar {
@@ -910,6 +999,98 @@ onBeforeUnmount(() => {
   border-top: 1px solid var(--border-color);
 }
 
+/* 高级筛选区：默认 grid 0fr 折叠，与外层 collapse 同款动画 */
+.ql-filter-advanced {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition:
+    grid-template-rows 0.3s cubic-bezier(0.32, 0.72, 0, 1),
+    opacity 0.2s cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.ql-filter-advanced.is-open {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
+.ql-filter-advanced > .ql-filter-row {
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* 筛选面板底部：高级筛选切换 + 清空按钮 */
+.ql-filter-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0 0;
+  margin-top: 4px;
+  border-top: 1px dashed var(--divider);
+}
+
+.ql-advanced-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 9999px;
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: var(--transition-fast);
+}
+
+.ql-advanced-toggle:hover {
+  border-color: var(--text-muted);
+  color: var(--text-primary);
+}
+
+.ql-advanced-toggle.active {
+  background: var(--accent-light);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.ql-advanced-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 9999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.ql-clear-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 12px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  border-radius: 9999px;
+  transition: var(--transition-fast);
+}
+
+.ql-clear-all:hover {
+  color: var(--danger);
+  background: var(--danger-light);
+}
+
 .ql-filter-row {
   display: flex;
   align-items: center;
@@ -1040,6 +1221,70 @@ onBeforeUnmount(() => {
   color: var(--text-muted);
 }
 
+/* ===== 空状态：居中缺省页 ===== */
+.ql-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 80px 20px 60px;
+  text-align: center;
+  animation: ql-empty-fade 0.4s ease;
+}
+
+@keyframes ql-empty-fade {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.ql-empty-icon {
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  margin-bottom: 18px;
+}
+
+.ql-empty-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 6px;
+  letter-spacing: -0.01em;
+}
+
+.ql-empty-desc {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-bottom: 18px;
+}
+
+.ql-empty-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 16px;
+  border-radius: 9999px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: var(--transition-fast);
+}
+
+.ql-empty-action:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-light);
+}
+
 /* ===== Card List ===== */
 .q-card-list {
   display: flex;
@@ -1134,10 +1379,6 @@ onBeforeUnmount(() => {
 .q-tag--solution {
   background: var(--success-light);
   color: var(--success);
-}
-.q-tag--judgment {
-  background: var(--bg-active);
-  color: var(--text-secondary);
 }
 
 /* Difficulty tags */

@@ -496,7 +496,7 @@ defineExpose({
           </div>
           <div class="ai-actions">
             <AppButton variant="ghost" @click="aiResult = null">返回修改</AppButton>
-            <AppButton variant="success" @click="applyAiResult"><AppIcon name="check" :size="16" /> 应用到表单</AppButton>
+            <AppButton variant="primary" @click="applyAiResult"><AppIcon name="check" :size="16" /> 应用到表单</AppButton>
           </div>
         </div>
       </div>

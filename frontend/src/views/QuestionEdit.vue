@@ -9,15 +9,25 @@
       <!-- ==================== 顶部操作栏 ==================== -->
       <header class="top-bar">
         <div class="top-bar-left">
-          <AppButton variant="ghost" size="sm" @click="handleBack"><AppIcon name="chevron-left" :size="17" /> 返回</AppButton>
-          <AppButton variant="ghost" size="sm" @click="handleAi"><AppIcon name="sparkles" :size="17" /> AI 智能识别</AppButton>
+          <AppButton variant="ghost" size="sm" @click="handleBack"><AppIcon name="chevron-left" :size="15" /> 返回</AppButton>
+          <AppButton variant="ghost" size="sm" @click="handleAi"><AppIcon name="sparkles" :size="15" /> AI 智能识别</AppButton>
           <h1 class="edit-title">{{ isNew ? '录入新题' : '编辑题目' }}</h1>
           <AppBadge v-if="!isNew" color="gray">v{{ form.version }}</AppBadge>
         </div>
         <div class="top-bar-right">
-          <AppButton v-if="!isNew" variant="ghost" size="sm" @click="showHistory = true"><AppIcon name="history" :size="17" /> 历史版本</AppButton>
-          <AppButton variant="outline" size="sm" :loading="saving" :disabled="saving || submitting" @click="handleSave(false)"><AppIcon name="save" :size="17" /> 保存</AppButton>
-          <AppButton variant="success" size="sm" :loading="submitting" :disabled="saving || submitting" @click="handleSave(true)"><AppIcon name="send" :size="17" /> 提交审核</AppButton>
+          <span
+            v-if="draftStatus !== 'idle'"
+            class="draft-status"
+            :class="draftStatus"
+            :key="draftStatus"
+          >
+            <span v-if="draftStatus === 'saving'" class="draft-spinner" />
+            <AppIcon v-else name="check" :size="13" />
+            <span>{{ draftStatus === 'saving' ? '正在保存草稿…' : '已保存' }}</span>
+          </span>
+          <AppButton v-if="!isNew" variant="outline" size="sm" @click="showHistory = true"><AppIcon name="history" :size="15" /> 历史版本</AppButton>
+          <AppButton variant="outline" size="sm" :loading="saving" :disabled="saving || submitting" @click="handleSave(false)"><AppIcon name="save" :size="15" /> 保存</AppButton>
+          <AppButton variant="primary" size="sm" :loading="submitting" :disabled="saving || submitting" @click="handleSave(true)"><AppIcon name="send" :size="15" /> 提交审核</AppButton>
         </div>
       </header>
 
@@ -41,7 +51,7 @@
       <!-- ==================== 主内容 三栏：编辑 + 预览 + 属性面板 ==================== -->
       <div class="main-content">
         <!-- 左栏：编辑 -->
-        <div class="edit-col">
+        <div class="edit-col interactive-column">
           <div class="edit-col-inner">
             <!-- ==================== 第二层：描述性标签流（只读概览，知识点在右侧面板编辑） ==================== -->
             <div class="question-tags-wrapper">
@@ -175,13 +185,15 @@
         </div>
 
         <!-- 中栏：试卷化预览 -->
-        <LivePreviewCard :form="form" />
+        <LivePreviewCard class="interactive-column" tabindex="0" @click="focusColumn" :form="form" />
 
         <!-- 右栏：常驻属性面板（含 AI 智能打标） -->
         <AttributeSidePanel
+          class="interactive-column"
           v-model:tagIds="form.tagIds"
           v-model:knowledgeNodeIds="knowledgeNodeIds"
           v-model:aiGeneratedFields="aiGeneratedFields"
+          v-model:collapsed="panelCollapsed"
           :competenceTags="competenceTags"
           :methodTags="methodTags"
           :schoolTags="schoolTags"
@@ -280,6 +292,18 @@ const knowledgeNodeIds = ref<string[]>([])
 const methodTags = ref<Tag[]>([])
 const competenceTags = ref<Tag[]>([])
 const schoolTags = ref<Tag[]>([])
+
+// 右侧属性面板折叠状态（小屏场景把空间还给编辑器）
+const panelCollapsed = ref(false)
+
+// 草稿自动保存状态指示：'idle' | 'saving' | 'saved'
+const draftStatus = ref<'idle' | 'saving' | 'saved'>('idle')
+let draftStatusTimer: ReturnType<typeof setTimeout> | null = null
+
+// 预览列无 input，点击时手动聚焦其根节点以触发 :focus-within 沉浸式高亮
+function focusColumn(e: MouseEvent) {
+  (e.currentTarget as HTMLElement)?.focus()
+}
 
 async function loadTags() {
   try {
@@ -391,7 +415,6 @@ const form = reactive({
   solutionAnswer: '',
   sub_answers: [''] as string[],
   gradingSteps: [] as { label: string; points: number; description: string }[],
-  judgmentCorrect: true,
   knowledgeNodeIds: [] as string[],
   tagIds: [] as string[],
   reviewer: '' as string,
@@ -589,9 +612,6 @@ function buildPayload() {
     case 'solution':
       payload.correct_answer = form.sub_answers.filter(a => a.trim())
       break
-    case 'judgment':
-      payload.correct_answer = [form.judgmentCorrect]
-      break
   }
   return payload
 }
@@ -632,15 +652,20 @@ async function handleSave(submitAfter: boolean) {
 
 // Draft autosave
 // 【闸门】切换 Tab 期间不写草稿（避免 applyFormSnapshot 触发的批量字段变更被误判为修改）
+// 用户每次改动 → 立即标记 "saving" → 3s 防抖落盘后切到 "saved" → 2s 后回到 "idle"
 let autoSaveTimer: ReturnType<typeof setTimeout> | null = null
 watch(() => ({ ...form }), () => {
   if (isLoading.value || isSwitchingTab.value) return
   form.hasUnsaved = true
+  draftStatus.value = 'saving'
+  if (draftStatusTimer) { clearTimeout(draftStatusTimer); draftStatusTimer = null }
   if (autoSaveTimer) clearTimeout(autoSaveTimer)
   autoSaveTimer = setTimeout(() => {
     try {
       const key = isNew ? 'q-draft-new' : `q-draft-${route.params.id}`
       sessionStorage.setItem(key, JSON.stringify(form))
+      draftStatus.value = 'saved'
+      draftStatusTimer = setTimeout(() => { draftStatus.value = 'idle' }, 2000)
     } catch { /* quota exceeded */ }
   }, 3000)
 }, { deep: true })
@@ -695,7 +720,7 @@ async function doRestoreDraft() {
   if (!pendingDraft) return
   const fields = ['stem', 'question_type', 'sub_type', 'difficulty', 'default_score', 'grade', 'semester',
     'source', 'solutions', 'options', 'correctAnswer', 'blanks', 'solutionAnswer', 'sub_answers',
-    'gradingSteps', 'judgmentCorrect', 'tagIds', 'difficulty_coefficient', 'academic_year', 'grade_semester', 'exam_region', 'exam_type', 'reviewer', 'reviewer_ids', 'internal_note']
+    'gradingSteps', 'tagIds', 'difficulty_coefficient', 'academic_year', 'grade_semester', 'exam_region', 'exam_type', 'reviewer', 'reviewer_ids', 'internal_note']
   for (const f of fields) {
     if (pendingDraft[f] !== undefined) (form as any)[f] = pendingDraft[f]
   }
@@ -796,7 +821,6 @@ async function loadQuestion() {
     form.solutionAnswer = ''
     form.sub_answers = ['']
     form.gradingSteps = []
-    form.judgmentCorrect = true
     if (d.question_type === 'choice' && d.options) {
       let opts = d.options
       if (typeof opts === 'string') { try { opts = JSON.parse(opts) } catch { opts = [] } }
@@ -822,8 +846,6 @@ async function loadQuestion() {
       if (Array.isArray(d.correct_answer) && d.correct_answer.length > 0) {
         form.sub_answers = d.correct_answer.map((a: any) => typeof a === 'string' ? a : String(a))
       }
-    } else if (d.question_type === 'judgment') {
-      if (Array.isArray(d.correct_answer)) form.judgmentCorrect = d.correct_answer[0] === true
     }
     form.hasUnsaved = false
   } catch { /* handled */ }
@@ -882,7 +904,6 @@ function applyFormSnapshot(s: any) {
   form.solutionAnswer = s.solutionAnswer ?? ''
   form.sub_answers = Array.isArray(s.sub_answers) ? [...s.sub_answers] : ['']
   form.gradingSteps = Array.isArray(s.gradingSteps) ? [...s.gradingSteps] : []
-  form.judgmentCorrect = s.judgmentCorrect ?? true
   form.knowledgeNodeIds = Array.isArray(s.knowledgeNodeIds) ? [...s.knowledgeNodeIds] : []
   form.tagIds = Array.isArray(s.tagIds) ? [...s.tagIds] : []
   form.reviewer = s.reviewer ?? ''
@@ -1044,7 +1065,6 @@ function parsedQuestionToSnapshot(q: ParsedQuestion): any {
     solutionAnswer: '',
     solutions: q.analysis.map(a => a.content),
     gradingSteps: [],
-    judgmentCorrect: true,
     knowledgeNodeIds,
     tagIds: [],
     reviewer_ids: [],
@@ -1127,6 +1147,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.removeEventListener('beforeunload', handleBeforeUnload)
   if (autoSaveTimer) clearTimeout(autoSaveTimer)
+  if (draftStatusTimer) clearTimeout(draftStatusTimer)
 })
 
 watch(() => form.question_type, () => {
@@ -1139,7 +1160,6 @@ watch(() => form.question_type, () => {
     form.solutionAnswer = ''
     form.sub_answers = ['']
     form.gradingSteps = []
-    form.judgmentCorrect = true
   }
 })
 </script>
@@ -1186,6 +1206,54 @@ watch(() => form.question_type, () => {
   gap: 8px;
 }
 
+/* 顶部操作栏按钮统一苹果胶囊风（999px 全圆角），与 QuestionDetail.vue 保持样式一致 */
+.top-bar :deep(.btn) {
+  border-radius: 999px;
+}
+
+/* 草稿自动保存状态指示器 */
+.draft-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: var(--bg-muted, transparent);
+  transition: color 0.2s ease, background 0.2s ease;
+  animation: draft-fade-in 0.2s ease;
+}
+
+.draft-status.saving {
+  color: var(--text-secondary, var(--text-muted));
+}
+
+.draft-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: draft-spin 0.9s linear infinite;
+}
+
+.draft-status.saved {
+  color: var(--success, #10b981);
+  background: var(--success-light, rgba(16, 185, 129, 0.08));
+}
+
+@keyframes draft-fade-in {
+  from { opacity: 0; transform: translateY(-1px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes draft-spin {
+  to { transform: rotate(360deg); }
+}
+
 /* ============ 主双栏布局 ============ */
 .main-content {
   display: flex;
@@ -1193,11 +1261,13 @@ watch(() => form.question_type, () => {
   gap: 16px;
   overflow: hidden;
   height: 100%;
+  align-items: stretch;
 }
 
 .edit-col {
   flex: 1.2;
   min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   background: var(--bg-card);
@@ -1214,6 +1284,56 @@ watch(() => form.question_type, () => {
   display: flex;
   flex-direction: column;
   gap: 20px;
+}
+
+/* ============ 沉浸式三栏交互容器 ============ */
+.interactive-column {
+  height: 100%;
+  min-height: 0;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  opacity: 0.7;
+  outline: none;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.interactive-column:hover {
+  opacity: 0.85;
+}
+
+.interactive-column:focus-within {
+  opacity: 1;
+  border-color: var(--purple);
+  transform: translateY(-2px);
+  box-shadow: 0 0 0 3px var(--purple-light), var(--shadow-md);
+}
+
+/* 细滚动条：Firefox */
+.edit-col-inner,
+.interactive-column :deep(.preview-col-inner),
+.interactive-column :deep(.asp-body) {
+  scrollbar-width: thin;
+}
+
+/* 细滚动条：WebKit（6px 极简风） */
+.edit-col-inner::-webkit-scrollbar,
+.interactive-column :deep(.preview-col-inner)::-webkit-scrollbar,
+.interactive-column :deep(.asp-body)::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.edit-col-inner::-webkit-scrollbar-thumb,
+.interactive-column :deep(.preview-col-inner)::-webkit-scrollbar-thumb,
+.interactive-column :deep(.asp-body)::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 3px;
+}
+
+.edit-col-inner::-webkit-scrollbar-track,
+.interactive-column :deep(.preview-col-inner)::-webkit-scrollbar-track,
+.interactive-column :deep(.asp-body)::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 /* ============ 第二层：描述性标签流 ============ */
@@ -1608,8 +1728,7 @@ watch(() => form.question_type, () => {
   transition: box-shadow 0.5s ease;
 }
 
-[data-theme='dark'] .edit-col {
-  border-color: #3a3a3c;
+[data-theme='dark'] .interactive-column {
   box-shadow: none;
 }
 

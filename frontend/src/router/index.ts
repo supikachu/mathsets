@@ -39,6 +39,7 @@ const router = createRouter({
           path: 'questions/new',
           name: 'QuestionNew',
           component: () => import('@/views/QuestionEdit.vue'),
+          meta: { immersive: true },
         },
         {
           path: 'questions/:id',
@@ -49,6 +50,7 @@ const router = createRouter({
           path: 'questions/:id/edit',
           name: 'QuestionEdit',
           component: () => import('@/views/QuestionEdit.vue'),
+          meta: { immersive: true },
         },
         {
           path: 'review',

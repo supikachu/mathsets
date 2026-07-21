@@ -1,5 +1,5 @@
 <template>
-  <div class="layout-root">
+  <div class="layout-root" :class="{ 'is-immersive': isImmersive }">
     <div class="app-container">
       <!-- 桌面侧边栏（导航卡片 + 用户卡片，两个独立卡片透出背景色） -->
       <nav class="sidebar">
@@ -89,6 +89,10 @@ const { items } = useNavItems()
 
 const showUserMenu = ref(false)
 const userMenuRef = ref<HTMLElement | null>(null)
+
+/** 沉浸式录题模式：路由 meta.immersive=true 时隐藏左侧系统导航，
+ *  让 QuestionEdit 独享 100% 横向屏幕空间 */
+const isImmersive = computed(() => route.meta.immersive === true)
 
 const avatarLetter = computed(() =>
   (auth.displayName || '?').charAt(0).toUpperCase(),
@@ -359,6 +363,17 @@ onUnmounted(() => document.removeEventListener('click', onDocumentClick))
 @media (min-width: 769px) {
   .layout-root :deep(.bottom-nav) {
     display: none;
+  }
+}
+
+/* ===== 沉浸式录题模式：隐藏左侧系统导航，主区独享 100% 宽度 ===== */
+@media (min-width: 769px) {
+  .layout-root.is-immersive .sidebar {
+    display: none;
+  }
+
+  .layout-root.is-immersive .app-container {
+    padding: 0;
   }
 }
 </style>

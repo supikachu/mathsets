@@ -7,11 +7,14 @@
  * 设计要点：
  * - 复用 AppIcon / AppEmpty，不引入任何第三方 UI 库
  * - 触发器风格对齐 AppSelect（Apple 风格圆角输入框）
- * - Popover 用 Teleport + fixed 定位，避免父容器裁剪
+ * - 交互模型：平铺折叠（Push-down Accordion），取消悬浮层
+ *   · 点击触发器 → 面板在 DOM 流中向下展开，推开后续表单字段
+ *   · 树列表不设 max-height / overflow-y，依赖父级面板流式滚动（拒绝嵌套滚动条）
+ *   · Esc 或"收起"按钮折叠面板
  * - 树采用"扁平化 + 深度缩进"渲染，规避递归组件的复杂度
  * - 选中状态用 Set 存储，O(1) 查询；不联动父子（保持最小可用语义）
  */
-import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import { AppIcon, AppEmpty } from '@/components/ui'
 import {
   knowledgeTreeApi,
@@ -44,16 +47,12 @@ const emit = defineEmits<{
 
 // ─── 状态 ──────────────────────────────────────────────────────────────
 const open = ref(false)
-const triggerRef = ref<HTMLElement | null>(null)
-const popoverRef = ref<HTMLElement | null>(null)
-const popoverStyle = ref({ top: '0px', left: '0px', width: '320px' })
 
 const trees = ref<KnowledgeTree[]>([])
 const activeTreeId = ref<string>('')
 const treeData = ref<KnowledgeNodeTreeNode[]>([])
 const loading = ref(false)
 
-const searchText = ref('')
 const expandedIds = ref<Set<string>>(new Set())
 const selectedIds = ref<Set<string>>(new Set(props.modelValue))
 
@@ -69,6 +68,18 @@ const selectedNodes = computed(() =>
     .filter((n): n is KnowledgeNodeTreeNode => !!n),
 )
 
+// ─── Chips 折叠：默认最多显示 2 个，剩余合并为 +N 徽标 ─────
+const CHIP_LIMIT = 2
+const showAllChips = ref(false)
+
+const visibleChips = computed(() =>
+  showAllChips.value ? selectedNodes.value : selectedNodes.value.slice(0, CHIP_LIMIT),
+)
+
+const hiddenChipsCount = computed(() =>
+  Math.max(0, selectedNodes.value.length - CHIP_LIMIT),
+)
+
 const activeTreeName = computed(() =>
   trees.value.find((t) => t.id === activeTreeId.value)?.name ?? '',
 )
@@ -78,55 +89,31 @@ interface FlatItem {
   depth: number
 }
 
-/** 扁平化展示列表：搜索时强制展开所有匹配项及其祖先链 */
-const filteredFlatList = computed<FlatItem[]>(() => {
+/** 扁平化展示列表：仅依据 expandedIds 决定是否递归子节点（不再做搜索过滤） */
+const flatList = computed<FlatItem[]>(() => {
   const result: FlatItem[] = []
-  const q = searchText.value.trim().toLowerCase()
 
-  function walk(nodes: KnowledgeNodeTreeNode[], depth: number, ancestorMatched: boolean) {
+  function walk(nodes: KnowledgeNodeTreeNode[], depth: number) {
     for (const n of nodes) {
-      const name = n.name.toLowerCase()
-      const code = (n.code || '').toLowerCase()
-      const selfMatched = !q || name.includes(q) || code.includes(q)
-      const shouldShow = selfMatched || ancestorMatched
-      if (shouldShow) {
-        result.push({ node: n, depth })
-      }
-      // 搜索时：任一祖先或自身匹配，则展开子树；否则尊重 expandedIds
-      const shouldRecurse =
-        shouldShow && (q ? true : expandedIds.value.has(n.id))
-      if (shouldRecurse && n.children.length > 0) {
-        walk(n.children, depth + 1, selfMatched || ancestorMatched)
+      result.push({ node: n, depth })
+      if (expandedIds.value.has(n.id) && n.children.length > 0) {
+        walk(n.children, depth + 1)
       }
     }
   }
 
-  walk(treeData.value, 0, false)
+  walk(treeData.value, 0)
   return result
 })
 
 // ─── 方法 ──────────────────────────────────────────────────────────────
-function updatePopoverPosition() {
-  if (!triggerRef.value) return
-  const rect = triggerRef.value.getBoundingClientRect()
-  const spaceBelow = window.innerHeight - rect.bottom
-  const maxH = Math.min(420, Math.max(280, spaceBelow - 8))
-  popoverStyle.value = {
-    top: `${rect.bottom + 4}px`,
-    left: `${rect.left}px`,
-    width: `${Math.max(320, rect.width)}px`,
-  }
-  if (popoverRef.value) {
-    popoverRef.value.style.maxHeight = `${maxH}px`
-  }
-}
-
 function toggle() {
   if (props.disabled) return
   open.value = !open.value
-  if (open.value) {
-    nextTick(updatePopoverPosition)
-  }
+}
+
+function collapse() {
+  open.value = false
 }
 
 function toggleExpand(id: string) {
@@ -157,22 +144,9 @@ function clearAll() {
   emit('update:modelValue', [])
 }
 
-function onClickOutside(e: MouseEvent) {
-  const target = e.target as Node
-  if (triggerRef.value?.contains(target)) return
-  if (popoverRef.value?.contains(target)) return
-  open.value = false
-}
-
-function onEscape(e: KeyboardEvent) {
-  if (e.key === 'Escape' && open.value) {
-    open.value = false
-    triggerRef.value?.focus()
-  }
-}
-
-function onScrollOrResize() {
-  if (open.value) updatePopoverPosition()
+/** Esc 折叠面板（仅当焦点在级联器内部时触发，避免干扰其他输入区） */
+function onEscape() {
+  if (open.value) open.value = false
 }
 
 function rebuildNodeMap() {
@@ -221,6 +195,14 @@ async function loadTreeData() {
 }
 
 // ─── 侦听 ──────────────────────────────────────────────────────────────
+// 选中数下降到 ≤2 时自动收起"展开全部"状态，避免下次添加新 chip 仍展开
+watch(
+  () => selectedNodes.value.length,
+  (n) => {
+    if (n <= CHIP_LIMIT) showAllChips.value = false
+  },
+)
+
 watch(
   () => props.treeId,
   (newId) => {
@@ -240,36 +222,16 @@ watch(
   { deep: true },
 )
 
-watch(open, (val) => {
-  if (val) {
-    window.addEventListener('scroll', onScrollOrResize, true)
-    window.addEventListener('resize', onScrollOrResize)
-  } else {
-    window.removeEventListener('scroll', onScrollOrResize, true)
-    window.removeEventListener('resize', onScrollOrResize)
-  }
-})
-
 onMounted(async () => {
-  document.addEventListener('click', onClickOutside)
-  document.addEventListener('keydown', onEscape)
   await loadTrees()
   if (activeTreeId.value) await loadTreeData()
-})
-
-onBeforeUnmount(() => {
-  document.removeEventListener('click', onClickOutside)
-  document.removeEventListener('keydown', onEscape)
-  window.removeEventListener('scroll', onScrollOrResize, true)
-  window.removeEventListener('resize', onScrollOrResize)
 })
 </script>
 
 <template>
-  <div class="kt-cascader" :class="{ disabled }">
+  <div class="kt-cascader" :class="{ disabled }" @keydown.escape="onEscape">
     <!-- 触发器 -->
     <button
-      ref="triggerRef"
       type="button"
       class="cascader-trigger"
       :class="{ open, 'has-value': selectedIds.size > 0 }"
@@ -301,35 +263,42 @@ onBeforeUnmount(() => {
       </span>
     </button>
 
-    <!-- 已选 chips -->
+    <!-- 已选 chips（默认最多 2 个，超出折叠为 +N 徽标） -->
     <div v-if="selectedNodes.length > 0" class="cascader-chips">
-      <span v-for="n in selectedNodes" :key="n.id" class="chip">
+      <span v-for="n in visibleChips" :key="n.id" class="chip">
         <span class="chip-name">{{ n.name }}</span>
         <button class="chip-x" type="button" @click="toggleSelect(n.id)">
           <AppIcon name="x" :size="11" />
         </button>
       </span>
+      <!-- 折叠徽标：点击展开全部 chips -->
+      <button
+        v-if="hiddenChipsCount > 0 && !showAllChips"
+        type="button"
+        class="chip chip-more"
+        :title="`点击展开剩余 ${hiddenChipsCount} 个`"
+        @click="showAllChips = true"
+      >
+        +{{ hiddenChipsCount }}
+      </button>
+      <!-- 展开后提供收起按钮 -->
+      <button
+        v-if="showAllChips && hiddenChipsCount > 0"
+        type="button"
+        class="chip chip-collapse"
+        @click="showAllChips = false"
+      >
+        收起
+      </button>
     </div>
 
-    <!-- Popover -->
-    <Teleport to="body">
-      <Transition name="cascader-pop">
-        <div
-          v-if="open"
-          ref="popoverRef"
-          class="cascader-popover"
-          :style="popoverStyle"
-        >
-          <!-- 搜索栏 -->
-          <div class="pop-search">
-            <AppIcon name="search" :size="13" class="pop-search-icon" />
-            <input
-              v-model="searchText"
-              placeholder="搜索知识点…"
-              class="pop-search-input"
-            />
-          </div>
-
+    <!-- 平铺折叠面板（Push-down Accordion） -->
+    <!-- 利用 grid-template-rows 0fr→1fr 实现高度自适应的平滑过渡；
+         内层 overflow:hidden 在折叠动画期间裁剪内容；
+         树列表不设 max-height / overflow-y，依赖父级面板流式滚动 -->
+    <Transition name="cascader-accordion">
+      <div v-if="open" class="cascader-panel">
+        <div class="cascader-panel-inner">
           <!-- 多树切换 -->
           <div v-if="showTreeSelector" class="pop-tree-tabs">
             <button
@@ -344,13 +313,13 @@ onBeforeUnmount(() => {
             </button>
           </div>
 
-          <!-- 树列表 -->
+          <!-- 树列表：自然撑开高度，不设 max-height / overflow-y -->
           <div class="pop-tree-list">
             <div v-if="loading" class="pop-loading">加载中…</div>
-            <AppEmpty v-else-if="filteredFlatList.length === 0" description="无匹配知识点" />
+            <AppEmpty v-else-if="flatList.length === 0" description="无知识点" />
             <template v-else>
               <div
-                v-for="item in filteredFlatList"
+                v-for="item in flatList"
                 :key="item.node.id"
                 class="pop-row"
                 :class="{ selected: isSelected(item.node.id) }"
@@ -389,14 +358,15 @@ onBeforeUnmount(() => {
             <span class="footer-info">{{ selectedIds.size }} 项已选</span>
             <div class="footer-actions">
               <button type="button" class="footer-btn" @click="clearAll">清空</button>
-              <button type="button" class="footer-btn primary" @click="open = false">
-                完成
+              <button type="button" class="footer-btn primary" @click="collapse">
+                <AppIcon name="chevron-up" :size="12" />
+                <span>收起</span>
               </button>
             </div>
           </div>
         </div>
-      </Transition>
-    </Teleport>
+      </div>
+    </Transition>
   </div>
 </template>
 
@@ -544,46 +514,60 @@ onBeforeUnmount(() => {
   opacity: 1;
 }
 
-/* ── Popover ── */
-.cascader-popover {
-  position: fixed;
-  z-index: 10000;
-  display: flex;
-  flex-direction: column;
-  background: var(--bg-card);
+/* +N 折叠徽标 */
+.chip-more {
+  background: var(--bg-active);
+  color: var(--text-secondary);
+  font-weight: 600;
+  border: 1px dashed var(--border-strong);
+  cursor: pointer;
+  transition: var(--transition-fast);
+}
+
+.chip-more:hover {
+  background: var(--accent-light);
+  color: var(--accent);
+  border-color: var(--accent);
+  border-style: solid;
+}
+
+/* "收起" 按钮 */
+.chip-collapse {
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: var(--transition-fast);
+}
+
+.chip-collapse:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+/* ── 平铺折叠面板（Push-down Accordion） — 下凹 (Well) 视觉 ── */
+/* 外层 grid 容器：grid-template-rows 1fr ↔ 0fr 实现高度自适应平滑过渡 */
+.cascader-panel {
+  display: grid;
+  grid-template-rows: 1fr;
+  margin-top: 8px;
+}
+
+/* 内层 overflow:hidden 在 0fr 折叠态裁剪内容；展开态自然撑开不裁剪
+   下凹视觉：使用 --bg-input（比卡片底色略深）+ inset 阴影模拟抽屉凹陷感；
+   顶部边框与触发器 input 边框自然衔接，无外侧悬浮阴影 */
+.cascader-panel-inner {
+  overflow: hidden;
+  min-height: 0;
+  background: var(--bg-input);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-sm);
-  box-shadow: var(--shadow-lg);
-  backdrop-filter: var(--blur-modal);
-  -webkit-backdrop-filter: var(--blur-modal);
-  overflow: hidden;
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.05);
 }
 
-.pop-search {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--divider);
-}
-
-.pop-search-icon {
-  color: var(--text-muted);
-  flex-shrink: 0;
-}
-
-.pop-search-input {
-  flex: 1;
-  border: none;
-  outline: none;
-  background: transparent;
-  color: var(--text-primary);
-  font-size: 13px;
-  font-family: inherit;
-}
-
-.pop-search-input::placeholder {
-  color: var(--text-muted);
+[data-theme='dark'] .cascader-panel-inner {
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.3);
 }
 
 .pop-tree-tabs {
@@ -617,11 +601,9 @@ onBeforeUnmount(() => {
   color: var(--text-inverse);
 }
 
+/* 树列表：拒绝嵌套滚动 —— 不设 max-height / overflow-y，自然撑开高度，
+   依赖外层 AttributeSidePanel 的 overflow-y:auto 实现全局流式滚动 */
 .pop-tree-list {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  overscroll-behavior: contain;
   padding: 4px;
 }
 
@@ -740,6 +722,9 @@ onBeforeUnmount(() => {
 }
 
 .footer-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   padding: 4px 10px;
   border: 1px solid var(--border-color);
   border-radius: 6px;
@@ -766,39 +751,16 @@ onBeforeUnmount(() => {
   border-color: var(--accent-hover);
 }
 
-/* 滚动条 */
-.pop-tree-list::-webkit-scrollbar {
-  width: 5px;
-}
-.pop-tree-list::-webkit-scrollbar-track {
-  background: transparent;
-}
-.pop-tree-list::-webkit-scrollbar-thumb {
-  background: var(--border-color);
-  border-radius: 3px;
+/* ── 过渡动画：grid-template-rows 0fr↔1fr + opacity 淡入淡出 ── */
+.cascader-accordion-enter-active,
+.cascader-accordion-leave-active {
+  transition: grid-template-rows 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+              opacity 0.25s ease;
 }
 
-/* ── 过渡动画 ── */
-.cascader-pop-enter-active {
-  transition: opacity 0.15s ease, transform 0.15s ease;
-}
-.cascader-pop-leave-active {
-  transition: opacity 0.1s ease, transform 0.1s ease;
-}
-.cascader-pop-enter-from {
+.cascader-accordion-enter-from,
+.cascader-accordion-leave-to {
+  grid-template-rows: 0fr;
   opacity: 0;
-  transform: translateY(-4px) scale(0.98);
-}
-.cascader-pop-leave-to {
-  opacity: 0;
-  transform: translateY(-2px) scale(0.98);
-}
-
-/* ── 响应式：小屏收紧宽度 ── */
-@media (max-width: 480px) {
-  .cascader-popover {
-    width: calc(100vw - 16px) !important;
-    left: 8px !important;
-  }
 }
 </style>
