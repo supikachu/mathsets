@@ -16,7 +16,12 @@
           <template v-if="q?.status === 'draft'">
             <AppButton variant="outline" size="sm" @click="$router.push(`/questions/${q!.id}/edit`)"><AppIcon name="pencil" :size="15" /> 编辑</AppButton>
             <AppButton variant="primary" size="sm" :loading="submitting" :disabled="submitting" @click="submitReview">提交审核</AppButton>
-            <AppButton variant="danger" size="sm" @click="confirmDelete"><AppIcon name="trash" :size="15" /> 删除</AppButton>
+            <AppButton
+              v-if="auth.isAdmin || auth.isSuperAdmin"
+              variant="danger"
+              size="sm"
+              @click="confirmDelete"
+            ><AppIcon name="trash" :size="15" /> 删除</AppButton>
           </template>
           <template v-else-if="q?.status === 'rejected'">
             <AppButton variant="outline" size="sm" @click="$router.push(`/questions/${q!.id}/edit`)"><AppIcon name="pencil" :size="15" /> 重新编辑</AppButton>

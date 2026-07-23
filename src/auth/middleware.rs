@@ -13,11 +13,19 @@ use crate::auth::jwt::verify_token;
 use crate::AppState;
 
 /// 认证用户信息（由中间件注入到请求扩展）
+///
+/// 双轨制角色：
+/// - `role`：旧枚举字符串（"admin" / "user"），兼容 `is_admin()`
+/// - `global_role`：新枚举字符串（"super_admin" / "teacher"），供 `is_super_admin()` 判定
+///
+/// 业务层推荐使用 `is_admin_user(&auth_user)` 做统一管理员判定，
+/// 自动覆盖两条轨道，避免双轨不一致导致权限丢失。
 #[derive(Debug, Clone)]
 pub struct AuthUser {
     pub id: Uuid,
     pub username: String,
     pub role: String,
+    pub global_role: String,
 }
 
 /// JWT 认证中间件 — 要求请求携带有效的 Bearer Token
@@ -64,11 +72,12 @@ pub async fn require_auth(
             .into_response()
     })?;
 
-    // 4. 注入 AuthUser 到请求扩展
+    // 4. 注入 AuthUser 到请求扩展（同时携带新旧角色）
     let auth_user = AuthUser {
         id: claims.sub,
         username: claims.username,
         role: claims.role,
+        global_role: claims.global_role,
     };
     req.extensions_mut().insert(auth_user);
 

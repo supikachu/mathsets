@@ -4,6 +4,10 @@
 //! - 数学知识树（knowledge）
 //! - 数学能力树（ability）
 //! - 教材章节树（chapter，按版本细分：人教版/北师大版）
+//!
+//! 权限模型：
+//! - 查询（list）：任意登录用户
+//! - 创建/更新/删除：仅管理员（双轨统一判定 `is_admin_user`）
 
 use axum::{
     extract::{Extension, Path, Query, State},
@@ -15,6 +19,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::auth::middleware::AuthUser;
+use crate::auth::permissions::is_admin_user;
 use crate::models::question::{
     CreateKnowledgeTreeRequest, KnowledgeTree, KnowledgeTreeKind, UpdateKnowledgeTreeRequest,
 };
@@ -32,6 +37,11 @@ pub struct TreeQuery {
     pub include_inactive: bool,
 }
 
+/// 构造 403 Forbidden 响应
+fn forbid(msg: &str) -> (StatusCode, Json<serde_json::Value>) {
+    (StatusCode::FORBIDDEN, Json(json!({"error": msg})))
+}
+
 /// GET /api/v1/knowledge-trees — 列出知识树
 ///
 /// 默认返回：当前用户空间的全局树（space_id IS NULL）+ 空间专属树
@@ -40,7 +50,12 @@ pub async fn list_knowledge_trees(
     Extension(auth_user): Extension<AuthUser>,
     Query(query): Query<TreeQuery>,
 ) -> Result<Json<Vec<KnowledgeTree>>, (StatusCode, Json<serde_json::Value>)> {
-    let _ = auth_user;
+    // 非管理员请求 include_inactive 时静默降级（不报错，仅不返回inactive）
+    let include_inactive = if query.include_inactive {
+        is_admin_user(&auth_user) && query.include_inactive
+    } else {
+        false
+    };
 
     let trees = sqlx::query_as::<_, KnowledgeTree>(
         r#"
@@ -55,7 +70,7 @@ pub async fn list_knowledge_trees(
         ORDER BY kind, code
         "#,
     )
-    .bind(query.include_inactive)
+    .bind(include_inactive)
     .bind(query.kind)
     .bind(query.space_id)
     .fetch_all(&state.pool)
@@ -72,13 +87,15 @@ pub async fn list_knowledge_trees(
 
 /// POST /api/v1/knowledge-trees — 新建知识树
 ///
-/// 注意：code 在同空间内唯一（partial unique index）
+/// 权限：仅管理员（双轨统一判定）
 pub async fn create_knowledge_tree(
     State(state): State<AppState>,
     Extension(auth_user): Extension<AuthUser>,
     Json(req): Json<CreateKnowledgeTreeRequest>,
 ) -> Result<(StatusCode, Json<KnowledgeTree>), (StatusCode, Json<serde_json::Value>)> {
-    let _ = auth_user;
+    if !is_admin_user(&auth_user) {
+        return Err(forbid("仅管理员可创建知识树"));
+    }
 
     let kind = req.kind.unwrap_or(KnowledgeTreeKind::Knowledge);
 
@@ -110,13 +127,17 @@ pub async fn create_knowledge_tree(
 }
 
 /// PUT /api/v1/knowledge-trees/{id} — 更新知识树元数据
+///
+/// 权限：仅管理员（双轨统一判定）
 pub async fn update_knowledge_tree(
     State(state): State<AppState>,
     Extension(auth_user): Extension<AuthUser>,
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateKnowledgeTreeRequest>,
 ) -> Result<Json<KnowledgeTree>, (StatusCode, Json<serde_json::Value>)> {
-    let _ = auth_user;
+    if !is_admin_user(&auth_user) {
+        return Err(forbid("仅管理员可更新知识树"));
+    }
 
     let tree = sqlx::query_as::<_, KnowledgeTree>(
         r#"
@@ -153,6 +174,8 @@ pub async fn update_knowledge_tree(
 
 /// DELETE /api/v1/knowledge-trees/{id} — 删除知识树
 ///
+/// 权限：仅管理员（双轨统一判定）
+///
 /// 级联删除：knowledge_trees ON DELETE CASCADE 会自动删除所有 knowledge_nodes
 /// （但 question_knowledge_nodes 也会因 knowledge_nodes ON DELETE CASCADE 被清理）
 pub async fn delete_knowledge_tree(
@@ -160,7 +183,9 @@ pub async fn delete_knowledge_tree(
     Extension(auth_user): Extension<AuthUser>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
-    let _ = auth_user;
+    if !is_admin_user(&auth_user) {
+        return Err(forbid("仅管理员可删除知识树"));
+    }
 
     // 预检查：如果有题目关联，拒绝删除（避免误删）
     let linked_questions = sqlx::query_scalar::<_, i64>(

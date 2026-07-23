@@ -138,16 +138,16 @@ async fn process_one_task(state: &AppState) -> Result<bool, String> {
 /// 成功返回新题目的 ID；失败返回错误信息字符串。
 async fn execute_task(state: &AppState, task: &AiParseTask) -> Result<Uuid, String> {
     // 1. 加载 creator 信息（resolve_ai_config 需要 AuthUser）
-    //    注意：users.role 是 user_role 枚举类型，必须用 ::text 强制转换才能作为 String 解码
-    let user_row: Option<(String, String, Option<String>)> = sqlx::query_as(
-        "SELECT username, role::text, display_name FROM users WHERE id = $1",
+    //    注意：users.role / global_role 是枚举类型，必须用 ::text 强制转换才能作为 String 解码
+    let user_row: Option<(String, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT username, role::text, global_role::text, display_name FROM users WHERE id = $1",
     )
     .bind(task.creator_id)
     .fetch_optional(&state.pool)
     .await
     .map_err(|e| format!("查询用户失败: {e}"))?;
 
-    let Some((username, role, display_name)) = user_row else {
+    let Some((username, role, global_role, display_name)) = user_row else {
         return Err(format!("用户 {} 不存在", task.creator_id));
     };
 
@@ -155,6 +155,7 @@ async fn execute_task(state: &AppState, task: &AiParseTask) -> Result<Uuid, Stri
         id: task.creator_id,
         username,
         role,
+        global_role,
     };
 
     // 2. 解析 AI 配置（用户个人 Key 优先，否则平台默认）

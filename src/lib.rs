@@ -112,7 +112,10 @@ pub fn build_app(state: AppState) -> Router {
                 .layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
         )
         // 管理员用户管理
-        .route("/admin/users", get(handlers::auth::list_users))
+        .route("/admin/users", get(handlers::auth::list_users).post(handlers::auth::create_user))
+        .route("/admin/users/{id}", get(handlers::auth::get_user).delete(handlers::auth::delete_user))
+        .route("/admin/users/{id}/role", put(handlers::auth::update_user_role))
+        .route("/admin/users/{id}/status", put(handlers::auth::update_user_status))
         // 题目统计（必须在 {id} 之前注册）
         .route("/questions/stats", get(handlers::questions::question_stats))
         // 题目 CRUD

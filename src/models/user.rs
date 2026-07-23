@@ -93,6 +93,7 @@ pub struct LoginResponse {
 pub struct UserPublic {
     pub id: Uuid,
     pub username: String,
+    pub email: String,
     pub display_name: String,
     pub role: UserRole,
     pub global_role: GlobalRole,
@@ -106,6 +107,7 @@ impl From<User> for UserPublic {
         Self {
             id: u.id,
             username: u.username,
+            email: u.email,
             display_name: u.display_name,
             role: u.role,
             global_role: u.global_role,

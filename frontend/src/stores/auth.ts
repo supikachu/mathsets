@@ -17,11 +17,20 @@ export const useAuthStore = defineStore('auth', () => {
 
   const isLoggedIn = computed(() => !!token.value)
   const role = computed(() => user.value?.role || '')
+  const globalRole = computed(() => user.value?.global_role || '')
   const displayName = computed(() => user.value?.display_name || '')
   const userId = computed(() => user.value?.user_id || '')
-  const isAdmin = computed(() => role.value === 'Admin' || role.value === 'admin')
   /// 用户头像 URL（null 时调用方应 fallback 到首字母）
   const avatarUrl = computed(() => user.value?.avatar_url || null)
+
+  // ── 双轨制角色判定 ──────────────────────────────────────────────
+  // 旧轨道：role = "admin" / "user"
+  const isAdmin = computed(() => role.value === 'Admin' || role.value === 'admin')
+  // 新轨道：global_role = "super_admin" / "teacher"
+  const isSuperAdmin = computed(() => globalRole.value === 'super_admin')
+  const isTeacher = computed(() => globalRole.value === 'teacher')
+  /// 统一管理员判定：任一轨道命中即视为管理员（与后端 is_admin_user 对齐）
+  const isAdminUnified = computed(() => isAdmin.value || isSuperAdmin.value)
 
   /// 将当前 user 状态持久化到 localStorage（保持 token 与 user 的一致性）
   function persistUser() {
@@ -96,9 +105,13 @@ export const useAuthStore = defineStore('auth', () => {
     user,
     isLoggedIn,
     role,
+    globalRole,
     displayName,
     userId,
     isAdmin,
+    isSuperAdmin,
+    isTeacher,
+    isAdminUnified,
     avatarUrl,
     login,
     logout,

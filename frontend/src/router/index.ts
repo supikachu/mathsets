@@ -56,6 +56,7 @@ const router = createRouter({
           path: 'review',
           name: 'Review',
           component: () => import('@/views/ReviewQueue.vue'),
+          meta: { requiresAdmin: true },
         },
         {
           path: 'users',
@@ -103,7 +104,8 @@ router.beforeEach(async (to, _from) => {
     return '/dashboard'
   }
 
-  if (to.meta.requiresAdmin && !auth.isAdmin) {
+  // 管理员路由：使用双轨统一判定（旧 isAdmin || 新 isSuperAdmin）
+  if (to.meta.requiresAdmin && !auth.isAdminUnified) {
     return '/dashboard'
   }
 })

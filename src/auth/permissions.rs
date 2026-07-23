@@ -14,8 +14,27 @@ use crate::models::space::{Space, SpaceKind, SpaceSettings};
 use crate::models::user::{GlobalRole, User};
 
 /// 系统管理员（兼容旧 role 字符串）
+///
+/// 仅判定旧 `role` 字段（"admin"）。新代码推荐使用 `is_admin_user` 做
+/// 双轨统一判定，避免遗漏 `global_role = super_admin` 的新管理员。
 pub fn is_admin(role: &str) -> bool {
     role == "Admin" || role.eq_ignore_ascii_case("admin")
+}
+
+/// 新全局超管（判定 `global_role` 字段）
+pub fn is_super_admin(global_role: &str) -> bool {
+    global_role == "SuperAdmin" || global_role.eq_ignore_ascii_case("super_admin")
+}
+
+/// 双轨统一管理员判定（推荐入口）
+///
+/// 任一轨道命中即视为管理员：
+/// - 旧 `role = "admin"`
+/// - 新 `global_role = "super_admin"`
+///
+/// 用于堵住双轨制过渡期 "新超管旧 role 还是 user" 的判定漏洞。
+pub fn is_admin_user(auth_user: &AuthUser) -> bool {
+    is_admin(&auth_user.role) || is_super_admin(&auth_user.global_role)
 }
 
 /// 加载空间

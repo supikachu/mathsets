@@ -885,3 +885,46 @@ export const userApi = {
     })
   },
 }
+
+// ── 管理员用户管理 API（阶段三新增） ──────────────────────────────
+
+export interface AdminUser {
+  id: string
+  username: string
+  email: string
+  display_name: string
+  role: string
+  global_role: 'super_admin' | 'teacher'
+  is_active: boolean
+  avatar_url: string | null
+  created_at: string
+}
+
+export interface CreateUserRequest {
+  username: string
+  email: string
+  password: string
+  display_name: string
+  global_role?: 'super_admin' | 'teacher'
+}
+
+export const adminUserApi = {
+  list() {
+    return client.get<AdminUser[]>('/admin/users')
+  },
+  create(data: CreateUserRequest) {
+    return client.post<AdminUser>('/admin/users', data)
+  },
+  getUser(id: string) {
+    return client.get<AdminUser>(`/admin/users/${id}`)
+  },
+  updateRole(id: string, global_role: string) {
+    return client.put<AdminUser>(`/admin/users/${id}/role`, { global_role })
+  },
+  updateStatus(id: string, is_active: boolean) {
+    return client.put<AdminUser>(`/admin/users/${id}/status`, { is_active })
+  },
+  deleteUser(id: string) {
+    return client.delete(`/admin/users/${id}`)
+  },
+}
