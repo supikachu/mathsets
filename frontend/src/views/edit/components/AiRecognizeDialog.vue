@@ -24,10 +24,13 @@ const props = defineProps<{
     default_score: number
     grade: string | undefined
     semester: string | undefined
-    academic_year: string
     grade_semester: string
-    exam_region: string
-    exam_type: string
+    // ── 长尾维度：与 QuestionList 数据字典对齐，统一存入 metadata(JSONB) ──
+    year: string
+    region_province: string
+    region_city: string
+    source_type: string
+    sub_source_type: string
     options: { label: string; content: string }[]
     correctAnswer: any
     blanks: { position: number; answer: string }[]

@@ -10,20 +10,6 @@
     <!-- ===== Apple风格吸顶工具栏 ===== -->
     <div class="ql-sticky-bar">
       <div class="ql-toolbar">
-        <!-- 左侧：题库空间切换 — Apple分段控件风格 -->
-        <div class="ql-space-segmented">
-          <button
-            v-for="s in space.spaces"
-            :key="s.id"
-            class="ql-space-seg"
-            :class="{ active: space.currentSpaceId === s.id }"
-            @click="onSpaceChange(s.id)"
-          >
-            <AppIcon :name="s.kind === 'personal' ? 'user' : 'users'" :size="14" />
-            <span>{{ spaceKindLabel(s.kind) }}</span>
-          </button>
-        </div>
-
         <!-- 中间：搜索框 -->
         <div class="ql-search-wrap">
           <AppIcon name="search" :size="15" class="ql-search-icon" />
@@ -56,78 +42,224 @@
         <ThemeToggle />
       </div>
 
-      <!-- 筛选面板（点击搜索/筛选按钮时展开，紧贴搜索框下方） -->
+      <!-- ===== 多维属性矩阵筛选面板 ===== -->
       <div class="ql-filter-collapse" :class="{ 'is-open': showFilter }">
-        <div class="ql-filter-panel">
-          <!-- 基础筛选：题型 + 知识点（默认展示） -->
-          <div class="ql-filter-row">
-            <span class="ql-filter-label">题型</span>
-            <div class="ql-filter-tags">
+        <div class="ql-matrix-panel">
+
+          <!-- ── 顶层平铺标签组 ── -->
+          <!-- 来源 -->
+          <div class="ql-matrix-row">
+            <span class="ql-matrix-label">来源:</span>
+            <div class="ql-matrix-tags">
               <button
-                v-for="opt in typeOptions"
-                :key="opt.value"
-                class="ql-tag"
-                :class="{ active: !query.question_type && opt.value === '__all' || query.question_type === opt.value }"
-                @click="selectTag('question_type', opt.value)"
+                v-for="opt in sourceOptions"
+                :key="opt"
+                class="ql-mtag"
+                :class="{ active: filters.source === opt }"
+                @click="selectFilter('source', opt)"
+              >{{ opt }}</button>
+            </div>
+          </div>
+
+          <!-- 来源子项（级联：仅"高考模拟"显示） -->
+          <div class="ql-matrix-row ql-matrix-sub" :class="{ 'is-on': showSubSource }">
+            <span class="ql-matrix-label">模拟类型:</span>
+            <div class="ql-matrix-tags">
+              <button
+                v-for="opt in subSourceOptions"
+                :key="opt"
+                class="ql-mtag"
+                :class="{ active: filters.subSource === opt }"
+                @click="selectFilter('subSource', opt)"
+              >{{ opt }}</button>
+            </div>
+          </div>
+
+          <!-- 题型 -->
+          <div class="ql-matrix-row">
+            <span class="ql-matrix-label">题型:</span>
+            <div class="ql-matrix-tags">
+              <button
+                v-for="opt in questionTypeOptions"
+                :key="opt.label"
+                class="ql-mtag"
+                :class="{ active: filters.type === opt.value }"
+                @click="selectFilter('type', opt.value)"
               >{{ opt.label }}</button>
             </div>
           </div>
 
-          <!-- 高级筛选：难度 + 状态（点击展开） -->
-          <div class="ql-filter-advanced" :class="{ 'is-open': showAdvancedFilter }">
-            <div class="ql-filter-row">
-              <span class="ql-filter-label">难度</span>
-              <div class="ql-filter-tags">
-                <button
-                  v-for="opt in difficultyOptions"
-                  :key="opt.value"
-                  class="ql-tag"
-                  :class="{ active: !query.difficulty && opt.value === '__all' || query.difficulty === opt.value }"
-                  @click="selectTag('difficulty', opt.value)"
-                >{{ opt.label }}</button>
-              </div>
-            </div>
-            <div class="ql-filter-row">
-              <span class="ql-filter-label">状态</span>
-              <div class="ql-filter-tags">
-                <button
-                  v-for="opt in statusOptions"
-                  :key="opt.value"
-                  class="ql-tag"
-                  :class="{ active: !query.status && opt.value === '__all' || query.status === opt.value }"
-                  @click="selectTag('status', opt.value)"
-                >{{ opt.label }}</button>
-              </div>
+          <!-- 难度 -->
+          <div class="ql-matrix-row">
+            <span class="ql-matrix-label">难度:</span>
+            <div class="ql-matrix-tags">
+              <button
+                v-for="opt in difficultyOptions"
+                :key="opt.value"
+                class="ql-mtag"
+                :class="{ active: filters.difficulty === opt.value }"
+                @click="selectFilter('difficulty', opt.value)"
+              >{{ opt.label }}</button>
             </div>
           </div>
 
-          <!-- 高级筛选切换按钮 + 已选筛选条件提示 -->
-          <div class="ql-filter-footer">
-            <button
-              type="button"
-              class="ql-advanced-toggle"
-              :class="{ active: showAdvancedFilter }"
-              @click="showAdvancedFilter = !showAdvancedFilter"
-            >
-              <AppIcon
-                :name="showAdvancedFilter ? 'chevron-up' : 'chevron-down'"
-                :size="12"
-              />
-              <span>高级筛选</span>
-              <span v-if="advancedFilterActiveCount > 0" class="ql-advanced-badge">
-                {{ advancedFilterActiveCount }}
-              </span>
-            </button>
-            <button
-              v-if="hasAnyFilter"
-              type="button"
-              class="ql-clear-all"
-              @click="clearAllFilters"
-            >
-              <AppIcon name="x" :size="12" />
-              清空筛选
-            </button>
+          <!-- ── 底部折叠下拉组：态转换（未选=纯文字 / 已选=蓝标签×）── -->
+          <div class="ql-matrix-row">
+            <span class="ql-matrix-label">更多:</span>
+            <div class="ql-matrix-dropdown-bar">
+              <!-- 年份 -->
+              <div class="ql-matrix-dropdown" :class="{ 'is-open': openDropdown === 'year' }">
+                <!-- 未选中：纯文字触发器 -->
+                <button v-if="!isFilterActive('year')" class="ql-dd-plain" @click.stop="toggleDropdown('year')">
+                  <span>年份</span>
+                  <AppIcon name="chevron-down" :size="11" class="ql-dd-caret" />
+                </button>
+                <!-- 已选中：蓝标签 + × 关闭 -->
+                <span v-else class="ql-dd-chip">
+                  {{ filters.year }}
+                  <button class="ql-dd-chip-x" @click.stop="clearFilter('year')">
+                    <AppIcon name="x" :size="10" />
+                  </button>
+                </span>
+                <div v-if="openDropdown === 'year'" class="ql-dd-panel">
+                  <button
+                    v-for="opt in yearOptions"
+                    :key="opt"
+                    class="ql-dd-opt"
+                    :class="{ active: filters.year === opt }"
+                    @click.stop="selectFilter('year', opt); openDropdown = null"
+                  >{{ opt }}</button>
+                </div>
+              </div>
+
+              <!-- 地区（级联：选中后动态渲染市级下拉） -->
+              <div class="ql-matrix-dropdown" :class="{ 'is-open': openDropdown === 'region' }">
+                <button v-if="!isFilterActive('region')" class="ql-dd-plain" @click.stop="toggleDropdown('region')">
+                  <span>地区</span>
+                  <AppIcon name="chevron-down" :size="11" class="ql-dd-caret" />
+                </button>
+                <span v-else class="ql-dd-chip">
+                  {{ filters.region }}
+                  <button class="ql-dd-chip-x" @click.stop="clearFilter('region')">
+                    <AppIcon name="x" :size="10" />
+                  </button>
+                </span>
+                <div v-if="openDropdown === 'region'" class="ql-dd-panel">
+                  <button
+                    v-for="opt in regionOptions"
+                    :key="opt"
+                    class="ql-dd-opt"
+                    :class="{ active: filters.region === opt }"
+                    @click.stop="selectFilter('region', opt); openDropdown = null"
+                  >{{ opt }}</button>
+                </div>
+              </div>
+
+              <!-- 市/区（动态级联：仅当地区已选时渲染） -->
+              <div v-if="showCityDropdown" class="ql-matrix-dropdown" :class="{ 'is-open': openDropdown === 'city' }">
+                <button v-if="!isFilterActive('city')" class="ql-dd-plain" @click.stop="toggleDropdown('city')">
+                  <span>市/区</span>
+                  <AppIcon name="chevron-down" :size="11" class="ql-dd-caret" />
+                </button>
+                <span v-else class="ql-dd-chip">
+                  {{ filters.city }}
+                  <button class="ql-dd-chip-x" @click.stop="clearFilter('city')">
+                    <AppIcon name="x" :size="10" />
+                  </button>
+                </span>
+                <div v-if="openDropdown === 'city'" class="ql-dd-panel">
+                  <button
+                    v-for="opt in currentCityOptions"
+                    :key="opt"
+                    class="ql-dd-opt"
+                    :class="{ active: filters.city === opt }"
+                    @click.stop="selectFilter('city', opt); openDropdown = null"
+                  >{{ opt }}</button>
+                </div>
+              </div>
+
+              <!-- 年级 -->
+              <div class="ql-matrix-dropdown" :class="{ 'is-open': openDropdown === 'grade' }">
+                <button v-if="!isFilterActive('grade')" class="ql-dd-plain" @click.stop="toggleDropdown('grade')">
+                  <span>年级</span>
+                  <AppIcon name="chevron-down" :size="11" class="ql-dd-caret" />
+                </button>
+                <span v-else class="ql-dd-chip">
+                  {{ filters.grade }}
+                  <button class="ql-dd-chip-x" @click.stop="clearFilter('grade')">
+                    <AppIcon name="x" :size="10" />
+                  </button>
+                </span>
+                <div v-if="openDropdown === 'grade'" class="ql-dd-panel">
+                  <button
+                    v-for="opt in gradeOptions"
+                    :key="opt"
+                    class="ql-dd-opt"
+                    :class="{ active: filters.grade === opt }"
+                    @click.stop="selectFilter('grade', opt); openDropdown = null"
+                  >{{ opt }}</button>
+                </div>
+              </div>
+
+              <!-- 学期 -->
+              <div class="ql-matrix-dropdown" :class="{ 'is-open': openDropdown === 'semester' }">
+                <button v-if="!isFilterActive('semester')" class="ql-dd-plain" @click.stop="toggleDropdown('semester')">
+                  <span>学期</span>
+                  <AppIcon name="chevron-down" :size="11" class="ql-dd-caret" />
+                </button>
+                <span v-else class="ql-dd-chip">
+                  {{ filters.semester }}
+                  <button class="ql-dd-chip-x" @click.stop="clearFilter('semester')">
+                    <AppIcon name="x" :size="10" />
+                  </button>
+                </span>
+                <div v-if="openDropdown === 'semester'" class="ql-dd-panel">
+                  <button
+                    v-for="opt in semesterOptions"
+                    :key="opt"
+                    class="ql-dd-opt"
+                    :class="{ active: filters.semester === opt }"
+                    @click.stop="selectFilter('semester', opt); openDropdown = null"
+                  >{{ opt }}</button>
+                </div>
+              </div>
+
+              <!-- 状态 -->
+              <div class="ql-matrix-dropdown" :class="{ 'is-open': openDropdown === 'status' }">
+                <button v-if="!isFilterActive('status')" class="ql-dd-plain" @click.stop="toggleDropdown('status')">
+                  <span>状态</span>
+                  <AppIcon name="chevron-down" :size="11" class="ql-dd-caret" />
+                </button>
+                <span v-else class="ql-dd-chip">
+                  {{ statusLabel(filters.status) }}
+                  <button class="ql-dd-chip-x" @click.stop="clearFilter('status')">
+                    <AppIcon name="x" :size="10" />
+                  </button>
+                </span>
+                <div v-if="openDropdown === 'status'" class="ql-dd-panel">
+                  <button
+                    v-for="opt in statusOptions"
+                    :key="opt.value"
+                    class="ql-dd-opt"
+                    :class="{ active: filters.status === opt.value }"
+                    @click.stop="selectFilter('status', opt.value); openDropdown = null"
+                  >{{ opt.label }}</button>
+                </div>
+              </div>
+
+              <!-- 清空筛选（右侧） -->
+              <button
+                v-if="hasAnyFilter"
+                type="button"
+                class="ql-matrix-clear"
+                @click="clearAllFilters"
+              >
+                <AppIcon name="x" :size="12" />
+                清空筛选
+              </button>
+            </div>
           </div>
+
         </div>
       </div>
 
@@ -166,13 +298,15 @@
             class="q-card"
             :class="{ 'is-expanded': expandedIds.has(card.id) }"
           >
-            <!-- Row 1: Header — 来源 / 题型 / 难度 / 状态 -->
+            <!-- Header Row 1: 题目来源（年级·学期·考试类型·地区·年份） -->
+            <div v-if="formatQuestionSource(card)" class="q-card-source-row">
+              <AppIcon name="bookmark" :size="12" :stroke="2" />
+              <span>{{ formatQuestionSource(card) }}</span>
+            </div>
+
+            <!-- Header Row 2: 属性标签 + 知识点 + 时间 -->
             <div class="q-card-header">
               <div class="q-card-tags">
-                <span v-if="card.source" class="q-source">
-                  <AppIcon name="bookmark" :size="12" :stroke="2" />
-                  {{ card.source }}
-                </span>
                 <AppBadge :color="typeBadgeColor(card.question_type)">
                   {{ typeLabel(card.question_type) }}
                 </AppBadge>
@@ -183,6 +317,15 @@
                   <AppIcon :name="statusIcon(card.status)" :size="11" :stroke="2" />
                   {{ statusLabel(card.status) }}
                 </AppBadge>
+                <span class="q-tags-divider">|</span>
+                <span class="q-kp-inline">
+                  <span
+                    v-for="kn in card.knowledgeNodes"
+                    :key="kn.id"
+                    class="q-kp-text"
+                  >{{ kn.name }}</span>
+                  <span v-if="card.knowledgeNodes.length === 0" class="q-kp-text-empty">未关联知识点</span>
+                </span>
               </div>
               <span class="q-card-time">{{ formatTime(card.updated_at) }}</span>
             </div>
@@ -245,23 +388,8 @@
               </div>
             </Transition>
 
-            <!-- Row 3: Footer — 知识点 + 操作按钮 -->
+            <!-- Row 3: Footer — 操作按钮 -->
             <div class="q-card-footer">
-              <div class="q-kps">
-                <span class="q-kps-label">
-                  <AppIcon name="tag" :size="12" :stroke="2" />
-                  知识点
-                </span>
-                <span
-                  v-for="kn in card.knowledgeNodes"
-                  :key="kn.id"
-                  class="q-kp-chip"
-                >
-                  {{ kn.name }}
-                </span>
-                <span v-if="card.knowledgeNodes.length === 0" class="q-kp-empty">未关联</span>
-                <span v-if="card.grade_level" class="q-grade-chip">{{ gradeLevelLabel(card.grade_level) }}</span>
-              </div>
               <div class="q-actions">
                 <button class="q-action-btn q-action--ghost" @click="toggleAnalysis(card.id)">
                   <AppIcon
@@ -304,7 +432,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick, type ComponentPublicInstance } from 'vue'
 import { useRouter } from 'vue-router'
-import { questionApi, type QuestionSummary, type QuestionDetail, type QuestionQuery, type GradeLevel, type KnowledgeNodeSummary } from '@/api/client'
+import { questionApi, type QuestionSummary, type QuestionDetail, type QuestionQuery, type GradeLevel, type SemesterType, type ExamType, type KnowledgeNodeSummary } from '@/api/client'
 import LatexRender from '@/components/LatexRender.vue'
 import ThemeToggle from '@/components/ThemeToggle.vue'
 import KnowledgeTreeNav from '@/components/KnowledgeTreeNav.vue'
@@ -342,7 +470,6 @@ function handleKnowledgeNodeSelect(nodeId: string) {
 
 // ---- 筛选面板展开状态 ----
 const showFilter = ref(false)
-const showAdvancedFilter = ref(false)
 
 function toggleFilter() {
   showFilter.value = !showFilter.value
@@ -352,14 +479,6 @@ function toggleFilter() {
     fetchList()
   }
 }
-
-// 已激活的高级筛选项数量（用于切换按钮徽标）
-const advancedFilterActiveCount = computed(() => {
-  let n = 0
-  if (query.difficulty != null) n++
-  if (query.status != null) n++
-  return n
-})
 
 // 是否有任何筛选条件被激活（用于显示"清空筛选"按钮）
 const hasAnyFilter = computed(() => {
@@ -380,23 +499,52 @@ function clearAllFilters() {
   query.knowledge_node_ids = undefined
   query.include_descendants = undefined
   navNodeId.value = ''
+  // 重置多维筛选 UI 状态
+  filters.source = '全部'
+  filters.subSource = '全部高考模拟'
+  filters.type = '__all'
+  filters.difficulty = '__all'
+  filters.status = '__all'
+  filters.year = '全部'
+  filters.grade = '全部'
+  filters.semester = '全部'
+  filters.region = '全部'
+  filters.city = '全部'
+  openDropdown.value = null
   page.value = 1
   fetchList()
 }
+
+// 下拉面板点击外部关闭
+function onDropdownClickOutside(e: MouseEvent) {
+  const target = e.target as Node
+  if (!(e.target as HTMLElement).closest('.ql-matrix-dropdown')) {
+    openDropdown.value = null
+  }
+}
+onMounted(() => {
+  document.addEventListener('click', onDropdownClickOutside)
+})
+onBeforeUnmount(() => {
+  document.removeEventListener('click', onDropdownClickOutside)
+})
 
 function spaceKindLabel(kind: string) {
   if (kind === 'personal') return '个人'
   if (kind === 'public') return '公共'
-  if (kind === 'shared') return '共享'
+  if (kind === 'team') return '团队'
   return kind
 }
 
-function onSpaceChange(id: string) {
-  space.setCurrentSpace(id)
-  query.space_id = id
-  page.value = 1
-  fetchList()
-}
+// 全局 SpaceSwitcher 切换空间时自动刷新列表
+watch(
+  () => space.currentSpaceId,
+  (newId) => {
+    query.space_id = newId || undefined
+    page.value = 1
+    fetchList()
+  },
+)
 
 // ---- 卡片数据类型 ----
 interface QuestionCard {
@@ -406,7 +554,13 @@ interface QuestionCard {
   difficulty: string
   status: string
   grade_level: GradeLevel | null
+  semester: SemesterType | null
   source: string | null
+  school_source: string | null
+  exam_type: ExamType | null
+  region: string | null
+  year: string | null
+  metadata: Record<string, unknown>
   updated_at: string
   version: number
   parsedOptions: { label: string; content: string }[]
@@ -456,28 +610,198 @@ function gradeLevelLabel(g: GradeLevel | null | undefined): string {
   return map[g] || g
 }
 
-const typeOptions = [
-  { label: '不限', value: '__all' },
-  { label: '选择题', value: 'choice' },
+function semesterLabel(s: SemesterType | null | undefined): string {
+  if (!s) return ''
+  const map: Record<SemesterType, string> = {
+    first: '上学期',
+    second: '下学期',
+    full_year: '全年',
+  }
+  return map[s] || s
+}
+
+function examTypeLabel(t: ExamType | null | undefined): string {
+  if (!t) return ''
+  const map: Record<ExamType, string> = {
+    midterm: '期中',
+    final: '期末',
+    gaokao: '高考',
+    mock: '模拟',
+    entrance: '中考',
+    daily: '日常',
+    other: '其他',
+  }
+  return map[t] || t
+}
+
+/// 格式化题目来源：将年级、学期、考试类型、来源、地区等非空字段用 · 拼接
+function formatQuestionSource(q: any): string {
+  const parts: string[] = []
+
+  // 1. 年级
+  if (q.grade_level) {
+    parts.push(gradeLevelLabel(q.grade_level) || q.grade_level)
+  }
+  // 2. 学期
+  if (q.semester) {
+    parts.push(semesterLabel(q.semester) || q.semester)
+  }
+  // 3. 考试类型
+  if (q.exam_type) {
+    parts.push(examTypeLabel(q.exam_type) || q.exam_type)
+  }
+  // 4. 来源学校
+  if (q.school_source && q.school_source.trim() !== '') {
+    parts.push(q.school_source.trim())
+  }
+  // 5. 地区
+  if (q.region && q.region.trim() !== '') {
+    parts.push(q.region.trim())
+  }
+  // 6. 年份
+  if (q.year && q.year.trim() !== '') {
+    parts.push(q.year.trim())
+  }
+
+  return parts.filter(Boolean).join(' · ')
+}
+
+// ============================================================================
+// 多维属性矩阵筛选 — 数据字典
+// ============================================================================
+// 来源（顶层平铺标签）
+const sourceOptions = [
+  '全部', '课前预习', '课堂例题', '随堂练习', '课后作业',
+  '单元复习', '单元测试', '阶段检测', '期中', '期末',
+  '高考真题', '高考模拟',
+]
+
+// 高考模拟子类型（仅当 source === '高考模拟' 时级联显示）
+const subSourceOptions = [
+  '全部高考模拟', '一模', '二模', '三模', '模拟预测',
+]
+
+// 题型（label 为业务展示，value 对齐后端 QuestionType 枚举）
+const questionTypeOptions = [
+  { label: '全部', value: '__all' },
+  { label: '单选题', value: 'choice' },
+  { label: '多选题', value: 'choice' },
   { label: '填空题', value: 'fill' },
   { label: '解答题', value: 'solution' },
+  { label: '判断题', value: 'judgment' },
 ]
 
+// 难度
 const difficultyOptions = [
-  { label: '不限', value: '__all' },
-  { label: '简单', value: 2 },
-  { label: '中等', value: 3 },
-  { label: '困难', value: 4 },
+  { label: '全部', value: '__all' },
+  { label: '容易', value: 'easy' },
+  { label: '适中', value: 'medium' },
+  { label: '困难', value: 'hard' },
 ]
+
+// 底部下拉组
+const yearOptions = ['全部', '2020', '2021', '2022', '2023', '2024', '2025', '2026']
+const gradeOptions = ['全部', '高一', '高二', '高三']
+const semesterOptions = ['全部', '上学期', '下学期']
+const regionOptions = ['全部', '北京', '上海', '浙江', '江苏', '广东', '湖北', '湖南', '四川', '山东']
+
+// 地区 → 市区 级联字典（其他省份用空数组兜底）
+const cityOptions: Record<string, string[]> = {
+  '浙江': ['杭州市', '宁波市', '温州市', '绍兴市', '嘉兴市'],
+  '江苏': ['南京市', '苏州市', '无锡市', '常州市', '南通市'],
+  '广东': ['广州市', '深圳市', '珠海市', '佛山市', '东莞市'],
+  '北京': ['东城区', '西城区', '海淀区', '朝阳区', '丰台区'],
+  '上海': ['黄浦区', '徐汇区', '浦东新区', '静安区', '杨浦区'],
+}
 
 const statusOptions = [
-  { label: '不限', value: '__all' },
+  { label: '全部', value: '__all' },
   { label: '草稿', value: 'draft' },
   { label: '待审核', value: 'pending' },
   { label: '驳回', value: 'rejected' },
   { label: '已发布', value: 'published' },
   { label: '已停用', value: 'disabled' },
 ]
+
+// ============================================================================
+// 筛选响应式状态（UI 层）— 与后端 query 解耦，applyFilters 时映射
+// ============================================================================
+const filters = reactive({
+  source: '全部',
+  subSource: '全部高考模拟',
+  type: '__all',
+  difficulty: '__all',
+  status: '__all',
+  year: '全部',
+  grade: '全部',
+  semester: '全部',
+  region: '全部',
+  city: '全部',
+})
+
+// 级联逻辑：source 切换非"高考模拟"时，重置 subSource 并隐藏子行
+const showSubSource = computed(() => filters.source === '高考模拟')
+watch(() => filters.source, (v) => {
+  if (v !== '高考模拟') filters.subSource = '全部高考模拟'
+})
+
+// 地区 → 市区 级联：切换地区时清空市级，并控制市级下拉是否渲染
+const showCityDropdown = computed(() => filters.region !== '全部')
+const currentCityOptions = computed(() => {
+  const cities = cityOptions[filters.region] || []
+  return ['全部', ...cities]
+})
+watch(() => filters.region, () => {
+  filters.city = '全部' // 清空市级选中
+})
+
+// 底部下拉面板展开状态（同时只展开一个）
+const openDropdown = ref<null | 'year' | 'grade' | 'semester' | 'region' | 'city' | 'status'>(null)
+function toggleDropdown(key: typeof openDropdown.value) {
+  openDropdown.value = openDropdown.value === key ? null : key
+}
+
+// 通用筛选点击：更新 filters → 映射到 query → 触发搜索
+function selectFilter(field: keyof typeof filters, value: string) {
+  ;(filters as any)[field] = value
+  applyFilters()
+}
+
+// 判断下拉项是否已激活（值非"全部"/"__all"）
+function isFilterActive(field: keyof typeof filters): boolean {
+  const v = (filters as any)[field]
+  return v !== '全部' && v !== '__all'
+}
+
+// 清除单个筛选项（× 图标点击），恢复为默认"全部"值
+function clearFilter(field: keyof typeof filters) {
+  const defaults: Record<string, string> = {
+    source: '全部', subSource: '全部高考模拟', type: '__all', difficulty: '__all',
+    status: '__all', year: '全部', grade: '全部', semester: '全部', region: '全部', city: '全部',
+  }
+  ;(filters as any)[field] = defaults[field] ?? '全部'
+  // 地区清除时同步清空市级
+  if (field === 'region') filters.city = '全部'
+  applyFilters()
+}
+
+// 状态值 → 中文 label
+function statusLabel(value: string): string {
+  return statusOptions.find(o => o.value === value)?.label ?? ''
+}
+
+// 将 UI filters 映射到后端 query 并搜索
+function applyFilters() {
+  // 题型
+  query.question_type = filters.type === '__all' ? undefined : (filters.type as any)
+  // 难度
+  query.difficulty = filters.difficulty === '__all' ? undefined : (filters.difficulty as any)
+  // 状态
+  query.status = filters.status === '__all' ? undefined : (filters.status as any)
+  // TODO: source / subSource / year / grade / semester / region 待后端支持后映射
+  page.value = 1
+  fetchList()
+}
 
 let searchTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -490,16 +814,6 @@ function onSearchInput() {
 }
 
 function onSearchSubmit() {
-  page.value = 1
-  fetchList()
-}
-
-function selectTag(field: 'question_type' | 'difficulty' | 'status', value: string | number) {
-  if (value === '__all') {
-    ;(query as any)[field] = undefined
-  } else {
-    ;(query as any)[field] = value
-  }
   page.value = 1
   fetchList()
 }
@@ -696,7 +1010,13 @@ async function fetchList() {
         difficulty: difficultyNumToString(s.difficulty),
         status: s.status,
         grade_level: s.grade_level,
+        semester: detail?.semester ?? null,
         source: detail?.source ?? null,
+        school_source: detail?.source ?? null,
+        exam_type: detail?.exam_type ?? null,
+        region: (detail?.metadata?.exam_region as string) ?? null,
+        year: detail?.metadata?.academic_year ? String(detail.metadata.academic_year) : null,
+        metadata: detail?.metadata ?? {},
         updated_at: s.updated_at,
         version: s.version,
         parsedOptions: parseOptions(detail?.options),
@@ -705,8 +1025,9 @@ async function fetchList() {
         knowledgeNodes: detail?.knowledge_nodes ?? [],
       }
     })
-  } catch {
-    /* handled by interceptor */
+  } catch (e: any) {
+    console.error('列表加载失败:', e)
+    toast.error(e.response?.data?.error || e.response?.data?.message || e.message || '列表加载失败')
   } finally {
     loading.value = false
   }
@@ -984,97 +1305,241 @@ onBeforeUnmount(() => {
   opacity: 1;
 }
 
-.ql-filter-collapse > .ql-filter-panel {
-  overflow: hidden;
+.ql-filter-collapse > .ql-matrix-panel {
+  overflow: hidden; /* 折叠动画期间裁剪内容（grid 0fr→1fr 技术必需） */
   min-height: 0;
 }
 
-/* 筛选面板 — Apple简约风格 */
-.ql-filter-panel {
+/* 展开态：解除裁剪，让底部下拉面板 .ql-dd-panel 能自由溢出父容器 */
+.ql-filter-collapse.is-open > .ql-matrix-panel {
+  overflow: visible;
+}
+
+/* ===== 多维属性矩阵筛选面板 ===== */
+.ql-matrix-panel {
+  position: relative; /* 建立堆叠上下文，凌驾于下方题目列表之上 */
+  z-index: 100;
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: 14px 20px 16px;
+  gap: 10px;
+  padding: 16px 20px 14px;
   background: var(--bg-card);
   border-top: 1px solid var(--border-color);
 }
 
-/* 高级筛选区：默认 grid 0fr 折叠，与外层 collapse 同款动画 */
-.ql-filter-advanced {
-  display: grid;
-  grid-template-rows: 0fr;
-  opacity: 0;
-  transition:
-    grid-template-rows 0.3s cubic-bezier(0.32, 0.72, 0, 1),
-    opacity 0.2s cubic-bezier(0.32, 0.72, 0, 1);
-}
-
-.ql-filter-advanced.is-open {
-  grid-template-rows: 1fr;
-  opacity: 1;
-}
-
-.ql-filter-advanced > .ql-filter-row {
-  overflow: hidden;
-  min-height: 0;
-}
-
-/* 筛选面板底部：高级筛选切换 + 清空按钮 */
-.ql-filter-footer {
+/* —— 平铺标签行 —— */
+.ql-matrix-row {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 0 0;
-  margin-top: 4px;
-  border-top: 1px dashed var(--divider);
+  align-items: flex-start;
+  gap: 16px;
+  padding: 2px 0;
 }
 
-.ql-advanced-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 5px 12px;
-  border: 1px solid var(--border-color);
-  border-radius: 9999px;
-  background: var(--bg-input);
-  color: var(--text-secondary);
+.ql-matrix-label {
   font-size: 12px;
   font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: 0.03em;
+  flex-shrink: 0;
+  min-width: 44px;
+  height: 30px;
+  line-height: 30px;
+}
+
+.ql-matrix-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  flex: 1;
+  min-width: 0;
+}
+
+/* 单个标签 — 扁平化：纯文本，无背景/边框/圆角 */
+.ql-mtag {
+  padding: 3px 10px;
+  border-radius: 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  transition: var(--transition-fast);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.ql-mtag:hover {
+  color: var(--text-primary);
+}
+
+/* 选中态：仅品牌蓝文字，无背景 */
+.ql-mtag.active {
+  color: #1890ff;
+  font-weight: 600;
+  background: transparent;
+  border: none;
+}
+
+/* —— 级联子行（高考模拟子类型）—— */
+.ql-matrix-sub {
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
+  margin: 0;
+  padding: 0;
+  transition:
+    max-height 0.3s cubic-bezier(0.32, 0.72, 0, 1),
+    opacity 0.2s cubic-bezier(0.32, 0.72, 0, 1),
+    margin 0.3s ease;
+}
+
+.ql-matrix-sub.is-on {
+  max-height: 60px;
+  opacity: 1;
+  margin-top: -2px;
+  padding: 2px 0;
+}
+
+.ql-matrix-sub .ql-matrix-label {
+  color: var(--accent);
+  opacity: 0.7;
+}
+
+/* —— 底部下拉组 —— */
+.ql-matrix-dropdown-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+}
+
+.ql-matrix-dropdown {
+  position: relative; /* 作为 .ql-dd-panel 的定位上下文 */
+  display: inline-flex;
+  z-index: 101; /* 略高于 .ql-matrix-panel，确保展开的下拉浮层在同级之上 */
+}
+
+/* 未选中态：纯文字触发器（轻量，无边框） */
+.ql-dd-plain {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 0;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
   cursor: pointer;
   transition: var(--transition-fast);
 }
 
-.ql-advanced-toggle:hover {
-  border-color: var(--text-muted);
+.ql-dd-plain:hover {
   color: var(--text-primary);
 }
 
-.ql-advanced-toggle.active {
-  background: var(--accent-light);
-  border-color: var(--accent);
-  color: var(--accent);
+.ql-matrix-dropdown.is-open .ql-dd-plain {
+  color: #1890ff;
 }
 
-.ql-advanced-badge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 4px;
-  border-radius: 9999px;
-  background: var(--accent);
-  color: #fff;
-  font-size: 10px;
-  font-weight: 700;
-  line-height: 1;
-}
-
-.ql-clear-all {
+/* 选中态：浅蓝背景 + 蓝字 + × 关闭的 chip 标签 */
+.ql-dd-chip {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  padding: 3px 4px 3px 10px;
+  border-radius: 4px;
+  background: #e6f7ff;
+  color: #1890ff;
+  font-size: 12.5px;
+  font-weight: 600;
+  border: 1px solid #91d5ff;
+  line-height: 1.4;
+}
+
+.ql-dd-chip-x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border: none;
+  background: transparent;
+  color: #1890ff;
+  cursor: pointer;
+  border-radius: 50%;
+  padding: 0;
+  flex-shrink: 0;
+  transition: var(--transition-fast);
+}
+
+.ql-dd-chip-x:hover {
+  background: #1890ff;
+  color: #fff;
+}
+
+.ql-dd-caret {
+  color: var(--text-muted);
+  transition: transform 0.2s;
+}
+
+.ql-matrix-dropdown.is-open .ql-dd-caret {
+  transform: rotate(180deg);
+  color: #1890ff;
+}
+
+/* 下拉面板 */
+.ql-dd-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 200; /* 高于矩阵面板(100)与下拉组(101)，绝对自由浮于题目列表之上 */
+  min-width: 120px;
+  max-height: 280px;
+  overflow-y: auto;
+  padding: 5px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  box-shadow: var(--shadow-md, 0 4px 16px rgba(0, 0, 0, 0.12));
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ql-dd-opt {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 7px 12px;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  font-size: 12.5px;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: var(--transition-fast);
+  white-space: nowrap;
+}
+
+.ql-dd-opt:hover {
+  background: var(--bg-hover);
+}
+
+.ql-dd-opt.active {
+  background: #e6f7ff;
+  color: #1890ff;
+  font-weight: 600;
+}
+
+/* —— 清空筛选按钮 —— */
+.ql-matrix-clear {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
   padding: 5px 12px;
   border: none;
   background: transparent;
@@ -1086,56 +1551,9 @@ onBeforeUnmount(() => {
   transition: var(--transition-fast);
 }
 
-.ql-clear-all:hover {
+.ql-matrix-clear:hover {
   color: var(--danger);
   background: var(--danger-light);
-}
-
-.ql-filter-row {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 5px 0;
-}
-
-.ql-filter-label {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-muted);
-  letter-spacing: 0.03em;
-  flex-shrink: 0;
-  min-width: 40px;
-  text-transform: uppercase;
-}
-
-.ql-filter-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 7px;
-}
-
-.ql-tag {
-  padding: 5px 14px;
-  border-radius: 980px;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-secondary);
-  background: var(--bg-input);
-  border: 1px solid transparent;
-  transition: var(--transition-fast);
-  white-space: nowrap;
-}
-
-.ql-tag:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
-
-.ql-tag.active {
-  background: var(--accent);
-  color: #fff;
-  font-weight: 600;
-  box-shadow: 0 1px 4px rgba(0, 122, 255, 0.2);
 }
 
 /* ===== 可滚动列表区域（独立滚动域） ===== */
@@ -1325,12 +1743,26 @@ onBeforeUnmount(() => {
   box-shadow: none;
 }
 
-/* ---- Row 1: Header ---- */
+/* ---- Header Row 1: 来源 ---- */
+.q-card-source-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 10px 20px 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- Header Row 2: 标签 + 知识点 ---- */
 .q-card-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 20px;
+  padding: 10px 20px;
   border-bottom: 1px solid var(--divider);
   gap: 12px;
 }
@@ -1342,17 +1774,29 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
 }
 
-.q-source {
+.q-tags-divider {
+  color: var(--text-muted);
+  font-size: 12px;
+  margin: 0 2px;
+}
+
+.q-kp-inline {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.q-kp-text {
   font-size: 12px;
-  font-weight: 500;
-  color: var(--text-secondary);
-  max-width: 200px;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  color: var(--text-muted);
   white-space: nowrap;
+}
+
+.q-kp-text-empty {
+  font-size: 12px;
+  color: var(--text-muted);
+  opacity: 0.6;
 }
 
 .q-tag {
@@ -1624,51 +2068,10 @@ onBeforeUnmount(() => {
 .q-card-footer {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   padding: 10px 20px;
   border-top: 1px solid var(--divider);
   gap: 12px;
-  flex-wrap: wrap;
-}
-
-.q-kps {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.q-kps-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  font-size: 11.5px;
-  font-weight: 600;
-  color: var(--text-muted);
-}
-
-.q-kp-chip {
-  padding: 3px 10px;
-  border-radius: var(--radius-full);
-  background: var(--purple-light);
-  color: var(--purple);
-  font-size: 11.5px;
-  font-weight: 500;
-  white-space: nowrap;
-}
-
-.q-kp-empty {
-  font-size: 11.5px;
-  color: var(--text-muted);
-}
-
-.q-grade-chip {
-  padding: 3px 10px;
-  border-radius: var(--radius-full);
-  background: var(--teal-light);
-  color: var(--teal);
-  font-size: 11.5px;
-  font-weight: 500;
 }
 
 .q-actions {

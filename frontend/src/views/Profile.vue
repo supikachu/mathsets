@@ -456,15 +456,14 @@ async function onChangePassword() {
 // ---------------------------------------------------------------------------
 const roleLabel = computed(() => {
   if (!profile.value) return ''
-  const r = profile.value.global_role || profile.value.role
-  if (r === 'super_admin' || r === 'Admin' || r === 'admin') return '系统管理员'
+  // global_role 类型为 'super_admin' | 'teacher'，直接匹配即可
+  if (profile.value.global_role === 'super_admin') return '系统管理员'
   return '教师'
 })
 
 const roleBadgeColor = computed(() => {
   if (!profile.value) return 'gray'
-  const r = profile.value.global_role || profile.value.role
-  if (r === 'super_admin' || r === 'Admin' || r === 'admin') return 'purple'
+  if (profile.value.global_role === 'super_admin') return 'purple'
   return 'teal'
 })
 

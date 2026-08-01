@@ -62,6 +62,26 @@ async fn main() {
     tokio::spawn(mathset::workers::ai_parse_worker::start_worker(state.clone()));
     tracing::info!("🤖 AI 解析 worker 已在后台启动");
 
+    // 启动 SSE 票据过期清理后台任务（每 5 分钟清理一次过期 ticket）
+    {
+        let cleanup_state = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+            loop {
+                interval.tick().await;
+                let before = cleanup_state.sse_tickets.len();
+                cleanup_state
+                    .sse_tickets
+                    .retain(|_, info| !info.is_expired());
+                let removed = before - cleanup_state.sse_tickets.len();
+                if removed > 0 {
+                    tracing::debug!("SSE 票据清理: 移除 {} 个过期票据", removed);
+                }
+            }
+        });
+        tracing::info!("🧹 SSE 票据清理任务已启动 (5 分钟间隔)");
+    }
+
     // 构建路由
     let app = build_app(state);
 

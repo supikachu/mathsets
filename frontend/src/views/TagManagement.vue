@@ -135,7 +135,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import { tagsApi, type Tag } from '@/api/client'
+import { tagsApi, type Tag, type TagCategory } from '@/api/client'
 import { AppIcon, AppButton, AppBadge, AppEmpty, AppModal, AppConfirm } from '@/components/ui'
 import { useToast } from '@/composables/useToast'
 
@@ -224,7 +224,7 @@ async function saveEdit(tag: Tag) {
 // ===== 创建 =====
 const showCreateDialog = ref(false)
 const createLoading = ref(false)
-const createForm = ref({ name: '', category: 'method' as string })
+const createForm = ref<{ name: string; category: TagCategory }>({ name: '', category: 'method' })
 
 async function doCreate() {
   const name = createForm.value.name.trim()
@@ -234,7 +234,7 @@ async function doCreate() {
   }
   createLoading.value = true
   try {
-    const res = await tagsApi.create(name, createForm.value.category)
+    const res = await tagsApi.create({ name, category: createForm.value.category })
     tags.value = [...tags.value, res.data]
     toast.success(`已创建标签「${name}」`)
     showCreateDialog.value = false

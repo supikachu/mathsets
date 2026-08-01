@@ -42,6 +42,24 @@ pub struct Paper {
     pub version: i32,
 }
 
+/// 试卷简要信息（用于下拉选择）
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct PaperBrief {
+    pub id: Uuid,
+    pub title: String,
+}
+
+/// 题目被引用的试卷项（反向查询响应）
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct QuestionPaperItem {
+    pub paper_id: Uuid,
+    pub title: String,
+    pub sort_order: i32,
+    pub score: i32,
+    pub section: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
 /// 试卷列表响应
 #[derive(Debug, Clone, Serialize, FromRow)]
 pub struct PaperSummary {

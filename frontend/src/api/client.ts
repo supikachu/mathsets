@@ -7,6 +7,7 @@ import axios from 'axios'
 const client = axios.create({
   baseURL: '/api/v1',
   timeout: 10000,
+  paramsSerializer: { indexes: null },
 })
 
 // 请求拦截器：自动注入 Bearer token（login/register 不带）
@@ -352,7 +353,7 @@ export const questionApi = {
   delete(id: string) {
     return client.delete(`/questions/${id}`)
   },
-  submit(id: string, body?: { reviewer_ids?: string[]; comment?: string }) {
+  submit(id: string, body?: { reviewer_id?: string; reviewer_ids?: string[]; comment?: string }) {
     return client.post(`/questions/${id}/submit`, body || {})
   },
   approve(id: string, body?: { comment?: string }) {
@@ -373,6 +374,35 @@ export const questionApi = {
   },
   stats(params?: { space_id?: string }) {
     return client.get<QuestionStats>('/questions/stats', { params })
+  },
+}
+
+// ===========================================================================
+// 试卷
+// ===========================================================================
+
+export interface PaperBrief {
+  id: string
+  title: string
+}
+
+export interface QuestionPaperItem {
+  paper_id: string
+  title: string
+  sort_order: number
+  score: number
+  section: string | null
+  created_at: string
+}
+
+export const paperApi = {
+  /// 试卷轻量列表（仅 id + title，供下拉选择）
+  listBrief() {
+    return client.get<PaperBrief[]>('/papers/brief')
+  },
+  /// 反向查询：题目被引用的试卷列表
+  getQuestionPapers(questionId: string) {
+    return client.get<QuestionPaperItem[]>(`/questions/${questionId}/papers`)
   },
 }
 
@@ -419,8 +449,67 @@ export const spaceApi = {
   get(id: string) {
     return client.get<SpaceDetail>(`/spaces/${id}`)
   },
-  addMember(spaceId: string, userId: string, duties?: string[]) {
-    return client.post(`/spaces/${spaceId}/members`, { user_id: userId, duties })
+  update(id: string, data: { name?: string; settings?: Record<string, unknown> }) {
+    return client.put(`/spaces/${id}`, data)
+  },
+  delete(id: string) {
+    return client.delete(`/spaces/${id}`)
+  },
+  addMember(spaceId: string, username: string, role?: string, duties?: string[]) {
+    return client.post(`/spaces/${spaceId}/members`, { username, role, duties })
+  },
+  updateMember(spaceId: string, userId: string, data: { role?: string; duties?: string[] }) {
+    return client.put(`/spaces/${spaceId}/members/${userId}`, data)
+  },
+  removeMember(spaceId: string, userId: string) {
+    return client.delete(`/spaces/${spaceId}/members/${userId}`)
+  },
+  transferOwnership(spaceId: string, targetUserId: string) {
+    return client.put(`/spaces/${spaceId}/transfer/${targetUserId}`)
+  },
+  leaveSpace(spaceId: string) {
+    return client.delete(`/spaces/${spaceId}/leave`)
+  },
+}
+
+// ===========================================================================
+// 推库申请（公共题库终审流程）
+// ===========================================================================
+
+export interface PublicLibrarySubmission {
+  id: string
+  question_id: string
+  source_space_id: string
+  source_space_name: string
+  submitted_by: string
+  submitter_name: string
+  status: 'pending' | 'approved' | 'rejected'
+  review_comment: string | null
+  reviewed_by: string | null
+  reviewed_at: string | null
+  created_at: string
+  stem: string
+  question_type: string
+  difficulty: number
+}
+
+export const publicLibraryApi = {
+  submitToPublic(questionId: string, comment?: string) {
+    return client.post(`/questions/${questionId}/submit-to-public`, { comment })
+  },
+  withdraw(submissionId: string) {
+    return client.delete(`/public-library/${submissionId}`)
+  },
+  listPending() {
+    return client.get<PublicLibrarySubmission[]>('/public-library/pending')
+  },
+  review(submissionId: string, action: 'approved' | 'rejected', reviewComment?: string) {
+    return client.post(`/public-library/${submissionId}/review`, { action, review_comment: reviewComment })
+  },
+  getSubmissionStatus(questionId: string) {
+    return client.get<{ has_pending_submission: boolean; submission_id: string | null }>(
+      `/questions/${questionId}/public-submission`,
+    )
   },
 }
 
@@ -926,5 +1015,40 @@ export const adminUserApi = {
   },
   deleteUser(id: string) {
     return client.delete(`/admin/users/${id}`)
+  },
+}
+
+// ── 通知 ──
+
+export interface Notification {
+  id: string
+  user_id: string
+  kind: string
+  title: string
+  body: string | null
+  resource_type: string | null
+  resource_id: string | null
+  is_read: boolean
+  created_at: string
+}
+
+export const notificationApi = {
+  getTicket() {
+    return client.post<{ ticket: string; expires_in: number }>('/notifications/ticket')
+  },
+  list() {
+    return client.get<Notification[]>('/notifications')
+  },
+  markRead(id: string) {
+    return client.put<Notification>(`/notifications/${id}/read`)
+  },
+  markAllRead() {
+    return client.put<{ updated: number }>('/notifications/read-all')
+  },
+  delete(id: string) {
+    return client.delete(`/notifications/${id}`)
+  },
+  getUnreadCount() {
+    return client.get<{ count: number }>('/notifications/unread-count')
   },
 }

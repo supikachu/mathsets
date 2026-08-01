@@ -3,15 +3,17 @@
 export function typeLabel(t: string) {
   const map: Record<string, string> = {
     choice: '选择',
+    multiple: '多选',
     fill: '填空',
     solution: '解答',
   }
   return map[t] || t
 }
 
-export function typeBadgeColor(t: string): 'blue' | 'yellow' | 'green' | 'gray' {
-  const map: Record<string, 'blue' | 'yellow' | 'green' | 'gray'> = {
+export function typeBadgeColor(t: string): 'blue' | 'yellow' | 'green' | 'purple' | 'gray' {
+  const map: Record<string, 'blue' | 'yellow' | 'green' | 'purple' | 'gray'> = {
     choice: 'blue',
+    multiple: 'purple',
     fill: 'yellow',
     solution: 'green',
   }

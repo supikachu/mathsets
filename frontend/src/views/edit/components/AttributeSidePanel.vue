@@ -5,21 +5,31 @@
  * 设计要点：
  * - 320px 宽常驻右侧，Flex 纵向布局，与编辑区/预览区并排
  * - 顶部 "✨ AI 智能打标" 按钮，调用 aiTaggingApi.tag() 一键回填
- * - 知识点用 KnowledgeTreeCascader（自管数据加载）
+ * - 知识树标注：可折叠内联面板（Accordion），收起态仅展示已选 Tag + "展开知识树"按钮
+ *   展开后原地平滑展开 Tabs（章节|知识点|解题方法）+ 动态折叠树，勾选实时同步无需确定
+ *   动态拉取对应 tree（expectedCode = `${subject}_${mode}_${stage}` 严格精确匹配）
+ *   实时勾选同步到 chapterNodeIds / knowledgeNodeIds / methodNodeIds
+ *   面板外用 Tag 融合展示三组已选节点，支持 x 移除
  * - 标签分为核心素养 / 解题方法 / 学校来源 三组
  * - AI 回填字段加 --purple-light 边框高亮动画，用户手动修改后取消
- * - 严格使用 CSS 变量，复用 AppButton / AppIcon，无第三方 UI 库
+ * - 严格使用 CSS 变量，复用 AppButton / AppIcon / AppSelect，无第三方 UI 库
  */
-import { ref, reactive, computed, watch, nextTick } from 'vue'
+import { ref, reactive, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import {
   aiTaggingApi,
   tagsApi,
+  paperApi,
+  knowledgeTreeApi,
+  knowledgeNodeApi,
   type Tag,
   type TagCategory,
   type QuestionType,
+  type PaperBrief,
+  type KnowledgeTree,
+  type KnowledgeNodeTreeNode,
 } from '@/api/client'
 import { AppButton, AppIcon, AppSelect } from '@/components/ui'
-import KnowledgeTreeCascader from '@/components/KnowledgeTreeCascader.vue'
+import KnowledgeTreeCheckbox from '@/components/KnowledgeTreeCheckbox.vue'
 import { useToast } from '@/composables/useToast'
 import { useSpaceStore } from '@/stores/space'
 
@@ -28,9 +38,15 @@ import { useSpaceStore } from '@/stores/space'
 // ─────────────────────────────────────────────────────────────────────
 const tagIds = defineModel<string[]>('tagIds', { required: true })
 const knowledgeNodeIds = defineModel<string[]>('knowledgeNodeIds', { required: true })
+/** 章节节点 ID（前端独立维护，提交时与知识点/方法合并为统一 knowledge_node_ids） */
+const chapterNodeIds = defineModel<string[]>('chapterNodeIds', { default: () => [] })
+/** 解题方法节点 ID（前端独立维护，提交时合并） */
+const methodNodeIds = defineModel<string[]>('methodNodeIds', { default: () => [] })
 const aiGeneratedFields = defineModel<Set<string>>('aiGeneratedFields', { required: true })
 /** 面板折叠状态：父组件通过 v-model:collapsed 双向绑定 */
 const collapsed = defineModel<boolean>('collapsed', { default: false })
+/** 关联试卷 ID 列表：父组件通过 v-model:paperIds 双向绑定 */
+const paperIds = defineModel<string[]>('paperIds', { default: () => [] })
 
 // ─────────────────────────────────────────────────────────────────────
 // Props
@@ -46,18 +62,204 @@ const props = defineProps<{
     sub_type: string
     difficulty: string
     difficulty_coefficient: number
-    academic_year: string
     grade_semester: string
-    exam_type: string
-    exam_region: string
+    // ── 长尾维度：与 QuestionList 数据字典对齐，统一存入 metadata(JSONB) ──
+    year: string
+    region_province: string
+    region_city: string
+    source_type: string
+    sub_source_type: string
     options: { label: string; content: string }[]
     sub_answers: string[]
     solutions: string[]
+    // ── 知识树动态加载依赖：学段 / 学科（提交时进 metadata） ──
+    stage: 'junior' | 'senior'
+    subject: 'math' | 'physics'
   }
+  /**
+   * 初始节点名称映射（id → name），用于编辑场景下不打开弹窗也能展示 Tag 名称。
+   * 父组件 loadQuestion 时从 d.knowledge_nodes 构建。
+   */
+  initialNodeNames?: Record<string, string>
 }>()
 
 const toast = useToast()
 const space = useSpaceStore()
+
+// ─────────────────────────────────────────────────────────────────────
+// 知识树动态加载（从 KnowledgeTreeNav.vue 移植，无 kind 兜底）
+// ─────────────────────────────────────────────────────────────────────
+type Stage = 'junior' | 'senior'
+type Subject = 'math' | 'physics'
+type TreeMode = 'chapter' | 'knowledge' | 'method'
+
+// code 命名规则：{subject}_{mode}_{stage}，后端 high 表示高中
+const STAGE_CODE: Record<Stage, string> = { junior: 'junior', senior: 'high' }
+const SUBJECT_CODE: Record<Subject, string> = { math: 'math', physics: 'physics' }
+const MODE_CODE: Record<TreeMode, string> = { chapter: 'chapter', knowledge: 'knowledge', method: 'method' }
+
+const MODES: { key: TreeMode; label: string }[] = [
+  { key: 'chapter', label: '章节' },
+  { key: 'knowledge', label: '知识点' },
+  { key: 'method', label: '解题方法' },
+]
+
+// 顶部学段 / 学科下拉选项
+const stageOptions = [
+  { label: '初中', value: 'junior' },
+  { label: '高中', value: 'senior' },
+]
+const subjectOptions = [
+  { label: '数学', value: 'math' },
+  { label: '物理', value: 'physics' },
+]
+
+/** 当前弹窗内选中的模式（默认知识点） */
+const treeMode = ref<TreeMode>('knowledge')
+/** 当前模式对应的树数据（嵌套结构，直接喂给 KnowledgeTreeCheckbox） */
+const treeData = ref<KnowledgeNodeTreeNode[]>([])
+const activeTreeId = ref<string>('')
+const treeLoading = ref(false)
+/** 内联折叠面板展开态（默认收起，点击"展开知识树"后原地展开） */
+const treeExpanded = ref(false)
+
+/** 当前模式对应的已选 ID 数组（实时双向同步到对应 v-model，无需确定按钮） */
+const currentModeSelectedIds = computed<string[]>({
+  get: () => {
+    if (treeMode.value === 'chapter') return chapterNodeIds.value
+    if (treeMode.value === 'knowledge') return knowledgeNodeIds.value
+    return methodNodeIds.value
+  },
+  set: (ids: string[]) => {
+    if (treeMode.value === 'chapter') chapterNodeIds.value = ids
+    else if (treeMode.value === 'knowledge') knowledgeNodeIds.value = ids
+    else methodNodeIds.value = ids
+    clearFieldHighlight('knowledge_node')
+  },
+})
+
+/** 节点 ID → name 映射，用于面板外 Tag 展示 */
+const nodeNameMap = ref<Map<string, string>>(new Map())
+
+/** 期望的 tree code，如 'math_knowledge_high'（高中数学知识点树） */
+const expectedCode = computed(() => {
+  const subj = SUBJECT_CODE[props.form.subject]
+  const mode = MODE_CODE[treeMode.value]
+  const stage = STAGE_CODE[props.form.stage]
+  return `${subj}_${mode}_${stage}`
+})
+
+/** 物理学科 / 解题方法 等后端尚未覆盖时的兜底提示 */
+const emptyHint = computed(() => {
+  if (props.form.subject === 'physics') return '物理学科资源敬请期待'
+  if (treeMode.value === 'method') return '暂无解题方法树'
+  if (treeData.value.length === 0) return '当前模式暂无知识树'
+  return '无节点'
+})
+
+// ─── 三组已选节点融合展示（带 type 标签） ───────────────────────────
+interface SelectedNodeTag {
+  id: string
+  type: TreeMode
+  typeLabel: string
+  name: string
+}
+
+const allSelectedNodes = computed<SelectedNodeTag[]>(() => {
+  const build = (ids: string[], type: TreeMode, typeLabel: string): SelectedNodeTag[] =>
+    ids.map(id => ({ id, type, typeLabel, name: nodeNameMap.value.get(id) || id }))
+  return [
+    ...build(chapterNodeIds.value, 'chapter', '章节'),
+    ...build(knowledgeNodeIds.value, 'knowledge', '知识点'),
+    ...build(methodNodeIds.value, 'method', '方法'),
+  ]
+})
+
+const totalSelectedNodes = computed(() => allSelectedNodes.value.length)
+
+// ─── 数据加载 ─────────────────────────────────────────────────────────
+/**
+ * 加载知识树列表，按 expectedCode 严格精确匹配（无 kind 兜底，避免初中物理误抓高中数学）
+ */
+async function loadTrees() {
+  try {
+    const res = await knowledgeTreeApi.list()
+    const matched = res.data.find(t => t.code === expectedCode.value)
+    activeTreeId.value = matched?.id ?? ''
+  } catch (e) {
+    console.error('[AttributeSidePanel] 加载知识树列表失败', e)
+    activeTreeId.value = ''
+  }
+}
+
+/**
+ * 加载当前 activeTreeId 对应的树数据，并递归填充 nodeNameMap
+ */
+async function loadTreeData() {
+  if (!activeTreeId.value) {
+    treeData.value = []
+    return
+  }
+  treeLoading.value = true
+  try {
+    const res = await knowledgeNodeApi.getTree(activeTreeId.value)
+    treeData.value = res.data
+    // 递归遍历填充 nodeNameMap（id → name）
+    walkTreeToNameMap(res.data)
+  } catch (e) {
+    console.error('[AttributeSidePanel] 加载知识点树失败', e)
+    treeData.value = []
+  } finally {
+    treeLoading.value = false
+  }
+}
+
+/** 递归遍历树，把 id → name 写入 nodeNameMap */
+function walkTreeToNameMap(nodes: KnowledgeNodeTreeNode[]) {
+  for (const n of nodes) {
+    nodeNameMap.value.set(n.id, n.name)
+    if (n.children.length > 0) walkTreeToNameMap(n.children)
+  }
+}
+
+// ─── 内联树交互 ─────────────────────────────────────────────────────
+/** 切换模式：watch 会自动触发对应树的加载，无需额外操作 */
+function setMode(m: TreeMode) {
+  if (treeMode.value === m) return
+  treeMode.value = m
+}
+
+/** 面板外 Tag 移除：按 type 定位对应数组 */
+function removeNode(id: string, type: TreeMode) {
+  if (type === 'knowledge') {
+    knowledgeNodeIds.value = knowledgeNodeIds.value.filter(x => x !== id)
+  } else if (type === 'chapter') {
+    chapterNodeIds.value = chapterNodeIds.value.filter(x => x !== id)
+  } else {
+    methodNodeIds.value = methodNodeIds.value.filter(x => x !== id)
+  }
+  clearFieldHighlight('knowledge_node')
+}
+
+// ─── 侦听：treeMode / stage / subject 变化 → 重新加载树 ──────────────
+watch(
+  [treeMode, () => props.form.stage, () => props.form.subject],
+  async ([, newStage, newSubject], old) => {
+    const stageChanged = old && old[1] !== newStage
+    const subjectChanged = old && old[2] !== newSubject
+    // 学段 / 学科变化：清空三组已选节点（树已换，旧 ID 无意义）
+    if (stageChanged || subjectChanged) {
+      chapterNodeIds.value = []
+      knowledgeNodeIds.value = []
+      methodNodeIds.value = []
+      clearFieldHighlight('knowledge_node')
+    }
+    activeTreeId.value = ''
+    treeData.value = []
+    await loadTrees()
+    await loadTreeData()
+  },
+)
 
 // ─────────────────────────────────────────────────────────────────────
 // 标签分类与限额
@@ -162,6 +364,81 @@ async function createNewTag(name: string, category: TagCategory, state: SuggestS
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// 关联试卷（多选 + 搜索）
+// ─────────────────────────────────────────────────────────────────────
+const papers = ref<PaperBrief[]>([])
+const papersLoading = ref(false)
+const paperDropdownOpen = ref(false)
+const paperSearch = ref('')
+const paperTriggerRef = ref<HTMLElement | null>(null)
+const paperPopoverRef = ref<HTMLElement | null>(null)
+
+const filteredPapers = computed(() => {
+  const q = paperSearch.value.trim().toLowerCase()
+  if (!q) return papers.value
+  return papers.value.filter((p) => p.title.toLowerCase().includes(q))
+})
+
+const selectedPapers = computed(() =>
+  paperIds.value
+    .map((id) => papers.value.find((p) => p.id === id))
+    .filter((p): p is PaperBrief => !!p),
+)
+
+async function loadPapers() {
+  papersLoading.value = true
+  try {
+    const res = await paperApi.listBrief()
+    papers.value = res.data
+  } catch (e: any) {
+    toast.error(e.response?.data?.error || '加载试卷列表失败')
+  } finally {
+    papersLoading.value = false
+  }
+}
+
+function togglePaperDropdown() {
+  paperDropdownOpen.value = !paperDropdownOpen.value
+  if (paperDropdownOpen.value) {
+    paperSearch.value = ''
+    nextTick(() => updatePaperPopoverPosition())
+  }
+}
+
+function updatePaperPopoverPosition() {
+  if (!paperTriggerRef.value) return
+  const rect = paperTriggerRef.value.getBoundingClientRect()
+  paperPopoverStyle.value = {
+    top: `${rect.bottom + 4}px`,
+    left: `${rect.left}px`,
+    minWidth: `${rect.width}px`,
+  }
+}
+
+const paperPopoverStyle = ref({ top: '0px', left: '0px', minWidth: '0px' })
+
+function togglePaper(id: string) {
+  const idx = paperIds.value.indexOf(id)
+  if (idx >= 0) {
+    paperIds.value.splice(idx, 1)
+  } else {
+    paperIds.value.push(id)
+  }
+}
+
+function removePaper(id: string) {
+  const idx = paperIds.value.indexOf(id)
+  if (idx >= 0) paperIds.value.splice(idx, 1)
+}
+
+function onPaperClickOutside(e: MouseEvent) {
+  const target = e.target as Node
+  if (paperTriggerRef.value?.contains(target)) return
+  if (paperPopoverRef.value?.contains(target)) return
+  paperDropdownOpen.value = false
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // 基础属性选项（题型 / 学年 / 年级学期 / 考试类型）
 // ─────────────────────────────────────────────────────────────────────
 const typeOptions = [
@@ -170,34 +447,76 @@ const typeOptions = [
   { label: '解答题', value: 'solution' },
 ]
 
-const currentYear = new Date().getFullYear()
-const academicYearOptions = [
-  { label: `${currentYear - 1}-${String(currentYear).slice(2)}`, value: `${currentYear - 1}-${String(currentYear).slice(2)}` },
-  { label: `${currentYear}-${String(currentYear + 1).slice(2)}`, value: `${currentYear}-${String(currentYear + 1).slice(2)}` },
-  { label: `${currentYear + 1}-${String(currentYear + 2).slice(2)}`, value: `${currentYear + 1}-${String(currentYear + 2).slice(2)}` },
-]
-
+// 学期（与 QuestionList.vue semesterOptions 对齐；字段名沿用 grade_semester 以兼容旧 metadata）
 const gradeSemesterOptions = [
-  ...['初一', '初二', '初三'].flatMap(g => [
-    { label: `${g}上`, value: `${g}上` },
-    { label: `${g}下`, value: `${g}下` },
-  ]),
-  ...['高一', '高二', '高三'].flatMap(g => [
-    { label: `${g}上`, value: `${g}上` },
-    { label: `${g}下`, value: `${g}下` },
-  ]),
+  { label: '上学期', value: '上学期' },
+  { label: '下学期', value: '下学期' },
 ]
 
-const examTypeOptions = [
-  { label: '期末', value: '期末' },
-  { label: '期中', value: '期中' },
-  { label: '月考', value: '月考' },
-  { label: '周测', value: '周测' },
-  { label: '模拟', value: '模拟' },
-  { label: '高考', value: '高考' },
-  { label: '中考', value: '中考' },
-  { label: '竞赛', value: '竞赛' },
-]
+// ─────────────────────────────────────────────────────────────────────
+// 来源 / 年份 / 省市 数据字典（与 QuestionList.vue 完全对齐）
+// 长尾维度统一存入 questions.metadata(JSONB)
+// ─────────────────────────────────────────────────────────────────────
+// 来源（source_type）：去掉"全部"占位
+const sourceTypeOptions = [
+  '课前预习', '课堂例题', '随堂练习', '课后作业',
+  '单元复习', '单元测试', '阶段检测', '期中', '期末',
+  '高考真题', '高考模拟',
+].map(v => ({ label: v, value: v }))
+
+// 高考模拟子类型（sub_source_type）：仅当 source_type === '高考模拟' 时启用
+const subSourceTypeOptions = [
+  '一模', '二模', '三模', '模拟预测',
+].map(v => ({ label: v, value: v }))
+
+// 年份（year）：2020-2026
+const yearOptions = ['2020', '2021', '2022', '2023', '2024', '2025', '2026']
+  .map(v => ({ label: v, value: v }))
+
+// 省份（region_province）
+const regionOptions = ['北京', '上海', '浙江', '江苏', '广东', '湖北', '湖南', '四川', '山东']
+  .map(v => ({ label: v, value: v }))
+
+// 省份 → 城市级联字典（与 QuestionList.vue cityOptions 一致；其他省份用空数组兜底）
+const cityOptionsMap: Record<string, string[]> = {
+  '浙江': ['杭州市', '宁波市', '温州市', '绍兴市', '嘉兴市'],
+  '江苏': ['南京市', '苏州市', '无锡市', '常州市', '南通市'],
+  '广东': ['广州市', '深圳市', '珠海市', '佛山市', '东莞市'],
+  '北京': ['东城区', '西城区', '海淀区', '朝阳区', '丰台区'],
+  '上海': ['黄浦区', '徐汇区', '浦东新区', '静安区', '杨浦区'],
+}
+
+// 当前省份对应的市级选项（动态级联）
+const currentCityOptions = computed(() => {
+  const cities = cityOptionsMap[props.form.region_province]
+  return cities ? cities.map(c => ({ label: c, value: c })) : []
+})
+
+// 是否显示城市下拉（仅当省份在 cityOptionsMap 中存在时）
+const showCitySelect = computed(() => !!cityOptionsMap[props.form.region_province])
+
+// 是否显示模拟类型下拉（仅当来源是"高考模拟"时）
+const showSubSourceSelect = computed(() => props.form.source_type === '高考模拟')
+
+// 切换省份时清空城市，避免悬挂脏数据
+watch(
+  () => props.form.region_province,
+  () => {
+    if (props.form.region_city && !cityOptionsMap[props.form.region_province]?.includes(props.form.region_city)) {
+      props.form.region_city = ''
+    }
+  },
+)
+
+// 切换来源时清空模拟类型，避免悬挂脏数据
+watch(
+  () => props.form.source_type,
+  (newVal) => {
+    if (newVal !== '高考模拟' && props.form.sub_source_type) {
+      props.form.sub_source_type = ''
+    }
+  },
+)
 
 // 难度星级：1-5 星 ↔ easy/medium/hard + difficulty_coefficient
 const difficultyStars = computed<number>({
@@ -325,20 +644,8 @@ watch(
   () => clearFieldHighlight('question_type'),
 )
 watch(
-  () => props.form.academic_year,
-  () => clearFieldHighlight('academic_year'),
-)
-watch(
   () => props.form.grade_semester,
   () => clearFieldHighlight('grade_semester'),
-)
-watch(
-  () => props.form.exam_type,
-  () => clearFieldHighlight('exam_type'),
-)
-watch(
-  () => props.form.exam_region,
-  () => clearFieldHighlight('exam_region'),
 )
 
 // 暴露给父组件：当 form 字段被用户手动修改时，可调用此方法清除对应高亮
@@ -350,6 +657,34 @@ defineExpose({ clearFieldHighlight })
 function toggleCollapsed() {
   collapsed.value = !collapsed.value
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// 初始化
+// ─────────────────────────────────────────────────────────────────────
+// 监听父组件传入的 initialNodeNames：编辑场景下 loadQuestion 完成后会异步更新
+// 用 immediate 确保首次挂载也能捕获同步传入的值
+watch(
+  () => props.initialNodeNames,
+  (val) => {
+    if (!val) return
+    for (const [id, name] of Object.entries(val)) {
+      nodeNameMap.value.set(id, name)
+    }
+  },
+  { immediate: true },
+)
+
+onMounted(() => {
+  // 预加载当前 stage/subject/mode 对应的树（默认知识点模式）
+  loadTrees().then(loadTreeData)
+
+  loadPapers()
+  document.addEventListener('click', onPaperClickOutside)
+})
+
+onBeforeUnmount(() => {
+  document.removeEventListener('click', onPaperClickOutside)
+})
 </script>
 
 <template>
@@ -377,126 +712,214 @@ function toggleCollapsed() {
 
     <!-- ===== 滚动主体 ===== -->
     <div class="asp-body">
-      <!-- 基础属性（题型 / 难度 / 学年 / 年级学期 / 考试类型 / 考试地区） -->
+      <!-- 基础属性：5 行双列网格（第一行：学段 | 学科） -->
       <section class="asp-section asp-section-meta">
-        <div class="asp-section-head">
-          <label class="asp-label">基础属性</label>
-        </div>
         <div class="asp-meta-grid">
-          <!-- 题型 -->
+          <!-- 第一行左：学段（绑定 form.stage） -->
+          <div class="asp-meta-cell">
+            <AppSelect
+              :model-value="props.form.stage"
+              :options="stageOptions"
+              placeholder="学段"
+              class="asp-meta-select"
+              @update:model-value="(v: string | undefined) => { props.form.stage = (v as 'junior' | 'senior') || 'senior' }"
+            />
+          </div>
+
+          <!-- 第一行右：学科（绑定 form.subject） -->
+          <div class="asp-meta-cell">
+            <AppSelect
+              :model-value="props.form.subject"
+              :options="subjectOptions"
+              placeholder="学科"
+              class="asp-meta-select"
+              @update:model-value="(v: string | undefined) => { props.form.subject = (v as 'math' | 'physics') || 'math' }"
+            />
+          </div>
+
+          <!-- 第二行左：题型 -->
           <div
             class="asp-meta-cell"
             :class="{ 'ai-highlight': aiGeneratedFields.has('question_type') }"
           >
-            <label class="asp-meta-label">题型</label>
             <AppSelect
               :model-value="props.form.question_type"
               :options="typeOptions"
-              placeholder="选择题型"
+              placeholder="题型"
               class="asp-meta-select"
               @update:model-value="(v: string | undefined) => { props.form.question_type = v ?? ''; clearFieldHighlight('question_type') }"
             />
           </div>
 
-          <!-- 学年 -->
+          <!-- 第二行右：难度星级 -->
           <div
-            class="asp-meta-cell"
-            :class="{ 'ai-highlight': aiGeneratedFields.has('academic_year') }"
+            class="asp-meta-cell asp-meta-cell-stars"
+            :class="{ 'ai-highlight': aiGeneratedFields.has('difficulty') }"
           >
-            <label class="asp-meta-label">学年</label>
+            <button
+              v-for="n in 5"
+              :key="n"
+              type="button"
+              class="asp-star"
+              :class="{ active: difficultyStars >= n }"
+              @click="difficultyStars = n"
+            >
+              <AppIcon name="star" :size="13" />
+            </button>
+          </div>
+
+          <!-- 第三行左：年份 -->
+          <div class="asp-meta-cell">
             <AppSelect
-              :model-value="props.form.academic_year || undefined"
-              :options="academicYearOptions"
-              placeholder="学年"
+              :model-value="props.form.year || undefined"
+              :options="yearOptions"
+              placeholder="年份"
               clearable
               class="asp-meta-select"
-              @update:model-value="(v: string | undefined) => { props.form.academic_year = v ?? ''; clearFieldHighlight('academic_year') }"
+              @update:model-value="(v: string | undefined) => { props.form.year = v ?? '' }"
             />
           </div>
 
-          <!-- 难度星级（整行） -->
-          <div
-            class="asp-meta-cell asp-meta-cell-full"
-            :class="{ 'ai-highlight': aiGeneratedFields.has('difficulty') }"
-          >
-            <label class="asp-meta-label">难度</label>
-            <div class="asp-diff-row">
-              <button
-                v-for="n in 5"
-                :key="n"
-                type="button"
-                class="asp-star"
-                :class="{ active: difficultyStars >= n }"
-                @click="difficultyStars = n"
-              >
-                <AppIcon name="star" :size="14" />
-              </button>
-              <span class="asp-diff-hint">{{ difficultyStars }} 星</span>
-            </div>
-          </div>
-
-          <!-- 年级学期 -->
+          <!-- 第三行右：学期 -->
           <div
             class="asp-meta-cell"
             :class="{ 'ai-highlight': aiGeneratedFields.has('grade_semester') }"
           >
-            <label class="asp-meta-label">年级学期</label>
             <AppSelect
               :model-value="props.form.grade_semester || undefined"
               :options="gradeSemesterOptions"
-              placeholder="年级学期"
+              placeholder="学期"
               clearable
               class="asp-meta-select"
               @update:model-value="(v: string | undefined) => { props.form.grade_semester = v ?? ''; clearFieldHighlight('grade_semester') }"
             />
           </div>
 
-          <!-- 考试类型 -->
-          <div
-            class="asp-meta-cell"
-            :class="{ 'ai-highlight': aiGeneratedFields.has('exam_type') }"
-          >
-            <label class="asp-meta-label">考试类型</label>
+          <!-- 第四行左：省份 -->
+          <div class="asp-meta-cell">
             <AppSelect
-              :model-value="props.form.exam_type || undefined"
-              :options="examTypeOptions"
-              placeholder="考试类型"
+              :model-value="props.form.region_province || undefined"
+              :options="regionOptions"
+              placeholder="省份"
               clearable
               class="asp-meta-select"
-              @update:model-value="(v: string | undefined) => { props.form.exam_type = v ?? ''; clearFieldHighlight('exam_type') }"
+              @update:model-value="(v: string | undefined) => { props.form.region_province = v ?? '' }"
             />
           </div>
 
-          <!-- 考试地区（整行） -->
-          <div
-            class="asp-meta-cell asp-meta-cell-full"
-            :class="{ 'ai-highlight': aiGeneratedFields.has('exam_region') }"
-          >
-            <label class="asp-meta-label">考试地区</label>
-            <input
-              v-model="props.form.exam_region"
-              placeholder="如：北京市"
-              class="asp-input"
-              @input="clearFieldHighlight('exam_region')"
+          <!-- 第四行右：市区（级联：未选省份时 disabled 占位） -->
+          <div class="asp-meta-cell">
+            <AppSelect
+              :model-value="props.form.region_city || undefined"
+              :options="currentCityOptions"
+              :placeholder="showCitySelect ? '市/区' : '请先选省份'"
+              :disabled="!showCitySelect"
+              clearable
+              class="asp-meta-select"
+              @update:model-value="(v: string | undefined) => { props.form.region_city = v ?? '' }"
+            />
+          </div>
+
+          <!-- 第五行左：来源类型 -->
+          <div class="asp-meta-cell">
+            <AppSelect
+              :model-value="props.form.source_type || undefined"
+              :options="sourceTypeOptions"
+              placeholder="来源类型"
+              clearable
+              class="asp-meta-select"
+              @update:model-value="(v: string | undefined) => { props.form.source_type = v ?? '' }"
+            />
+          </div>
+
+          <!-- 第五行右：模拟类型（级联：未选高考模拟时 disabled 占位） -->
+          <div class="asp-meta-cell">
+            <AppSelect
+              :model-value="props.form.sub_source_type || undefined"
+              :options="subSourceTypeOptions"
+              :placeholder="showSubSourceSelect ? '模拟类型' : '需选高考模拟'"
+              :disabled="!showSubSourceSelect"
+              clearable
+              class="asp-meta-select"
+              @update:model-value="(v: string | undefined) => { props.form.sub_source_type = v ?? '' }"
             />
           </div>
         </div>
       </section>
 
-      <!-- 知识点 -->
+      <!-- 知识树标注（可折叠内联面板：收起态展示摘要，展开态实时勾选） -->
       <section
         class="asp-section"
         :class="{ 'ai-highlight': aiGeneratedFields.has('knowledge_node') }"
       >
         <div class="asp-section-head">
-          <label class="asp-label">知识点</label>
-          <span class="asp-counter">{{ knowledgeNodeIds.length }}/3</span>
+          <label class="asp-label">知识树标注</label>
+          <span class="asp-counter">{{ totalSelectedNodes }}</span>
         </div>
-        <KnowledgeTreeCascader
-          v-model="knowledgeNodeIds"
-          :max="3"
-          placeholder="选择知识点…"
-        />
+        <!-- 已选节点 Tag 平铺（融合三组） -->
+        <div v-if="allSelectedNodes.length" class="asp-node-chips">
+          <span
+            v-for="t in allSelectedNodes"
+            :key="t.id"
+            class="asp-node-chip"
+            :class="'is-' + t.type"
+          >
+            <span class="asp-node-chip-type">{{ t.typeLabel }}</span>
+            <span class="asp-node-chip-name">{{ t.name }}</span>
+            <button
+              type="button"
+              class="asp-node-chip-x"
+              :title="`移除${t.typeLabel}`"
+              @click="removeNode(t.id, t.type)"
+            >
+              <AppIcon name="x" :size="10" />
+            </button>
+          </span>
+        </div>
+        <!-- 展开按钮（收起态：点击原地展开 Tabs + 树） -->
+        <button
+          v-if="!treeExpanded"
+          type="button"
+          class="asp-tree-toggle"
+          @click="treeExpanded = true"
+        >
+          <AppIcon name="chevron-down" :size="14" />
+          <span>展开知识树</span>
+        </button>
+        <!-- 可折叠内容容器（展开态：Tabs + 树 + 收起按钮，max-height 过渡动画） -->
+        <div class="asp-tree-collapse" :class="{ 'is-expanded': treeExpanded }">
+          <div class="asp-tree-tabs" role="tablist" aria-label="标注模式">
+            <button
+              v-for="m in MODES"
+              :key="m.key"
+              type="button"
+              class="asp-tree-tab"
+              :class="{ active: treeMode === m.key }"
+              role="tab"
+              :aria-selected="treeMode === m.key"
+              @click="setMode(m.key)"
+            >
+              {{ m.label }}
+            </button>
+          </div>
+          <div class="asp-tree-inline">
+            <div v-if="treeLoading" class="asp-tree-empty">加载中…</div>
+            <div v-else-if="treeData.length === 0" class="asp-tree-empty">{{ emptyHint }}</div>
+            <KnowledgeTreeCheckbox
+              v-else
+              :nodes="treeData"
+              v-model="currentModeSelectedIds"
+            />
+          </div>
+          <button
+            type="button"
+            class="asp-tree-toggle asp-tree-toggle-collapse"
+            @click="treeExpanded = false"
+          >
+            <AppIcon name="chevron-down" :size="14" class="asp-tree-toggle-icon-up" />
+            <span>收起 / 完成</span>
+          </button>
+        </div>
       </section>
 
       <!-- 核心素养 -->
@@ -620,6 +1043,88 @@ function toggleCollapsed() {
           </button>
         </div>
       </section>
+
+      <!-- 所属/关联试卷（多选 + 搜索） -->
+      <section class="asp-section">
+        <div class="asp-section-head">
+          <label class="asp-label">所属/关联试卷</label>
+          <span class="asp-counter">{{ paperIds.length }}</span>
+        </div>
+        <!-- 已选试卷 chips -->
+        <div v-if="selectedPapers.length" class="asp-paper-chips">
+          <span
+            v-for="p in selectedPapers"
+            :key="p.id"
+            class="asp-paper-chip"
+          >
+            <span class="asp-paper-chip-name">{{ p.title }}</span>
+            <button
+              type="button"
+              class="asp-paper-chip-x"
+              @click="removePaper(p.id)"
+            >
+              <AppIcon name="x" :size="10" />
+            </button>
+          </span>
+        </div>
+        <!-- 触发输入框 -->
+        <div
+          ref="paperTriggerRef"
+          class="asp-paper-trigger"
+          :class="{ 'is-open': paperDropdownOpen }"
+          @click="togglePaperDropdown"
+        >
+          <span v-if="paperIds.length === 0" class="asp-paper-placeholder">
+            选择试卷…
+          </span>
+          <span v-else class="asp-paper-summary">
+            已选 {{ paperIds.length }} 份试卷
+          </span>
+          <AppIcon
+            name="chevron-down"
+            :size="14"
+            class="asp-paper-caret"
+            :class="{ 'is-open': paperDropdownOpen }"
+          />
+        </div>
+        <!-- 下拉浮层（Teleport 到 body 避免 overflow 裁剪） -->
+        <Teleport to="body">
+          <div
+            v-if="paperDropdownOpen"
+            ref="paperPopoverRef"
+            class="asp-paper-popover"
+            :style="paperPopoverStyle"
+          >
+            <div class="asp-paper-search">
+              <input
+                v-model="paperSearch"
+                class="asp-paper-search-input"
+                placeholder="搜索试卷标题…"
+                @click.stop
+              />
+            </div>
+            <div v-if="papersLoading" class="asp-paper-empty">加载中…</div>
+            <div v-else-if="filteredPapers.length === 0" class="asp-paper-empty">
+              {{ paperSearch.trim() ? '无匹配试卷' : '暂无试卷' }}
+            </div>
+            <div v-else class="asp-paper-list">
+              <button
+                v-for="p in filteredPapers"
+                :key="p.id"
+                type="button"
+                class="asp-paper-option"
+                :class="{ active: paperIds.includes(p.id) }"
+                @click.stop="togglePaper(p.id)"
+              >
+                <span class="asp-paper-check">
+                  <AppIcon v-if="paperIds.includes(p.id)" name="check" :size="12" />
+                </span>
+                <span class="asp-paper-title">{{ p.title }}</span>
+              </button>
+            </div>
+          </div>
+        </Teleport>
+      </section>
     </div>
     </aside>
 
@@ -639,6 +1144,7 @@ function toggleCollapsed() {
       />
       <span class="toggle-tooltip">{{ collapsed ? '展开属性' : '收起属性' }}</span>
     </button>
+
   </div>
 </template>
 
@@ -811,62 +1317,75 @@ function toggleCollapsed() {
   transition: box-shadow 0.4s ease;
 }
 
-/* ===== 基础属性区块：两列紧凑栅格 ===== */
+/* ===== 基础属性区块：5 行双列极简扁平化栅格 ===== */
 .asp-section-meta {
-  padding: 4px 8px 4px;
+  padding: 4px 4px 16px;
   border-bottom: 1px solid var(--border-color);
-  padding-bottom: 16px;
 }
 
 .asp-meta-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 12px 8px;
+  gap: 6px 6px;
 }
 
+/* cell 纯容器：无 padding/边框，让 AppSelect 自身承担"标签按钮"视觉 */
 .asp-meta-cell {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  align-items: center;
   min-width: 0;
-  padding: 6px 8px;
-  border-radius: var(--radius-sm);
-  border: 1px solid transparent;
-  transition: box-shadow 0.4s ease, border-color 0.2s ease;
-}
-
-.asp-meta-cell-full {
-  grid-column: 1 / -1;
-}
-
-.asp-meta-label {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-muted);
-  letter-spacing: 0.02em;
+  border-radius: 6px;
+  transition: box-shadow 0.4s ease;
 }
 
 .asp-meta-select {
   width: 100%;
 }
 
-/* 让 AppSelect 在 cell 内宽度填满 */
 .asp-meta-cell :deep(.app-select-wrapper) {
   width: 100%;
   min-width: 0;
 }
 
+/* ===== 极简扁平化：淡灰背景 + 无 border + 6px 圆角 + 紧凑 padding ===== */
 .asp-meta-cell :deep(.app-select-trigger) {
   width: 100%;
   min-width: 0;
+  padding: 5px 10px;
+  min-height: 32px;
+  font-size: 12.5px;
+  border: none;
+  border-radius: 6px;
+  background: var(--bg-input);
+  transition: background 0.15s ease, box-shadow 0.15s ease;
 }
 
-/* 难度星级 */
-.asp-diff-row {
-  display: inline-flex;
+.asp-meta-cell :deep(.app-select-trigger:hover:not(.open)) {
+  background: var(--bg-hover);
+}
+
+.asp-meta-cell :deep(.app-select-trigger.open) {
+  background: var(--bg-card);
+  box-shadow: 0 0 0 2px var(--accent-light);
+}
+
+/* disabled 占位态：更淡的背景 + 不可点击 */
+.asp-meta-cell :deep(.app-select-wrapper.disabled) .app-select-trigger {
+  opacity: 0.55;
+  cursor: not-allowed;
+  background: var(--bg-input);
+}
+
+/* ===== 难度星级 cell：与 AppSelect 同款的"标签按钮"容器 ===== */
+.asp-meta-cell-stars {
+  display: flex;
   align-items: center;
+  justify-content: center;
   gap: 2px;
-  height: 28px;
+  padding: 5px 8px;
+  min-height: 32px;
+  border-radius: 6px;
+  background: var(--bg-input);
 }
 
 .asp-star {
@@ -874,7 +1393,7 @@ function toggleCollapsed() {
   background: none;
   border: none;
   cursor: pointer;
-  padding: 4px;
+  padding: 3px;
   display: inline-flex;
   transition: transform 0.15s ease, color 0.2s ease;
 }
@@ -895,13 +1414,6 @@ function toggleCollapsed() {
 .asp-star.active :deep(svg),
 .asp-star.active svg {
   color: var(--star-color, #ff9500) !important;
-}
-
-.asp-diff-hint {
-  margin-left: 8px;
-  font-size: 11px;
-  color: var(--text-muted);
-  font-weight: 500;
 }
 
 .asp-section-head {
@@ -1065,6 +1577,89 @@ function toggleCollapsed() {
   align-items: center;
 }
 
+/* ===== 知识树标注：已选节点 Tag + 添加按钮 ===== */
+.asp-node-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.asp-node-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 4px 3px 6px;
+  border-radius: 9999px;
+  background: var(--accent-light);
+  border: 1px solid var(--accent-light);
+  color: var(--accent);
+  font-size: 11.5px;
+  font-weight: 500;
+  max-width: 100%;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+/* 按 type 区分色调（章节/知识点/方法） */
+.asp-node-chip.is-chapter {
+  background: var(--bg-active);
+  border-color: var(--border-strong, #d1d1d6);
+  color: var(--text-secondary);
+}
+
+.asp-node-chip.is-knowledge {
+  background: var(--accent-light);
+  border-color: var(--accent-light);
+  color: var(--accent);
+}
+
+.asp-node-chip.is-method {
+  background: var(--purple-light, #f3e8ff);
+  border-color: var(--purple-light, #f3e8ff);
+  color: var(--purple, #8b5cf6);
+}
+
+.asp-node-chip-type {
+  font-size: 9.5px;
+  font-weight: 600;
+  padding: 1px 4px;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.5);
+  line-height: 1.3;
+}
+
+[data-theme='dark'] .asp-node-chip-type {
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.asp-node-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 120px;
+}
+
+.asp-node-chip-x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  border-radius: 50%;
+  padding: 0;
+  flex-shrink: 0;
+  opacity: 0.7;
+  transition: opacity 0.15s, background 0.15s;
+}
+
+.asp-node-chip-x:hover {
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.1);
+}
+
 /* ===== AI 高亮动画（与 QuestionEdit.vue 的 .ai-highlight 一致） ===== */
 @keyframes asp-ai-breathe {
   0%, 100% {
@@ -1081,11 +1676,6 @@ function toggleCollapsed() {
   border-radius: var(--radius-sm);
 }
 
-/* ===== 让 KnowledgeTreeCascader 宽度填满 ===== */
-.asp-section :deep(.cascader-trigger) {
-  width: 100%;
-}
-
 /* ===== 移动端：宽度自适应，但仍保持纵向栈 ===== */
 @media (max-width: 900px) {
   .attr-side-panel {
@@ -1093,5 +1683,304 @@ function toggleCollapsed() {
     height: auto;
     max-height: 480px;
   }
+}
+
+/* ===== 关联试卷多选 ===== */
+.asp-paper-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.asp-paper-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 4px 3px 8px;
+  border-radius: 9999px;
+  background: var(--accent-light);
+  border: 1px solid var(--accent-light);
+  color: var(--accent);
+  font-size: 11.5px;
+  font-weight: 500;
+  max-width: 100%;
+}
+
+.asp-paper-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 140px;
+}
+
+.asp-paper-chip-x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  border-radius: 50%;
+  padding: 0;
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+
+.asp-paper-chip-x:hover {
+  background: var(--accent);
+  color: #fff;
+}
+
+.asp-paper-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-input);
+  cursor: pointer;
+  box-sizing: border-box;
+  transition: border-color 0.2s;
+}
+
+.asp-paper-trigger:hover {
+  border-color: var(--accent);
+}
+
+.asp-paper-trigger.is-open {
+  border-color: var(--accent);
+  background: var(--bg-card);
+}
+
+.asp-paper-placeholder {
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.asp-paper-summary {
+  font-size: 12.5px;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.asp-paper-caret {
+  color: var(--text-muted);
+  transition: transform 0.2s;
+  flex-shrink: 0;
+}
+
+.asp-paper-caret.is-open {
+  transform: rotate(180deg);
+}
+
+/* 下拉浮层（Teleport 到 body） */
+.asp-paper-popover {
+  position: fixed;
+  z-index: 9999;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  box-shadow: var(--shadow-md);
+  max-height: 280px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.asp-paper-search {
+  padding: 8px;
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.asp-paper-search-input {
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 12.5px;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.asp-paper-search-input:focus {
+  border-color: var(--accent);
+}
+
+.asp-paper-list {
+  overflow-y: auto;
+  padding: 4px;
+  flex: 1;
+  min-height: 0;
+}
+
+.asp-paper-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  font-size: 12.5px;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: background 0.15s;
+  text-align: left;
+}
+
+.asp-paper-option:hover {
+  background: var(--bg-hover);
+}
+
+.asp-paper-option.active {
+  background: var(--accent-light);
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.asp-paper-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: var(--accent);
+}
+
+.asp-paper-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.asp-paper-empty {
+  padding: 16px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* ===== 知识树内联折叠树 ===== */
+/* 顶部 Tabs（无缝分段控制器风格，温润圆角） */
+.asp-tree-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  background: var(--bg-active);
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+
+.asp-tree-tab {
+  flex: 1;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.asp-tree-tab:hover:not(.active) {
+  color: var(--text-secondary);
+}
+
+.asp-tree-tab.active {
+  background: var(--bg-card);
+  color: var(--text-primary);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+[data-theme='dark'] .asp-tree-tab.active {
+  background: var(--bg-input);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+}
+
+/* 内联树容器：透明（卡片质感由 .asp-tree-collapse.is-expanded 承载） */
+.asp-tree-inline {
+  padding: 2px 0;
+}
+
+.asp-tree-empty {
+  padding: 32px 12px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
+/* ===== 可折叠内容容器：展开态为拟物化教研纸张卡片 ===== */
+.asp-tree-collapse {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  transition: max-height 0.35s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.25s ease;
+}
+
+.asp-tree-collapse.is-expanded {
+  max-height: 1500px;
+  opacity: 1;
+  padding: 10px;
+  background: linear-gradient(180deg, #fafbfc 0%, #f5f7fa 100%);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06), inset 0 1px 2px rgba(0, 0, 0, 0.03);
+}
+
+[data-theme='dark'] .asp-tree-collapse.is-expanded {
+  background: linear-gradient(180deg, var(--bg-input) 0%, var(--bg-active) 100%);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2), inset 0 1px 2px rgba(0, 0, 0, 0.1);
+}
+
+/* ===== 展开 / 收起 按钮（温润圆角） ===== */
+.asp-tree-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 7px 14px;
+  border: 1px dashed var(--accent);
+  border-radius: 8px;
+  background: var(--accent-light);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  align-self: flex-start;
+  transition: all 0.2s ease;
+}
+
+.asp-tree-toggle:hover {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+}
+
+/* 收起按钮：撑满宽度，置于展开区域底部 */
+.asp-tree-toggle-collapse {
+  align-self: stretch;
+}
+
+/* 收起按钮的箭头翻转 180deg 指向上 */
+.asp-tree-toggle-icon-up {
+  transform: rotate(180deg);
 }
 </style>

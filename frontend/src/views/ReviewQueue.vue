@@ -9,7 +9,12 @@
 
     <div v-if="loading" class="loading-hint">加载中…</div>
 
-    <AppEmpty v-else-if="list.length === 0" icon="check-circle" description="所有题目已审核完毕" />
+    <!--
+      修正 1：个人空间也必须调用 reviewable_by_me，后端会根据 space kind 自动返回
+      该用户作为 creator 且 status=pending 的待审题目（自审模式）。
+      绝不能在此处把 list 置空，否则会让个人空间的题目永远卡在 pending 状态。
+    -->
+    <AppEmpty v-else-if="list.length === 0" icon="check-circle" :description="emptyHint" />
 
     <template v-else>
       <div
@@ -57,15 +62,16 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { questionApi, type QuestionSummary } from '@/api/client'
-import client from '@/api/client'
 import { AppBadge, AppButton, AppEmpty, AppModal, AppIcon } from '@/components/ui'
 import LatexRender from '@/components/LatexRender.vue'
 import { useToast } from '@/composables/useToast'
+import { useSpaceStore } from '@/stores/space'
 import { typeLabel, typeBadgeColor, diffLabel, diffBadgeColor, formatTime } from '@/utils/questionDisplay'
 
 const toast = useToast()
+const space = useSpaceStore()
 const list = ref<QuestionSummary[]>([])
 const loading = ref(true)
 const rejectDialog = ref(false)
@@ -74,14 +80,33 @@ const currentQ = ref<QuestionSummary | null>(null)
 const reviewing = ref<string | null>(null)
 const rejecting = ref(false)
 
+// 修正 1：所有空间 kind 都调用同一个接口；后端会按身份和空间 kind 自动过滤。
+// - 个人空间：返回 status=pending 且 creator=当前用户 的题目（自审模式）
+// - 团队空间：返回 reviewer_ids 包含当前用户 的 pending 题目（交叉审核）
+// - 公共空间：返回空（公共题目已终审，无内部审核流程）
+const currentSpaceKind = computed(() => space.currentSpace?.kind || 'personal')
+
+const emptyHint = computed(() => {
+  if (currentSpaceKind.value === 'personal') return '暂无待审核题目（个人空间自审：提交后在此审核）'
+  if (currentSpaceKind.value === 'team') return '所有题目已审核完毕'
+  return '公共空间无需审核'
+})
+
 async function fetchList() {
   loading.value = true
   try {
-    const res = await questionApi.list({ reviewable_by_me: true, page_size: 50 })
+    const res = await questionApi.list({
+      reviewable_by_me: true,
+      space_id: space.currentSpaceId || undefined,
+      page_size: 50,
+    })
     list.value = res.data
   } catch { /* handled */ }
   finally { loading.value = false }
 }
+
+// 切换空间时自动刷新
+watch(() => space.currentSpaceId, () => fetchList())
 
 function handleReview(q: QuestionSummary, action: string) {
   currentQ.value = q
@@ -111,12 +136,17 @@ async function confirmReject() {
 async function confirmReview(q: QuestionSummary, action: string, comment?: string): Promise<boolean> {
   reviewing.value = q.id
   try {
-    await client.post(`/questions/${q.id}/review`, { action, comment })
+    if (action === 'approved') {
+      await questionApi.approve(q.id)
+    } else {
+      await questionApi.reject(q.id, { reject_reason: comment })
+    }
     toast.success(action === 'approved' ? '已通过' : '已驳回')
     list.value = list.value.filter(item => item.id !== q.id)
     return true
   } catch (e: any) {
-    toast.error(e.response?.data?.error || '操作失败')
+    console.error('审核操作失败:', e)
+    toast.error(e.response?.data?.error || e.response?.data?.message || e.message || '操作失败')
     return false
   } finally {
     reviewing.value = null
@@ -131,6 +161,27 @@ onMounted(fetchList)
   text-align: center;
   padding: 48px 20px;
   color: var(--text-muted);
+}
+
+.no-review-hint {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 60px 20px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.no-review-hint p {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin: 4px 0 0;
+}
+
+.no-review-hint span {
+  font-size: 13px;
 }
 
 .line-clamp-2 {

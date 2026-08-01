@@ -20,6 +20,7 @@ use tower_http::trace::TraceLayer;
 use crate::db::DbPool;
 
 use std::sync::Arc;
+use uuid::Uuid;
 
 /// 应用共享状态内部数据
 pub struct AppStateInner {
@@ -29,6 +30,10 @@ pub struct AppStateInner {
     pub ai_config: crate::config::AiConfig,
     /// 文件上传根目录（如 ./uploads），头像等用户文件落盘位置
     pub upload_dir: String,
+    /// SSE 广播通道 — 工作流事件通过此通道推送到所有 SSE 连接
+    pub notify_tx: tokio::sync::broadcast::Sender<crate::models::notification::BroadcastEvent>,
+    /// SSE 一次性票据存储（30s TTL，使用后立即销毁）
+    pub sse_tickets: Arc<dashmap::DashMap<Uuid, crate::models::notification::TicketInfo>>,
 }
 
 /// 应用共享状态（通过 Arc 包裹，Clone 成本为 O(1)）
@@ -53,6 +58,10 @@ impl AppState {
         ai_config: crate::config::AiConfig,
         upload_dir: String,
     ) -> Self {
+        // 广播通道：容量 256，超出时旧消息被丢弃（SSE 客户端会收到 Lagged 警告）
+        let (notify_tx, _) = tokio::sync::broadcast::channel(256);
+        let sse_tickets = Arc::new(dashmap::DashMap::new());
+
         Self {
             inner: Arc::new(AppStateInner {
                 pool,
@@ -60,6 +69,8 @@ impl AppState {
                 jwt_expiry_hours,
                 ai_config,
                 upload_dir,
+                notify_tx,
+                sse_tickets,
             }),
         }
     }
@@ -81,6 +92,11 @@ pub fn build_app(state: AppState) -> Router {
             "/spaces/{id}/members/{user_id}",
             delete(handlers::spaces::remove_member),
         )
+        .route(
+            "/spaces/{id}/transfer/{target_user_id}",
+            put(handlers::spaces::transfer_ownership),
+        )
+        .route("/spaces/{id}/leave", delete(handlers::spaces::leave_space))
         // 知识树（KnowledgeTree）— B3 新增：多棵树容器（数学知识/能力/教材章节）
         .route("/knowledge-trees", get(handlers::knowledge_trees::list_knowledge_trees))
         .route("/knowledge-trees", post(handlers::knowledge_trees::create_knowledge_tree))
@@ -146,14 +162,42 @@ pub fn build_app(state: AppState) -> Router {
             "/questions/{id}/import",
             post(handlers::questions::import_question),
         )
+        // 推库申请（公共题库终审流程）
+        .route(
+            "/questions/{id}/submit-to-public",
+            post(handlers::public_library::submit_to_public),
+        )
+        .route(
+            "/questions/{id}/public-submission",
+            get(handlers::public_library::get_question_submission_status),
+        )
+        .route(
+            "/public-library/pending",
+            get(handlers::public_library::list_pending),
+        )
+        .route(
+            "/public-library/{id}/review",
+            post(handlers::public_library::review_submission),
+        )
+        .route(
+            "/public-library/{id}",
+            delete(handlers::public_library::withdraw_submission),
+        )
         // 跨空间克隆题目（深拷贝 + 强制 Draft + origin_question_id）
         .route(
             "/questions/{id}/clone",
             post(handlers::spaces::clone_question),
         )
+        // 反向查询：题目被引用的试卷列表
+        .route(
+            "/questions/{id}/papers",
+            get(handlers::papers::get_question_papers),
+        )
         // 试卷 CRUD
         .route("/papers", get(handlers::papers::list_papers))
         .route("/papers", post(handlers::papers::create_paper))
+        // 试卷轻量列表（仅 id + title，供下拉选择，必须放在 /papers/{id} 之前）
+        .route("/papers/brief", get(handlers::papers::list_papers_brief))
         .route("/papers/{id}", get(handlers::papers::get_paper))
         .route("/papers/{id}", put(handlers::papers::update_paper))
         .route("/papers/{id}", delete(handlers::papers::delete_paper))
@@ -183,6 +227,16 @@ pub fn build_app(state: AppState) -> Router {
         .route("/tags/{id}", put(handlers::tags::update_tag))
         .route("/tags/{id}", delete(handlers::tags::delete_tag))
         .route("/tags/{id}/merge", post(handlers::tags::merge_tag))
+        // 通知系统（ticket 颁发 + 列表 + 已读标记）
+        .route("/notifications/ticket", post(handlers::notifications::create_ticket))
+        .route("/notifications", get(handlers::notifications::list_notifications))
+        .route("/notifications/unread-count", get(handlers::notifications::unread_count))
+        .route("/notifications/read-all", put(handlers::notifications::mark_all_read))
+        .route("/notifications/{id}/read", put(handlers::notifications::mark_read))
+        .route(
+            "/notifications/{id}",
+            delete(handlers::notifications::delete_notification),
+        )
         // 统一应用认证中间件
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -196,6 +250,11 @@ pub fn build_app(state: AppState) -> Router {
         // API v1 认证模块（无需认证）
         .route("/api/v1/auth/register", post(handlers::auth::register))
         .route("/api/v1/auth/login", post(handlers::auth::login))
+        // SSE 通知流（无需 JWT，使用一次性 ticket 认证）
+        .route(
+            "/api/v1/notifications/stream",
+            get(handlers::notifications::stream),
+        )
         // API v1 保护模块（需要 JWT）
         .nest("/api/v1", protected_routes)
         // 静态文件服务（用户头像等）— 无需认证，直接通过 URL 访问

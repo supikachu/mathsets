@@ -11,11 +11,13 @@ use crate::auth::permissions::{
     can_access_space, ensure_personal_space, ensure_public_space, get_space, is_admin,
     is_space_member,
 };
+use crate::handlers::notifications::send_notification;
 use crate::handlers::questions::{build_detail, db_err, save_version};
+use crate::models::notification::CreateNotification;
 use crate::models::question::{Question, QuestionStatus, TransferQuestionRequest};
 use crate::models::space::{
     AddSpaceMemberRequest, CreateTeamSpaceRequest, Space, SpaceDetail, SpaceKind, SpaceMemberInfo,
-    SpaceSummary, UpdateSpaceMemberRequest, UpdateSpaceRequest,
+    SpaceRole, SpaceSummary, UpdateSpaceMemberRequest, UpdateSpaceRequest,
 };
 use crate::AppState;
 
@@ -144,11 +146,12 @@ pub async fn create_team_space(
     sqlx::query(
         r#"
         INSERT INTO space_members (space_id, user_id, role, duties, joined_at)
-        VALUES ($1, $2, 'owner', '{}', $3)
+        VALUES ($1, $2, $3, '{}', $4)
         "#,
     )
     .bind(id)
     .bind(auth.id)
+    .bind(SpaceRole::Owner)
     .bind(now)
     .execute(&mut *tx)
     .await
@@ -210,7 +213,7 @@ pub async fn get_space_detail(
     let members = if space.kind == SpaceKind::Team {
         sqlx::query_as::<_, SpaceMemberInfo>(
             r#"
-            SELECT sm.user_id, u.username, u.display_name, sm.role, sm.duties, sm.joined_at
+            SELECT sm.user_id, u.username, u.display_name, sm.role::text AS role, sm.duties, sm.joined_at
             FROM space_members sm
             JOIN users u ON u.id = sm.user_id
             WHERE sm.space_id = $1
@@ -266,7 +269,7 @@ pub async fn update_space(
         SpaceKind::Personal => space.owner_user_id == Some(auth.id),
         SpaceKind::Team => {
             let role: Option<String> = sqlx::query_scalar(
-                "SELECT role FROM space_members WHERE space_id = $1 AND user_id = $2",
+                "SELECT role::text FROM space_members WHERE space_id = $1 AND user_id = $2",
             )
             .bind(id)
             .bind(auth.id)
@@ -347,7 +350,7 @@ pub async fn delete_space(
     }
 
     let is_owner = sqlx::query_scalar::<_, String>(
-        "SELECT role FROM space_members WHERE space_id = $1 AND user_id = $2",
+        "SELECT role::text FROM space_members WHERE space_id = $1 AND user_id = $2",
     )
     .bind(id)
     .bind(auth.id)
@@ -366,27 +369,69 @@ pub async fn delete_space(
         return Err((StatusCode::FORBIDDEN, Json(json!({"error": "无权删除该空间"}))));
     }
 
-    // 有题目则禁止删除
-    let q_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM questions WHERE space_id = $1")
-        .bind(id)
-        .fetch_one(&state.pool)
+    // ── 删除前快照：原成员列表 + 空间名（用于事务后通知） ──
+    let member_ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT user_id FROM space_members WHERE space_id = $1",
+    )
+    .bind(id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("查询成员列表失败: {}", e)})),
+        )
+    })?;
+
+    let space_name = space.name.clone();
+
+    // ── 事务前：确保 Owner 个人空间存在 ──
+    let personal_space_id = ensure_personal_space(&state.pool, auth.id, &auth.username)
         .await
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("检查题目失败: {}", e)})),
+                Json(json!({"error": format!("获取个人空间失败: {}", e)})),
             )
         })?;
-    if q_count > 0 {
-        return Err((
-            StatusCode::CONFLICT,
-            Json(json!({"error": "空间内仍有题目，无法删除"})),
-        ));
-    }
 
+    // ── 事务：批量转移题目 → 清理成员 → 删除空间 ──
+    let mut tx = state.pool.begin().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("开启事务失败: {}", e)})),
+        )
+    })?;
+
+    // 1. 将所有题目资产转移到 Owner 的个人空间
+    sqlx::query("UPDATE questions SET space_id = $1 WHERE space_id = $2")
+        .bind(personal_space_id)
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("转移题目资产失败: {}", e)})),
+            )
+        })?;
+
+    // 2. 清理成员映射表
+    sqlx::query("DELETE FROM space_members WHERE space_id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("清理成员失败: {}", e)})),
+            )
+        })?;
+
+    // 3. 物理删除空间
     sqlx::query("DELETE FROM spaces WHERE id = $1")
         .bind(id)
-        .execute(&state.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| {
             (
@@ -394,6 +439,36 @@ pub async fn delete_space(
                 Json(json!({"error": format!("删除空间失败: {}", e)})),
             )
         })?;
+
+    tx.commit().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("提交事务失败: {}", e)})),
+        )
+    })?;
+
+    // ── 事务后：向所有原成员发送系统通知（SSE 广播） ──
+    for member_id in &member_ids {
+        if let Err(e) = send_notification(
+            &state.pool,
+            &state.notify_tx,
+            CreateNotification {
+                user_id: *member_id,
+                kind: "system".into(),
+                title: "团队空间已解散".into(),
+                body: Some(format!(
+                    "您所在的团队空间「{}」已被解散，相关题目资产已由管理员接收",
+                    space_name
+                )),
+                resource_type: Some("space".into()),
+                resource_id: None,
+            },
+        )
+        .await
+        {
+            tracing::warn!("解散空间通知发送失败, member_id={}, err={}", member_id, e);
+        }
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -423,7 +498,7 @@ pub async fn add_member(
     }
 
     let my_role: Option<String> = sqlx::query_scalar(
-        "SELECT role FROM space_members WHERE space_id = $1 AND user_id = $2",
+        "SELECT role::text FROM space_members WHERE space_id = $1 AND user_id = $2",
     )
     .bind(space_id)
     .bind(auth.id)
@@ -437,28 +512,48 @@ pub async fn add_member(
     })?;
 
     if my_role.as_deref() != Some("owner") && !is_admin(&auth.role) {
-        return Err((StatusCode::FORBIDDEN, Json(json!({"error": "仅所有者可添加成员"}))));
+        return Err((StatusCode::FORBIDDEN, Json(json!({"error": "仅空间拥有者可进行成员管理"}))));
     }
 
     let role = req.role.unwrap_or_else(|| "member".into());
-    if role != "owner" && role != "member" {
+    if !matches!(role.as_str(), "owner" | "member" | "viewer") {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(json!({"error": "role 必须是 owner 或 member"})),
+            Json(json!({"error": "role 必须是 owner、member 或 viewer"})),
         ));
     }
     let duties = req.duties.unwrap_or_default();
     let now = chrono::Utc::now();
 
+    // 按 username 解析 user_id（避免前端依赖 /admin/users 接口）
+    let user_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM users WHERE username = $1 AND is_active = true",
+    )
+    .bind(req.username.trim())
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("查询用户失败: {}", e)})),
+        )
+    })?
+    .ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("用户 '{}' 不存在或已停用", req.username.trim())})),
+        )
+    })?;
+
     sqlx::query(
         r#"
         INSERT INTO space_members (space_id, user_id, role, duties, joined_at)
-        VALUES ($1, $2, $3, $4, $5)
-        ON CONFLICT (space_id, user_id) DO UPDATE SET role = $3, duties = $4
+        VALUES ($1, $2, $3::space_role, $4, $5)
+        ON CONFLICT (space_id, user_id) DO UPDATE SET role = $3::space_role, duties = $4
         "#,
     )
     .bind(space_id)
-    .bind(req.user_id)
+    .bind(user_id)
     .bind(&role)
     .bind(&duties)
     .bind(now)
@@ -470,6 +565,24 @@ pub async fn add_member(
             Json(json!({"error": format!("添加成员失败: {}", e)})),
         )
     })?;
+
+    // ── 入群通知：向新成员发送 SSE 通知 ──
+    if let Err(e) = send_notification(
+        &state.pool,
+        &state.notify_tx,
+        CreateNotification {
+            user_id,
+            kind: "system".into(),
+            title: "加入空间通知".into(),
+            body: Some(format!("您已被加入团队空间「{}」", space.name)),
+            resource_type: Some("space".into()),
+            resource_id: Some(space_id),
+        },
+    )
+    .await
+    {
+        tracing::warn!("入群通知发送失败, user_id={}, err={}", user_id, e);
+    }
 
     Ok((
         StatusCode::CREATED,
@@ -485,7 +598,7 @@ pub async fn update_member(
     Json(req): Json<UpdateSpaceMemberRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let my_role: Option<String> = sqlx::query_scalar(
-        "SELECT role FROM space_members WHERE space_id = $1 AND user_id = $2",
+        "SELECT role::text FROM space_members WHERE space_id = $1 AND user_id = $2",
     )
     .bind(space_id)
     .bind(auth.id)
@@ -499,11 +612,11 @@ pub async fn update_member(
     })?;
 
     if my_role.as_deref() != Some("owner") && !is_admin(&auth.role) {
-        return Err((StatusCode::FORBIDDEN, Json(json!({"error": "仅所有者可修改成员"}))));
+        return Err((StatusCode::FORBIDDEN, Json(json!({"error": "仅空间拥有者可进行成员管理"}))));
     }
 
     let existing = sqlx::query_as::<_, (String, Vec<String>)>(
-        "SELECT role, duties FROM space_members WHERE space_id = $1 AND user_id = $2",
+        "SELECT role::text, duties FROM space_members WHERE space_id = $1 AND user_id = $2",
     )
     .bind(space_id)
     .bind(user_id)
@@ -517,11 +630,20 @@ pub async fn update_member(
     })?
     .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "成员不存在"}))))?;
 
+    // 仅当显式指定新角色时校验，避免旧数据（editor/reviewer）更新 duties 时被阻断
+    if let Some(ref new_role) = req.role {
+        if !matches!(new_role.as_str(), "owner" | "member" | "viewer") {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "role 必须是 owner、member 或 viewer"})),
+            ));
+        }
+    }
     let role = req.role.unwrap_or(existing.0);
     let duties = req.duties.unwrap_or(existing.1);
 
     sqlx::query(
-        "UPDATE space_members SET role = $1, duties = $2 WHERE space_id = $3 AND user_id = $4",
+        "UPDATE space_members SET role = $1::space_role, duties = $2 WHERE space_id = $3 AND user_id = $4",
     )
     .bind(&role)
     .bind(&duties)
@@ -546,7 +668,7 @@ pub async fn remove_member(
     Path((space_id, user_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
     let my_role: Option<String> = sqlx::query_scalar(
-        "SELECT role FROM space_members WHERE space_id = $1 AND user_id = $2",
+        "SELECT role::text FROM space_members WHERE space_id = $1 AND user_id = $2",
     )
     .bind(space_id)
     .bind(auth.id)
@@ -561,7 +683,7 @@ pub async fn remove_member(
 
     let self_leave = user_id == auth.id;
     if !self_leave && my_role.as_deref() != Some("owner") && !is_admin(&auth.role) {
-        return Err((StatusCode::FORBIDDEN, Json(json!({"error": "无权移除成员"}))));
+        return Err((StatusCode::FORBIDDEN, Json(json!({"error": "仅空间拥有者可进行成员管理"}))));
     }
 
     let result = sqlx::query(
@@ -580,6 +702,281 @@ pub async fn remove_member(
 
     if result.rows_affected() == 0 {
         return Err((StatusCode::NOT_FOUND, Json(json!({"error": "成员不存在"}))));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// PUT /api/v1/spaces/:id/transfer/:target_user_id — 转让空间所有权
+///
+/// 事务内完成"一升一降"：目标用户升为 Owner，当前用户降为 Member。
+/// 仅当前 Owner（或系统 Admin）可发起转让；不能转让给自己。
+pub async fn transfer_ownership(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthUser>,
+    Path((space_id, target_user_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let space = get_space(&state.pool, space_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("查询空间失败: {}", e)})),
+            )
+        })?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "空间不存在"}))))?;
+
+    if space.kind != SpaceKind::Team {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({"error": "只能转让团队空间"})),
+        ));
+    }
+
+    // 校验当前用户是 Owner
+    let my_role: Option<String> = sqlx::query_scalar(
+        "SELECT role::text FROM space_members WHERE space_id = $1 AND user_id = $2",
+    )
+    .bind(space_id)
+    .bind(auth.id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("查询成员失败: {}", e)})),
+        )
+    })?;
+
+    if my_role.as_deref() != Some("owner") && !is_admin(&auth.role) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "仅空间拥有者可转让权限"})),
+        ));
+    }
+
+    // 不能转让给自己
+    if target_user_id == auth.id {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "不能转让给自己"})),
+        ));
+    }
+
+    // 校验目标用户是该空间成员
+    let target_role: Option<String> = sqlx::query_scalar(
+        "SELECT role::text FROM space_members WHERE space_id = $1 AND user_id = $2",
+    )
+    .bind(space_id)
+    .bind(target_user_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("查询目标成员失败: {}", e)})),
+        )
+    })?;
+
+    if target_role.is_none() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "目标用户不是该空间成员"})),
+        ));
+    }
+
+    // 事务：目标用户升 Owner，当前用户降 Member（一升一降，保证单 Owner）
+    let mut tx = state.pool.begin().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("开启事务失败: {}", e)})),
+        )
+    })?;
+
+    sqlx::query(
+        "UPDATE space_members SET role = 'owner'::space_role WHERE space_id = $1 AND user_id = $2",
+    )
+    .bind(space_id)
+    .bind(target_user_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("升级目标用户失败: {}", e)})),
+        )
+    })?;
+
+    sqlx::query(
+        "UPDATE space_members SET role = 'member'::space_role WHERE space_id = $1 AND user_id = $2",
+    )
+    .bind(space_id)
+    .bind(auth.id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("降级当前用户失败: {}", e)})),
+        )
+    })?;
+
+    tx.commit().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("提交事务失败: {}", e)})),
+        )
+    })?;
+
+    // ── 事务后：向所有成员广播通知（SSE） ──
+    let all_members: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT user_id FROM space_members WHERE space_id = $1",
+    )
+    .bind(space_id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("查询成员列表失败: {}", e)})),
+        )
+    })?;
+
+    // 查询新 Owner 的用户名
+    let new_owner_name: String = sqlx::query_scalar(
+        "SELECT username FROM users WHERE id = $1",
+    )
+    .bind(target_user_id)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap_or_else(|_| "未知用户".into());
+
+    let space_name = space.name.clone();
+    for member_id in &all_members {
+        if let Err(e) = send_notification(
+            &state.pool,
+            &state.notify_tx,
+            CreateNotification {
+                user_id: *member_id,
+                kind: "system".into(),
+                title: "空间拥有者变更".into(),
+                body: Some(format!(
+                    "团队空间「{}」的拥有者已变更为 {}",
+                    space_name, new_owner_name
+                )),
+                resource_type: Some("space".into()),
+                resource_id: Some(space_id),
+            },
+        )
+        .await
+        {
+            tracing::warn!("转让通知发送失败, member_id={}, err={}", member_id, e);
+        }
+    }
+
+    Ok(Json(json!({"message": "权限转让成功"})))
+}
+
+/// DELETE /api/v1/spaces/:id/leave — 成员退出空间
+///
+/// Owner 不能直接退出（需先转让或解散），Member/Viewer 可自行退出。
+pub async fn leave_space(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthUser>,
+    Path(space_id): Path<Uuid>,
+) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
+    let space = get_space(&state.pool, space_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("查询空间失败: {}", e)})),
+            )
+        })?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "空间不存在"}))))?;
+
+    if space.kind != SpaceKind::Team {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({"error": "只能退出团队空间"})),
+        ));
+    }
+
+    let my_role: Option<String> = sqlx::query_scalar(
+        "SELECT role::text FROM space_members WHERE space_id = $1 AND user_id = $2",
+    )
+    .bind(space_id)
+    .bind(auth.id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("查询成员失败: {}", e)})),
+        )
+    })?;
+
+    if my_role.is_none() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "您不是该空间成员"})),
+        ));
+    }
+
+    // Owner 不能直接退出 —— 必须先转让或解散
+    if my_role.as_deref() == Some("owner") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "拥有者只能解散空间或转让权限，不能直接退出"})),
+        ));
+    }
+
+    sqlx::query("DELETE FROM space_members WHERE space_id = $1 AND user_id = $2")
+        .bind(space_id)
+        .bind(auth.id)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("退出空间失败: {}", e)})),
+            )
+        })?;
+
+    // ── 退出后：向空间 Owner 发送通知（SSE 广播） ──
+    let owner_id: Option<Uuid> = sqlx::query_scalar(
+        "SELECT user_id FROM space_members WHERE space_id = $1 AND role = 'owner'",
+    )
+    .bind(space_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("查询空间 Owner 失败: {}", e)})),
+        )
+    })?;
+
+    if let Some(owner) = owner_id {
+        if let Err(e) = send_notification(
+            &state.pool,
+            &state.notify_tx,
+            CreateNotification {
+                user_id: owner,
+                kind: "system".into(),
+                title: "成员退出空间".into(),
+                body: Some(format!(
+                    "成员 {} 已退出团队空间「{}」",
+                    auth.username, space.name
+                )),
+                resource_type: Some("space".into()),
+                resource_id: Some(space_id),
+            },
+        )
+        .await
+        {
+            tracing::warn!("成员退出通知发送失败, owner_id={}, err={}", owner, e);
+        }
     }
 
     Ok(StatusCode::NO_CONTENT)

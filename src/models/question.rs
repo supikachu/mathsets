@@ -264,6 +264,9 @@ pub struct CreateQuestionRequest {
     pub space_id: Option<Uuid>,
     /// 录入方式（"manual" | "ocr" | "ai_parse"）— 仅 "ocr" 触发配额扣减
     pub input_method: Option<String>,
+    /// 关联试卷 ID 列表（同步写入 paper_questions 关联表）
+    #[serde(default)]
+    pub paper_ids: Option<Vec<Uuid>>,
 }
 
 /// 更新题目请求（B2 重构）
@@ -298,6 +301,9 @@ pub struct UpdateQuestionRequest {
     pub new_tags: Option<Vec<NewTagInput>>,
     pub knowledge_node_ids: Option<Vec<Uuid>>,
     pub primary_knowledge_node_id: Option<Uuid>,
+    /// 关联试卷 ID 列表（同步写入 paper_questions 关联表，全量覆盖）
+    #[serde(default)]
+    pub paper_ids: Option<Vec<Uuid>>,
 }
 
 /// 自建标签输入（B2 重构：category 改为 enum，新增 parent_id 支持层级）
@@ -492,11 +498,67 @@ pub struct RejectRequest {
     pub reject_reason: Option<String>,
 }
 
+/// 提交审核请求
+#[derive(Debug, Deserialize)]
+pub struct SubmitReviewRequest {
+    /// 指定审题人（团队空间必填，个人空间后端自动设为 creator）
+    pub reviewer_id: Option<Uuid>,
+}
+
 /// 贡献到公共库 / 从公共导入
 #[derive(Debug, Deserialize)]
 pub struct TransferQuestionRequest {
     /// 导入时的目标空间；贡献到公共时可省略
     pub target_space_id: Option<Uuid>,
+}
+
+// ===========================================================================
+// 推库申请（公共题库终审流程，与空间内部审核解耦）
+// ===========================================================================
+
+/// 推库申请状态
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq)]
+#[sqlx(type_name = "submission_status", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+pub enum SubmissionStatus {
+    Pending,
+    Approved,
+    Rejected,
+}
+
+/// 推库申请记录
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct PublicLibrarySubmission {
+    pub id: Uuid,
+    pub question_id: Uuid,
+    pub source_space_id: Uuid,
+    pub submitted_by: Uuid,
+    pub status: SubmissionStatus,
+    pub review_comment: Option<String>,
+    pub reviewed_by: Option<Uuid>,
+    pub reviewed_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// 推库待审列表项（JOIN 题目 + 来源空间 + 申请人）
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct PublicLibrarySubmissionDetail {
+    pub id: Uuid,
+    pub question_id: Uuid,
+    pub source_space_id: Uuid,
+    pub source_space_name: String,
+    pub submitted_by: Uuid,
+    pub submitter_name: String,
+    pub status: SubmissionStatus,
+    pub review_comment: Option<String>,
+    pub reviewed_by: Option<Uuid>,
+    pub reviewed_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+
+    // 题目摘要
+    pub stem: String,
+    pub question_type: QuestionType,
+    pub difficulty: Difficulty,
 }
 
 // ===========================================================================

@@ -56,7 +56,7 @@ const router = createRouter({
           path: 'review',
           name: 'Review',
           component: () => import('@/views/ReviewQueue.vue'),
-          meta: { requiresAdmin: true },
+          // 审核队列权限由 Space 属性决定，不限制全局角色
         },
         {
           path: 'users',
@@ -77,9 +77,22 @@ const router = createRouter({
           meta: { requiresAdmin: true },
         },
         {
+          // 修正 2：独立推库审批页面 —— 专供超级管理员处理 public_library_submissions
+          // 与 ReviewQueue.vue 完全解耦：ReviewQueue 只负责空间内部审核
+          path: 'admin/public-library-review',
+          name: 'PublicLibraryReview',
+          component: () => import('@/views/PublicLibraryReview.vue'),
+          meta: { requiresAdmin: true },
+        },
+        {
           path: 'profile',
           name: 'Profile',
           component: () => import('@/views/Profile.vue'),
+        },
+        {
+          path: 'spaces/:id/settings',
+          name: 'SpaceSettings',
+          component: () => import('@/views/SpaceSettings.vue'),
         },
       ],
     },
@@ -107,6 +120,15 @@ router.beforeEach(async (to, _from) => {
   // 管理员路由：使用双轨统一判定（旧 isAdmin || 新 isSuperAdmin）
   if (to.meta.requiresAdmin && !auth.isAdminUnified) {
     return '/dashboard'
+  }
+
+  // 认证页面：确保空间列表已加载（兜底初始化）
+  if (to.meta.requiresAuth && auth.isLoggedIn) {
+    const { useSpaceStore } = await import('@/stores/space')
+    const spaceStore = useSpaceStore()
+    if (!spaceStore.spacesLoaded && !spaceStore.loading) {
+      spaceStore.fetchSpaces()
+    }
   }
 })
 

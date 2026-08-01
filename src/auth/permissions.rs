@@ -201,7 +201,18 @@ pub async fn can_write_in_space(
     match space.kind {
         SpaceKind::Public => Ok(false), // 公共库仅通过「贡献」写入
         SpaceKind::Personal => Ok(space.owner_user_id == Some(auth.id)),
-        SpaceKind::Team => is_space_member(pool, space.id, auth.id).await,
+        SpaceKind::Team => {
+            // Viewer 无写入权限，仅 Owner/Member 可写入
+            let role: Option<String> = sqlx::query_scalar(
+                "SELECT role::text FROM space_members WHERE space_id = $1 AND user_id = $2",
+            )
+            .bind(space.id)
+            .bind(auth.id)
+            .fetch_optional(pool)
+            .await?;
+
+            Ok(matches!(role.as_deref(), Some("owner") | Some("member")))
+        }
     }
 }
 
@@ -213,7 +224,7 @@ pub async fn can_edit_question(
     creator_id: Option<Uuid>,
     status: &QuestionStatus,
 ) -> Result<bool, sqlx::Error> {
-    if *status != QuestionStatus::Draft && *status != QuestionStatus::Rejected {
+    if *status != QuestionStatus::Draft && *status != QuestionStatus::Rejected && *status != QuestionStatus::Published {
         return Ok(false);
     }
     if is_admin(&auth.role) {
@@ -272,6 +283,17 @@ pub async fn can_review_question(
         }
         SpaceKind::Team => {
             if !is_space_member(pool, space.id, auth.id).await? {
+                return Ok(false);
+            }
+            // Viewer 无审核权限，仅 Owner/Member 可审核
+            let role: Option<String> = sqlx::query_scalar(
+                "SELECT role::text FROM space_members WHERE space_id = $1 AND user_id = $2",
+            )
+            .bind(space.id)
+            .bind(auth.id)
+            .fetch_optional(pool)
+            .await?;
+            if !matches!(role.as_deref(), Some("owner") | Some("member")) {
                 return Ok(false);
             }
             if settings.require_review_duty {
@@ -342,7 +364,7 @@ impl IntoResponse for PermissionError {
 ///    且空间 settings.allow_creator_self_review 为 true
 /// 3. `SpaceKind::Team`：强制录审分离
 ///    - 若 `question.creator_id == user.id` → 返回 `Err(MakerCheckerViolation)`
-///    - 否则查询当前用户在该 space 的角色，要求具有 Owner 或 Reviewer 权限
+///    - 否则查询当前用户在该 space 的角色，要求具有 Owner 或 Member 权限
 /// 4. `SpaceKind::Public`：公共库仅可通过「贡献」接口写入，禁止直接发布
 pub async fn can_publish_question(
     pool: &PgPool,
@@ -373,7 +395,7 @@ pub async fn can_publish_question(
 
             // ── 法则 3b：查询当前用户在该 space 的角色 ──
             let role_str: Option<String> = sqlx::query_scalar(
-                "SELECT role FROM space_members WHERE space_id = $1 AND user_id = $2",
+                "SELECT role::text FROM space_members WHERE space_id = $1 AND user_id = $2",
             )
             .bind(space.id)
             .bind(user.id)
@@ -381,7 +403,7 @@ pub async fn can_publish_question(
             .await?;
 
             match role_str.as_deref() {
-                Some("owner") | Some("reviewer") => Ok(true),
+                Some("owner") | Some("member") => Ok(true),
                 Some(other) => Err(PermissionError::MissingPrivilege(format!(
                     "space_role={}",
                     other

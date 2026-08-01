@@ -55,10 +55,20 @@
           <div class="edit-col-inner">
             <!-- ==================== 第二层：描述性标签流（只读概览，知识点在右侧面板编辑） ==================== -->
             <div class="question-tags-wrapper">
-              <span v-if="form.exam_region" class="attr-tag">
+              <span v-if="form.region_province || form.region_city" class="attr-tag">
                 <AppIcon name="pin" :size="11" />
-                <span class="attr-tag-text">{{ form.exam_region }}</span>
-                <button type="button" class="attr-tag-x" @click="form.exam_region = ''"><AppIcon name="x" :size="10" /></button>
+                <span class="attr-tag-text">{{ [form.region_province, form.region_city].filter(Boolean).join(' · ') }}</span>
+                <button type="button" class="attr-tag-x" @click="form.region_province = ''; form.region_city = ''"><AppIcon name="x" :size="10" /></button>
+              </span>
+              <span v-if="form.source_type" class="attr-tag">
+                <AppIcon name="bookmark" :size="11" />
+                <span class="attr-tag-text">{{ form.source_type === '高考模拟' && form.sub_source_type ? form.sub_source_type : form.source_type }}</span>
+                <button type="button" class="attr-tag-x" @click="form.source_type = ''; form.sub_source_type = ''"><AppIcon name="x" :size="10" /></button>
+              </span>
+              <span v-if="form.year" class="attr-tag">
+                <AppIcon name="clock" :size="11" />
+                <span class="attr-tag-text">{{ form.year }}</span>
+                <button type="button" class="attr-tag-x" @click="form.year = ''"><AppIcon name="x" :size="10" /></button>
               </span>
               <span v-if="knowledgeNodeIds.length > 0" class="attr-tag attr-tag-kp attr-tag-kp-primary">
                 <AppIcon name="tag" :size="11" />
@@ -192,8 +202,12 @@
           class="interactive-column"
           v-model:tagIds="form.tagIds"
           v-model:knowledgeNodeIds="knowledgeNodeIds"
+          v-model:chapterNodeIds="chapterNodeIds"
+          v-model:methodNodeIds="methodNodeIds"
           v-model:aiGeneratedFields="aiGeneratedFields"
           v-model:collapsed="panelCollapsed"
+          v-model:paperIds="paperIds"
+          :initial-node-names="initialNodeNames"
           :competenceTags="competenceTags"
           :methodTags="methodTags"
           :schoolTags="schoolTags"
@@ -239,13 +253,32 @@
       @confirm="doRestoreDraft"
       @update:model-value="(v: boolean) => { if (!v) discardDraft() }"
     />
+
+    <!-- 团队空间：审题人选择对话框 -->
+    <AppModal v-model="showReviewerDialog" title="选择审题人">
+      <div class="dialog-body" style="min-width: 360px">
+        <p class="dialog-hint" style="margin-bottom: 12px; color: var(--text-secondary); font-size: 13px">
+          团队空间需要交叉审核，请选择空间内的其他成员作为审题人
+        </p>
+        <select v-model="selectedReviewerId" class="dialog-input" style="width: 100%; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border-color); font-size: 14px">
+          <option value="">请选择审题人…</option>
+          <option v-for="m in reviewableMembers" :key="m.user_id" :value="m.user_id">
+            {{ m.display_name || m.username }}（{{ m.role === 'owner' ? '拥有者' : '成员' }}）
+          </option>
+        </select>
+      </div>
+      <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px">
+        <AppButton variant="outline" @click="showReviewerDialog = false">取消</AppButton>
+        <AppButton variant="primary" :disabled="!selectedReviewerId" :loading="submitting" @click="confirmSubmitWithReviewer">确认提交</AppButton>
+      </div>
+    </AppModal>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { questionApi, spaceApi, tagsApi, type SpaceMemberInfo, type Tag, type ParsedQuestion } from '@/api/client'
+import { questionApi, spaceApi, tagsApi, paperApi, knowledgeTreeApi, type SpaceMemberInfo, type Tag, type ParsedQuestion } from '@/api/client'
 import { AppButton, AppBadge, AppModal, AppConfirm, AppIcon } from '@/components/ui'
 import { useToast } from '@/composables/useToast'
 import { useSpaceStore } from '@/stores/space'
@@ -285,8 +318,16 @@ const questionList = ref<any[]>([])
 const activeIndex = ref(0)
 const isSwitchingTab = ref(false)
 
-// Selected Knowledge Node IDs（与 AttributeSidePanel v-model 双向绑定）
+// Selected Knowledge node IDs（与 AttributeSidePanel v-model 双向绑定）
 const knowledgeNodeIds = ref<string[]>([])
+// 章节 / 解题方法节点 ID（与 AttributeSidePanel v-model 双向绑定，提交时与知识点合并）
+const chapterNodeIds = ref<string[]>([])
+const methodNodeIds = ref<string[]>([])
+// 初始节点名称映射（编辑场景 loadQuestion 后填充，传给 AttributeSidePanel 展示 Tag）
+const initialNodeNames = ref<Record<string, string>>({})
+
+// 关联试卷 ID 列表（与 AttributeSidePanel v-model 双向绑定）
+const paperIds = ref<string[]>([])
 
 // Tag classification lists
 const methodTags = ref<Tag[]>([])
@@ -397,11 +438,13 @@ const form = reactive({
   default_score: 5,
   grade: undefined as string | undefined,
   semester: undefined as string | undefined,
-  academic_year: '' as string,
   grade_semester: '' as string,
-  exam_region: '' as string,
-  exam_type: '' as string,
-  source: '原创',
+  // ── 长尾维度：统一存入 questions.metadata(JSONB)，与 QuestionList 数据字典对齐 ──
+  year: '' as string,                  // 年份：'2020'..'2026'
+  region_province: '' as string,       // 省份：'浙江'/'江苏'...
+  region_city: '' as string,           // 城市：'杭州市'...（与省份级联）
+  source_type: '' as string,           // 来源：'课前预习'/'高考模拟'...
+  sub_source_type: '' as string,       // 来源子项：仅 source_type='高考模拟' 时启用
   estimated_time: 5,
   solutions: [''] as string[],
   options: [
@@ -416,6 +459,12 @@ const form = reactive({
   sub_answers: [''] as string[],
   gradingSteps: [] as { label: string; points: number; description: string }[],
   knowledgeNodeIds: [] as string[],
+  // ── 知识树动态加载依赖：学段 / 学科（提交时进 metadata） ──
+  stage: 'senior' as 'junior' | 'senior',
+  subject: 'math' as 'math' | 'physics',
+  // ── 前端独立维护三组节点 ID，提交时合并为统一 knowledge_node_ids ──
+  chapterNodeIds: [] as string[],
+  methodNodeIds: [] as string[],
   tagIds: [] as string[],
   reviewer: '' as string,
   reviewer_ids: [] as string[],
@@ -429,6 +478,8 @@ const form = reactive({
 watch(knowledgeNodeIds, (v) => {
   form.knowledgeNodeIds = v
 }, { deep: true })
+watch(chapterNodeIds, v => { form.chapterNodeIds = v }, { deep: true })
+watch(methodNodeIds, v => { form.methodNodeIds = v }, { deep: true })
 
 // 难度字符串枚举 ↔ 数字 1-5 转换
 function difficultyStringToNum(s: string): number {
@@ -577,29 +628,42 @@ function handleSolutionImageUpload(index: number) {
 
 // Payload construction
 function buildPayload() {
+  // ── metadata(JSONB)：长尾维度统一存放 ──
+  // grade_semester / year / region_province / region_city / source_type / sub_source_type
   const metadata: Record<string, unknown> = {}
-  if (form.academic_year) metadata.academic_year = form.academic_year
   if (form.grade_semester) metadata.grade_semester = form.grade_semester
-  if (form.exam_region) metadata.exam_region = form.exam_region
+  if (form.year) metadata.year = form.year
+  if (form.region_province) metadata.region_province = form.region_province
+  if (form.region_city) metadata.region_city = form.region_city
+  if (form.source_type) metadata.source_type = form.source_type
+  if (form.sub_source_type) metadata.sub_source_type = form.sub_source_type
+  metadata.stage = form.stage
+  metadata.subject = form.subject
 
+  // 三组节点 ID 合并去重为统一 knowledge_node_ids（后端无感知前端拆分）
+  const mergedNodeIds = Array.from(new Set([
+    ...form.chapterNodeIds,
+    ...form.knowledgeNodeIds,
+    ...form.methodNodeIds,
+  ]))
+
+  // Payload 严格对齐后端 UpdateQuestionRequest / CreateQuestionRequest
+  // 移除后端不识别的 sub_type、space_id 字段（space_id 由后端从用户上下文推断）
   const payload: any = {
     stem: form.stem,
     question_type: form.question_type,
-    sub_type: form.sub_type || null,
     difficulty: difficultyStringToNum(form.difficulty),
-    difficulty_score: form.difficulty_coefficient,
+    difficulty_score: Math.max(1, Math.min(10, Math.round((1 - form.difficulty_coefficient) * 9) + 1)),
     default_score: form.default_score,
-    source: form.source,
-    exam_type: form.exam_type || null,
     metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
     analysis: form.solutions.filter(s => s.trim()).join('\n\n---\n\n') || null,
-    knowledge_node_ids: knowledgeNodeIds.value.length > 0 ? knowledgeNodeIds.value : null,
+    knowledge_node_ids: mergedNodeIds.length > 0 ? mergedNodeIds : null,
     tag_ids: form.tagIds,
+    paper_ids: paperIds.value,
   }
   switch (form.question_type) {
     case 'choice':
       payload.options = (form.options || []).filter(o => o.content.trim())
-      payload.sub_type = form.sub_type || null
       if (Array.isArray(form.correctAnswer)) {
         payload.correct_answer = form.correctAnswer
       } else {
@@ -617,6 +681,17 @@ function buildPayload() {
 }
 
 // Save & Submit Actions
+
+// ── 团队空间审题人选择对话框 ──
+const showReviewerDialog = ref(false)
+const selectedReviewerId = ref('')
+const pendingQuestionId = ref<string | null>(null)
+
+// 可选审题人：团队空间中排除自己和 viewer
+const reviewableMembers = computed(() =>
+  spaceMembers.value.filter(m => m.user_id !== auth.userId && m.role !== 'viewer'),
+)
+
 async function handleSave(submitAfter: boolean) {
   if (!form.stem.trim()) { toast.warning('请输入题干'); return }
   if (form.question_type === 'choice' && !hasCorrectAnswer.value) { toast.warning('请选择正确答案'); return }
@@ -628,12 +703,25 @@ async function handleSave(submitAfter: boolean) {
     const qid = res.data.id
     form.hasUnsaved = false
     clearDraft()
+
     if (submitAfter) {
-      await questionApi.submit(qid, { reviewer_ids: form.reviewer_ids.length > 0 ? form.reviewer_ids : undefined })
-      toast.success('已创建并提交审核')
+      if (isTeamSpace.value) {
+        // 团队空间：弹出选人对话框
+        pendingQuestionId.value = qid
+        selectedReviewerId.value = ''
+        showReviewerDialog.value = true
+        // 不直接跳转，等用户选完审题人
+        flag.value = false
+        return
+      } else {
+        // 个人空间：自审自发，直接提交
+        await questionApi.submit(qid)
+        toast.success('已创建并提交审核')
+      }
     } else {
       toast.success(isNew ? '草稿已保存' : '已更新')
     }
+
     if (isNew) {
       router.replace(`/questions/${qid}`)
     } else {
@@ -644,9 +732,45 @@ async function handleSave(submitAfter: boolean) {
       }
     }
   } catch (e: any) {
-    toast.error(e.response?.data?.error || '操作失败')
+    console.error('[QuestionEdit] 保存失败:', e)
+    // axum 0.8 Json 拒绝响应体可能是纯字符串（非 JSON 对象），需多级兜底
+    const errData = e.response?.data
+    const errMsg = typeof errData === 'string' ? errData : (errData?.error || errData?.message)
+    toast.error(errMsg || e.message || '保存失败')
   } finally {
-    flag.value = false
+    if (!showReviewerDialog.value) {
+      flag.value = false
+    }
+  }
+}
+
+// ── 团队空间：确认选择审题人后提交 ──
+async function confirmSubmitWithReviewer() {
+  if (!selectedReviewerId.value || !pendingQuestionId.value) return
+  submitting.value = true
+  try {
+    await questionApi.submit(pendingQuestionId.value, { reviewer_id: selectedReviewerId.value })
+    toast.success('已提交审核')
+    showReviewerDialog.value = false
+    const qid = pendingQuestionId.value
+    pendingQuestionId.value = null
+    selectedReviewerId.value = ''
+    if (isNew) {
+      router.replace(`/questions/${qid}`)
+    } else {
+      if (window.history.state?.back) {
+        router.back()
+      } else {
+        router.replace(`/questions/${qid}`)
+      }
+    }
+  } catch (e: any) {
+    console.error('[QuestionEdit] 提交审核失败:', e)
+    const errData = e.response?.data
+    const errMsg = typeof errData === 'string' ? errData : (errData?.error || errData?.message)
+    toast.error(errMsg || e.message || '提交审核失败')
+  } finally {
+    submitting.value = false
   }
 }
 
@@ -719,8 +843,10 @@ function restoreDraft() {
 async function doRestoreDraft() {
   if (!pendingDraft) return
   const fields = ['stem', 'question_type', 'sub_type', 'difficulty', 'default_score', 'grade', 'semester',
-    'source', 'solutions', 'options', 'correctAnswer', 'blanks', 'solutionAnswer', 'sub_answers',
-    'gradingSteps', 'tagIds', 'difficulty_coefficient', 'academic_year', 'grade_semester', 'exam_region', 'exam_type', 'reviewer', 'reviewer_ids', 'internal_note']
+    'solutions', 'options', 'correctAnswer', 'blanks', 'solutionAnswer', 'sub_answers',
+    'gradingSteps', 'tagIds', 'difficulty_coefficient', 'grade_semester',
+    'year', 'region_province', 'region_city', 'source_type', 'sub_source_type',
+    'reviewer', 'reviewer_ids', 'internal_note']
   for (const f of fields) {
     if (pendingDraft[f] !== undefined) (form as any)[f] = pendingDraft[f]
   }
@@ -776,11 +902,14 @@ async function loadQuestion() {
     form.semester = d.semester || undefined
     form.sub_type = (d as any).sub_type || ''
     form.difficulty_coefficient = d.difficulty_score ?? 0.5
-    form.academic_year = meta.academic_year || ''
     form.grade_semester = meta.grade_semester || ''
-    form.exam_region = meta.exam_region || ''
-    form.exam_type = d.exam_type || ''
-    form.source = d.source || '原创'
+    form.year = meta.year || ''
+    form.region_province = meta.region_province || ''
+    form.region_city = meta.region_city || ''
+    form.source_type = meta.source_type || ''
+    form.sub_source_type = meta.sub_source_type || ''
+    form.stage = meta.stage === 'junior' ? 'junior' : 'senior'
+    form.subject = meta.subject === 'physics' ? 'physics' : 'math'
     const raw = d.analysis || ''
     if (raw.includes('\n\n---\n\n')) {
       form.solutions = raw.split(/\n\n---\n\n/)
@@ -791,9 +920,57 @@ async function loadQuestion() {
     }
     form.status = d.status
     form.version = d.version
-    knowledgeNodeIds.value = d.knowledge_nodes?.map(k => k.id) || []
-    form.knowledgeNodeIds = knowledgeNodeIds.value
+    // 按类回填：d.knowledge_nodes 每项含 id/name/tree_id，按 tree_id → kind 映射分类
+    const knodes = (d.knowledge_nodes || []) as { id: string; name: string; tree_id: string }[]
+    if (knodes.length > 0) {
+      try {
+        const treesRes = await knowledgeTreeApi.list()
+        const treeKindMap = new Map(treesRes.data.map(t => [t.id, t.kind]))
+        const kIds: string[] = [], cIds: string[] = [], mIds: string[] = []
+        const nameMap: Record<string, string> = {}
+        for (const k of knodes) {
+          nameMap[k.id] = k.name
+          const kind = treeKindMap.get(k.tree_id)
+          if (kind === 'chapter') cIds.push(k.id)
+          else if (kind === 'ability') mIds.push(k.id)
+          else kIds.push(k.id) // 'knowledge' 或未知兜底
+        }
+        knowledgeNodeIds.value = kIds
+        chapterNodeIds.value = cIds
+        methodNodeIds.value = mIds
+        form.knowledgeNodeIds = kIds
+        form.chapterNodeIds = cIds
+        form.methodNodeIds = mIds
+        initialNodeNames.value = nameMap
+      } catch {
+        // 树列表加载失败：全部回填到知识点，避免数据丢失
+        knowledgeNodeIds.value = knodes.map(k => k.id)
+        form.knowledgeNodeIds = knowledgeNodeIds.value
+        chapterNodeIds.value = []
+        methodNodeIds.value = []
+        form.chapterNodeIds = []
+        form.methodNodeIds = []
+        initialNodeNames.value = Object.fromEntries(knodes.map(k => [k.id, k.name]))
+      }
+    } else {
+      knowledgeNodeIds.value = []
+      chapterNodeIds.value = []
+      methodNodeIds.value = []
+      form.knowledgeNodeIds = []
+      form.chapterNodeIds = []
+      form.methodNodeIds = []
+      initialNodeNames.value = {}
+    }
     form.tagIds = d.tags?.map(t => t.id) || []
+
+    // 加载题目已关联的试卷列表（反向查询）
+    try {
+      const papersRes = await paperApi.getQuestionPapers(route.params.id as string)
+      paperIds.value = papersRes.data.map(p => p.paper_id)
+    } catch {
+      // 关联试卷加载失败不阻塞题目编辑
+      paperIds.value = []
+    }
     if (d.tags?.length) {
       for (const t of d.tags) {
         if (!allTagsMap.value.has(t.id)) {
@@ -882,11 +1059,12 @@ function applyFormSnapshot(s: any) {
   form.default_score = s.default_score ?? 5
   form.grade = s.grade
   form.semester = s.semester
-  form.academic_year = s.academic_year ?? ''
   form.grade_semester = s.grade_semester ?? ''
-  form.exam_region = s.exam_region ?? ''
-  form.exam_type = s.exam_type ?? ''
-  form.source = s.source ?? '原创'
+  form.year = s.year ?? ''
+  form.region_province = s.region_province ?? ''
+  form.region_city = s.region_city ?? ''
+  form.source_type = s.source_type ?? ''
+  form.sub_source_type = s.sub_source_type ?? ''
   form.estimated_time = s.estimated_time ?? 5
   form.solutions = Array.isArray(s.solutions) ? [...s.solutions] : ['']
   form.options = Array.isArray(s.options)
@@ -960,11 +1138,12 @@ function loadBatchMockData() {
       knowledgeNodeIds: [],
       tagIds: [],
       reviewer_ids: [],
-      source: '原创',
-      academic_year: '',
       grade_semester: '',
-      exam_region: '',
-      exam_type: '',
+      year: '',
+      region_province: '',
+      region_city: '',
+      source_type: '',
+      sub_source_type: '',
     },
     {
       stem: '【题目 2】化简 $\\sqrt{12} - \\sqrt{3}$，并求其值。',
@@ -986,11 +1165,12 @@ function loadBatchMockData() {
       knowledgeNodeIds: [],
       tagIds: [],
       reviewer_ids: [],
-      source: '原创',
-      academic_year: '',
       grade_semester: '',
-      exam_region: '',
-      exam_type: '',
+      year: '',
+      region_province: '',
+      region_city: '',
+      source_type: '',
+      sub_source_type: '',
     },
   ]
   activeIndex.value = 0
@@ -1047,10 +1227,12 @@ function parsedQuestionToSnapshot(q: ParsedQuestion): any {
     default_score: 5,
     grade: undefined,
     semester: undefined,
-    academic_year: '',
     grade_semester: '',
-    exam_region: '',
-    exam_type: '',
+    year: '',
+    region_province: '',
+    region_city: '',
+    source_type: '',
+    sub_source_type: '',
     options: q.question_type === 'choice' && q.options
       ? q.options.map(o => ({ label: o.label, content: o.content }))
       : [
@@ -1073,7 +1255,6 @@ function parsedQuestionToSnapshot(q: ParsedQuestion): any {
     status: '',
     version: 1,
     hasUnsaved: true,
-    source: '原创',
     estimated_time: 5,
   }
 }

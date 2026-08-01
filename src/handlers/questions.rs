@@ -1,8 +1,9 @@
 use axum::{
-    extract::{Extension, Path, Query, State},
+    extract::{Extension, Path, State},
     http::StatusCode,
     Json,
 };
+use axum_extra::extract::Query;
 use serde::Serialize;
 use serde_json::json;
 use uuid::Uuid;
@@ -15,8 +16,8 @@ use crate::auth::permissions::{
 };
 use crate::models::question::{
     CreateQuestionRequest, KnowledgeNodeSummary, Question, QuestionDetail,
-    QuestionQuery, QuestionStatus, QuestionSummary, RejectRequest, TagSummary,
-    TransferQuestionRequest, UpdateQuestionRequest,
+    QuestionQuery, QuestionStatus, QuestionSummary, RejectRequest, SubmitReviewRequest,
+    TagSummary, TransferQuestionRequest, UpdateQuestionRequest,
 };
 use crate::models::space::SpaceKind;
 use crate::models::user::{GlobalRole, User};
@@ -256,6 +257,76 @@ async fn update_question_tags(
     Ok(())
 }
 
+/// 同步题目 ↔ 试卷关联（全量覆盖：删除多余的，插入新增的）
+/// 在题目创建/更新事务内调用，保证原子性。
+pub(crate) async fn sync_question_papers(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    question_id: Uuid,
+    paper_ids: &[Uuid],
+) -> Result<(), sqlx::Error> {
+    // 1. 查询当前已关联的 paper_id
+    let existing: Vec<Uuid> =
+        sqlx::query_scalar("SELECT paper_id FROM paper_questions WHERE question_id = $1")
+            .bind(question_id)
+            .fetch_all(&mut **tx)
+            .await?;
+
+    let existing_set: std::collections::HashSet<Uuid> = existing.into_iter().collect();
+
+    // 2. 删除被移除的关联
+    let removed: Vec<Uuid> = existing_set
+        .iter()
+        .filter(|id| !paper_ids.contains(id))
+        .copied()
+        .collect();
+    if !removed.is_empty() {
+        sqlx::query(
+            "DELETE FROM paper_questions WHERE question_id = $1 AND paper_id = ANY($2)",
+        )
+        .bind(question_id)
+        .bind(&removed)
+        .execute(&mut **tx)
+        .await?;
+    }
+
+    // 3. 插入新增关联（去重，默认 sort_order=0, score=0）
+    let added: Vec<Uuid> = paper_ids
+        .iter()
+        .filter(|id| !existing_set.contains(id))
+        .copied()
+        .collect();
+    for paper_id in &added {
+        let pq_id = Uuid::new_v4();
+        let now = chrono::Utc::now();
+        sqlx::query(
+            r#"
+            INSERT INTO paper_questions (id, paper_id, question_id, sort_order, score, section, created_at)
+            VALUES ($1, $2, $3, 0, 0, NULL, $4)
+            ON CONFLICT DO NOTHING
+            "#,
+        )
+        .bind(pq_id)
+        .bind(paper_id)
+        .bind(question_id)
+        .bind(now)
+        .execute(&mut **tx)
+        .await?;
+    }
+
+    // 4. 同步 questions.paper_count 缓存字段
+    let cnt: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM paper_questions WHERE question_id = $1")
+        .bind(question_id)
+        .fetch_one(&mut **tx)
+        .await?;
+    sqlx::query("UPDATE questions SET paper_count = $1 WHERE id = $2")
+        .bind(cnt as i32)
+        .bind(question_id)
+        .execute(&mut **tx)
+        .await?;
+
+    Ok(())
+}
+
 /// 获取题目的关联标签
 async fn get_question_tags(
     pool: &sqlx::PgPool,
@@ -481,6 +552,11 @@ fn apply_access_filters<'a>(
     query: &'a QuestionQuery,
 ) {
     if query.reviewable_by_me.unwrap_or(false) {
+        // 【空间隔离】强制按 space_id 过滤，无论是否管理员，审核队列必须严格按空间隔离
+        if let Some(space_id) = query.space_id {
+            builder.push(" AND q.space_id = ");
+            builder.push_bind(space_id);
+        }
         // 待审 + （指定审题人含我 OR 无指定且空间可审）
         builder.push(" AND q.status = 'pending'");
         builder.push(" AND (");
@@ -508,9 +584,7 @@ fn apply_access_filters<'a>(
         );
         builder.push_bind(auth.id);
         builder.push(")");
-        if is_admin(&auth.role) {
-            builder.push(" OR TRUE");
-        }
+        // 管理员也不能跨空间审核 —— 移除 OR TRUE，强制 space_id 隔离
         builder.push("))");
         builder.push(")");
         return;
@@ -793,6 +867,13 @@ pub async fn create_question(
             .map_err(|e| db_err(format!("关联标签失败: {}", e)))?;
     }
 
+    // 同步题目 ↔ 试卷关联（全量覆盖）
+    if let Some(ref paper_ids) = req.paper_ids {
+        sync_question_papers(&mut tx, id, paper_ids)
+            .await
+            .map_err(|e| db_err(format!("关联试卷失败: {}", e)))?;
+    }
+
     save_version(&mut tx, id, version, Some(creator_id))
         .await
         .map_err(|e| db_err(format!("保存版本失败: {}", e)))?;
@@ -885,10 +966,10 @@ pub async fn update_question(
     .await
     .map_err(|e| db_err(format!("权限检查失败: {}", e)))?
     {
-        if existing.status != QuestionStatus::Draft && existing.status != QuestionStatus::Rejected {
+        if existing.status != QuestionStatus::Draft && existing.status != QuestionStatus::Rejected && existing.status != QuestionStatus::Published {
             return Err((
                 StatusCode::CONFLICT,
-                Json(json!({"error": "只有草稿或驳回状态的题目可以编辑"})),
+                Json(json!({"error": "当前状态不允许编辑"})),
             ));
         }
         return Err((StatusCode::FORBIDDEN, Json(json!({"error": "无权编辑该题目"}))));
@@ -967,6 +1048,16 @@ pub async fn update_question(
         ));
     }
 
+    // ── 状态降级：已发布题目被编辑后强制回到草稿，清除旧审题人记录 ──
+    // 确保修改后的题目必须重新提交审核
+    if existing.status != QuestionStatus::Draft {
+        sqlx::query("DELETE FROM question_reviewers WHERE question_id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| db_err(format!("清除审题人记录失败: {}", e)))?;
+    }
+
     if let Some(ref node_ids) = req.knowledge_node_ids {
         update_knowledge_nodes(&mut tx, id, node_ids, req.primary_knowledge_node_id)
             .await
@@ -996,6 +1087,13 @@ pub async fn update_question(
         update_question_tags(&mut tx, id, &all_tag_ids)
             .await
             .map_err(|e| db_err(format!("更新标签关联失败: {}", e)))?;
+    }
+
+    // 同步题目 ↔ 试卷关联（全量覆盖）
+    if let Some(ref paper_ids) = req.paper_ids {
+        sync_question_papers(&mut tx, id, paper_ids)
+            .await
+            .map_err(|e| db_err(format!("更新试卷关联失败: {}", e)))?;
     }
 
     save_version(&mut tx, id, new_version, Some(auth_user.id))
@@ -1032,10 +1130,10 @@ pub async fn delete_question(
         .map_err(|e| db_err(format!("查询题目失败: {}", e)))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "题目不存在"}))))?;
 
-    if existing.status != QuestionStatus::Draft {
+    if existing.status != QuestionStatus::Draft && existing.status != QuestionStatus::Published {
         return Err((
             StatusCode::CONFLICT,
-            Json(json!({"error": "只有草稿状态的题目可以删除"})),
+            Json(json!({"error": "只能删除草稿或已发布状态的题目"})),
         ));
     }
 
@@ -1044,17 +1142,18 @@ pub async fn delete_question(
         .map_err(|e| db_err(format!("查询空间失败: {}", e)))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "空间不存在"}))))?;
 
-    if !can_edit_question(
-        &state.pool,
-        &auth_user,
-        &space,
-        existing.creator_id.into(),
-        &existing.status,
-    )
-    .await
-    .map_err(|e| db_err(format!("权限检查失败: {}", e)))?
-    {
-        return Err((StatusCode::FORBIDDEN, Json(json!({"error": "无权删除该题目"}))));
+    // ── 删除权限：按空间类型分流 ──
+    // 个人空间：创建者或管理员可删除
+    // 团队/公共空间：仅超级管理员或空间 Owner 可删除
+    let can_delete = match space.kind {
+        SpaceKind::Personal => existing.creator_id == auth_user.id || is_admin(&auth_user.role),
+        SpaceKind::Team | SpaceKind::Public => {
+            is_admin(&auth_user.role) || space.owner_user_id == Some(auth_user.id)
+        }
+    };
+
+    if !can_delete {
+        return Err((StatusCode::FORBIDDEN, Json(json!({"error": "无权删除该题目，仅空间 Owner 或管理员可删除"}))));
     }
 
     sqlx::query("DELETE FROM questions WHERE id = $1")
@@ -1078,6 +1177,7 @@ pub async fn submit_for_review(
     State(state): State<AppState>,
     Extension(auth_user): Extension<AuthUser>,
     Path(id): Path<Uuid>,
+    Json(req): Json<SubmitReviewRequest>,
 ) -> Result<Json<QuestionDetail>, (StatusCode, Json<serde_json::Value>)> {
     let existing = sqlx::query_as::<_, Question>("SELECT * FROM questions WHERE id = $1")
         .bind(id)
@@ -1099,7 +1199,7 @@ pub async fn submit_for_review(
         ));
     }
 
-    // ── 权限校验：creator / admin / 空间 owner/editor/reviewer ──
+    // ── 权限校验：creator / admin / 空间 owner/member ──
     let space = get_space(&state.pool, existing.space_id)
         .await
         .map_err(|e| db_err(format!("查询空间失败: {}", e)))?
@@ -1112,7 +1212,7 @@ pub async fn submit_for_review(
             .await
             .map_err(|e| db_err(format!("查询成员角色失败: {}", e)))?
         {
-            Some((role, _)) => matches!(role.as_str(), "owner" | "editor" | "reviewer"),
+            Some((role, _)) => matches!(role.as_str(), "owner" | "member"),
             None => false,
         }
     };
@@ -1121,21 +1221,131 @@ pub async fn submit_for_review(
         return Err((
             StatusCode::FORBIDDEN,
             Json(json!({
-                "error": "无权提交审核：仅题目创建者或空间 owner/editor/reviewer 可提交",
+                "error": "无权提交审核：仅题目创建者或空间 owner/member 可提交",
                 "code": "ERR_FORBIDDEN"
             })),
         ));
     }
 
-    // ── 状态流转：draft → pending ──
+    // ── 审题人校验：按空间类型分流 ──
+    let reviewer_id = match space.kind {
+        SpaceKind::Personal => {
+            // 个人空间：自审自发，reviewer_id = creator_id
+            existing.creator_id
+        }
+        SpaceKind::Team => {
+            // 团队空间：强制交叉审核，reviewer_id 必须由前端传入且 != creator_id
+            let rid = req.reviewer_id.ok_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "团队空间提交审核必须指定审题人"})),
+                )
+            })?;
+            if rid == existing.creator_id {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    Json(json!({"error": "团队空间不允许自审，请选择其他成员作为审题人"})),
+                ));
+            }
+            // 校验审题人是否为该空间成员且有权审题（owner/member）
+            let reviewer_role = get_member_meta(&state.pool, space.id, rid)
+                .await
+                .map_err(|e| db_err(format!("查询审题人角色失败: {}", e)))?;
+            match reviewer_role {
+                Some((role, _)) if matches!(role.as_str(), "owner" | "member") => rid,
+                _ => {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": "指定的审题人不存在或无审核权限"})),
+                    ));
+                }
+            }
+        }
+        SpaceKind::Public => {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": "公共空间题目无需提交审核"})),
+            ));
+        }
+    };
+
+    // ── 事务内：FOR UPDATE 锁定 + 状态流转 + 审题人写入（GAP-4 修复） ──
+    let mut tx = state
+        .pool
+        .begin()
+        .await
+        .map_err(|e| db_err(format!("开启事务失败: {}", e)))?;
+
+    // FOR UPDATE 锁定 — 防止并发提交竞态
+    let locked = sqlx::query_as::<_, Question>(
+        "SELECT * FROM questions WHERE id = $1 FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| db_err(format!("锁定题目失败: {}", e)))?;
+
+    // 二次校验状态（防止并发窗口内状态已变）
+    if locked.status != QuestionStatus::Draft {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "题目状态已被并发修改，请刷新后重试",
+                "code": "ERR_CONCURRENT_STATE_CHANGE"
+            })),
+        ));
+    }
+
+    // 状态流转：draft → pending
     sqlx::query(
         "UPDATE questions SET status = 'pending'::question_status, updated_at = $1 WHERE id = $2",
     )
     .bind(chrono::Utc::now())
     .bind(id)
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await
     .map_err(|e| db_err(format!("提交审核失败: {}", e)))?;
+
+    // 写入审题人记录（覆盖旧记录，同事务内）
+    sqlx::query("DELETE FROM question_reviewers WHERE question_id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| db_err(format!("清理旧审题人失败: {}", e)))?;
+
+    sqlx::query("INSERT INTO question_reviewers (question_id, user_id) VALUES ($1, $2)")
+        .bind(id)
+        .bind(reviewer_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| db_err(format!("写入审题人失败: {}", e)))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| db_err(format!("提交事务失败: {}", e)))?;
+
+    // ── 通知审题人 ──
+    if reviewer_id != existing.creator_id {
+        if let Err(e) = crate::handlers::notifications::send_notification(
+            &state.pool,
+            &state.notify_tx,
+            crate::models::notification::CreateNotification {
+                user_id: reviewer_id,
+                kind: "workflow".into(),
+                title: "新题目待审核".into(),
+                body: Some(format!(
+                    "您所在的团队空间「{}」有新题目等待您的审核",
+                    space.name
+                )),
+                resource_type: Some("question".into()),
+                resource_id: Some(id),
+            },
+        )
+        .await
+        {
+            tracing::warn!("发送提交通知失败, reviewer_id={}, err={}", reviewer_id, e);
+        }
+    }
 
     let question = sqlx::query_as::<_, Question>("SELECT * FROM questions WHERE id = $1")
         .bind(id)
@@ -1214,6 +1424,23 @@ pub async fn approve_question(
             PermissionError::Database(e) => db_err(format!("权限检查失败: {}", e)),
         })?;
 
+    // ── 3b. 指定审核人校验（GAP-1 修复）──
+    // 如果题目已指定审核人，仅指定审核人可审核通过（SuperAdmin 豁免）
+    if user.global_role != GlobalRole::SuperAdmin {
+        let designated = list_reviewers(&state.pool, id)
+            .await
+            .map_err(|e| db_err(format!("查询审题人失败: {}", e)))?;
+        if !designated.is_empty() && !designated.contains(&auth_user.id) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "error": "无权审核：您不是该题目的指定审核人",
+                    "code": "ERR_NOT_DESIGNATED_REVIEWER"
+                })),
+            ));
+        }
+    }
+
     // ── 4. 事务内：FOR UPDATE 锁定 + 状态更新 + version+1 + save_version ──
     let mut tx = state
         .pool
@@ -1267,6 +1494,32 @@ pub async fn approve_question(
     tx.commit()
         .await
         .map_err(|e| db_err(format!("提交事务失败: {}", e)))?;
+
+    // ── 通知题目创建者：审核通过 ──
+    // Maker-Checker 已确保团队空间中审核者 ≠ 创建者；
+    // 个人空间允许自审，此时不通知自己
+    if existing.creator_id != auth_user.id {
+        if let Err(e) = crate::handlers::notifications::send_notification(
+            &state.pool,
+            &state.notify_tx,
+            crate::models::notification::CreateNotification {
+                user_id: existing.creator_id,
+                kind: "workflow".into(),
+                title: "题目审核通过".into(),
+                body: Some("您提交的题目已通过审核，正式发布".into()),
+                resource_type: Some("question".into()),
+                resource_id: Some(id),
+            },
+        )
+        .await
+        {
+            tracing::warn!(
+                "发送审核通过通知失败, creator_id={}, err={}",
+                existing.creator_id,
+                e
+            );
+        }
+    }
 
     // ── 5. 返回详情 ──
     let question = sqlx::query_as::<_, Question>("SELECT * FROM questions WHERE id = $1")
@@ -1335,13 +1588,28 @@ pub async fn reject_question(
                 existing.creator_id == auth_user.id
             }
             SpaceKind::Team => {
-                // 团队空间：要求 owner 或 reviewer（允许 creator 自己 reject，不受 Maker-Checker 约束）
-                match get_member_meta(&state.pool, space.id, auth_user.id)
-                    .await
-                    .map_err(|e| db_err(format!("查询成员角色失败: {}", e)))?
-                {
-                    Some((role, _)) => matches!(role.as_str(), "owner" | "reviewer"),
-                    None => false,
+                // 团队空间（GAP-2 修复）：
+                // 1. creator 可以撤回自己的提交（不受指定审核人约束）
+                // 2. 非 creator 需要 owner/member 角色 + 是指定审核人（如果有指定）
+                if existing.creator_id == auth_user.id {
+                    true
+                } else {
+                    let has_role = match get_member_meta(&state.pool, space.id, auth_user.id)
+                        .await
+                        .map_err(|e| db_err(format!("查询成员角色失败: {}", e)))?
+                    {
+                        Some((role, _)) => matches!(role.as_str(), "owner" | "member"),
+                        None => false,
+                    };
+                    if !has_role {
+                        false
+                    } else {
+                        // 指定审核人校验：有指定审核人时，仅指定人可驳回
+                        let designated = list_reviewers(&state.pool, id)
+                            .await
+                            .map_err(|e| db_err(format!("查询审题人失败: {}", e)))?;
+                        designated.is_empty() || designated.contains(&auth_user.id)
+                    }
                 }
             }
             SpaceKind::Public => false,
@@ -1384,6 +1652,35 @@ pub async fn reject_question(
     .execute(&state.pool)
     .await
     .map_err(|e| db_err(format!("驳回题目失败: {}", e)))?;
+
+    // ── 通知题目创建者：题目被驳回 ──
+    // 个人空间允许自审退回，此时不通知自己
+    // resource_type 使用 question_edit，前端点击后直接跳转编辑页
+    if existing.creator_id != auth_user.id {
+        if let Err(e) = crate::handlers::notifications::send_notification(
+            &state.pool,
+            &state.notify_tx,
+            crate::models::notification::CreateNotification {
+                user_id: existing.creator_id,
+                kind: "workflow".into(),
+                title: "题目被驳回".into(),
+                body: req
+                    .reject_reason
+                    .as_ref()
+                    .map(|r| format!("驳回理由：{}", r)),
+                resource_type: Some("question_edit".into()),
+                resource_id: Some(id),
+            },
+        )
+        .await
+        {
+            tracing::warn!(
+                "发送驳回通知失败, creator_id={}, err={}",
+                existing.creator_id,
+                e
+            );
+        }
+    }
 
     let question = sqlx::query_as::<_, Question>("SELECT * FROM questions WHERE id = $1")
         .bind(id)

@@ -16,12 +16,7 @@
           <template v-if="q?.status === 'draft'">
             <AppButton variant="outline" size="sm" @click="$router.push(`/questions/${q!.id}/edit`)"><AppIcon name="pencil" :size="15" /> 编辑</AppButton>
             <AppButton variant="primary" size="sm" :loading="submitting" :disabled="submitting" @click="submitReview">提交审核</AppButton>
-            <AppButton
-              v-if="auth.isAdmin || auth.isSuperAdmin"
-              variant="danger"
-              size="sm"
-              @click="confirmDelete"
-            ><AppIcon name="trash" :size="15" /> 删除</AppButton>
+            <AppButton v-if="canDelete" variant="danger" size="sm" @click="confirmDelete"><AppIcon name="trash" :size="15" /> 删除</AppButton>
           </template>
           <template v-else-if="q?.status === 'rejected'">
             <AppButton variant="outline" size="sm" @click="$router.push(`/questions/${q!.id}/edit`)"><AppIcon name="pencil" :size="15" /> 重新编辑</AppButton>
@@ -30,8 +25,27 @@
             <AppButton variant="primary" size="sm" @click="handleReview('approved')"><AppIcon name="check-circle" :size="15" /> 通过</AppButton>
             <AppButton variant="danger" size="sm" @click="handleReview('rejected')"><AppIcon name="x-circle" :size="15" /> 驳回</AppButton>
           </template>
-          <template v-else-if="q?.status === 'published' && auth.isAdmin">
-            <AppButton variant="ghost" size="sm" @click="toast.info('停用功能即将上线')"><AppIcon name="ban" :size="15" /> 停用</AppButton>
+          <template v-else-if="q?.status === 'published'">
+            <AppButton variant="outline" size="sm" @click="$router.push(`/questions/${q!.id}/edit`)"><AppIcon name="pencil" :size="15" /> 编辑</AppButton>
+            <!-- 推送到公共题库 / 撤回推库申请 -->
+            <AppButton
+              v-if="spaceStore.currentSpace?.kind !== 'public' && !hasPendingSubmission"
+              variant="primary"
+              size="sm"
+              :loading="submittingPublic"
+              :disabled="submittingPublic"
+              @click="handleSubmitToPublic"
+            ><AppIcon name="upload" :size="15" /> 推送到公共题库</AppButton>
+            <AppButton
+              v-if="hasPendingSubmission"
+              variant="outline"
+              size="sm"
+              :loading="withdrawing"
+              :disabled="withdrawing"
+              @click="handleWithdrawSubmission"
+            ><AppIcon name="x-circle" :size="15" /> 撤回推库申请</AppButton>
+            <AppButton v-if="canDelete" variant="danger" size="sm" @click="confirmDelete"><AppIcon name="trash" :size="15" /> 删除</AppButton>
+            <AppButton v-if="auth.isAdmin" variant="ghost" size="sm" @click="toast.info('停用功能即将上线')"><AppIcon name="ban" :size="15" /> 停用</AppButton>
           </template>
         </div>
       </header>
@@ -172,6 +186,31 @@
               <div class="meta-row"><span class="meta-label">更新</span><span class="meta-val">{{ formatTime(q?.updated_at) }}</span></div>
             </div>
           </div>
+
+          <!-- 被引用的试卷（溯源卡片） -->
+          <div class="side-card">
+            <div class="side-card-title">
+              <AppIcon name="files" :size="15" />
+              被引用的试卷
+              <span v-if="questionPapers.length" class="side-card-count">{{ questionPapers.length }}</span>
+            </div>
+            <div v-if="questionPapers.length" class="qp-list">
+              <router-link
+                v-for="p in questionPapers"
+                :key="p.paper_id"
+                :to="`/papers/${p.paper_id}`"
+                class="qp-item"
+              >
+                <div class="qp-item-title">{{ p.title }}</div>
+                <div class="qp-item-meta">
+                  <span v-if="p.section">{{ p.section }}</span>
+                  <span>分值 {{ p.score }}</span>
+                  <span>序号 #{{ p.sort_order }}</span>
+                </div>
+              </router-link>
+            </div>
+            <div v-else class="side-empty">该题目暂未被试卷引用</div>
+          </div>
         </div>
       </div>
     </template>
@@ -192,6 +231,30 @@
       </div>
     </AppModal>
 
+    <!-- 团队空间：审题人选择对话框（GAP-3 修复） -->
+    <AppModal v-model="reviewerDialog" title="选择审题人">
+      <div class="reviewer-dialog-body">
+        <p class="reviewer-dialog-hint">
+          团队空间需要交叉审核，请选择空间内的其他成员作为审题人
+        </p>
+        <select v-model="selectedReviewerId" class="reviewer-select">
+          <option value="">请选择审题人…</option>
+          <option v-for="m in reviewableMembers" :key="m.user_id" :value="m.user_id">
+            {{ m.display_name || m.username }}（{{ m.role === 'owner' ? '拥有者' : '成员' }}）
+          </option>
+        </select>
+      </div>
+      <div class="form-actions">
+        <AppButton variant="ghost" @click="reviewerDialog = false">取消</AppButton>
+        <AppButton
+          variant="primary"
+          :disabled="!selectedReviewerId"
+          :loading="submitting"
+          @click="confirmSubmitWithReviewer"
+        >确认提交</AppButton>
+      </div>
+    </AppModal>
+
     <!-- 删除确认 -->
     <AppConfirm
       v-model="deleteDialog"
@@ -207,9 +270,10 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { questionApi, type QuestionDetail, type GradeLevel, type SemesterType } from '@/api/client'
+import { questionApi, spaceApi, paperApi, type QuestionDetail, type GradeLevel, type SemesterType, type SpaceMemberInfo, type QuestionPaperItem, publicLibraryApi } from '@/api/client'
 import client from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
+import { useSpaceStore } from '@/stores/space'
 import LatexRender from '@/components/LatexRender.vue'
 import { AppButton, AppBadge, AppModal, AppConfirm, AppIcon } from '@/components/ui'
 import { useToast } from '@/composables/useToast'
@@ -219,6 +283,7 @@ import { useOptionsLayout } from '@/composables/useOptionsLayout'
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
+const spaceStore = useSpaceStore()
 const toast = useToast()
 const q = ref<QuestionDetail | null>(null)
 const loading = ref(false)
@@ -226,6 +291,18 @@ const submitting = ref(false)
 const rejectDialog = ref(false)
 const rejectComment = ref('')
 const deleteDialog = ref(false)
+
+// ── 删除权限：按空间类型分流 ──
+// 个人空间：始终允许；团队/公共空间：仅超级管理员或空间 Owner
+const canDelete = computed(() => {
+  if (!q.value) return false
+  const status = q.value.status
+  if (status !== 'draft' && status !== 'published') return false
+  const space = spaceStore.currentSpace
+  if (!space) return false
+  if (space.kind === 'personal') return true
+  return auth.isSuperAdmin || space.owner_user_id === auth.userId
+})
 
 // 难度星数：后端返回 1-5 数值，直接用作星数
 const diffStars = computed(() => {
@@ -348,18 +425,123 @@ async function fetchDetail() {
   try {
     const res = await questionApi.get(route.params.id as string)
     q.value = res.data
+    // 已发布题目：查询推库申请状态
+    if (q.value?.status === 'published') {
+      await checkSubmissionStatus()
+    }
+    // 加载被引用的试卷列表（溯源）
+    loadQuestionPapers()
   } catch { /* handled */ }
   finally { loading.value = false }
 }
 
+// ── 题目被引用的试卷列表（溯源卡片）──
+const questionPapers = ref<QuestionPaperItem[]>([])
+
+async function loadQuestionPapers() {
+  try {
+    const res = await paperApi.getQuestionPapers(route.params.id as string)
+    questionPapers.value = res.data
+  } catch {
+    questionPapers.value = []
+  }
+}
+
+// ── 团队空间审题人选择（GAP-3 修复）──
+const reviewerDialog = ref(false)
+const selectedReviewerId = ref('')
+const spaceMembers = ref<SpaceMemberInfo[]>([])
+
+// 可选审题人：团队空间中排除自己和 viewer
+const reviewableMembers = computed(() =>
+  spaceMembers.value.filter(m => m.user_id !== auth.userId && m.role !== 'viewer'),
+)
+
+async function loadSpaceMembers() {
+  if (spaceStore.currentSpace?.kind !== 'team' || !spaceStore.currentSpaceId) return
+  try {
+    const res = await spaceApi.get(spaceStore.currentSpaceId)
+    spaceMembers.value = res.data.members || []
+  } catch { /* handled */ }
+}
+
 async function submitReview() {
+  // 团队空间：需要先选择审题人
+  if (spaceStore.currentSpace?.kind === 'team') {
+    await loadSpaceMembers()
+    if (reviewableMembers.value.length === 0) {
+      toast.error('团队空间内无可选审题人，请先邀请其他成员加入空间')
+      return
+    }
+    selectedReviewerId.value = ''
+    reviewerDialog.value = true
+    return
+  }
+
+  // 个人空间：自审自发，直接提交
   submitting.value = true
   try {
-    await client.post(`/questions/${route.params.id}/submit`, {})
+    await questionApi.submit(route.params.id as string)
     toast.success('已提交审核')
     fetchDetail()
-  } catch { /* handled */ }
-  finally { submitting.value = false }
+  } catch (e: any) {
+    toast.error(e.response?.data?.error || e.response?.data?.message || e.message || '提交审核失败')
+  } finally { submitting.value = false }
+}
+
+// 团队空间：确认选择审题人后提交
+async function confirmSubmitWithReviewer() {
+  if (!selectedReviewerId.value) return
+  submitting.value = true
+  try {
+    await questionApi.submit(route.params.id as string, { reviewer_id: selectedReviewerId.value })
+    toast.success('已提交审核')
+    reviewerDialog.value = false
+    selectedReviewerId.value = ''
+    fetchDetail()
+  } catch (e: any) {
+    toast.error(e.response?.data?.error || e.response?.data?.message || e.message || '提交审核失败')
+  } finally { submitting.value = false }
+}
+
+// ── 推送到公共题库 ──
+const hasPendingSubmission = ref(false)
+const pendingSubmissionId = ref<string | null>(null)
+const submittingPublic = ref(false)
+const withdrawing = ref(false)
+
+async function checkSubmissionStatus() {
+  if (!q.value) return
+  try {
+    const res = await publicLibraryApi.getSubmissionStatus(q.value.id)
+    hasPendingSubmission.value = res.data.has_pending_submission
+    pendingSubmissionId.value = res.data.submission_id
+  } catch { /* ignore */ }
+}
+
+async function handleSubmitToPublic() {
+  if (!q.value) return
+  submittingPublic.value = true
+  try {
+    await publicLibraryApi.submitToPublic(q.value.id)
+    toast.success('已提交推库申请，等待管理员审核')
+    await checkSubmissionStatus()
+  } catch (e: any) {
+    toast.error(e.response?.data?.error || e.response?.data?.message || e.message || '推送失败')
+  } finally { submittingPublic.value = false }
+}
+
+async function handleWithdrawSubmission() {
+  if (!pendingSubmissionId.value) return
+  withdrawing.value = true
+  try {
+    await publicLibraryApi.withdraw(pendingSubmissionId.value)
+    toast.success('已撤回推库申请')
+    hasPendingSubmission.value = false
+    pendingSubmissionId.value = null
+  } catch (e: any) {
+    toast.error(e.response?.data?.error || e.response?.data?.message || e.message || '撤回失败')
+  } finally { withdrawing.value = false }
 }
 
 // 返回列表：优先用 router.back() 回退，不产生重复历史条目
@@ -380,7 +562,12 @@ async function doDelete() {
     await client.delete(`/questions/${route.params.id}`)
     toast.success('已删除')
     backToList()
-  } catch { /* handled */ }
+  } catch (e: any) {
+    console.error('删除题目失败:', e)
+    const errData = e.response?.data
+    const errMsg = typeof errData === 'string' ? errData : (errData?.error || errData?.message)
+    toast.error(errMsg || e.message || '删除失败')
+  }
 }
 
 function handleReview(action: string) {
@@ -401,12 +588,17 @@ async function confirmReject() {
 
 async function confirmReview(action: string, comment?: string): Promise<boolean> {
   try {
-    await client.post(`/questions/${route.params.id}/review`, { action, comment })
+    if (action === 'approved') {
+      await questionApi.approve(route.params.id as string)
+    } else {
+      await questionApi.reject(route.params.id as string, { reject_reason: comment })
+    }
     toast.success(action === 'approved' ? '已通过' : '已驳回')
     await fetchDetail()
     return true
   } catch (e: any) {
-    toast.error(e.response?.data?.error || '操作失败')
+    console.error('审核操作失败:', e)
+    toast.error(e.response?.data?.error || e.response?.data?.message || e.message || '操作失败')
     return false
   }
 }
@@ -425,6 +617,12 @@ const isMultiChoice = computed(() => {
   return Array.isArray(ans) && ans.length > 1
 })
 
+// ── 空间切换监听：防止幽灵页面 ──
+// 详情页切换空间后，原题目可能不属于新空间，立即重定向回列表页
+watch(() => spaceStore.currentSpaceId, () => {
+  router.replace('/questions')
+})
+
 onMounted(async () => {
   await fetchDetail()
 })
@@ -433,10 +631,8 @@ onMounted(async () => {
 <style scoped>
 /* ============ 页面根容器 ============ */
 .detail-page {
-  height: 100vh;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
+  display: block;
+  min-height: 100%;
   background: #f5f5f7;
 }
 
@@ -636,31 +832,30 @@ onMounted(async () => {
   border-radius: 999px;
 }
 
-/* ============ 内容区：Flex 双栏 ============ */
+/* ============ 内容区：居中双栏 ============ */
 .detail-body {
   flex: 1;
   display: flex;
-  gap: 16px;
-  min-height: 0;
-  padding: 0 24px 16px;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 24px;
+  max-width: 1200px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 20px;
 }
 
-/* 中间滚动区 */
+/* 左侧内容区 — 自然高度，由全局滚动接管 */
 .paper-scroll {
   flex: 1;
   min-width: 0;
-  overflow-y: auto;
-  padding: 4px 0;
 }
 
-/* 右侧滚动区 */
+/* 右侧粘性侧边栏 — 悬浮固定在可视区域内 */
 .side-scroll {
-  flex: 0 0 280px;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  padding: 4px 0;
+  flex: 0 0 300px;
+  position: sticky;
+  top: 24px;
 }
 
 /* ============ 中间：沉浸式试卷卡片 ============ */
@@ -1146,6 +1341,7 @@ onMounted(async () => {
   border: none;
   border-radius: 16px;
   padding: 16px 18px;
+  margin-bottom: 14px;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.03), 0 1px 3px rgba(0, 0, 0, 0.02);
   transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
 }
@@ -1207,6 +1403,57 @@ onMounted(async () => {
   color: #86868b;
 }
 
+/* ===== 被引用的试卷溯源卡片 ===== */
+.side-card-count {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-light);
+  padding: 1px 7px;
+  border-radius: 9999px;
+}
+
+.qp-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.qp-item {
+  display: block;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-input, #f5f5f7);
+  text-decoration: none;
+  color: var(--text-primary);
+  transition: all 0.15s ease;
+}
+
+.qp-item:hover {
+  border-color: var(--accent);
+  background: var(--accent-light);
+}
+
+.qp-item-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  margin-bottom: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qp-item-meta {
+  display: flex;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-wrap: wrap;
+}
+
 .meta-list {
   display: flex;
   flex-direction: column;
@@ -1259,6 +1506,35 @@ onMounted(async () => {
   box-shadow: 0 0 0 3px var(--accent-light);
 }
 
+.reviewer-dialog-body {
+  padding: 4px 0;
+  min-width: 340px;
+}
+
+.reviewer-dialog-hint {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin: 0 0 12px 0;
+  line-height: 1.4;
+}
+
+.reviewer-select {
+  width: 100%;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm, 8px);
+  background: var(--bg-input, #fff);
+  border: 1px solid var(--border-color, #d1d1d6);
+  color: var(--text-primary, #1d1d1f);
+  font-size: 14px;
+  box-sizing: border-box;
+}
+
+.reviewer-select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-light);
+}
+
 /* ============ 响应式 ============ */
 @media (max-width: 1024px) {
   .detail-body {
@@ -1266,11 +1542,14 @@ onMounted(async () => {
   }
   .side-scroll {
     flex: none;
+    display: flex;
     flex-direction: row;
     gap: 14px;
+    position: static;
   }
   .side-card {
     flex: 1;
+    margin-bottom: 0;
   }
 }
 

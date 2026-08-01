@@ -16,8 +16,7 @@ html {
   -moz-osx-font-smoothing: grayscale;
   scroll-behavior: smooth;
   height: 100%;
-  overflow-y: scroll;
-  overflow-x: hidden;
+  overflow: hidden !important;
 }
 
 body {
@@ -41,8 +40,9 @@ body {
   color: var(--text-primary);
   line-height: 1.5;
   letter-spacing: -0.01em;
-  min-height: 100vh;
-  overflow-x: hidden;
+  height: 100%;
+  margin: 0;
+  overflow: hidden !important;
   transition: background-color var(--transition), color var(--transition);
 }
 
@@ -164,6 +164,7 @@ select option {
 
 .view.active {
   display: block;
+  min-height: 100%;
   animation: fadeInUp 0.4s cubic-bezier(0.4, 0, 0.2, 1);
 }
 

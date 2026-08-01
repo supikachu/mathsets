@@ -6,9 +6,17 @@
         <!-- 上方：导航卡片 -->
         <div class="sidebar-nav-card">
           <div class="sidebar-brand">
-            <AppIcon name="logo" :size="24" class="brand-icon" />
-            <span>协同题库</span>
+            <div class="brand-left">
+              <AppIcon name="logo" :size="24" class="brand-icon" />
+              <span>协同题库</span>
+            </div>
+            <NotificationBell
+              :unread-count="unreadCount"
+              :open="showNotifDrawer"
+              @toggle="showNotifDrawer = !showNotifDrawer"
+            />
           </div>
+          <SpaceSwitcher />
           <router-link
             v-for="item in items"
             :key="item.path"
@@ -69,6 +77,9 @@
 
     <!-- 移动端底部导航 -->
     <BottomNav />
+
+    <!-- 通知抽屉 -->
+    <NotificationDrawer v-model:open="showNotifDrawer" />
   </div>
 </template>
 
@@ -80,6 +91,10 @@ import { useSpaceStore } from '@/stores/space'
 import { useNavItems } from '@/composables/useNavItems'
 import { AppIcon } from '@/components/ui'
 import BottomNav from '@/components/BottomNav.vue'
+import SpaceSwitcher from '@/components/SpaceSwitcher.vue'
+import NotificationBell from '@/components/NotificationBell.vue'
+import NotificationDrawer from '@/components/NotificationDrawer.vue'
+import { useNotification } from '@/composables/useNotification'
 
 const route = useRoute()
 const router = useRouter()
@@ -89,6 +104,9 @@ const { items } = useNavItems()
 
 const showUserMenu = ref(false)
 const userMenuRef = ref<HTMLElement | null>(null)
+
+const showNotifDrawer = ref(false)
+const { unreadCount, init: initNotifications } = useNotification()
 
 /** 沉浸式录题模式：路由 meta.immersive=true 时隐藏左侧系统导航，
  *  让 QuestionEdit 独享 100% 横向屏幕空间 */
@@ -151,12 +169,16 @@ onMounted(() => {
   document.addEventListener('click', onDocumentClick)
   if (auth.isLoggedIn) {
     space.fetchSpaces()
+    initNotifications()
   }
 })
 watch(
   () => auth.isLoggedIn,
   (v) => {
-    if (v) space.fetchSpaces()
+    if (v) {
+      space.fetchSpaces()
+      initNotifications()
+    }
   },
 )
 onUnmounted(() => document.removeEventListener('click', onDocumentClick))
@@ -179,12 +201,18 @@ onUnmounted(() => document.removeEventListener('click', onDocumentClick))
 .sidebar-brand {
   display: flex;
   align-items: center;
-  gap: 9px;
+  justify-content: space-between;
   font-size: 17px;
   font-weight: 700;
   padding: 6px 10px 18px;
   color: var(--text-primary);
   letter-spacing: -0.02em;
+}
+
+.brand-left {
+  display: flex;
+  align-items: center;
+  gap: 9px;
 }
 
 .brand-icon {

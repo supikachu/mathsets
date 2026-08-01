@@ -9,8 +9,8 @@ use uuid::Uuid;
 use crate::auth::middleware::AuthUser;
 use crate::auth::permissions::is_admin;
 use crate::models::paper::{
-    AddQuestionRequest, CreatePaperRequest, PaperDetail, PaperQuestionItem, PaperStatus,
-    PaperSummary, UpdatePaperQuestionRequest, UpdatePaperRequest,
+    AddQuestionRequest, CreatePaperRequest, PaperBrief, PaperDetail, PaperQuestionItem,
+    PaperStatus, PaperSummary, QuestionPaperItem, UpdatePaperQuestionRequest, UpdatePaperRequest,
 };
 use crate::models::PageResult;
 use crate::AppState;
@@ -101,6 +101,58 @@ pub async fn list_papers(
         page: page as u32,
         page_size: page_size as u32,
     }))
+}
+
+/// GET /api/v1/papers/brief — 试卷轻量列表（仅 id + title，供下拉选择）
+pub async fn list_papers_brief(
+    State(state): State<AppState>,
+    Extension(_auth): Extension<AuthUser>,
+) -> Result<Json<Vec<PaperBrief>>, (StatusCode, Json<serde_json::Value>)> {
+    let papers = sqlx::query_as::<_, PaperBrief>(
+        r#"
+        SELECT id, title
+        FROM papers
+        ORDER BY updated_at DESC
+        "#,
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("查询试卷简报失败: {}", e)})),
+        )
+    })?;
+
+    Ok(Json(papers))
+}
+
+/// GET /api/v1/questions/:id/papers — 反向查询引用该题目的试卷列表
+pub async fn get_question_papers(
+    State(state): State<AppState>,
+    Extension(_auth): Extension<AuthUser>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<QuestionPaperItem>>, (StatusCode, Json<serde_json::Value>)> {
+    let papers = sqlx::query_as::<_, QuestionPaperItem>(
+        r#"
+        SELECT pq.paper_id, p.title, pq.sort_order, pq.score, pq.section, pq.created_at
+        FROM paper_questions pq
+        JOIN papers p ON p.id = pq.paper_id
+        WHERE pq.question_id = $1
+        ORDER BY pq.sort_order, pq.created_at
+        "#,
+    )
+    .bind(id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("查询题目关联试卷失败: {}", e)})),
+        )
+    })?;
+
+    Ok(Json(papers))
 }
 
 /// GET /api/v1/papers/:id — 试卷详情

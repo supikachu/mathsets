@@ -17,25 +17,31 @@ pub enum SpaceKind {
 }
 
 /// 空间上下文角色（与全局 GlobalRole 独立）
+///
+/// 3 级互审模型：
+/// - Owner：空间管理员，管理成员 + 录题 + 审题
+/// - Member：空间成员，录题 + 审题（核心生产力）
+/// - Viewer：只读观察员，仅浏览已发布题目
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq)]
 #[sqlx(type_name = "space_role", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
 pub enum SpaceRole {
     Owner,
-    Editor,
-    Reviewer,
+    Member,
     Viewer,
 }
 
 impl SpaceRole {
     /// 是否有录入/编辑题目的权限
+    /// Owner 和 Member 均可录入，Viewer 无权限
     pub fn can_write(&self) -> bool {
-        matches!(self, SpaceRole::Owner | SpaceRole::Editor | SpaceRole::Reviewer)
+        matches!(self, SpaceRole::Owner | SpaceRole::Member)
     }
 
     /// 是否有审核发布的权限
+    /// Owner 和 Member 均可审核，Viewer 无权限
     pub fn can_review(&self) -> bool {
-        matches!(self, SpaceRole::Owner | SpaceRole::Reviewer)
+        matches!(self, SpaceRole::Owner | SpaceRole::Member)
     }
 
     /// 是否为空间管理员
@@ -153,9 +159,12 @@ pub struct UpdateSpaceRequest {
 }
 
 /// 添加成员
+///
+/// 注意：前端传入 `username` 而非 `user_id`，由 handler 查 `users` 表解析为 user_id。
+/// 这样可避免依赖管理员接口 `/admin/users`（普通 owner 无权调用）。
 #[derive(Debug, Deserialize)]
 pub struct AddSpaceMemberRequest {
-    pub user_id: Uuid,
+    pub username: String,
     pub role: Option<String>,
     pub duties: Option<Vec<String>>,
 }

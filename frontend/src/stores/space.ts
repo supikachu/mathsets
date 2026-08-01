@@ -6,6 +6,7 @@ export const useSpaceStore = defineStore('space', () => {
   const spaces = ref<SpaceSummary[]>([])
   const currentSpaceId = ref(localStorage.getItem('currentSpaceId') || '')
   const loading = ref(false)
+  const spacesLoaded = ref(false)
 
   const currentSpace = computed(
     () => spaces.value.find((s) => s.id === currentSpaceId.value) || null,
@@ -39,6 +40,7 @@ export const useSpaceStore = defineStore('space', () => {
       /* handled by interceptor */
     } finally {
       loading.value = false
+      spacesLoaded.value = true
     }
   }
 
@@ -54,6 +56,7 @@ export const useSpaceStore = defineStore('space', () => {
     personalSpace,
     publicSpace,
     loading,
+    spacesLoaded,
     fetchSpaces,
     setCurrentSpace,
   }
