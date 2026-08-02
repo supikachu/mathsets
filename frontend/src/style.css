@@ -14,3 +14,28 @@ html {
 html[data-theme='dark'] {
   color-scheme: dark;
 }
+
+/* ============================================================
+   字体继承修复：表单元素 + KaTeX 中文兜底
+   策略：#app 前缀提升权重自然覆盖，不使用 !important
+   ============================================================ */
+
+/* 1. 原生表单元素强制继承全局字体栈
+   textarea/input/button/select 默认不继承父级 font-family，
+   导致题干、解析输入区降级为浏览器默认宋体 */
+#app textarea,
+#app input,
+#app button,
+#app select {
+  font-family: inherit;
+}
+
+/* 2. KaTeX 中文文本字体覆盖（不触碰数学符号字体）
+   #app 前缀将权重提升至 (1,2,0)，自然覆盖 KaTeX 默认的 (0,2,0)
+   - .text：\text{} 命令内的文本（如 \text{或}）
+   - .cjk_fallback：CJK 字符兜底（KaTeX 对中文等无 math 字体的字符使用此 class）
+   数学符号（积分号 ∫、希腊字母 α、变量斜体 x 等）的 .mathnormal/.mathbf/.mathrm 不受影响 */
+#app .katex .text,
+#app .katex .cjk_fallback {
+  font-family: var(--font-cn-isolated);
+}
