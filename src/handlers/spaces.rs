@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::auth::middleware::AuthUser;
 use crate::auth::permissions::{
-    can_access_space, ensure_personal_space, ensure_public_space, get_space, is_admin,
+    can_access_space, ensure_personal_space, ensure_public_space, get_space, is_admin_user,
     is_space_member,
 };
 use crate::handlers::notifications::send_notification;
@@ -73,7 +73,7 @@ pub async fn list_spaces(
         "#,
     )
     .bind(auth.id)
-    .bind(is_admin(&auth.role))
+    .bind(is_admin_user(&auth))
     .fetch_all(&state.pool)
     .await
     .map_err(|e| {
@@ -261,7 +261,7 @@ pub async fn update_space(
         })?
         .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "空间不存在"}))))?;
 
-    if space.kind == SpaceKind::Public && !is_admin(&auth.role) {
+    if space.kind == SpaceKind::Public && !is_admin_user(&auth) {
         return Err((StatusCode::FORBIDDEN, Json(json!({"error": "无权修改公共空间"}))));
     }
 
@@ -283,10 +283,10 @@ pub async fn update_space(
             })?;
             role.as_deref() == Some("owner")
         }
-        SpaceKind::Public => is_admin(&auth.role),
+        SpaceKind::Public => is_admin_user(&auth),
     };
 
-    if !is_owner && !is_admin(&auth.role) {
+    if !is_owner && !is_admin_user(&auth) {
         return Err((StatusCode::FORBIDDEN, Json(json!({"error": "仅空间所有者可修改"}))));
     }
 
@@ -365,7 +365,7 @@ pub async fn delete_space(
     .as_deref()
         == Some("owner");
 
-    if !is_owner && !is_admin(&auth.role) {
+    if !is_owner && !is_admin_user(&auth) {
         return Err((StatusCode::FORBIDDEN, Json(json!({"error": "无权删除该空间"}))));
     }
 
@@ -511,7 +511,7 @@ pub async fn add_member(
         )
     })?;
 
-    if my_role.as_deref() != Some("owner") && !is_admin(&auth.role) {
+    if my_role.as_deref() != Some("owner") && !is_admin_user(&auth) {
         return Err((StatusCode::FORBIDDEN, Json(json!({"error": "仅空间拥有者可进行成员管理"}))));
     }
 
@@ -611,7 +611,7 @@ pub async fn update_member(
         )
     })?;
 
-    if my_role.as_deref() != Some("owner") && !is_admin(&auth.role) {
+    if my_role.as_deref() != Some("owner") && !is_admin_user(&auth) {
         return Err((StatusCode::FORBIDDEN, Json(json!({"error": "仅空间拥有者可进行成员管理"}))));
     }
 
@@ -682,7 +682,7 @@ pub async fn remove_member(
     })?;
 
     let self_leave = user_id == auth.id;
-    if !self_leave && my_role.as_deref() != Some("owner") && !is_admin(&auth.role) {
+    if !self_leave && my_role.as_deref() != Some("owner") && !is_admin_user(&auth) {
         return Err((StatusCode::FORBIDDEN, Json(json!({"error": "仅空间拥有者可进行成员管理"}))));
     }
 
@@ -748,7 +748,7 @@ pub async fn transfer_ownership(
         )
     })?;
 
-    if my_role.as_deref() != Some("owner") && !is_admin(&auth.role) {
+    if my_role.as_deref() != Some("owner") && !is_admin_user(&auth) {
         return Err((
             StatusCode::FORBIDDEN,
             Json(json!({"error": "仅空间拥有者可转让权限"})),
@@ -1006,7 +1006,7 @@ pub async fn require_space_member(
                 Json(json!({"error": format!("权限检查失败: {}", e)})),
             )
         })?
-        && !is_admin(&auth.role)
+        && !is_admin_user(&auth)
     {
         return Err((StatusCode::FORBIDDEN, Json(json!({"error": "无权访问该空间"}))));
     }
@@ -1061,7 +1061,7 @@ pub async fn clone_question(
     // 公共库未发布题：仅管理员可克隆（防止未发布题目被提前扩散）
     if src_space.kind == SpaceKind::Public
         && src.status != QuestionStatus::Published
-        && !is_admin(&auth.role)
+        && !is_admin_user(&auth)
     {
         return Err((
             StatusCode::FORBIDDEN,
@@ -1158,20 +1158,18 @@ async fn clone_question_internal(
     sqlx::query(
         r#"
         INSERT INTO questions (
-            id, stem, stem_text, images, question_type, difficulty, default_score, status,
-            options, correct_answer, analysis, grading_criteria, source, exam_type, metadata,
-            grade_level, semester, cognitive_level, difficulty_score, estimated_minutes,
+            id, stem, stem_text, images, question_type, difficulty, status,
+            options, correct_answer, analysis, metadata,
             parent_id, sub_order,
             paper_count, attempt_count, accuracy_rate, favorite_count,
             creator_id, created_at, updated_at, version, space_id, origin_question_id
         )
         VALUES (
-            $1, $2, $3, $4, $5, $6, $7, 'draft'::question_status,
-            $8, $9, $10, $11, $12, $13, COALESCE($14, '{}'::jsonb),
-            $15, $16, $17, $18, $19,
-            $20, $21,
+            $1, $2, $3, $4, $5, $6, 'draft'::question_status,
+            $7, $8, $9, COALESCE($10, '{}'::jsonb),
+            $11, $12,
             0, 0, NULL, 0,
-            $22, $23, $24, 1, $25, $26
+            $13, $14, $15, 1, $16, $17
         )
         "#,
     )
@@ -1181,19 +1179,10 @@ async fn clone_question_internal(
     .bind(&src.images)
     .bind(&src.question_type)
     .bind(&src.difficulty)
-    .bind(src.default_score)
     .bind(&src.options)
     .bind(&src.correct_answer)
     .bind(&src.analysis)
-    .bind(&src.grading_criteria)
-    .bind(&src.source)
-    .bind(&src.exam_type)
     .bind(&src.metadata)
-    .bind(&src.grade_level)
-    .bind(&src.semester)
-    .bind(&src.cognitive_level)
-    .bind(src.difficulty_score)
-    .bind(src.estimated_minutes)
     .bind(src.parent_id)
     .bind(src.sub_order)
     .bind(creator_id)

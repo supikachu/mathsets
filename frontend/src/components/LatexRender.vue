@@ -35,6 +35,19 @@ function escapeHtml(s: string): string {
 }
 
 /**
+ * 图片 src scheme 白名单：
+ * 仅放行 http/https（含协议相对 //）、站内相对路径、安全的 base64 位图。
+ * 拒绝 javascript: / vbscript: / data:text/html / data:image/svg+xml 等可执行载荷。
+ */
+function isSafeImageSrc(src: string): boolean {
+  if (/^(https?:)?\/\//i.test(src)) return true // https:// 或 //cdn.example.com
+  if (/^\//.test(src)) return true              // /uploads/xxx 站内绝对路径
+  if (/^\.{1,2}\//.test(src)) return true       // ./ ../ 相对路径
+  if (/^data:image\/(png|jpe?g|gif|webp|bmp);base64,/i.test(src)) return true
+  return false
+}
+
+/**
  * 渲染单个公式为 KaTeX HTML。
  * 【关键】传入的 formula 必须是 raw string（未经 HTML 转义），
  * 这样 KaTeX 才能正确识别 \sqrt、\frac、\text 等 LaTeX 命令。
@@ -46,7 +59,11 @@ function renderKatex(formula: string, displayMode: boolean): string {
     return katex.renderToString(raw, {
       displayMode,
       throwOnError: false,
-      macros: katexMacros,
+      // 【安全】显式 trust:false —— 拒绝 \href / \htmlClass / \htmlId 等
+      //   生成 HTML 的命令（默认即 false，此处显式声明防御未来改动）
+      trust: false,
+      strict: 'warn', // 非法命令仅警告不执行
+      macros: katexMacros, // 固定宏映射（无用户输入参与宏定义）
     })
   } catch {
     return `<span class="katex-error">${escapeHtml(formula)}</span>`
@@ -103,20 +120,24 @@ function render() {
   }
 
   // 处理 Markdown 图片语法 ![alt](url)
+  // 【安全】阶段 2 的 escapeHtml 使 alt/url 处于实体态；此处解码后
+  //   必须对 alt 二次转义，否则可构造 alt="x" onerror="..." 属性逃逸。
+  //   src 解码后做 scheme 白名单校验，拒绝 javascript: 等危险协议。
   html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (match, alt, url) => {
-    const decodedUrl = url
+    const decode = (s: string) => s
       .replace(/&amp;/g, '&')
       .replace(/&lt;/g, '<')
       .replace(/&gt;/g, '>')
       .replace(/&quot;/g, '"')
       .replace(/&#39;/g, "'")
-    const decodedAlt = alt
-      .replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'")
-    return `<img src="${decodedUrl}" alt="${decodedAlt}" class="latex-img" loading="lazy" />`
+    const decodedUrl = decode(url)
+    const decodedAlt = decode(alt)
+    // 非白名单 URL：降级为转义文本，不渲染任何 img 标签
+    if (!isSafeImageSrc(decodedUrl)) {
+      return `<span class="latex-img-invalid">${escapeHtml(match)}</span>`
+    }
+    // 属性值二次转义：阻断 " ' < > & 全部实体化，杜绝属性逃逸
+    return `<img src="${escapeHtml(decodedUrl)}" alt="${escapeHtml(decodedAlt)}" class="latex-img" loading="lazy" referrerpolicy="no-referrer" />`
   })
 
   // 处理换行 — 此时 KaTeX 尚未渲染，img 标签也不会被影响

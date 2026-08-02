@@ -7,7 +7,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::auth::middleware::AuthUser;
-use crate::auth::permissions::is_admin;
+use crate::auth::permissions::is_admin_user;
 use crate::models::paper::{
     AddQuestionRequest, CreatePaperRequest, PaperBrief, PaperDetail, PaperQuestionItem,
     PaperStatus, PaperSummary, QuestionPaperItem, UpdatePaperQuestionRequest, UpdatePaperRequest,
@@ -303,7 +303,7 @@ pub async fn update_paper(
         .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "试卷不存在"}))))?;
 
     // 所有权检查：Admin 可操作所有试卷，其他用户仅能操作自己创建的
-    if !is_admin(&auth.role) && creator_id != Some(auth.id) {
+    if !is_admin_user(&auth) && creator_id != Some(auth.id) {
         return Err((StatusCode::FORBIDDEN, Json(json!({"error": "无权操作该试卷"}))));
     }
 
@@ -364,7 +364,7 @@ pub async fn delete_paper(
         .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "试卷不存在"}))))?;
 
     // 所有权检查：Admin 可操作所有试卷，其他用户仅能操作自己创建的
-    if !is_admin(&auth.role) && creator_id != Some(auth.id) {
+    if !is_admin_user(&auth) && creator_id != Some(auth.id) {
         return Err((StatusCode::FORBIDDEN, Json(json!({"error": "无权操作该试卷"}))));
     }
 
@@ -407,7 +407,7 @@ pub async fn add_question_to_paper(
         .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "试卷不存在"}))))?;
 
     // 所有权检查：Admin 可操作所有试卷，其他用户仅能操作自己创建的
-    if !is_admin(&auth.role) && creator_id != Some(auth.id) {
+    if !is_admin_user(&auth) && creator_id != Some(auth.id) {
         return Err((StatusCode::FORBIDDEN, Json(json!({"error": "无权操作该试卷"}))));
     }
 
@@ -497,7 +497,7 @@ pub async fn update_paper_question(
         .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "试卷不存在"}))))?;
 
     // 所有权检查：Admin 可操作所有试卷，其他用户仅能操作自己创建的
-    if !is_admin(&auth.role) && creator_id != Some(auth.id) {
+    if !is_admin_user(&auth) && creator_id != Some(auth.id) {
         return Err((StatusCode::FORBIDDEN, Json(json!({"error": "无权操作该试卷"}))));
     }
 
@@ -553,7 +553,7 @@ pub async fn remove_question_from_paper(
         .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "试卷不存在"}))))?;
 
     // 所有权检查：Admin 可操作所有试卷，其他用户仅能操作自己创建的
-    if !is_admin(&auth.role) && creator_id != Some(auth.id) {
+    if !is_admin_user(&auth) && creator_id != Some(auth.id) {
         return Err((StatusCode::FORBIDDEN, Json(json!({"error": "无权操作该试卷"}))));
     }
 
@@ -598,7 +598,7 @@ pub async fn publish_paper(
         .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "试卷不存在"}))))?;
 
     // 所有权检查：Admin 可操作所有试卷，其他用户仅能操作自己创建的
-    if !is_admin(&auth.role) && creator_id != Some(auth.id) {
+    if !is_admin_user(&auth) && creator_id != Some(auth.id) {
         return Err((StatusCode::FORBIDDEN, Json(json!({"error": "无权操作该试卷"}))));
     }
 

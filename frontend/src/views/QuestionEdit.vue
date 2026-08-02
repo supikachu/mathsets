@@ -48,6 +48,17 @@
         </div>
       </div>
 
+      <!-- 知识树分类失败提示条：节点暂存，可重试分类（保存时原样并入，不丢数据） -->
+      <div v-if="pendingNodes.length > 0" class="classify-retry-banner">
+        <AppIcon name="alert" :size="14" />
+        <span class="classify-retry-text">
+          知识树分类数据加载失败，{{ pendingNodes.length }} 个节点暂未分类显示（保存时会原样保留，不会丢失）
+        </span>
+        <AppButton variant="outline" size="sm" :loading="classifyRetrying" :disabled="classifyRetrying" @click="retryDistributePendingNodes">
+          重试分类
+        </AppButton>
+      </div>
+
       <!-- ==================== 主内容 三栏：编辑 + 预览 + 属性面板 ==================== -->
       <div class="main-content">
         <!-- 左栏：编辑 -->
@@ -204,9 +215,12 @@
           v-model:knowledgeNodeIds="knowledgeNodeIds"
           v-model:chapterNodeIds="chapterNodeIds"
           v-model:methodNodeIds="methodNodeIds"
+          v-model:primaryKnowledgeNodeId="primaryKnowledgeNodeId"
           v-model:aiGeneratedFields="aiGeneratedFields"
+          v-model:aiHighlightIds="aiHighlightIds"
           v-model:collapsed="panelCollapsed"
           v-model:paperIds="paperIds"
+          :selection-cache="selectionCache"
           :initial-node-names="initialNodeNames"
           :competenceTags="competenceTags"
           :methodTags="methodTags"
@@ -278,9 +292,10 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { questionApi, spaceApi, tagsApi, paperApi, knowledgeTreeApi, type SpaceMemberInfo, type Tag, type ParsedQuestion } from '@/api/client'
+import { questionApi, spaceApi, tagsApi, paperApi, type SpaceMemberInfo, type Tag, type ParsedQuestion } from '@/api/client'
 import { AppButton, AppBadge, AppModal, AppConfirm, AppIcon } from '@/components/ui'
 import { useToast } from '@/composables/useToast'
+import { getKnowledgeTreeList } from '@/composables/useKnowledgeTreeCache'
 import { useSpaceStore } from '@/stores/space'
 import { useAuthStore } from '@/stores/auth'
 import { hasUnfinishedSnapshot } from '@/utils/batchSnapshot'
@@ -308,6 +323,10 @@ const isLoading = ref(false)
 const showHistory = ref(false)
 const showAiDialog = ref(false)
 const aiGeneratedFields = ref<Set<string>>(new Set())
+// AI 打标新增的知识树节点 ID（树组件浅金高亮；手动触碰单个即消，保存成功全清）
+const aiHighlightIds = ref<string[]>([])
+// 学段/学科切换的三组节点勾选缓存：key = `${subject}_${stage}`，切走快照、切回瞬恢
+const selectionCache = new Map<string, { chapter: string[]; knowledge: string[]; method: string[] }>()
 const applyingAiResult = ref(false)
 const aiDialogRef = ref<InstanceType<typeof AiRecognizeDialog> | null>(null)
 
@@ -323,8 +342,14 @@ const knowledgeNodeIds = ref<string[]>([])
 // 章节 / 解题方法节点 ID（与 AttributeSidePanel v-model 双向绑定，提交时与知识点合并）
 const chapterNodeIds = ref<string[]>([])
 const methodNodeIds = ref<string[]>([])
+// 主知识点节点 ID（每题最多 1 个，跨三组节点单选；与 AttributeSidePanel v-model 双向绑定）
+const primaryKnowledgeNodeId = ref<string | null>(null)
 // 初始节点名称映射（编辑场景 loadQuestion 后填充，传给 AttributeSidePanel 展示 Tag）
 const initialNodeNames = ref<Record<string, string>>({})
+// 知识树分类元数据（knowledgeTreeApi.list）加载失败时的待分发节点
+// 保留 id/name/tree_id，重试后按 tree_id->kind 精准分发；绝不静默错分为知识点
+const pendingNodes = ref<{ id: string; name: string; tree_id: string }[]>([])
+const classifyRetrying = ref(false)
 
 // 关联试卷 ID 列表（与 AttributeSidePanel v-model 双向绑定）
 const paperIds = ref<string[]>([])
@@ -436,7 +461,7 @@ const form = reactive({
   difficulty: 'medium',
   difficulty_coefficient: 0.5 as number,
   default_score: 5,
-  grade: undefined as string | undefined,
+  grade: '' as string,
   semester: undefined as string | undefined,
   grade_semester: '' as string,
   // ── 长尾维度：统一存入 questions.metadata(JSONB)，与 QuestionList 数据字典对齐 ──
@@ -465,6 +490,8 @@ const form = reactive({
   // ── 前端独立维护三组节点 ID，提交时合并为统一 knowledge_node_ids ──
   chapterNodeIds: [] as string[],
   methodNodeIds: [] as string[],
+  // ── 主知识点（每题最多 1 个，跨三组节点单选；后端 DTO 字段对齐） ──
+  primaryKnowledgeNodeId: null as string | null,
   tagIds: [] as string[],
   reviewer: '' as string,
   reviewer_ids: [] as string[],
@@ -480,6 +507,7 @@ watch(knowledgeNodeIds, (v) => {
 }, { deep: true })
 watch(chapterNodeIds, v => { form.chapterNodeIds = v }, { deep: true })
 watch(methodNodeIds, v => { form.methodNodeIds = v }, { deep: true })
+watch(primaryKnowledgeNodeId, v => { form.primaryKnowledgeNodeId = v })
 
 // 难度字符串枚举 ↔ 数字 1-5 转换
 function difficultyStringToNum(s: string): number {
@@ -629,8 +657,9 @@ function handleSolutionImageUpload(index: number) {
 // Payload construction
 function buildPayload() {
   // ── metadata(JSONB)：长尾维度统一存放 ──
-  // grade_semester / year / region_province / region_city / source_type / sub_source_type
+  // grade / grade_semester / year / region_province / region_city / source_type / sub_source_type
   const metadata: Record<string, unknown> = {}
+  if (form.grade) metadata.grade = form.grade
   if (form.grade_semester) metadata.grade_semester = form.grade_semester
   if (form.year) metadata.year = form.year
   if (form.region_province) metadata.region_province = form.region_province
@@ -641,10 +670,12 @@ function buildPayload() {
   metadata.subject = form.subject
 
   // 三组节点 ID 合并去重为统一 knowledge_node_ids（后端无感知前端拆分）
+  // pendingNodes：树分类元数据加载失败时暂存的节点，原样并入——不丢数据、不错分
   const mergedNodeIds = Array.from(new Set([
     ...form.chapterNodeIds,
     ...form.knowledgeNodeIds,
     ...form.methodNodeIds,
+    ...pendingNodes.value.map(n => n.id),
   ]))
 
   // Payload 严格对齐后端 UpdateQuestionRequest / CreateQuestionRequest
@@ -658,6 +689,8 @@ function buildPayload() {
     metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
     analysis: form.solutions.filter(s => s.trim()).join('\n\n---\n\n') || null,
     knowledge_node_ids: mergedNodeIds.length > 0 ? mergedNodeIds : null,
+    // 主知识点 ID：跨三组节点单选，null 表示取消主知识点
+    primary_knowledge_node_id: form.primaryKnowledgeNodeId || null,
     tag_ids: form.tagIds,
     paper_ids: paperIds.value,
   }
@@ -703,6 +736,8 @@ async function handleSave(submitAfter: boolean) {
     const qid = res.data.id
     form.hasUnsaved = false
     clearDraft()
+    // 保存成功：AI 高亮节点全部清除（手动修改阶段的视觉反馈到此为止）
+    aiHighlightIds.value = []
 
     if (submitAfter) {
       if (isTeamSpace.value) {
@@ -850,10 +885,23 @@ async function doRestoreDraft() {
   for (const f of fields) {
     if (pendingDraft[f] !== undefined) (form as any)[f] = pendingDraft[f]
   }
-  // knowledgeNodeIds 单独还原（独立 ref + form 字段同步）
+  // knowledgeNodeIds / chapterNodeIds / methodNodeIds 单独还原（独立 ref + form 字段同步）
   if (Array.isArray(pendingDraft.knowledgeNodeIds)) {
     knowledgeNodeIds.value = [...pendingDraft.knowledgeNodeIds]
     form.knowledgeNodeIds = [...pendingDraft.knowledgeNodeIds]
+  }
+  if (Array.isArray(pendingDraft.chapterNodeIds)) {
+    chapterNodeIds.value = [...pendingDraft.chapterNodeIds]
+    form.chapterNodeIds = [...pendingDraft.chapterNodeIds]
+  }
+  if (Array.isArray(pendingDraft.methodNodeIds)) {
+    methodNodeIds.value = [...pendingDraft.methodNodeIds]
+    form.methodNodeIds = [...pendingDraft.methodNodeIds]
+  }
+  // 主知识点还原（null 或 string，缺省保持 null）
+  if (pendingDraft.primaryKnowledgeNodeId !== undefined) {
+    primaryKnowledgeNodeId.value = pendingDraft.primaryKnowledgeNodeId
+    form.primaryKnowledgeNodeId = pendingDraft.primaryKnowledgeNodeId
   }
   toast.success('草稿已恢复')
   pendingDraft = null
@@ -886,6 +934,59 @@ async function loadSpaceMembers() {
   } catch { /* handled */ }
 }
 
+// 将扁平知识节点按 tree_id -> kind 映射分发到 章节/知识点/方法 三个数组
+// 同时回填 primaryKnowledgeNodeId（来自 is_primary 字段，每题最多 1 个）
+// 返回 true 表示分发成功；树列表不可用时返回 false（调用方负责兜底，绝不静默错分）
+async function distributeNodesByTreeKind(
+  knodes: { id: string; name: string; tree_id: string; is_primary?: boolean }[],
+): Promise<boolean> {
+  let treesData
+  try {
+    treesData = await getKnowledgeTreeList()
+  } catch {
+    return false
+  }
+  const treeKindMap = new Map(treesData.map(t => [t.id, t.kind]))
+  const kIds: string[] = [], cIds: string[] = [], mIds: string[] = []
+  const nameMap: Record<string, string> = {}
+  let primaryId: string | null = null
+  for (const k of knodes) {
+    nameMap[k.id] = k.name
+    const kind = treeKindMap.get(k.tree_id)
+    if (kind === 'chapter') cIds.push(k.id)
+    else if (kind === 'ability') mIds.push(k.id)
+    else kIds.push(k.id) // 'knowledge' 或未知兜底
+    if (k.is_primary) primaryId = k.id
+  }
+  knowledgeNodeIds.value = kIds
+  chapterNodeIds.value = cIds
+  methodNodeIds.value = mIds
+  form.knowledgeNodeIds = kIds
+  form.chapterNodeIds = cIds
+  form.methodNodeIds = mIds
+  primaryKnowledgeNodeId.value = primaryId
+  form.primaryKnowledgeNodeId = primaryId
+  initialNodeNames.value = nameMap
+  return true
+}
+
+// 分类失败后的手动重试：pendingNodes 暂存的节点重新走 tree_id->kind 分发
+async function retryDistributePendingNodes() {
+  if (pendingNodes.value.length === 0 || classifyRetrying.value) return
+  classifyRetrying.value = true
+  try {
+    const ok = await distributeNodesByTreeKind(pendingNodes.value)
+    if (ok) {
+      pendingNodes.value = []
+      toast.success('知识树分类已恢复')
+    } else {
+      toast.error('分类数据加载仍失败，请稍后重试')
+    }
+  } finally {
+    classifyRetrying.value = false
+  }
+}
+
 async function loadQuestion() {
   if (isNew) return
   isLoading.value = true
@@ -898,7 +999,7 @@ async function loadQuestion() {
     form.question_type = d.question_type
     form.difficulty = difficultyNumToString(d.difficulty)
     form.default_score = d.default_score
-    form.grade = undefined
+    form.grade = meta.grade || ''
     form.semester = d.semester || undefined
     form.sub_type = (d as any).sub_type || ''
     form.difficulty_coefficient = d.difficulty_score ?? 0.5
@@ -920,37 +1021,27 @@ async function loadQuestion() {
     }
     form.status = d.status
     form.version = d.version
-    // 按类回填：d.knowledge_nodes 每项含 id/name/tree_id，按 tree_id → kind 映射分类
-    const knodes = (d.knowledge_nodes || []) as { id: string; name: string; tree_id: string }[]
+    // 按类回填：d.knowledge_nodes 每项含 id/name/tree_id/is_primary，按 tree_id → kind 映射分类
+    const knodes = (d.knowledge_nodes || []) as {
+      id: string; name: string; tree_id: string; is_primary?: boolean
+    }[]
     if (knodes.length > 0) {
-      try {
-        const treesRes = await knowledgeTreeApi.list()
-        const treeKindMap = new Map(treesRes.data.map(t => [t.id, t.kind]))
-        const kIds: string[] = [], cIds: string[] = [], mIds: string[] = []
-        const nameMap: Record<string, string> = {}
-        for (const k of knodes) {
-          nameMap[k.id] = k.name
-          const kind = treeKindMap.get(k.tree_id)
-          if (kind === 'chapter') cIds.push(k.id)
-          else if (kind === 'ability') mIds.push(k.id)
-          else kIds.push(k.id) // 'knowledge' 或未知兜底
-        }
-        knowledgeNodeIds.value = kIds
-        chapterNodeIds.value = cIds
-        methodNodeIds.value = mIds
-        form.knowledgeNodeIds = kIds
-        form.chapterNodeIds = cIds
-        form.methodNodeIds = mIds
-        initialNodeNames.value = nameMap
-      } catch {
-        // 树列表加载失败：全部回填到知识点，避免数据丢失
-        knowledgeNodeIds.value = knodes.map(k => k.id)
-        form.knowledgeNodeIds = knowledgeNodeIds.value
+      const ok = await distributeNodesByTreeKind(knodes)
+      if (!ok) {
+        // 树列表加载失败：暂存原始节点（含 tree_id），不静默错分；UI 提示重试，提交时原样并入 payload
+        pendingNodes.value = knodes
+        initialNodeNames.value = Object.fromEntries(knodes.map(k => [k.id, k.name]))
+        knowledgeNodeIds.value = []
         chapterNodeIds.value = []
         methodNodeIds.value = []
+        form.knowledgeNodeIds = []
         form.chapterNodeIds = []
         form.methodNodeIds = []
-        initialNodeNames.value = Object.fromEntries(knodes.map(k => [k.id, k.name]))
+        // 兜底：分类失败时仍尝试回填 primary，避免主知识点信息丢失
+        const primaryKnode = knodes.find(k => k.is_primary)
+        primaryKnowledgeNodeId.value = primaryKnode?.id ?? null
+        form.primaryKnowledgeNodeId = primaryKnode?.id ?? null
+        toast.error('知识树分类数据加载失败，节点暂未分类，可点击上方提示条重试')
       }
     } else {
       knowledgeNodeIds.value = []
@@ -959,7 +1050,10 @@ async function loadQuestion() {
       form.knowledgeNodeIds = []
       form.chapterNodeIds = []
       form.methodNodeIds = []
+      primaryKnowledgeNodeId.value = null
+      form.primaryKnowledgeNodeId = null
       initialNodeNames.value = {}
+      pendingNodes.value = []
     }
     form.tagIds = d.tags?.map(t => t.id) || []
 
@@ -1443,6 +1537,32 @@ watch(() => form.question_type, () => {
   overflow: hidden;
   height: 100%;
   align-items: stretch;
+}
+
+/* 知识树分类失败提示条（pendingNodes 暂存重试） */
+.classify-retry-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 8px 12px;
+  margin-bottom: 10px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  color: #92400e;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+}
+
+.classify-retry-banner .classify-retry-text {
+  flex: 1;
+  min-width: 0;
+}
+
+[data-theme='dark'] .classify-retry-banner {
+  color: #fbbf24;
+  background: rgba(251, 191, 36, 0.08);
+  border-color: rgba(251, 191, 36, 0.3);
 }
 
 .edit-col {

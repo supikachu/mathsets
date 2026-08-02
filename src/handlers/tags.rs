@@ -8,7 +8,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::auth::middleware::AuthUser;
-use crate::auth::permissions::is_admin;
+use crate::auth::permissions::is_admin_user;
 use crate::models::question::{CreateTagRequest, Tag, TagCategory, TagQuery, UpdateTagRequest};
 use crate::AppState;
 
@@ -263,7 +263,7 @@ pub async fn create_tag(
     Json(req): Json<CreateTagRequest>,
 ) -> Result<(StatusCode, Json<Tag>), (StatusCode, Json<serde_json::Value>)> {
     // 全局标签（space_id = NULL）仅管理员可创建
-    if req.space_id.is_none() && !is_admin(&auth_user.role) {
+    if req.space_id.is_none() && !is_admin_user(&auth_user) {
         return Err((
             StatusCode::FORBIDDEN,
             Json(json!({"error": "仅管理员可创建全局预置标签"})),
@@ -391,7 +391,7 @@ pub async fn delete_tag(
     Extension(auth_user): Extension<AuthUser>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
-    if !is_admin(&auth_user.role) {
+    if !is_admin_user(&auth_user) {
         return Err((
             StatusCode::FORBIDDEN,
             Json(json!({"error": "仅管理员可删除标签"})),
@@ -428,7 +428,7 @@ pub async fn merge_tag(
     Path(source_id): Path<Uuid>,
     Json(req): Json<MergeTagRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if !is_admin(&auth_user.role) {
+    if !is_admin_user(&auth_user) {
         return Err((
             StatusCode::FORBIDDEN,
             Json(json!({"error": "仅管理员可合并标签"})),

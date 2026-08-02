@@ -18,6 +18,7 @@ import {
   type KnowledgeTreeKind,
   type KnowledgeNodeTreeNode,
 } from '@/api/client'
+import { unwrapTreeResponse } from '@/composables/useKnowledgeTreeCache'
 
 const props = withDefaults(
   defineProps<{
@@ -31,6 +32,8 @@ const props = withDefaults(
 
 const emit = defineEmits<{
   select: [nodeId: string]
+  /** 学段或学科切换时通知父组件（父组件需据此刷新题目列表） */
+  contextChange: [payload: { stage: string; subject: string }]
 }>()
 
 // ─── 学段 / 学科 / 模式 联动状态 ───────────────────────────────────────
@@ -53,9 +56,21 @@ const MODES: { key: TreeMode; label: string; kind: KnowledgeTreeKind | null }[] 
   { key: 'method', label: '解题方法', kind: 'ability' },
 ]
 
-const currentStage = ref<Stage>('junior')
-const currentSubject = ref<Subject>('math')
+const currentStage = ref<Stage>(
+  (localStorage.getItem('nav_selected_stage') as Stage) || 'junior',
+)
+const currentSubject = ref<Subject>(
+  (localStorage.getItem('nav_selected_subject') as Subject) || 'math',
+)
 const treeMode = ref<TreeMode>('chapter')
+
+// 学段 / 科目持久化：切换时即时写入 localStorage，刷新或重新进入时恢复
+watch(currentStage, (val) => {
+  localStorage.setItem('nav_selected_stage', val)
+})
+watch(currentSubject, (val) => {
+  localStorage.setItem('nav_selected_subject', val)
+})
 
 // ─── 状态 ──────────────────────────────────────────────────────────────
 // 知识树收起状态持久化到 localStorage，防止路由切换后状态丢失
@@ -181,10 +196,12 @@ function isSelected(id: string): boolean {
 function setStage(s: Stage) {
   if (currentStage.value === s) return
   currentStage.value = s
+  emit('contextChange', { stage: s, subject: currentSubject.value })
 }
 function setSubject(s: Subject) {
   if (currentSubject.value === s) return
   currentSubject.value = s
+  emit('contextChange', { stage: currentStage.value, subject: s })
 }
 function setMode(m: TreeMode) {
   if (treeMode.value === m) return
@@ -235,11 +252,9 @@ async function loadTreeData() {
   loading.value = true
   try {
     const res = await knowledgeNodeApi.getTree(activeTreeId.value)
-    treeData.value = res.data
-    // 默认展开所有根节点
-    expandedIds.value = new Set(
-      treeData.value.filter((n) => n.children.length > 0).map((n) => n.id),
-    )
+    treeData.value = unwrapTreeResponse(res.data)
+    // 默认折叠：初始不展开任何节点（削顶后顶层即真实内容根，保持清爽视图）
+    expandedIds.value = new Set()
   } catch (e) {
     console.error('[TreeNav] 加载知识点树失败', e)
   } finally {

@@ -12,7 +12,7 @@ use crate::auth::middleware::AuthUser;
 use crate::auth::permissions::{
     can_access_space, can_edit_question, can_publish_question, can_review_question,
     can_write_in_space, ensure_personal_space, ensure_public_space, get_member_meta, get_space,
-    is_admin, list_reviewers, PermissionError,
+    is_admin_user, list_reviewers, PermissionError,
 };
 use crate::models::question::{
     CreateQuestionRequest, KnowledgeNodeSummary, Question, QuestionDetail,
@@ -65,12 +65,49 @@ pub(crate) async fn update_knowledge_nodes(
     node_ids: &[Uuid],
     primary_node_id: Option<Uuid>,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("DELETE FROM question_knowledge_nodes WHERE question_id = $1")
+    // 1. 查询当前已有关联（node_id, is_primary, source, ai_confidence）
+    let existing: Vec<(Uuid, bool, String, Option<rust_decimal::Decimal>)> = sqlx::query_as(
+        r#"SELECT node_id, is_primary, source::text, ai_confidence
+           FROM question_knowledge_nodes WHERE question_id = $1"#,
+    )
+    .bind(question_id)
+    .fetch_all(&mut **tx)
+    .await?;
+
+    let existing_map: std::collections::HashMap<Uuid, (bool, String, Option<rust_decimal::Decimal>)> =
+        existing
+            .into_iter()
+            .map(|(id, is_p, src, conf)| (id, (is_p, src, conf)))
+            .collect();
+
+    let new_set: std::collections::HashSet<Uuid> = node_ids.iter().copied().collect();
+
+    // 2. 计算差分集合
+    let removed: Vec<Uuid> = existing_map
+        .keys()
+        .filter(|id| !new_set.contains(id))
+        .copied()
+        .collect();
+    let added: Vec<Uuid> = node_ids
+        .iter()
+        .filter(|id| !existing_map.contains_key(id))
+        .copied()
+        .collect();
+
+    // 3. 删除被移除的关联
+    if !removed.is_empty() {
+        sqlx::query(
+            "DELETE FROM question_knowledge_nodes WHERE question_id = $1 AND node_id = ANY($2)",
+        )
         .bind(question_id)
+        .bind(&removed)
         .execute(&mut **tx)
         .await?;
+    }
 
-    for node_id in node_ids {
+    // 4. 插入新增关联（统一标记为 manual；AI 来源只能由 upsert_ai_knowledge_nodes 写入）
+    //    保留 retained 关联的 source 与 ai_confidence，避免覆盖 AI 审计数据
+    for node_id in &added {
         let is_primary = primary_node_id == Some(*node_id);
         sqlx::query(
             r#"
@@ -87,22 +124,28 @@ pub(crate) async fn update_knowledge_nodes(
         .await?;
     }
 
-    // 确保 primary 唯一性：若 primary_node_id 不在 node_ids 中，单独插入
+    // 5. 主知识点切换：先把当前题所有 is_primary=true 清零，再设置目标
+    //    用 ON CONFLICT 统一处理 added/retained 两种情况，仅更新 is_primary，不破坏 source/ai_confidence
+    sqlx::query(
+        "UPDATE question_knowledge_nodes SET is_primary = FALSE WHERE question_id = $1 AND is_primary = TRUE",
+    )
+    .bind(question_id)
+    .execute(&mut **tx)
+    .await?;
+
     if let Some(primary_id) = primary_node_id {
-        if !node_ids.contains(&primary_id) {
-            sqlx::query(
-                r#"
-                INSERT INTO question_knowledge_nodes
-                  (question_id, node_id, is_primary, source, created_at)
-                VALUES ($1, $2, TRUE, 'manual', NOW())
-                ON CONFLICT (question_id, node_id) DO UPDATE SET is_primary = TRUE
-                "#,
-            )
-            .bind(question_id)
-            .bind(primary_id)
-            .execute(&mut **tx)
-            .await?;
-        }
+        sqlx::query(
+            r#"
+            INSERT INTO question_knowledge_nodes
+              (question_id, node_id, is_primary, source, created_at)
+            VALUES ($1, $2, TRUE, 'manual', NOW())
+            ON CONFLICT (question_id, node_id) DO UPDATE SET is_primary = TRUE
+            "#,
+        )
+        .bind(question_id)
+        .bind(primary_id)
+        .execute(&mut **tx)
+        .await?;
     }
 
     Ok(())
@@ -183,8 +226,10 @@ async fn get_question_knowledge_nodes(
         r#"
         SELECT kn.id, kn.tree_id, kn.name,
                kn.path::text AS path, kn.depth,
+               kt.kind::text AS kind,
                qkn.is_primary, qkn.ai_confidence, qkn.source
         FROM knowledge_nodes kn
+        JOIN knowledge_trees kt ON kt.id = kn.tree_id
         JOIN question_knowledge_nodes qkn ON qkn.node_id = kn.id
         WHERE qkn.question_id = $1
         ORDER BY qkn.is_primary DESC, kn.sort_order, kn.name
@@ -384,13 +429,41 @@ pub(crate) async fn build_detail(
     question: Question,
     creator_name: Option<String>,
 ) -> Result<QuestionDetail, sqlx::Error> {
-    let kns = get_question_knowledge_nodes(pool, question.id)
-        .await
-        .unwrap_or_default();
-    let tags = get_question_tags(pool, question.id)
-        .await
-        .unwrap_or_default();
-    let reviewer_ids = list_reviewers(pool, question.id).await.unwrap_or_default();
+    // 关联数据查询失败时记录日志而非静默吞错（fix：旧实现 unwrap_or_default
+    // 会把 SQL 错误吞成空数组，导致 tags/knowledge_nodes 在接口里"神秘消失"）
+    let kns = match get_question_knowledge_nodes(pool, question.id).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                "build_detail: 查询题目 {} 的知识节点失败（返回空数组兜底）: {}",
+                question.id,
+                e
+            );
+            Vec::new()
+        }
+    };
+    let tags = match get_question_tags(pool, question.id).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                "build_detail: 查询题目 {} 的标签失败（返回空数组兜底）: {}",
+                question.id,
+                e
+            );
+            Vec::new()
+        }
+    };
+    let reviewer_ids = match list_reviewers(pool, question.id).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                "build_detail: 查询题目 {} 的审题人失败（返回空数组兜底）: {}",
+                question.id,
+                e
+            );
+            Vec::new()
+        }
+    };
 
     let mut detail = QuestionDetail::from((question.clone(), kns));
     detail.tags = tags;
@@ -519,8 +592,8 @@ pub async fn list_questions(
         .map_err(|e| db_err(format!("统计题目总数失败: {}", e)))?;
 
     let mut builder = sqlx::QueryBuilder::new(
-        "SELECT q.id, q.stem, q.question_type, q.difficulty, q.default_score, q.status, \
-         q.grade_level, q.creator_id, u.display_name AS creator_name, q.created_at, q.updated_at, q.version, q.space_id \
+        "SELECT q.id, q.stem, q.question_type, q.difficulty, q.status, \
+         q.creator_id, u.display_name AS creator_name, q.created_at, q.updated_at, q.version, q.space_id \
          FROM questions q LEFT JOIN users u ON u.id = q.creator_id WHERE 1=1",
     );
     apply_access_filters(&mut builder, &auth, &query);
@@ -597,7 +670,7 @@ fn apply_access_filters<'a>(
     }
 
     // 默认可见：公共已发布 + 个人 + 团队成员 + Admin 全部
-    if is_admin(&auth.role) {
+    if is_admin_user(&auth) {
         return;
     }
 
@@ -622,6 +695,15 @@ fn apply_question_filters<'a>(
     builder: &mut sqlx::QueryBuilder<'a, sqlx::Postgres>,
     query: &'a QuestionQuery,
 ) {
+    // 学段 / 学科过滤：匹配 metadata JSONB 中的 stage / subject 字段
+    if let Some(ref stage) = query.stage {
+        builder.push(" AND q.metadata->>'stage' = ");
+        builder.push_bind(stage);
+    }
+    if let Some(ref subject) = query.subject {
+        builder.push(" AND q.metadata->>'subject' = ");
+        builder.push_bind(subject);
+    }
     if let Some(ref status) = query.status {
         // reviewable_by_me 已强制 pending
         if !query.reviewable_by_me.unwrap_or(false) {
@@ -646,22 +728,6 @@ fn apply_question_filters<'a>(
             builder.push(" AND q.difficulty <= ");
             builder.push_bind(max);
         }
-    }
-    if let Some(ref grade_level) = query.grade_level {
-        builder.push(" AND q.grade_level = ");
-        builder.push_bind(grade_level);
-    }
-    if let Some(ref semester) = query.semester {
-        builder.push(" AND q.semester = ");
-        builder.push_bind(semester);
-    }
-    if let Some(ref cognitive_level) = query.cognitive_level {
-        builder.push(" AND q.cognitive_level = ");
-        builder.push_bind(cognitive_level);
-    }
-    if let Some(ref exam_type) = query.exam_type {
-        builder.push(" AND q.exam_type = ");
-        builder.push_bind(exam_type);
     }
     // 知识点节点多选过滤：支持 LTREE 子树包含（include_descendants=true）
     if let Some(ref node_ids) = query.knowledge_node_ids {
@@ -794,35 +860,24 @@ pub async fn create_question(
 
     sqlx::query(
         r#"
-        INSERT INTO questions (id, stem, question_type, difficulty, default_score, status,
-            options, correct_answer, analysis, grading_criteria, source, exam_type, metadata,
-            grade_level, semester, cognitive_level, difficulty_score, estimated_minutes,
+        INSERT INTO questions (id, stem, question_type, difficulty, status,
+            options, correct_answer, analysis, metadata,
             images, parent_id, sub_order,
             creator_id, created_at, updated_at, version, space_id)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, COALESCE($13, '{}'::jsonb),
-            $14, $15, $16, $17, $18,
-            $19, $20, $21,
-            $22, $23, $24, $25, $26)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, '{}'::jsonb),
+            $10, $11, $12,
+            $13, $14, $15, $16, $17)
         "#,
     )
     .bind(id)
     .bind(&req.stem)
     .bind(&req.question_type)
     .bind(&req.difficulty)
-    .bind(req.default_score.unwrap_or(5))
     .bind(QuestionStatus::Draft)
     .bind(&req.options)
     .bind(&req.correct_answer)
     .bind(&req.analysis)
-    .bind(&req.grading_criteria)
-    .bind(&req.source)
-    .bind(&req.exam_type)
     .bind(&req.metadata)
-    .bind(&req.grade_level)
-    .bind(&req.semester)
-    .bind(&req.cognitive_level)
-    .bind(req.difficulty_score)
-    .bind(req.estimated_minutes)
     .bind(&req.images)
     .bind(&req.parent_id)
     .bind(req.sub_order)
@@ -917,7 +972,7 @@ pub async fn get_question(
     let can_see = can_access_space(&state.pool, &auth, &space)
         .await
         .map_err(|e| db_err(format!("权限检查失败: {}", e)))?
-        && (space.kind != SpaceKind::Public || question.status == QuestionStatus::Published || is_admin(&auth.role));
+        && (space.kind != SpaceKind::Public || question.status == QuestionStatus::Published || is_admin_user(&auth));
 
     if !can_see {
         return Err((StatusCode::FORBIDDEN, Json(json!({"error": "无权查看该题目"}))));
@@ -956,6 +1011,14 @@ pub async fn update_question(
         .map_err(|e| db_err(format!("查询空间失败: {}", e)))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "空间不存在"}))))?;
 
+    // 状态机保护：仅 Draft / Rejected 可编辑（已发布/Pending 需走审核流程）
+    if existing.status != QuestionStatus::Draft && existing.status != QuestionStatus::Rejected {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({"error": "当前状态不允许编辑"})),
+        ));
+    }
+
     if !can_edit_question(
         &state.pool,
         &auth_user,
@@ -966,12 +1029,6 @@ pub async fn update_question(
     .await
     .map_err(|e| db_err(format!("权限检查失败: {}", e)))?
     {
-        if existing.status != QuestionStatus::Draft && existing.status != QuestionStatus::Rejected && existing.status != QuestionStatus::Published {
-            return Err((
-                StatusCode::CONFLICT,
-                Json(json!({"error": "当前状态不允许编辑"})),
-            ));
-        }
         return Err((StatusCode::FORBIDDEN, Json(json!({"error": "无权编辑该题目"}))));
     }
 
@@ -987,45 +1044,27 @@ pub async fn update_question(
             stem = COALESCE($1, stem),
             question_type = COALESCE($2, question_type),
             difficulty = COALESCE($3, difficulty),
-            default_score = COALESCE($4, default_score),
-            options = COALESCE($5, options),
-            correct_answer = COALESCE($6, correct_answer),
-            analysis = COALESCE($7, analysis),
-            grading_criteria = COALESCE($8, grading_criteria),
-            source = COALESCE($9, source),
-            exam_type = COALESCE($10, exam_type),
-            metadata = COALESCE($11, metadata),
-            grade_level = COALESCE($12, grade_level),
-            semester = COALESCE($13, semester),
-            cognitive_level = COALESCE($14, cognitive_level),
-            difficulty_score = COALESCE($15, difficulty_score),
-            estimated_minutes = COALESCE($16, estimated_minutes),
-            images = COALESCE($17, images),
-            parent_id = COALESCE($18, parent_id),
-            sub_order = COALESCE($19, sub_order),
+            options = COALESCE($4, options),
+            correct_answer = COALESCE($5, correct_answer),
+            analysis = COALESCE($6, analysis),
+            metadata = COALESCE($7, metadata),
+            images = COALESCE($8, images),
+            parent_id = COALESCE($9, parent_id),
+            sub_order = COALESCE($10, sub_order),
             status = 'draft'::question_status,
-            updated_by = $20,
-            updated_at = $21,
-            version = $22
-        WHERE id = $23 AND version = $24
+            updated_by = $11,
+            updated_at = $12,
+            version = $13
+        WHERE id = $14 AND version = $15
         "#,
     )
     .bind(&req.stem)
     .bind(&req.question_type)
     .bind(&req.difficulty)
-    .bind(req.default_score.map(|s| s as i32))
     .bind(&req.options)
     .bind(&req.correct_answer)
     .bind(&req.analysis)
-    .bind(&req.grading_criteria)
-    .bind(&req.source)
-    .bind(&req.exam_type)
     .bind(&req.metadata)
-    .bind(&req.grade_level)
-    .bind(&req.semester)
-    .bind(&req.cognitive_level)
-    .bind(req.difficulty_score)
-    .bind(req.estimated_minutes)
     .bind(&req.images)
     .bind(&req.parent_id)
     .bind(req.sub_order)
@@ -1146,9 +1185,9 @@ pub async fn delete_question(
     // 个人空间：创建者或管理员可删除
     // 团队/公共空间：仅超级管理员或空间 Owner 可删除
     let can_delete = match space.kind {
-        SpaceKind::Personal => existing.creator_id == auth_user.id || is_admin(&auth_user.role),
+        SpaceKind::Personal => existing.creator_id == auth_user.id || is_admin_user(&auth_user),
         SpaceKind::Team | SpaceKind::Public => {
-            is_admin(&auth_user.role) || space.owner_user_id == Some(auth_user.id)
+            is_admin_user(&auth_user) || space.owner_user_id == Some(auth_user.id)
         }
     };
 
@@ -1205,7 +1244,7 @@ pub async fn submit_for_review(
         .map_err(|e| db_err(format!("查询空间失败: {}", e)))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "空间不存在"}))))?;
 
-    let can_submit = if existing.creator_id == auth_user.id || is_admin(&auth_user.role) {
+    let can_submit = if existing.creator_id == auth_user.id || is_admin_user(&auth_user) {
         true
     } else {
         match get_member_meta(&state.pool, space.id, auth_user.id)
@@ -1850,18 +1889,16 @@ async fn copy_question(
     sqlx::query(
         r#"
         INSERT INTO questions (
-            id, stem, stem_text, images, question_type, difficulty, default_score, status,
-            options, correct_answer, analysis, grading_criteria, source, exam_type, metadata,
-            grade_level, semester, cognitive_level, difficulty_score, estimated_minutes,
+            id, stem, stem_text, images, question_type, difficulty, status,
+            options, correct_answer, analysis, metadata,
             parent_id, sub_order,
             creator_id, created_at, updated_at, version, space_id, origin_question_id
         )
         VALUES (
-            $1, $2, $3, $4, $5, $6, $7, 'published'::question_status,
-            $8, $9, $10, $11, $12, $13, COALESCE($14, '{}'::jsonb),
-            $15, $16, $17, $18, $19,
-            $20, $21,
-            $22, $23, $24, 1, $25, $26
+            $1, $2, $3, $4, $5, $6, 'published'::question_status,
+            $7, $8, $9, COALESCE($10, '{}'::jsonb),
+            $11, $12,
+            $13, $14, $15, 1, $16, $17
         )
         "#,
     )
@@ -1871,19 +1908,10 @@ async fn copy_question(
     .bind(&src.images)
     .bind(&src.question_type)
     .bind(&src.difficulty)
-    .bind(src.default_score)
     .bind(&src.options)
     .bind(&src.correct_answer)
     .bind(&src.analysis)
-    .bind(&src.grading_criteria)
-    .bind(&src.source)
-    .bind(&src.exam_type)
     .bind(&src.metadata)
-    .bind(&src.grade_level)
-    .bind(&src.semester)
-    .bind(&src.cognitive_level)
-    .bind(src.difficulty_score)
-    .bind(src.estimated_minutes)
     .bind(&src.parent_id)
     .bind(src.sub_order)
     .bind(creator_id)

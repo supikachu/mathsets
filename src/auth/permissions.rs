@@ -126,7 +126,7 @@ pub async fn can_access_space(
     auth: &AuthUser,
     space: &Space,
 ) -> Result<bool, sqlx::Error> {
-    if is_admin(&auth.role) {
+    if is_admin_user(&auth) {
         return Ok(true);
     }
     match space.kind {
@@ -195,7 +195,7 @@ pub async fn can_write_in_space(
     auth: &AuthUser,
     space: &Space,
 ) -> Result<bool, sqlx::Error> {
-    if is_admin(&auth.role) {
+    if is_admin_user(&auth) {
         return Ok(true);
     }
     match space.kind {
@@ -224,10 +224,10 @@ pub async fn can_edit_question(
     creator_id: Option<Uuid>,
     status: &QuestionStatus,
 ) -> Result<bool, sqlx::Error> {
-    if *status != QuestionStatus::Draft && *status != QuestionStatus::Rejected && *status != QuestionStatus::Published {
+    if *status != QuestionStatus::Draft && *status != QuestionStatus::Rejected {
         return Ok(false);
     }
-    if is_admin(&auth.role) {
+    if is_admin_user(&auth) {
         return Ok(true);
     }
     if !can_write_in_space(pool, auth, space).await? {
@@ -265,7 +265,7 @@ pub async fn can_review_question(
     if *status != QuestionStatus::Pending {
         return Ok(false);
     }
-    if is_admin(&auth.role) {
+    if is_admin_user(&auth) {
         return Ok(true);
     }
 

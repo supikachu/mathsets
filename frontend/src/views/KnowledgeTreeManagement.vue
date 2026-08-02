@@ -20,6 +20,7 @@ import {
 } from '@/api/client'
 import { AppIcon, AppButton, AppModal, AppConfirm, AppEmpty } from '@/components/ui'
 import { useToast } from '@/composables/useToast'
+import { unwrapTreeResponse } from '@/composables/useKnowledgeTreeCache'
 
 const toast = useToast()
 
@@ -100,7 +101,7 @@ async function loadTreeData() {
   loading.value = true
   try {
     const res = await knowledgeNodeApi.getTree(activeTreeId.value)
-    treeData.value = res.data
+    treeData.value = unwrapTreeResponse(res.data)
     // 默认展开根节点
     expandedIds.value = new Set(
       treeData.value.filter((n) => n.children.length > 0).map((n) => n.id),

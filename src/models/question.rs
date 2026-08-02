@@ -180,28 +180,14 @@ pub struct Question {
     pub options: Option<serde_json::Value>,
     pub correct_answer: serde_json::Value,
     pub analysis: Option<String>,
-    pub grading_criteria: Option<serde_json::Value>,
 
     // ── 难度与评估 ────────────────────────────────
     /// 难度 1-5（5 星制）
     pub difficulty: Difficulty,
-    pub difficulty_score: Option<i16>,
-    pub default_score: i32,
-    pub estimated_minutes: Option<i16>,
-    pub cognitive_level: Option<CognitiveLevel>,
 
-    // ── 教研分类 ──────────────────────────────────
-    pub grade_level: Option<GradeLevel>,
-    /// 学期（B1 已将 semester_new RENAME 为 semester）
-    pub semester: Option<SemesterType>,
-
-    // ── 来源元数据 ────────────────────────────────
-    /// 出处备注（自由文本：书名、网址、"原创"等）
-    pub source: Option<String>,
-    /// 考试类型（B2 改为 enum）
-    pub exam_type: Option<ExamType>,
-    /// 长尾元数据 JSONB（B2 新增）：academic_year, exam_region, paper_name,
-    /// paper_page, textbook_version 等长尾字段统一存此 JSON
+    // ── 元数据 ──────────────────────────────────
+    /// 长尾元数据 JSONB（academic_year, exam_region, paper_name,
+    /// paper_page, textbook_version 等长尾字段统一存此 JSON）
     pub metadata: serde_json::Value,
 
     // ── 复合题结构 ────────────────────────────────
@@ -231,22 +217,11 @@ pub struct CreateQuestionRequest {
     pub stem: String,
     pub question_type: QuestionType,
     pub difficulty: Difficulty,
-    pub default_score: Option<i32>,
     pub options: Option<serde_json::Value>,
     pub correct_answer: serde_json::Value,
     pub analysis: Option<String>,
-    pub grading_criteria: Option<serde_json::Value>,
-    // 来源元数据
-    pub source: Option<String>,
-    pub exam_type: Option<ExamType>,
     /// 长尾元数据（academic_year, exam_region, paper_name 等）
     pub metadata: Option<serde_json::Value>,
-    // 教研维度
-    pub grade_level: Option<GradeLevel>,
-    pub semester: Option<SemesterType>,
-    pub cognitive_level: Option<CognitiveLevel>,
-    pub difficulty_score: Option<i16>,
-    pub estimated_minutes: Option<i16>,
     // 配图
     pub images: Option<serde_json::Value>,
     // 复合题
@@ -275,21 +250,10 @@ pub struct UpdateQuestionRequest {
     pub stem: Option<String>,
     pub question_type: Option<QuestionType>,
     pub difficulty: Option<Difficulty>,
-    pub default_score: Option<i32>,
     pub options: Option<serde_json::Value>,
     pub correct_answer: Option<serde_json::Value>,
     pub analysis: Option<String>,
-    pub grading_criteria: Option<serde_json::Value>,
-    // 来源元数据
-    pub source: Option<String>,
-    pub exam_type: Option<ExamType>,
     pub metadata: Option<serde_json::Value>,
-    // 教研维度
-    pub grade_level: Option<GradeLevel>,
-    pub semester: Option<SemesterType>,
-    pub cognitive_level: Option<CognitiveLevel>,
-    pub difficulty_score: Option<i16>,
-    pub estimated_minutes: Option<i16>,
     // 配图
     pub images: Option<serde_json::Value>,
     // 复合题
@@ -325,10 +289,6 @@ pub struct QuestionQuery {
     /// 按难度范围过滤（与 difficulty 互斥，min/max 同时存在时生效）
     pub difficulty_min: Option<i16>,
     pub difficulty_max: Option<i16>,
-    pub grade_level: Option<GradeLevel>,
-    pub semester: Option<SemesterType>,
-    pub cognitive_level: Option<CognitiveLevel>,
-    pub exam_type: Option<ExamType>,
     /// 多知识点过滤（默认 OR 关系：命中任一即返回）
     pub knowledge_node_ids: Option<Vec<Uuid>>,
     /// 是否包含所选知识点的所有子孙节点（LTREE 子树查询，B3 实现）
@@ -341,20 +301,22 @@ pub struct QuestionQuery {
     pub page: Option<u32>,
     pub page_size: Option<u32>,
     pub space_id: Option<Uuid>,
+    /// 学段过滤（junior / senior）— 对应 metadata->>'stage'
+    pub stage: Option<String>,
+    /// 学科过滤（math / physics）— 对应 metadata->>'subject'
+    pub subject: Option<String>,
     /// 仅返回当前用户可审核的待审题
     pub reviewable_by_me: Option<bool>,
 }
 
-/// 题目列表响应项（B2 重构：移除已 DROP 的 grade 字段）
+/// 题目列表响应项
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct QuestionSummary {
     pub id: Uuid,
     pub stem: String,
     pub question_type: QuestionType,
     pub difficulty: Difficulty,
-    pub default_score: i32,
     pub status: QuestionStatus,
-    pub grade_level: Option<GradeLevel>,
     pub creator_id: Uuid,
     pub creator_name: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -370,9 +332,7 @@ impl From<Question> for QuestionSummary {
             stem: q.stem,
             question_type: q.question_type,
             difficulty: q.difficulty,
-            default_score: q.default_score,
             status: q.status,
-            grade_level: q.grade_level,
             creator_id: q.creator_id,
             creator_name: None,
             created_at: q.created_at,
@@ -383,7 +343,7 @@ impl From<Question> for QuestionSummary {
     }
 }
 
-/// 题目详情响应（B2 重构：knowledge_points → knowledge_nodes，新增 metadata）
+/// 题目详情响应
 #[derive(Debug, Serialize)]
 pub struct QuestionDetail {
     pub id: Uuid,
@@ -398,22 +358,11 @@ pub struct QuestionDetail {
     pub options: Option<serde_json::Value>,
     pub correct_answer: serde_json::Value,
     pub analysis: Option<String>,
-    pub grading_criteria: Option<serde_json::Value>,
 
     // ── 难度与评估 ──
     pub difficulty: Difficulty,
-    pub difficulty_score: Option<i16>,
-    pub default_score: i32,
-    pub estimated_minutes: Option<i16>,
-    pub cognitive_level: Option<CognitiveLevel>,
 
-    // ── 教研分类 ──
-    pub grade_level: Option<GradeLevel>,
-    pub semester: Option<SemesterType>,
-
-    // ── 来源元数据 ──
-    pub source: Option<String>,
-    pub exam_type: Option<ExamType>,
+    // ── 元数据 ──
     pub metadata: serde_json::Value,
 
     // ── 复合题结构 ──
@@ -457,16 +406,7 @@ impl From<(Question, Vec<KnowledgeNodeSummary>)> for QuestionDetail {
             options: q.options,
             correct_answer: q.correct_answer,
             analysis: q.analysis,
-            grading_criteria: q.grading_criteria,
             difficulty: q.difficulty,
-            difficulty_score: q.difficulty_score,
-            default_score: q.default_score,
-            estimated_minutes: q.estimated_minutes,
-            cognitive_level: q.cognitive_level,
-            grade_level: q.grade_level,
-            semester: q.semester,
-            source: q.source,
-            exam_type: q.exam_type,
             metadata: q.metadata,
             parent_id: q.parent_id,
             sub_order: q.sub_order,
@@ -655,6 +595,9 @@ pub struct KnowledgeNodeSummary {
     /// 物化路径（handler 层 SELECT 时用 `path::text`）
     pub path: String,
     pub depth: i16,
+    /// 所属知识树类型（chapter / knowledge / ability）— 前端按维度着色
+    #[serde(default)]
+    pub kind: String,
     /// 是否主知识点（每题最多 1 个 is_primary=true）
     pub is_primary: bool,
     /// AI 匹配置信度（0.0000-1.0000）

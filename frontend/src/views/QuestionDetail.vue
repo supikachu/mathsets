@@ -171,7 +171,7 @@
           <div class="side-card">
             <div class="side-card-title"><AppIcon name="tag" :size="15" /> 知识点</div>
             <div v-if="q?.knowledge_nodes?.length" class="kp-tags">
-              <span v-for="kn in q!.knowledge_nodes" :key="kn.id" class="kp-tag">{{ kn.name }}</span>
+              <span v-for="kn in q!.knowledge_nodes" :key="kn.id" class="kp-tag" :class="kpTagClass(kn.kind)">{{ kn.name }}</span>
             </div>
             <div v-else class="side-empty">未关联知识点</div>
           </div>
@@ -290,6 +290,13 @@ const loading = ref(false)
 const submitting = ref(false)
 const rejectDialog = ref(false)
 const rejectComment = ref('')
+
+/** 知识点标签按维度着色：chapter→灰、knowledge→蓝、ability→紫（与列表页/编辑页统一） */
+function kpTagClass(kind: string): string {
+  if (kind === 'chapter') return 'kp-kind-chapter'
+  if (kind === 'ability') return 'kp-kind-method'
+  return 'kp-kind-knowledge'
+}
 const deleteDialog = ref(false)
 
 // ── 删除权限：按空间类型分流 ──
@@ -1393,9 +1400,28 @@ onMounted(async () => {
   transition: all 0.2s ease;
 }
 
+/* ── 按维度着色（与列表页 QuestionList / 编辑页 AttributeSidePanel 统一） ── */
+
+/* 章节 (chapter)：灰色调 */
+.kp-tag.kp-kind-chapter {
+  background: var(--bg-active, #f0f0f5);
+  color: var(--text-secondary, #6b7280);
+}
+
+/* 知识点 (knowledge)：亮蓝色调（保持默认色） */
+.kp-tag.kp-kind-knowledge {
+  background: var(--accent-light, rgba(37, 99, 235, 0.08));
+  color: var(--accent, #2563eb);
+}
+
+/* 解题方法 (ability)：紫色调 */
+.kp-tag.kp-kind-method {
+  background: var(--purple-light, #f3e8ff);
+  color: var(--purple, #8b5cf6);
+}
+
 .kp-tag:hover {
-  background: var(--accent);
-  color: #fff;
+  filter: brightness(0.92);
 }
 
 .side-empty {

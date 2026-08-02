@@ -3,7 +3,7 @@
     <!-- ===== 主体：左侧知识树导航 + 右侧列表区 ===== -->
     <div class="ql-body">
       <!-- 左侧常驻知识树导航（替代旧的 KpTreePanel） -->
-      <KnowledgeTreeNav :selected-id="navNodeId" @select="handleKnowledgeNodeSelect" />
+      <KnowledgeTreeNav :selected-id="navNodeId" @select="handleKnowledgeNodeSelect" @context-change="handleContextChange" />
 
       <!-- 右侧：工具栏 + 列表区 -->
       <div class="ql-main">
@@ -265,6 +265,25 @@
 
     </div>
 
+    <!-- ===== 状态切换 Segmented Tab ===== -->
+    <div class="ql-status-bar">
+      <div class="ql-seg-ctrl">
+        <button
+          v-for="tab in statusTabs"
+          :key="tab.value"
+          class="ql-seg-item"
+          :class="{ active: currentStatus === tab.value }"
+          @click="switchStatus(tab.value)"
+        >
+          {{ tab.label }}
+          <span
+            v-if="tab.value === 'pending' && pendingReviewCount > 0"
+            class="ql-seg-badge"
+          >{{ pendingReviewCount > 99 ? '99+' : pendingReviewCount }}</span>
+        </button>
+      </div>
+    </div>
+
     <!-- ===== 可滚动列表区域 ===== -->
     <div class="ql-scroll-area">
       <div v-if="loading" class="loading-hint">加载中…</div>
@@ -298,36 +317,31 @@
             class="q-card"
             :class="{ 'is-expanded': expandedIds.has(card.id) }"
           >
-            <!-- Header Row 1: 题目来源（年级·学期·考试类型·地区·年份） -->
-            <div v-if="formatQuestionSource(card)" class="q-card-source-row">
-              <AppIcon name="bookmark" :size="12" :stroke="2" />
-              <span>{{ formatQuestionSource(card) }}</span>
-            </div>
+            <!-- 来源角标：绝对定位，贴左上角边缘 -->
+            <span v-if="sourceMeta(card)" class="q-source-badge" :title="sourceMeta(card)">
+              {{ sourceMeta(card) }}
+            </span>
 
-            <!-- Header Row 2: 属性标签 + 知识点 + 时间 -->
+            <!-- 学校角标：绝对定位，贴右上角边缘（与来源角标镜像） -->
+            <span v-if="schoolName(card)" class="q-school-tag" :title="schoolName(card)">
+              <AppIcon name="bookmark" :size="11" :stroke="2" />
+              <span class="q-school-name">{{ schoolName(card) }}</span>
+            </span>
+
+            <!-- Row 1: 属性标签 -->
             <div class="q-card-header">
               <div class="q-card-tags">
-                <AppBadge :color="typeBadgeColor(card.question_type)">
+                <AppBadge :color="typeBadgeColor(card.question_type)" class="flex-shrink-0">
                   {{ typeLabel(card.question_type) }}
                 </AppBadge>
-                <AppBadge :color="diffBadgeColor(card.difficulty)">
+                <AppBadge :color="diffBadgeColor(card.difficulty)" class="flex-shrink-0">
                   {{ diffLabel(card.difficulty) }}
                 </AppBadge>
-                <AppBadge :color="statusBadgeColor(card.status)" class="flex items-center gap-1">
+                <AppBadge :color="statusBadgeColor(card.status)" class="flex items-center gap-1 flex-shrink-0">
                   <AppIcon :name="statusIcon(card.status)" :size="11" :stroke="2" />
                   {{ statusLabel(card.status) }}
                 </AppBadge>
-                <span class="q-tags-divider">|</span>
-                <span class="q-kp-inline">
-                  <span
-                    v-for="kn in card.knowledgeNodes"
-                    :key="kn.id"
-                    class="q-kp-text"
-                  >{{ kn.name }}</span>
-                  <span v-if="card.knowledgeNodes.length === 0" class="q-kp-text-empty">未关联知识点</span>
-                </span>
               </div>
-              <span class="q-card-time">{{ formatTime(card.updated_at) }}</span>
             </div>
 
             <!-- Row 2: Body — 题干 + 选项 -->
@@ -388,8 +402,37 @@
               </div>
             </Transition>
 
-            <!-- Row 3: Footer — 操作按钮 -->
+            <!-- Row 3: Footer — 知识点（流式自适应 + hover-expand 多行展开） + 操作按钮 -->
             <div class="q-card-footer">
+              <div
+                class="q-footer-kp"
+                :class="{ 'has-more': kpExpandIds.has(card.id) }"
+                @mouseenter="updateKpExpandState(card.id, $event)"
+              >
+                <!-- 流式标签行：全部知识点横向排列，溢出折行后被单行高度隐藏 -->
+                <span class="q-kp-flow">
+                  <span
+                    v-for="kn in card.knowledgeNodes"
+                    :key="kn.id"
+                    class="q-kp-tag"
+                    :class="kpTagClass(kn.kind)"
+                    :title="kn.name"
+                  >{{ kn.name }}</span>
+                  <span v-if="card.knowledgeNodes.length === 0" class="q-kp-text-empty">未关联知识点</span>
+                </span>
+
+                <!-- 悬停展开面板：绝对定位，向上弹出，多行完整渲染所有知识点 -->
+                <!-- 显示由 .has-more:hover CSS 控制（真实溢出检测驱动 has-more） -->
+                <div class="q-kp-expand-panel">
+                  <span
+                    v-for="kn in card.knowledgeNodes"
+                    :key="kn.id"
+                    class="q-kp-tag"
+                    :class="kpTagClass(kn.kind)"
+                    :title="kn.name"
+                  >{{ kn.name }}</span>
+                </div>
+              </div>
               <div class="q-actions">
                 <button class="q-action-btn q-action--ghost" @click="toggleAnalysis(card.id)">
                   <AppIcon
@@ -427,6 +470,8 @@
       </div>
     </div>
   </div>
+
+
 </template>
 
 <script setup lang="ts">
@@ -445,10 +490,8 @@ import {
   typeBadgeColor,
   diffLabel,
   diffBadgeColor,
-  statusLabel,
   statusIcon,
   statusBadgeColor,
-  formatTime,
 } from '@/utils/questionDisplay'
 
 const router = useRouter()
@@ -459,11 +502,65 @@ const basket = useQuestionBasket()
 // 左侧知识树导航选中的节点 ID（空字符串 = 全部题目）
 const navNodeId = ref('')
 
+// ===== 状态切换 Segmented Tab =====
+const statusTabs = [
+  { label: '全部', value: 'ALL' },
+  { label: '已发布', value: 'published' },
+  { label: '草稿', value: 'draft' },
+  { label: '待审核', value: 'pending' },
+] as const
+
+const currentStatus = ref<string>('ALL')
+const pendingReviewCount = ref(0)
+
+function switchStatus(value: string) {
+  currentStatus.value = value
+  // 同步到 query.status（ALL → undefined 表示不过滤）
+  query.status = value === 'ALL' ? undefined : (value as any)
+  // 同步到矩阵筛选面板的 UI 状态
+  filters.status = value === 'ALL' ? '__all' : value
+  page.value = 1
+  fetchList()
+}
+
+// 获取待审核数量（独立轻量请求，不干扰列表加载）
+async function fetchPendingCount() {
+  try {
+    const res = await questionApi.list({
+      ...query,
+      status: 'pending' as any,
+      page: 1,
+      page_size: 1,
+    })
+    // 后端如返回 total 字段直接取，否则用 length >= 1 标识有待审核
+    const total = (res as any).total ?? (res as any).pagination?.total
+    if (typeof total === 'number') {
+      pendingReviewCount.value = total
+    } else {
+      // 回退策略：有数据就标1，无数据标0
+      pendingReviewCount.value = res.data?.length > 0 ? res.data.length : 0
+    }
+  } catch {
+    pendingReviewCount.value = 0
+  }
+}
+
 // 左侧树节点点击 → 同步到 query 并触发表格刷新（默认包含子孙节点）
 function handleKnowledgeNodeSelect(nodeId: string) {
   navNodeId.value = nodeId
   query.knowledge_node_ids = nodeId ? [nodeId] : undefined
   query.include_descendants = nodeId ? true : undefined
+  page.value = 1
+  fetchList()
+}
+
+// 左侧学段/学科切换 → 同步到 query 并重置页码刷新列表
+function handleContextChange(payload: { stage: string; subject: string }) {
+  query.stage = payload.stage
+  query.subject = payload.subject
+  navNodeId.value = '' // 切换学段/学科后清空节点选中
+  query.knowledge_node_ids = undefined
+  query.include_descendants = undefined
   page.value = 1
   fetchList()
 }
@@ -511,6 +608,7 @@ function clearAllFilters() {
   filters.region = '全部'
   filters.city = '全部'
   openDropdown.value = null
+  currentStatus.value = 'ALL'
   page.value = 1
   fetchList()
 }
@@ -561,6 +659,7 @@ interface QuestionCard {
   region: string | null
   year: string | null
   metadata: Record<string, unknown>
+  tags: { id: string; name: string; category: string }[]
   updated_at: string
   version: number
   parsedOptions: { label: string; content: string }[]
@@ -574,7 +673,28 @@ const loading = ref(false)
 const page = ref(1)
 const pageSize = 20
 const hasMore = ref(false)
+
 const expandedIds = ref<Set<string>>(new Set())
+
+// —— 知识点 Hover 面板：真实溢出检测（替代 length>2 启发式）——
+// mouseenter 时用 scrollHeight > clientHeight 判断标签是否真正被隐藏，
+// 未溢出则静默无视（不弹面板），溢出才标记 has-more 允许面板显示。
+const kpExpandIds = ref<Set<string>>(new Set())
+function updateKpExpandState(cardId: string, e: MouseEvent) {
+  const flow = (e.currentTarget as HTMLElement).querySelector('.q-kp-flow') as HTMLElement | null
+  const overflowed = !!flow && flow.scrollHeight > flow.clientHeight
+  const next = new Set(kpExpandIds.value)
+  if (overflowed) next.add(cardId)
+  else next.delete(cardId)
+  kpExpandIds.value = next
+}
+
+/** 知识点标签按维度着色：chapter→灰、knowledge→蓝、ability→紫 */
+function kpTagClass(kind: string): string {
+  if (kind === 'chapter') return 'kp-kind-chapter'
+  if (kind === 'ability') return 'kp-kind-method'
+  return 'kp-kind-knowledge'
+}
 
 const query = reactive<QuestionQuery>({
   keyword: '',
@@ -584,6 +704,9 @@ const query = reactive<QuestionQuery>({
   knowledge_node_ids: [],
   include_descendants: true,
   space_id: space.currentSpaceId || undefined,
+  // 从 localStorage 恢复学段/学科（与 KnowledgeTreeNav 初始值保持同步）
+  stage: (localStorage.getItem('nav_selected_stage') as string) || 'junior',
+  subject: (localStorage.getItem('nav_selected_subject') as string) || 'math',
   page: 1,
   page_size: pageSize,
 })
@@ -595,75 +718,37 @@ function difficultyNumToString(n: number): string {
   return 'hard'
 }
 
-// GradeLevel 枚举 → 中文标签
-function gradeLevelLabel(g: GradeLevel | null | undefined): string {
-  if (!g) return ''
-  const map: Record<GradeLevel, string> = {
-    grade_7: '初一',
-    grade_8: '初二',
-    grade_9: '初三',
-    grade_10: '高一',
-    grade_11: '高二',
-    grade_12: '高三',
-    other: '其他',
-  }
-  return map[g] || g
+/// 元数据行左侧：年份 · 年级 · 省份市区 · 考试类型（剔除学校和学段，· 分隔，过滤空值）
+function sourceMeta(card: QuestionCard): string {
+  const m = card.metadata ?? {}
+  const str = (v: unknown) => String(v ?? '').trim()
+
+  // 1. 年份
+  const year = str(m.year)
+
+  // 2. 年级（移除学段，仅保留具体年级如"高一"）
+  const grade = str(m.grade)
+
+  // 3. 省份市区
+  const province = str(m.region_province)
+  const city = str(m.region_city)
+  const region = [province, city].filter(Boolean).join('')
+
+  // 4. 考试类型（高考模拟时优先显示细分模考类型：一模/二模/三模）
+  const sourceType = str(m.source_type) || str(m.exam_type)
+  const subSourceType = str(m.sub_source_type)
+  const exam = (sourceType === '高考模拟' && subSourceType) ? subSourceType : sourceType
+
+  return [year, grade, region, exam].filter(Boolean).join(' · ')
 }
 
-function semesterLabel(s: SemesterType | null | undefined): string {
-  if (!s) return ''
-  const map: Record<SemesterType, string> = {
-    first: '上学期',
-    second: '下学期',
-    full_year: '全年',
-  }
-  return map[s] || s
-}
-
-function examTypeLabel(t: ExamType | null | undefined): string {
-  if (!t) return ''
-  const map: Record<ExamType, string> = {
-    midterm: '期中',
-    final: '期末',
-    gaokao: '高考',
-    mock: '模拟',
-    entrance: '中考',
-    daily: '日常',
-    other: '其他',
-  }
-  return map[t] || t
-}
-
-/// 格式化题目来源：将年级、学期、考试类型、来源、地区等非空字段用 · 拼接
-function formatQuestionSource(q: any): string {
-  const parts: string[] = []
-
-  // 1. 年级
-  if (q.grade_level) {
-    parts.push(gradeLevelLabel(q.grade_level) || q.grade_level)
-  }
-  // 2. 学期
-  if (q.semester) {
-    parts.push(semesterLabel(q.semester) || q.semester)
-  }
-  // 3. 考试类型
-  if (q.exam_type) {
-    parts.push(examTypeLabel(q.exam_type) || q.exam_type)
-  }
-  // 4. 来源学校
-  if (q.school_source && q.school_source.trim() !== '') {
-    parts.push(q.school_source.trim())
-  }
-  // 5. 地区
-  if (q.region && q.region.trim() !== '') {
-    parts.push(q.region.trim())
-  }
-  // 6. 年份
-  if (q.year && q.year.trim() !== '') {
-    parts.push(q.year.trim())
-  }
-
-  return parts.filter(Boolean).join(' · ')
+/// 学校标签：从 school 类别标签提取（多个用 / 连接，无则空串）
+function schoolName(card: QuestionCard): string {
+  const schools = (card.tags ?? [])
+    .filter(t => t.category === 'school')
+    .map(t => String(t.name ?? '').trim())
+    .filter(Boolean)
+  return schools.join(' / ')
 }
 
 // ============================================================================
@@ -796,8 +881,9 @@ function applyFilters() {
   query.question_type = filters.type === '__all' ? undefined : (filters.type as any)
   // 难度
   query.difficulty = filters.difficulty === '__all' ? undefined : (filters.difficulty as any)
-  // 状态
+  // 状态：同步到 segmented tab
   query.status = filters.status === '__all' ? undefined : (filters.status as any)
+  currentStatus.value = filters.status === '__all' ? 'ALL' : filters.status
   // TODO: source / subSource / year / grade / semester / region 待后端支持后映射
   page.value = 1
   fetchList()
@@ -1003,6 +1089,9 @@ async function fetchList() {
 
     cardList.value = summaries.map((s, i) => {
       const detail: QuestionDetail | null = details[i]?.data ?? null
+      const meta = (detail?.metadata ?? {}) as Record<string, unknown>
+      const province = String(meta.region_province ?? '').trim()
+      const city = String(meta.region_city ?? '').trim()
       return {
         id: s.id,
         stem: s.stem,
@@ -1010,13 +1099,15 @@ async function fetchList() {
         difficulty: difficultyNumToString(s.difficulty),
         status: s.status,
         grade_level: s.grade_level,
-        semester: detail?.semester ?? null,
+        semester: null,
         source: detail?.source ?? null,
         school_source: detail?.source ?? null,
-        exam_type: detail?.exam_type ?? null,
-        region: (detail?.metadata?.exam_region as string) ?? null,
-        year: detail?.metadata?.academic_year ? String(detail.metadata.academic_year) : null,
-        metadata: detail?.metadata ?? {},
+        exam_type: null,
+        // B2 后 metadata 长尾字段：year / region_province+region_city（旧 academic_year/exam_region 已废弃）
+        region: [province, city].filter(Boolean).join('') || null,
+        year: meta.year ? String(meta.year) : null,
+        metadata: meta,
+        tags: detail?.tags ?? [],
         updated_at: s.updated_at,
         version: s.version,
         parsedOptions: parseOptions(detail?.options),
@@ -1065,7 +1156,10 @@ watch(() => space.currentSpaceId, (newId) => {
   fetchList()
 })
 
-onMounted(fetchList)
+onMounted(() => {
+  fetchList()
+  fetchPendingCount()
+})
 onBeforeUnmount(() => {
   if (searchTimer) clearTimeout(searchTimer)
   if (layoutDebounce) clearTimeout(layoutDebounce)
@@ -1074,6 +1168,81 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+/* ===== 状态切换 Segmented Tab（Notion/Vercel 胶囊分段控制器） ===== */
+.ql-status-bar {
+  flex-shrink: 0;
+  padding: 10px 20px 6px;
+  background: var(--bg-primary);
+}
+
+.ql-seg-ctrl {
+  display: inline-flex;
+  align-items: center;
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  padding: 3px;
+  gap: 2px;
+}
+
+.ql-seg-item {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 16px;
+  border: none;
+  background: transparent;
+  border-radius: 7px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  white-space: nowrap;
+  user-select: none;
+}
+
+.ql-seg-item:hover:not(.active) {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.ql-seg-item.active {
+  background: #fff;
+  color: var(--text-primary);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+[data-theme='dark'] .ql-seg-item.active {
+  background: var(--bg-active);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+}
+
+/* 待审核数字徽标 */
+.ql-seg-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9999px;
+  background: #ef4444;
+  color: #fff;
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  animation: ql-badge-pop 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@keyframes ql-badge-pop {
+  0% { transform: scale(0); opacity: 0; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
 /* ===== Apple风格吸顶工具栏 ===== */
 .ql-page {
   position: absolute; /* 绝对定位撑满父级 .view.active，避免 100vh 与上方导航栏叠加溢出 */
@@ -1712,11 +1881,11 @@ onBeforeUnmount(() => {
 
 /* ===== Question Card ===== */
 .q-card {
+  position: relative; /* 来源角标 & hover-expand 面板绝对定位基础 */
   background: var(--bg-card);
   border-radius: 16px; /* rounded-2xl */
   border: 1px solid transparent;
   box-shadow: var(--shadow-sm);
-  overflow: hidden;
   transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
 }
 
@@ -1743,26 +1912,36 @@ onBeforeUnmount(() => {
   box-shadow: none;
 }
 
-/* ---- Header Row 1: 来源 ---- */
-.q-card-source-row {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  padding: 10px 20px 0;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--accent);
+/* ---- 来源角标：贴左上角边缘，绝对定位（与学校角标镜像统一） ---- */
+.q-source-badge {
+  position: absolute;
+  top: 0;
+  left: 0;
+  max-width: 70%;
+  padding: 4px 16px 4px 12px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-muted);
+  background: rgba(100, 116, 139, 0.08); /* 极浅灰蓝底，融入卡片 */
+  border-radius: 16px 0 6px 0; /* 左上外角贴合卡片 16px 圆角，右下小圆角 */
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  pointer-events: none; /* 不阻挡卡片点击 */
+  z-index: 2;
 }
 
-/* ---- Header Row 2: 标签 + 知识点 ---- */
+[data-theme='dark'] .q-source-badge,
+[data-theme='dark'] .q-school-tag {
+  background: rgba(148, 163, 184, 0.12); /* dark 下浅灰蓝微亮化，保持无边框 */
+}
+
+/* ---- Header Row 1: 属性标签 ---- */
 .q-card-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 20px;
+  padding: 26px 20px 10px; /* 顶部加大：避开左上角来源角标 */
   border-bottom: 1px solid var(--divider);
   gap: 12px;
 }
@@ -1771,85 +1950,159 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 6px;
-  flex-wrap: wrap;
+  flex-wrap: wrap; /* 窄屏允许徽标换行，不硬裁（知识点已移出，最多两行） */
+  min-width: 0;
+  overflow: hidden;
 }
 
-.q-tags-divider {
-  color: var(--text-muted);
-  font-size: 12px;
-  margin: 0 2px;
-}
-
-.q-kp-inline {
+/* ---- 学校角标：贴右上角边缘，绝对定位（与来源角标镜像统一） ---- */
+.q-school-tag {
+  position: absolute;
+  top: 0;
+  right: 0;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
+  gap: 4px;
+  max-width: 60%;
+  padding: 4px 12px 4px 16px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-muted);
+  background: rgba(100, 116, 139, 0.08); /* 极浅灰蓝底，与来源角标一致 */
+  border-radius: 0 16px 0 6px; /* 右上外角贴合卡片 16px 圆角，左下小圆角（镜像） */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+  z-index: 2;
 }
 
-.q-kp-text {
-  font-size: 12px;
-  color: var(--text-muted);
+.q-school-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+/* 知识点标签（底部瘦身版）：极浅底色 + 无边框 + 小字号（内外一致） */
+.q-kp-tag {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 1; /* 允许收缩，避免长标签把 +N 挤出容器 */
+  min-width: 0;
+  max-width: 160px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 16px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  background: rgba(0, 113, 227, 0.06); /* 极浅蓝底，无边框 */
+  color: var(--accent);
+}
+
+/* ── 按维度着色（与编辑页 AttributeSidePanel .is-chapter/.is-knowledge/.is-method 统一） ── */
+
+/* 章节 (chapter)：灰色调 */
+.q-kp-tag.kp-kind-chapter {
+  background: var(--bg-active, #f0f0f5);
+  color: var(--text-secondary, #6b7280);
+}
+
+/* 知识点 (knowledge)：亮蓝色调 */
+.q-kp-tag.kp-kind-knowledge {
+  background: var(--accent-light, rgba(37, 99, 235, 0.08));
+  color: var(--accent, #2563eb);
+}
+
+/* 解题方法 (ability)：紫色调 */
+.q-kp-tag.kp-kind-method {
+  background: var(--purple-light, #f3e8ff);
+  color: var(--purple, #8b5cf6);
+}
+
+/* +N 折叠徽标：极浅灰蓝底变体，hover 时提示可展开 */
 .q-kp-text-empty {
   font-size: 12px;
   color: var(--text-muted);
   opacity: 0.6;
+  white-space: nowrap;
 }
 
-.q-tag {
+/* ---- 知识点 Hover-Expand 面板 ---- */
+/* 废弃旧 kp-tooltip Teleport 气泡，改用卡片内绝对定位的多行展开面板 */
+/* 流式标签行：固定单行高度 + 允许折行 + 溢出隐藏 —— 屏幕越宽展示越多 */
+/* 注意：height 24px = 标签 20px（16 行高 + 2px×2 padding）+ 行间 gap 4px，改动需同步 */
+.q-kp-flow {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 4px;
+  height: 24px; /* 单行高度：装不下的标签折到第二行后被隐藏 */
+  overflow: hidden;
+  flex: 1;
+  min-width: 0;
+  /* 右侧渐隐遮罩：标签顶到右缘被截断时产生"逐渐消失"的褪色暗示 */
+  -webkit-mask-image: linear-gradient(to right, black 85%, transparent 100%);
+  mask-image: linear-gradient(to right, black 85%, transparent 100%);
+}
+
+.q-footer-kp {
+  position: relative; /* 展开面板定位基础 */
   display: inline-flex;
   align-items: center;
-  gap: 3px;
-  padding: 3px 10px;
-  border-radius: var(--radius-full);
-  font-size: 11.5px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-  white-space: nowrap;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+  overflow: visible; /* 允许展开面板溢出 */
 }
 
-/* Type tags */
-.q-tag--choice {
-  background: rgba(0, 113, 227, 0.1);
-  color: var(--accent);
-}
-.q-tag--fill {
-  background: var(--warning-light);
-  color: var(--warning);
-}
-.q-tag--solution {
-  background: var(--success-light);
-  color: var(--success);
-}
-
-/* Difficulty tags */
-.q-tag--easy {
-  background: var(--success-light);
-  color: var(--success);
-}
-.q-tag--medium {
-  background: var(--warning-light);
-  color: var(--warning);
-}
-.q-tag--hard {
-  background: var(--danger-light);
-  color: var(--danger);
+/* 展开面板：绝对定位，向上弹出（避免被下一张卡片遮挡），完整多行渲染 */
+.q-kp-expand-panel {
+  position: absolute;
+  bottom: calc(100% + 6px); /* 向上生长，与知识点行保持 6px 视觉间距 */
+  left: 0;
+  right: 0;
+  z-index: 100; /* 浮于当前卡片所有内容之上 */
+  display: none;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 12px 16px;
+  background: var(--bg-card, #ffffff); /* 卡片底色（亮色为纯白），完美遮挡下方内容 */
+  border: 1px solid #f1f5f9; /* 极浅细边框，弱化轮廓 */
+  border-radius: 8px;
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1); /* 弥散悬浮阴影 */
+  max-height: 280px;
+  overflow-y: auto;
+  pointer-events: auto;
 }
 
-/* Neutral / status tag */
-.q-tag--neutral {
-  background: var(--bg-active);
-  color: var(--text-muted);
+/* 悬停桥接：6px 透明区域属于触发盒，鼠标平滑移入面板不丢 hover */
+.q-footer-kp.has-more::before {
+  content: '';
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  height: 6px;
 }
 
-.q-card-time {
-  font-size: 11.5px;
-  color: var(--text-muted);
-  white-space: nowrap;
-  flex-shrink: 0;
+/* 悬停触发展开：hover 整个 .q-footer-kp（需有 has-more 标记） */
+.q-footer-kp.has-more:hover .q-kp-expand-panel,
+.q-footer-kp.has-more:focus-within .q-kp-expand-panel {
+  display: flex;
+}
+
+/* 展开面板内的标签样式：复用 .q-kp-tag，但取消 max-width 限制 */
+.q-kp-expand-panel .q-kp-tag {
+  max-width: 100%;
+}
+
+[data-theme='dark'] .q-kp-expand-panel {
+  background: var(--bg-elevated, #1e1e20);
+  border-color: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.4), 0 8px 10px -6px rgba(0, 0, 0, 0.3);
 }
 
 /* ---- Row 2: Body ---- */
@@ -2068,11 +2321,13 @@ onBeforeUnmount(() => {
 .q-card-footer {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: space-between;
   padding: 10px 20px;
   border-top: 1px solid var(--divider);
   gap: 12px;
 }
+
+/* 左侧知识点区：样式已移至 .q-kp-expand-panel 附近（hover-expand 重构） */
 
 .q-actions {
   display: flex;
@@ -2085,12 +2340,12 @@ onBeforeUnmount(() => {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 7px 14px;
+  padding: 5px 10px;
   border-radius: var(--radius-sm);
   background: var(--bg-input);
   border: 1px solid var(--border-color);
   color: var(--text-secondary);
-  font-size: 12.5px;
+  font-size: 12px;
   font-weight: 600;
   white-space: nowrap;
   transition: var(--transition-fast);
@@ -2150,7 +2405,7 @@ onBeforeUnmount(() => {
 /* ===== Responsive ===== */
 @media (max-width: 640px) {
   .q-card-header {
-    padding: 10px 14px;
+    padding: 26px 14px 10px; /* 移动端同步顶部避让来源角标 */
   }
   .q-card-body {
     padding: 12px 14px;
@@ -2160,12 +2415,6 @@ onBeforeUnmount(() => {
   }
   .q-analysis-section {
     padding: 0 14px;
-  }
-  .q-source {
-    max-width: 120px;
-  }
-  .q-card-time {
-    display: none;
   }
   .q-actions {
     width: 100%;

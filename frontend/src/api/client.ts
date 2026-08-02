@@ -251,6 +251,10 @@ export interface QuestionQuery {
   page?: number
   page_size?: number
   space_id?: string
+  /// 学段过滤（junior / senior）
+  stage?: string
+  /// 学科过滤（math / physics）
+  subject?: string
   reviewable_by_me?: boolean
 }
 
@@ -577,6 +581,8 @@ export interface KnowledgeNodeSummary {
   name: string
   path: string
   depth: number
+  /// 所属知识树类型（chapter / knowledge / ability）
+  kind: string
   /// 是否主知识点（每题最多 1 个）
   is_primary: boolean
   /// AI 匹配置信度（0.0-1.0）
@@ -877,10 +883,30 @@ export interface KnowledgeNodeMatch {
   match_type: string
 }
 
+/// AI 打标返回的单个标签匹配结果（核心素养 / 解题方法）
+export interface TagMatch {
+  /// AI 返回的原始名称
+  ai_name: string
+  /// 匹配到的标签 UUID
+  tag_id: string
+  /// 匹配到的标签名称
+  tag_name: string
+  /// 标签类别（core_competence / method）
+  category: string
+  /// 匹配置信度（0.0-1.0）
+  score: number
+  /// 匹配类型：exact / alias / fuzzy
+  match_type: string
+}
+
 /// AI 打标响应
 export interface AiTaggingResponse {
   /// 匹配成功的知识点节点列表
   knowledge_nodes: KnowledgeNodeMatch[]
+  /// 匹配成功的核心素养标签列表
+  competency_tags: TagMatch[]
+  /// 匹配成功的解题方法标签列表
+  method_tags: TagMatch[]
   /// AI 推断的难度（1-5）
   difficulty: number | null
   /// AI 推断的题型

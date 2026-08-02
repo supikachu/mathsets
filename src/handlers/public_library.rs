@@ -7,7 +7,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::auth::middleware::AuthUser;
-use crate::auth::permissions::{ensure_public_space, get_space, is_admin};
+use crate::auth::permissions::{ensure_public_space, get_space, is_admin_user};
 use crate::handlers::notifications::send_notification;
 use crate::models::notification::CreateNotification;
 use crate::models::question::{PublicLibrarySubmissionDetail, SubmissionStatus};
@@ -68,7 +68,7 @@ pub async fn submit_to_public(
     }
 
     // 权限：creator 或 admin
-    if creator_id != auth.id && !is_admin(&auth.role) {
+    if creator_id != auth.id && !is_admin_user(&auth) {
         return Err(forbidden("仅题目创建者可推送至公共题库"));
     }
 
@@ -173,7 +173,7 @@ pub async fn list_pending(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthUser>,
 ) -> Result<Json<Vec<PublicLibrarySubmissionDetail>>, (StatusCode, Json<serde_json::Value>)> {
-    if !is_admin(&auth.role) {
+    if !is_admin_user(&auth) {
         return Err(forbidden("仅管理员可查看推库审批列表"));
     }
 
@@ -212,7 +212,7 @@ pub async fn review_submission(
     Path(submission_id): Path<Uuid>,
     Json(req): Json<ReviewSubmissionRequest>,
 ) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
-    if !is_admin(&auth.role) {
+    if !is_admin_user(&auth) {
         return Err(forbidden("仅管理员可审核推库申请"));
     }
 
@@ -244,17 +244,15 @@ pub async fn review_submission(
         sqlx::query(
             r#"
             INSERT INTO questions (
-                id, stem, stem_text, images, question_type, difficulty, default_score, status,
-                options, correct_answer, analysis, grading_criteria, source, exam_type, metadata,
-                grade_level, semester, cognitive_level, difficulty_score, estimated_minutes,
+                id, stem, stem_text, images, question_type, difficulty, status,
+                options, correct_answer, analysis, metadata,
                 parent_id, sub_order,
                 creator_id, created_at, updated_at, version, space_id, origin_question_id
             )
             SELECT
-                gen_random_uuid(), stem, stem_text, images, question_type, difficulty, default_score,
+                gen_random_uuid(), stem, stem_text, images, question_type, difficulty,
                 'published'::question_status,
-                options, correct_answer, analysis, grading_criteria, source, exam_type, metadata,
-                grade_level, semester, cognitive_level, difficulty_score, estimated_minutes,
+                options, correct_answer, analysis, metadata,
                 parent_id, sub_order,
                 creator_id, $2, $2, 1, $1, $3
             FROM questions WHERE id = $3

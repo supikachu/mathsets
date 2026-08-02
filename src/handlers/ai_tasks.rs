@@ -8,7 +8,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::auth::middleware::AuthUser;
-use crate::auth::permissions::is_admin;
+use crate::auth::permissions::is_admin_user;
 use crate::models::ai_task::{AiParseTask, AiTaskStatus};
 use crate::AppState;
 
@@ -146,7 +146,7 @@ pub async fn get_task_status(
 
     // 2. 权限校验：仅创建者或管理员可见
     //    （无权限统一返回 404，避免泄露任务存在性）
-    if task.creator_id != auth.id && !is_admin(&auth.role) {
+    if task.creator_id != auth.id && !is_admin_user(&auth) {
         return Err((
             StatusCode::NOT_FOUND,
             Json(json!({"error": "任务不存在"})),

@@ -22,6 +22,7 @@ import {
   type KnowledgeTree,
   type KnowledgeNodeTreeNode,
 } from '@/api/client'
+import { unwrapTreeResponse } from '@/composables/useKnowledgeTreeCache'
 
 const props = withDefaults(
   defineProps<{
@@ -181,7 +182,7 @@ async function loadTreeData() {
   loading.value = true
   try {
     const res = await knowledgeNodeApi.getTree(activeTreeId.value)
-    treeData.value = res.data
+    treeData.value = unwrapTreeResponse(res.data)
     rebuildNodeMap()
     // 默认展开所有根节点
     expandedIds.value = new Set(
