@@ -2,21 +2,28 @@
   <div class="layout-root" :class="{ 'is-immersive': isImmersive }">
     <div class="app-container">
       <!-- 桌面侧边栏（导航卡片 + 用户卡片，两个独立卡片透出背景色） -->
-      <nav class="sidebar">
+      <nav class="sidebar" :class="{ 'is-mini': isMini }">
         <!-- 上方：导航卡片 -->
         <div class="sidebar-nav-card">
+          <!-- Brand：mini 模式只保留 Logo 图标 -->
           <div class="sidebar-brand">
             <div class="brand-left">
               <AppIcon name="logo" :size="24" class="brand-icon" />
-              <span>协同题库</span>
+              <span v-if="!isMini">协同题库</span>
             </div>
+            <!-- 通知铃只在完整模式显示 -->
             <NotificationBell
+              v-if="!isMini"
               :unread-count="unreadCount"
               :open="showNotifDrawer"
               @toggle="showNotifDrawer = !showNotifDrawer"
             />
           </div>
-          <SpaceSwitcher />
+
+          <!-- SpaceSwitcher：mini 模式彻底隐藏 -->
+          <SpaceSwitcher v-if="!isMini" />
+
+          <!-- 导航项 -->
           <router-link
             v-for="item in items"
             :key="item.path"
@@ -24,15 +31,19 @@
             class="nav-item"
             :class="{ active: isActive(item.path) }"
           >
-            <AppIcon :name="item.icon" :size="19" />
-            <span>{{ item.label }}</span>
+            <!-- mini 模式：图标套正方形高亮包裹层 -->
+            <span v-if="isMini" class="nav-icon-wrap" :class="{ active: isActive(item.path) }">
+              <AppIcon :name="item.icon" :size="19" />
+            </span>
+            <AppIcon v-else :name="item.icon" :size="19" />
+            <span v-if="!isMini">{{ item.label }}</span>
           </router-link>
         </div>
 
-        <!-- 下方：用户信息卡片（独立，与导航卡片之间透出背景色） -->
+        <!-- 下方：用户信息卡片 -->
         <div class="sidebar-user-card" ref="userMenuRef">
-          <!-- 主题切换：紧贴用户卡片上方 -->
-          <div class="sidebar-theme-row">
+          <!-- 主题切换：仅完整模式显示 -->
+          <div v-if="!isMini" class="sidebar-theme-row">
             <ThemeToggle />
           </div>
           <button
@@ -49,26 +60,36 @@
               />
               <span v-else class="user-avatar-letter">{{ avatarLetter }}</span>
             </span>
-            <div class="sidebar-user-info">
+            <!-- 用户名/角色/下箭头：mini 模式隐藏 -->
+            <div v-if="!isMini" class="sidebar-user-info">
               <span class="sidebar-user-name">{{ auth.displayName }}</span>
               <span class="sidebar-user-role">{{ roleLabel }}</span>
             </div>
-            <AppIcon name="chevron-down" :size="14" class="sidebar-user-chevron" :class="{ rotated: showUserMenu }" />
+            <AppIcon v-if="!isMini" name="chevron-down" :size="14" class="sidebar-user-chevron" :class="{ rotated: showUserMenu }" />
           </button>
+        </div>
 
+        <!-- 头像下拉菜单：使用 Teleport 挂载到 body，完全突破 sidebar 的 overflow-y:auto 裁剪限制 -->
+        <Teleport to="body">
           <Transition name="user-pop">
-            <div v-if="showUserMenu" class="sidebar-user-dropdown">
+            <div
+              v-if="showUserMenu"
+              ref="dropdownRef"
+              class="sidebar-user-dropdown"
+              :class="{ 'is-mini': isMini }"
+              :style="dropdownStyle"
+            >
               <button type="button" class="user-menu-item menu-item-profile" @click="goProfile">
                 <AppIcon name="user" :size="16" />
-                个人中心
+                <span class="menu-item-text">个人中心</span>
               </button>
               <button type="button" class="user-menu-item menu-item-logout" @click="handleLogout">
                 <AppIcon name="logout" :size="16" />
-                退出登录
+                <span class="menu-item-text">退出登录</span>
               </button>
             </div>
           </Transition>
-        </div>
+        </Teleport>
       </nav>
 
       <!-- 主内容区 -->
@@ -109,6 +130,45 @@ const { items } = useNavItems()
 
 const showUserMenu = ref(false)
 const userMenuRef = ref<HTMLElement | null>(null)
+const dropdownRef = ref<HTMLElement | null>(null)
+const dropdownStyle = ref<Record<string, string>>({})
+
+function updateDropdownStyle() {
+  if (!userMenuRef.value) return
+  const rect = userMenuRef.value.getBoundingClientRect()
+  if (isMini.value) {
+    // Mini 模式：弹出菜单完全跳出侧边栏，定位在头像右侧 8px 处，底边与头像对齐，锁定 136px 宽度
+    dropdownStyle.value = {
+      position: 'fixed',
+      left: `${rect.right + 8}px`,
+      bottom: `${Math.max(12, window.innerHeight - rect.bottom)}px`,
+      top: 'auto',
+      right: 'auto',
+      width: '136px',
+      zIndex: '9999',
+    }
+  } else {
+    // 全尺寸模式：弹出菜单在用户卡片正上方
+    dropdownStyle.value = {
+      position: 'fixed',
+      left: `${rect.left}px`,
+      width: `${rect.width}px`,
+      bottom: `${window.innerHeight - rect.top + 6}px`,
+      top: 'auto',
+      right: 'auto',
+      zIndex: '9999',
+    }
+  }
+}
+
+watch(showUserMenu, (val) => {
+  if (val) updateDropdownStyle()
+})
+
+function onLayoutResize() {
+  winWidth.value = window.innerWidth
+  if (showUserMenu.value) updateDropdownStyle()
+}
 
 const showNotifDrawer = ref(false)
 const { unreadCount, init: initNotifications } = useNotification()
@@ -116,6 +176,10 @@ const { unreadCount, init: initNotifications } = useNotification()
 /** 沉浸式录题模式：路由 meta.immersive=true 时隐藏左侧系统导航，
  *  让 QuestionEdit 独享 100% 横向屏幕空间 */
 const isImmersive = computed(() => route.meta.immersive === true)
+
+/** Mini 模式：窗口宽度 < 1280px 时，侧边栏收缩为图标模式 */
+const winWidth = ref(window.innerWidth)
+const isMini = computed(() => winWidth.value < 1280)
 
 const avatarLetter = computed(() =>
   (auth.displayName || '?').charAt(0).toUpperCase(),
@@ -164,13 +228,19 @@ function goProfile() {
 
 function onDocumentClick(e: MouseEvent) {
   if (!showUserMenu.value) return
-  const el = userMenuRef.value
-  if (el && !el.contains(e.target as Node)) {
+  const triggerEl = userMenuRef.value
+  const menuEl = dropdownRef.value
+  const target = e.target as Node
+  if (
+    triggerEl && !triggerEl.contains(target) &&
+    menuEl && !menuEl.contains(target)
+  ) {
     showUserMenu.value = false
   }
 }
 
 onMounted(() => {
+  window.addEventListener('resize', onLayoutResize, { passive: true })
   document.addEventListener('click', onDocumentClick)
   if (auth.isLoggedIn) {
     space.fetchSpaces()
@@ -186,7 +256,10 @@ watch(
     }
   },
 )
-onUnmounted(() => document.removeEventListener('click', onDocumentClick))
+onUnmounted(() => {
+  document.removeEventListener('click', onDocumentClick)
+  window.removeEventListener('resize', onLayoutResize)
+})
 </script>
 
 <style scoped>
@@ -415,5 +488,110 @@ onUnmounted(() => document.removeEventListener('click', onDocumentClick))
   .layout-root.is-immersive .app-container {
     padding: 0;
   }
+}
+
+/* ===== Mini 侧边栏模式（窗口 < 1280px） ===== */
+.sidebar.is-mini {
+  width: var(--sidebar-mini-width, 64px);
+  padding: 12px 8px;
+  flex-shrink: 0;
+}
+
+/* Mini 模式：导航卡片居中排列 */
+.sidebar.is-mini .sidebar-nav-card {
+  padding: 8px 4px;
+  align-items: center;
+}
+
+/* Mini 模式：Brand 区只剩图标，居中 */
+.sidebar.is-mini .sidebar-brand {
+  justify-content: center;
+  padding: 4px 0 12px;
+}
+
+/* Mini 模式：导航项自身不显示任何背景，背景交给 nav-icon-wrap */
+.sidebar.is-mini .nav-item {
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  padding: 4px 0;
+  width: 100%;
+  background: transparent !important; /* 覆盖 .active 的条形背景 */
+  color: var(--text-secondary);
+}
+
+.sidebar.is-mini .nav-item.active {
+  background: transparent !important;
+  color: var(--accent);
+}
+
+/* 方形图标高亮包裹层：active 时显示圆角方块背景 */
+.nav-icon-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  transition: background 0.18s ease, color 0.18s ease;
+  color: var(--text-secondary);
+}
+
+.nav-icon-wrap.active {
+  background: var(--accent-light);
+  color: var(--accent);
+}
+
+.sidebar.is-mini .nav-item:hover .nav-icon-wrap:not(.active) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* Mini 模式：用户卡片只显示头像，居中 */
+.sidebar.is-mini .sidebar-user-card {
+  padding: 8px 4px;
+  align-items: center;
+}
+
+.sidebar.is-mini .sidebar-user-trigger {
+  justify-content: center;
+  padding: 4px;
+  gap: 0;
+  width: 100%;
+}
+
+/* Teleport 到 body 的头像下拉菜单：豁免任何局部隐藏逻辑，文本100%强制可见 */
+.sidebar-user-dropdown {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
+  padding: 6px;
+  z-index: 9999 !important;
+}
+
+.user-menu-item {
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  width: 100% !important;
+  text-align: left !important;
+  padding: 9px 12px !important;
+  border-radius: var(--radius-xs) !important;
+  font-size: 13px !important;
+  color: var(--text-primary) !important;
+  transition: var(--transition-fast) !important;
+  white-space: nowrap !important;
+}
+
+/* 显式保障下拉菜单文本绝对可见，不被任何 span 通配规则误伤 */
+.user-menu-item .menu-item-text {
+  display: inline-block !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  color: inherit !important;
+  white-space: nowrap !important;
 }
 </style>

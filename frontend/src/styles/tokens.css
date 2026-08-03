@@ -68,6 +68,7 @@
   /* ---- Layout ---- */
   --nav-height: 56px;
   --sidebar-width: 220px;
+  --sidebar-mini-width: 64px;
   --kp-tree-width: 264px;
   --max-width: 1360px;
   --spacing-unit: 24px;

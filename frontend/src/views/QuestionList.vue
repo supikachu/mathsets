@@ -1337,7 +1337,7 @@ onBeforeUnmount(() => {
 /* 右侧主区：工具栏 + 滚动列表 */
 .ql-main {
   flex: 1;
-  min-width: 0;
+  min-width: 600px; /* 防止 LaTeX 公式与题目选项被挤压变形 */
   display: flex;
   flex-direction: column;
   overflow: hidden;
