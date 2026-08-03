@@ -68,7 +68,7 @@ mathset/
 
 ```bash
 git clone https://github.com/supikachu/mathsets.git
-cd mathset
+cd mathsets
 
 # 前端依赖
 cd frontend
