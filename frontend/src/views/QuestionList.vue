@@ -9,10 +9,29 @@
       <div class="ql-main">
     <!-- ===== Apple风格吸顶工具栏 ===== -->
     <div class="ql-sticky-bar">
-      <div class="ql-toolbar">
-        <!-- 中间：搜索框 -->
+      <!-- ===== 单行一体化响应式 Header 工具栏 ===== -->
+      <div class="ql-header-bar">
+        <!-- 1. 左侧：状态切换 Segmented Tab -->
+        <div class="ql-seg-ctrl">
+          <button
+            v-for="tab in statusTabs"
+            :key="tab.value"
+            class="ql-seg-item"
+            :class="{ active: currentStatus === tab.value }"
+            @click="switchStatus(tab.value)"
+          >
+            <AppIcon :name="tab.icon" :size="14" class="ql-seg-icon" />
+            <span class="ql-seg-label">{{ tab.label }}</span>
+            <span
+              v-if="tab.value === 'pending' && pendingReviewCount > 0"
+              class="ql-seg-badge"
+            >{{ pendingReviewCount > 99 ? '99+' : pendingReviewCount }}</span>
+          </button>
+        </div>
+
+        <!-- 2. 中间：弹性伸缩搜索框 -->
         <div class="ql-search-wrap">
-          <AppIcon name="search" :size="15" class="ql-search-icon" />
+          <AppIcon name="search" :size="14" class="ql-search-icon" />
           <input
             v-model="query.keyword"
             class="ql-search-input"
@@ -20,26 +39,32 @@
             @input="onSearchInput"
             @keydown.enter="onSearchSubmit"
           />
-          <button class="ql-search-go" @click="toggleFilter">
-            <AppIcon name="filter" :size="14" />
-            筛选
-          </button>
         </div>
 
-        <!-- 右侧：新建题目 + 主题切换 -->
-        <button
-          v-if="basket.count.value > 0"
-          class="ql-basket-btn"
-          @click="toast.info(`试题篮中有 ${basket.count.value} 道题目`)"
-        >
-          <AppIcon name="shopping-cart" :size="16" />
-          <span class="ql-basket-count">{{ basket.count.value }}</span>
-        </button>
-        <button class="ql-new-btn" @click="$router.push('/questions/new')">
-          <AppIcon name="plus" :size="16" />
-          新建题目
-        </button>
-        <ThemeToggle />
+        <!-- 3. 右侧：操作区（筛选 + 试题篮 + 新建题目 + 统计） -->
+        <div class="ql-header-actions">
+          <button class="ql-filter-btn" :class="{ active: showFilter || hasAnyFilter }" @click="toggleFilter">
+            <AppIcon name="filter" :size="14" />
+            <span>筛选</span>
+            <span v-if="hasAnyFilter" class="ql-filter-dot"></span>
+          </button>
+
+          <button
+            v-if="basket.count.value > 0"
+            class="ql-basket-btn"
+            @click="toast.info(`试题篮中有 ${basket.count.value} 道题目`)"
+          >
+            <AppIcon name="shopping-cart" :size="15" />
+            <span class="ql-basket-count">{{ basket.count.value }}</span>
+          </button>
+
+          <button class="ql-new-btn" @click="$router.push('/questions/new')">
+            <AppIcon name="plus" :size="15" />
+            <span>新建题目</span>
+          </button>
+
+          <span class="ql-status-text">共 <strong>{{ totalCount }}</strong> 道</span>
+        </div>
       </div>
 
       <!-- ===== 多维属性矩阵筛选面板 ===== -->
@@ -262,26 +287,6 @@
 
         </div>
       </div>
-
-    </div>
-
-    <!-- ===== 状态切换 Segmented Tab ===== -->
-    <div class="ql-status-bar">
-      <div class="ql-seg-ctrl">
-        <button
-          v-for="tab in statusTabs"
-          :key="tab.value"
-          class="ql-seg-item"
-          :class="{ active: currentStatus === tab.value }"
-          @click="switchStatus(tab.value)"
-        >
-          {{ tab.label }}
-          <span
-            v-if="tab.value === 'pending' && pendingReviewCount > 0"
-            class="ql-seg-badge"
-          >{{ pendingReviewCount > 99 ? '99+' : pendingReviewCount }}</span>
-        </button>
-      </div>
     </div>
 
     <!-- ===== 可滚动列表区域 ===== -->
@@ -479,7 +484,6 @@ import { ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick, t
 import { useRouter } from 'vue-router'
 import { questionApi, type QuestionSummary, type QuestionDetail, type QuestionQuery, type GradeLevel, type SemesterType, type ExamType, type KnowledgeNodeSummary } from '@/api/client'
 import LatexRender from '@/components/LatexRender.vue'
-import ThemeToggle from '@/components/ThemeToggle.vue'
 import KnowledgeTreeNav from '@/components/KnowledgeTreeNav.vue'
 import { AppButton, AppSelect, AppPagination, AppIcon, AppBadge } from '@/components/ui'
 import { useQuestionBasket } from '@/composables/useQuestionBasket'
@@ -504,14 +508,15 @@ const navNodeId = ref('')
 
 // ===== 状态切换 Segmented Tab =====
 const statusTabs = [
-  { label: '全部', value: 'ALL' },
-  { label: '已发布', value: 'published' },
-  { label: '草稿', value: 'draft' },
-  { label: '待审核', value: 'pending' },
+  { label: '全部', value: 'ALL', icon: 'list' },
+  { label: '已发布', value: 'published', icon: 'check' },
+  { label: '草稿', value: 'draft', icon: 'pencil' },
+  { label: '待审核', value: 'pending', icon: 'clock' },
 ] as const
 
 const currentStatus = ref<string>('ALL')
 const pendingReviewCount = ref(0)
+const totalCount = ref(0)
 
 function switchStatus(value: string) {
   currentStatus.value = value
@@ -1080,6 +1085,8 @@ async function fetchList() {
     query.page_size = pageSize
     const res = await questionApi.list(query)
     const summaries: QuestionSummary[] = res.data
+    // 捕获总数：优先取后端 PageResult.total，否则回退到当前已加载条数
+    totalCount.value = (res as any).total ?? summaries.length
     hasMore.value = summaries.length >= pageSize
 
     // 并发获取每道题的详情
@@ -1168,13 +1175,51 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-/* ===== 状态切换 Segmented Tab（Notion/Vercel 胶囊分段控制器） ===== */
-.ql-status-bar {
-  flex-shrink: 0;
-  padding: 10px 20px 6px;
+/* ===== 融合单行工具栏 (Header Bar) ===== */
+.ql-header-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--divider);
   background: var(--bg-primary);
 }
 
+/* 右侧操作聚合区 */
+.ql-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* 筛选激活小原点 */
+.ql-filter-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+/* 统计文本（与右侧操作并排） */
+.ql-status-text {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  letter-spacing: -0.01em;
+  line-height: 1;
+  margin-left: 4px;
+}
+
+.ql-status-text strong {
+  color: var(--text-secondary);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  margin: 0 2px;
+}
+
+/* Segmented Control — Apple 风格胶囊分段控制器 */
 .ql-seg-ctrl {
   display: inline-flex;
   align-items: center;
@@ -1189,8 +1234,8 @@ onBeforeUnmount(() => {
   position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 5px 16px;
+  gap: 6px;
+  padding: 6px 14px;
   border: none;
   background: transparent;
   border-radius: 7px;
@@ -1198,9 +1243,15 @@ onBeforeUnmount(() => {
   font-weight: 500;
   color: var(--text-secondary);
   cursor: pointer;
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: all 0.28s cubic-bezier(0.4, 0, 0.2, 1);
   white-space: nowrap;
   user-select: none;
+}
+
+.ql-seg-icon {
+  flex-shrink: 0;
+  opacity: 0.7;
+  transition: opacity 0.28s ease;
 }
 
 .ql-seg-item:hover:not(.active) {
@@ -1208,11 +1259,20 @@ onBeforeUnmount(() => {
   background: var(--bg-hover);
 }
 
+.ql-seg-item:hover:not(.active) .ql-seg-icon {
+  opacity: 0.9;
+}
+
 .ql-seg-item.active {
-  background: #fff;
+  background: var(--bg-canvas);
   color: var(--text-primary);
   font-weight: 600;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+.ql-seg-item.active .ql-seg-icon {
+  opacity: 1;
+  color: var(--accent);
 }
 
 [data-theme='dark'] .ql-seg-item.active {
@@ -1220,22 +1280,36 @@ onBeforeUnmount(() => {
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
 }
 
-/* 待审核数字徽标 */
+.ql-seg-label {
+  line-height: 1;
+}
+
+/* 待审核数字徽标 — 红色小圆角，与文字保持间距 */
 .ql-seg-badge {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   min-width: 18px;
-  height: 18px;
+  height: 17px;
+  margin-left: 4px;
   padding: 0 5px;
   border-radius: 9999px;
-  background: #ef4444;
+  background: var(--danger);
   color: #fff;
   font-size: 10.5px;
   font-weight: 700;
   line-height: 1;
   letter-spacing: 0.02em;
+  box-shadow: 0 0 0 2px var(--bg-input);
   animation: ql-badge-pop 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.ql-seg-item.active .ql-seg-badge {
+  box-shadow: 0 0 0 2px var(--bg-canvas);
+}
+
+[data-theme='dark'] .ql-seg-item.active .ql-seg-badge {
+  box-shadow: 0 0 0 2px var(--bg-active);
 }
 
 @keyframes ql-badge-pop {
@@ -1277,15 +1351,6 @@ onBeforeUnmount(() => {
   background: var(--bg-primary);
   backdrop-filter: saturate(180%) blur(20px);
   -webkit-backdrop-filter: saturate(180%) blur(20px);
-  border-bottom: 1px solid var(--border-color);
-}
-
-/* ===== 工具栏单行布局 ===== */
-.ql-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 12px 20px;
 }
 
 /* 题库空间切换 */
@@ -1334,18 +1399,21 @@ onBeforeUnmount(() => {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 
-/* 搜索框 */
+/* 搜索框 — 弹性自适应宽度，在中间自然拉伸 */
 .ql-search-wrap {
   flex: 1;
+  max-width: 320px;
+  min-width: 150px;
   display: flex;
   align-items: center;
   gap: 0;
-  height: 36px;
+  height: 34px;
   background: var(--bg-input);
   border: 1px solid var(--border-color);
-  border-radius: 10px;
+  border-radius: 9px;
   transition: var(--transition-fast);
   overflow: hidden;
+  flex-shrink: 1;
 }
 
 .ql-search-wrap:focus-within {
@@ -1366,7 +1434,7 @@ onBeforeUnmount(() => {
   background: transparent;
   font-size: 14px;
   color: var(--text-primary);
-  padding: 0 10px;
+  padding: 0 12px;
   height: 100%;
 }
 
@@ -1374,26 +1442,32 @@ onBeforeUnmount(() => {
   color: var(--text-muted);
 }
 
-.ql-search-go {
+/* 独立筛选按钮（从搜索框分离） */
+.ql-filter-btn {
   display: flex;
   align-items: center;
   gap: 5px;
-  height: 100%;
-  padding: 0 16px;
-  background: var(--accent);
-  color: #fff;
+  height: 36px;
+  padding: 0 14px;
+  border-radius: 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 500;
   transition: var(--transition-fast);
   white-space: nowrap;
   flex-shrink: 0;
+  cursor: pointer;
 }
 
-.ql-search-go:hover {
-  background: var(--accent-hover);
+.ql-filter-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-light);
 }
 
-.ql-search-go:active {
+.ql-filter-btn:active {
   transform: scale(0.96);
 }
 
@@ -1459,24 +1533,18 @@ onBeforeUnmount(() => {
   padding: 0 4px;
 }
 
-/* ===== 筛选面板展开/折叠动画 (grid 0fr→1fr 技术, 最平滑) ===== */
+/* ===== 筛选面板展开/折叠动画 (max-height 方案, 确保折叠时高度归零) ===== */
 .ql-filter-collapse {
-  display: grid;
-  grid-template-rows: 0fr;
+  max-height: 0;
+  overflow: hidden;
   opacity: 0;
-  transition:
-    grid-template-rows 0.4s cubic-bezier(0.32, 0.72, 0, 1),
-    opacity 0.3s cubic-bezier(0.32, 0.72, 0, 1);
+  transition: max-height 0.35s cubic-bezier(0.32, 0.72, 0, 1),
+    opacity 0.25s ease;
 }
 
 .ql-filter-collapse.is-open {
-  grid-template-rows: 1fr;
+  max-height: 600px;
   opacity: 1;
-}
-
-.ql-filter-collapse > .ql-matrix-panel {
-  overflow: hidden; /* 折叠动画期间裁剪内容（grid 0fr→1fr 技术必需） */
-  min-height: 0;
 }
 
 /* 展开态：解除裁剪，让底部下拉面板 .ql-dd-panel 能自由溢出父容器 */
@@ -2403,6 +2471,22 @@ onBeforeUnmount(() => {
 }
 
 /* ===== Responsive ===== */
+@media (max-width: 960px) {
+  .ql-header-bar {
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    padding: 8px 12px;
+  }
+  .ql-search-wrap {
+    order: 3;
+    flex: 1 0 100%;
+    max-width: 100%;
+  }
+  .ql-status-text {
+    display: none;
+  }
+}
+
 @media (max-width: 640px) {
   .q-card-header {
     padding: 26px 14px 10px; /* 移动端同步顶部避让来源角标 */

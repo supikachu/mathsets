@@ -31,6 +31,10 @@
 
         <!-- 下方：用户信息卡片（独立，与导航卡片之间透出背景色） -->
         <div class="sidebar-user-card" ref="userMenuRef">
+          <!-- 主题切换：紧贴用户卡片上方 -->
+          <div class="sidebar-theme-row">
+            <ThemeToggle />
+          </div>
           <button
             type="button"
             class="sidebar-user-trigger"
@@ -92,6 +96,7 @@ import { useNavItems } from '@/composables/useNavItems'
 import { AppIcon } from '@/components/ui'
 import BottomNav from '@/components/BottomNav.vue'
 import SpaceSwitcher from '@/components/SpaceSwitcher.vue'
+import ThemeToggle from '@/components/ThemeToggle.vue'
 import NotificationBell from '@/components/NotificationBell.vue'
 import NotificationDrawer from '@/components/NotificationDrawer.vue'
 import { useNotification } from '@/composables/useNotification'
@@ -222,6 +227,13 @@ onUnmounted(() => document.removeEventListener('click', onDocumentClick))
 /* ===== Sidebar user card ===== */
 .sidebar-user-card {
   position: relative;
+}
+
+/* 主题切换行：紧贴用户卡片上方 */
+.sidebar-theme-row {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 4px 8px;
 }
 
 .sidebar-user-trigger {

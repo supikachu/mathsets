@@ -343,7 +343,11 @@ export const questionApi = {
       '/questions',
       { params },
     )
-    return { ...res, data: unwrapQuestionList(res.data as any) }
+    const raw = res.data
+    const items = unwrapQuestionList(raw as any)
+    // 暴露 total：PageResult.total 优先，数组回退到 length
+    const total = Array.isArray(raw) ? items.length : (raw as PageResult<QuestionSummary>)?.total ?? items.length
+    return { ...res, data: items, total }
   },
   get(id: string) {
     return client.get<QuestionDetail>(`/questions/${id}`)
