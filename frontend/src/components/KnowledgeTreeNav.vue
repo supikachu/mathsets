@@ -433,14 +433,14 @@ onMounted(async () => {
           </div>
         </div>
 
-        <!-- "全部"快捷项 -->
+        <!-- "全部"快捷项（根目录节点，融入树形结构） -->
         <button
           type="button"
           class="kt-nav-all"
           :class="{ active: !internalSelected }"
           @click="selectAll"
         >
-          <AppIcon name="grid" :size="13" />
+          <AppIcon name="list" :size="14" class="kt-nav-all-icon" />
           <span>全部题目</span>
         </button>
 
@@ -804,7 +804,7 @@ onMounted(async () => {
 .kt-stage-row {
   display: flex;
   width: 100%;
-  padding: 4px;
+  padding: 6px; /* p-1.5 内呼吸感，确保内部滑块与外边界有 4px 间隙 */
   gap: 4px;
   /* 白色胶囊底座 + 柔和外阴影 + 极浅边框 */
   background: var(--bg-card);
@@ -844,7 +844,7 @@ onMounted(async () => {
 .kt-subject-row {
   display: flex;
   width: 100%;
-  padding: 4px;
+  padding: 6px; /* p-1.5 内呼吸感 */
   gap: 4px;
   background: var(--bg-card);
   border: 1px solid var(--border-color);
@@ -882,7 +882,7 @@ onMounted(async () => {
 .kt-mode-segment {
   display: flex;
   width: 100%;
-  padding: 4px;
+  padding: 6px; /* p-1.5 内呼吸感 */
   gap: 4px;
   background: var(--bg-card);
   border: 1px solid var(--border-color);
@@ -932,22 +932,28 @@ onMounted(async () => {
   color: var(--accent);
 }
 
-/* "全部题目"快捷项 */
+/* "全部题目"快捷项 — 作为树形结构的根目录节点，融入树列表 */
 .kt-nav-all {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 7px 10px;
-  border: 1px solid transparent;
-  border-radius: 6px;
+  gap: 8px;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 8px;
   background: transparent;
   color: var(--text-secondary);
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  transition: var(--transition-fast);
+  transition: background-color 0.18s ease, color 0.18s ease;
   text-align: left;
   width: 100%;
+  margin-bottom: 4px;
+}
+
+.kt-nav-all-icon {
+  color: var(--text-muted);
+  flex-shrink: 0;
 }
 
 .kt-nav-all:hover {
@@ -955,10 +961,19 @@ onMounted(async () => {
   color: var(--text-primary);
 }
 
+.kt-nav-all:hover .kt-nav-all-icon {
+  color: var(--text-secondary);
+}
+
+/* 选中态：与树节点选中样式一致（浅灰底 + 主题色文字） */
 .kt-nav-all.active {
-  background: var(--accent-light);
+  background: var(--bg-active);
   color: var(--accent);
   font-weight: 600;
+}
+
+.kt-nav-all.active .kt-nav-all-icon {
+  color: var(--accent);
 }
 
 /* 树列表：左右内边距，避免高亮色块顶满边缘 */
@@ -982,10 +997,10 @@ onMounted(async () => {
   display: flex;
   align-items: flex-start;
   gap: 4px;
-  padding: 6px 8px;
-  border-radius: 8px;
+  padding: 4px 8px; /* 收紧行距 py-1.5，提升信息密度 */
+  border-radius: 8px; /* rounded-lg，柔和的 hover 底色提示 */
   cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
+  transition: background-color 0.15s ease, color 0.15s ease;
   font-size: 12.5px;
   line-height: 1.5;
   color: var(--text-primary);
@@ -993,7 +1008,7 @@ onMounted(async () => {
 }
 
 .kt-nav-row:hover {
-  background: var(--bg-hover);
+  background: var(--bg-hover); /* hover:bg-gray-50 柔和反馈 */
 }
 
 .kt-nav-row.selected {
@@ -1030,7 +1045,7 @@ onMounted(async () => {
   background: transparent;
   border: none;
   padding: 0;
-  color: var(--text-muted);
+  color: var(--text-secondary); /* 加深至 gray-400 级别，增强可读性 */
   cursor: pointer;
   flex-shrink: 0;
   transition: background-color 0.15s ease, color 0.15s ease, transform 0.15s ease;
