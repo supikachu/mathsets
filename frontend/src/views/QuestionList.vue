@@ -1327,19 +1327,27 @@ onBeforeUnmount(() => {
 }
 
 /* ===== 主体：左侧知识树 + 右侧列表区 ===== */
+/* 浅灰背景托起白色卡片，padding+gap 营造呼吸感 */
 .ql-body {
   flex: 1;
   min-height: 0;
   display: flex;
+  gap: 16px;
+  padding: 16px;
+  background: var(--bg-primary);
   overflow: hidden;
 }
 
-/* 右侧主区：工具栏 + 滚动列表 */
+/* 右侧主区：卡片化容器（与知识树卡片视觉对齐） */
 .ql-main {
   flex: 1;
   min-width: 600px; /* 防止 LaTeX 公式与题目选项被挤压变形 */
   display: flex;
   flex-direction: column;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
   overflow: hidden;
 }
 
@@ -1348,9 +1356,7 @@ onBeforeUnmount(() => {
   top: 0;
   z-index: 100;
   flex-shrink: 0;
-  background: var(--bg-primary);
-  backdrop-filter: saturate(180%) blur(20px);
-  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  background: var(--bg-card);
 }
 
 /* 题库空间切换 */
@@ -1800,7 +1806,7 @@ onBeforeUnmount(() => {
   overflow-y: auto;
   overscroll-behavior: contain; /* 切断滚动链：防止列表触底触发外层滚动/橡皮筋 */
   padding: 16px 20px;
-  background: var(--bg-primary);
+  background: var(--bg-card);
 }
 
 /* ===== Header Actions ===== */

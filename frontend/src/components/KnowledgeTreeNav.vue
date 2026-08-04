@@ -382,52 +382,55 @@ onMounted(async () => {
 
       <!-- 全部 + 树切换 + 列表 共用滚动区：使用 v-show="!isCollapsed" 彻底防止 Ghost DOM 挤压与溢出 -->
       <div v-show="!isCollapsed" class="kt-nav-body">
-        <!-- ===== 第 1 层：学段切换（极简下划线 Tab） ===== -->
-        <div class="kt-stage-row" role="tablist" aria-label="学段切换">
-          <button
-            v-for="s in STAGES"
-            :key="s.key"
-            type="button"
-            class="kt-stage-tab"
-            :class="{ active: currentStage === s.key }"
-            role="tab"
-            :aria-selected="currentStage === s.key"
-            @click="setStage(s.key)"
-          >
-            {{ s.label }}
-          </button>
-        </div>
+        <!-- ===== 顶部筛选区组：三行等宽无界 Tab + 底部分割线 ===== -->
+        <div class="kt-filter-group">
+          <!-- ===== 第 1 层：学段切换（等宽占满无界 Tab） ===== -->
+          <div class="kt-stage-row" role="tablist" aria-label="学段切换">
+            <button
+              v-for="s in STAGES"
+              :key="s.key"
+              type="button"
+              class="kt-stage-tab"
+              :class="{ active: currentStage === s.key }"
+              role="tab"
+              :aria-selected="currentStage === s.key"
+              @click="setStage(s.key)"
+            >
+              {{ s.label }}
+            </button>
+          </div>
 
-        <!-- ===== 第 2 层：学科切换（轻量浅色小标签） ===== -->
-        <div class="kt-subject-row" role="tablist" aria-label="学科切换">
-          <button
-            v-for="s in SUBJECTS"
-            :key="s.key"
-            type="button"
-            class="kt-subject-tag"
-            :class="{ active: currentSubject === s.key }"
-            role="tab"
-            :aria-selected="currentSubject === s.key"
-            @click="setSubject(s.key)"
-          >
-            {{ s.label }}
-          </button>
-        </div>
+          <!-- ===== 第 2 层：学科切换（等宽占满无界 Tab） ===== -->
+          <div class="kt-subject-row" role="tablist" aria-label="学科切换">
+            <button
+              v-for="s in SUBJECTS"
+              :key="s.key"
+              type="button"
+              class="kt-subject-tag"
+              :class="{ active: currentSubject === s.key }"
+              role="tab"
+              :aria-selected="currentSubject === s.key"
+              @click="setSubject(s.key)"
+            >
+              {{ s.label }}
+            </button>
+          </div>
 
-        <!-- ===== 第 3 层：模式 Tabs（无缝分段控制器） ===== -->
-        <div class="kt-mode-segment" role="tablist" aria-label="选题模式">
-          <button
-            v-for="m in MODES"
-            :key="m.key"
-            type="button"
-            class="kt-mode-item"
-            :class="{ active: treeMode === m.key }"
-            role="tab"
-            :aria-selected="treeMode === m.key"
-            @click="setMode(m.key)"
-          >
-            {{ m.label }}
-          </button>
+          <!-- ===== 第 3 层：模式切换（等宽占满无界 Tab） ===== -->
+          <div class="kt-mode-segment" role="tablist" aria-label="选题模式">
+            <button
+              v-for="m in MODES"
+              :key="m.key"
+              type="button"
+              class="kt-mode-item"
+              :class="{ active: treeMode === m.key }"
+              role="tab"
+              :aria-selected="treeMode === m.key"
+              @click="setMode(m.key)"
+            >
+              {{ m.label }}
+            </button>
+          </div>
         </div>
 
         <!-- "全部"快捷项 -->
@@ -451,9 +454,16 @@ onMounted(async () => {
               :key="item.node.id"
               class="kt-nav-row"
               :class="{ selected: isSelected(item.node.id) }"
-              :style="{ paddingLeft: 6 + item.depth * 16 + 'px' }"
+              :style="{ paddingLeft: 8 + item.depth * 16 + 'px' }"
               @click="selectNode(item.node.id)"
             >
+              <!-- 层级虚线引导线：根据 depth 渲染 depth 条垂直虚线 -->
+              <span
+                v-for="d in item.depth"
+                :key="'guide-' + d"
+                class="indent-guide"
+                :style="{ left: 8 + (d - 1) * 16 + 'px' }"
+              />
               <!-- 节点展开/折叠旋转按钮 -->
               <button
                 v-if="hasChildren(item.node)"
@@ -530,16 +540,24 @@ onMounted(async () => {
   overflow: visible !important; /* 关键：wrapper 宽归零，但悬浮拉环按钮依然保留悬挂于视口分割线处 */
 }
 
-/* ── 实际侧栏 ── */
+/* ── 实际侧栏：纯白浮动卡片（Apple 风格） ── */
 .kt-nav {
   width: 260px;
   height: 100%;
   display: flex;
   flex-direction: column;
   background: var(--bg-card);
-  border-right: 1px solid var(--border-color);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
   overflow: hidden;
-  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.25s ease;
+  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.25s ease,
+    box-shadow 0.28s ease;
+}
+
+/* 悬停时阴影加深，增强卡片浮动感 */
+.kt-nav-wrapper:hover .kt-nav:not(.is-collapsed) {
+  box-shadow: var(--shadow-md);
 }
 
 .kt-nav.is-collapsed:not(.is-drawer-mode) {
@@ -750,13 +768,23 @@ onMounted(async () => {
 .kt-nav-body {
   flex: 1;
   min-height: 0;
-  padding: 6px 14px 12px 8px;
+  padding: 8px 14px 12px 8px;
   display: flex;
   flex-direction: column;
   gap: 6px;
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-width: thin;
+}
+
+/* ── 顶部筛选区组：胶囊间距 + 极浅灰色分割线 ── */
+.kt-filter-group {
+  display: flex;
+  flex-direction: column;
+  gap: 12px; /* space-y-3 等效，胶囊间充足间距 */
+  padding-bottom: 16px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--divider);
 }
 
 .kt-nav-body::-webkit-scrollbar {
@@ -772,116 +800,136 @@ onMounted(async () => {
   background: transparent;
 }
 
-/* ═══ 第 1 层：学段 — 极简下划线 Tab ═══ */
+/* ═══ 第 1 层：学段 — 全圆角浮岛胶囊 (Pill-in-Pill) ═══ */
 .kt-stage-row {
   display: flex;
-  gap: 18px;
-  padding: 0 4px;
-  border-bottom: 1px solid var(--divider);
+  width: 100%;
+  padding: 4px;
+  gap: 4px;
+  /* 白色胶囊底座 + 柔和外阴影 + 极浅边框 */
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 9999px; /* rounded-full 全圆角 */
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
 }
 
 .kt-stage-tab {
-  position: relative;
-  padding: 3px 2px 6px;
+  flex: 1;
+  padding: 6px 12px;
   border: none;
+  border-radius: 9999px; /* 强制全圆角 */
   background: transparent;
   color: var(--text-muted);
   font-size: 12.5px;
   font-weight: 500;
   cursor: pointer;
-  transition: color 0.15s ease;
+  transition: background-color 0.22s ease, color 0.22s ease;
+  text-align: center;
 }
 
-.kt-stage-tab:hover {
+.kt-stage-tab:hover:not(.active) {
+  background: var(--bg-hover);
   color: var(--text-secondary);
 }
 
+/* 选中态：无阴影浅灰实体填充 + 主题蓝文字 */
 .kt-stage-tab.active {
-  color: var(--text-primary);
+  background: var(--bg-active);
+  color: var(--accent);
   font-weight: 600;
+  cursor: default;
 }
 
-/* 品牌蓝下划线：伪元素实现，避免影响布局高度 */
-.kt-stage-tab.active::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: -1px;
-  height: 2px;
-  background: var(--accent);
-  border-radius: 1px;
-}
-
-/* ═══ 第 2 层：学科 — 轻量浅色小标签 ═══ */
+/* ═══ 第 2 层：学科 — 全圆角浮岛胶囊 ═══ */
 .kt-subject-row {
   display: flex;
-  gap: 6px;
-  padding: 0 2px;
+  width: 100%;
+  padding: 4px;
+  gap: 4px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 9999px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
 }
 
 .kt-subject-tag {
-  padding: 2px 9px;
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-full);
-  background: transparent;
-  color: var(--text-muted);
-  font-size: 11px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.kt-subject-tag:hover {
-  border-color: var(--text-muted);
-  color: var(--text-secondary);
-}
-
-/* 选中态：浅蓝底 + 深蓝字 + 极浅蓝边框（取消实心蓝背景） */
-.kt-subject-tag.active {
-  background: var(--accent-light);
-  border-color: var(--accent-light);
-  color: var(--accent);
-  font-weight: 600;
-}
-
-/* ═══ 第 3 层：模式 — 无缝分段控制器 (Segmented Control) ═══ */
-.kt-mode-segment {
-  display: flex;
-  gap: 2px;
-  padding: 2px;
-  background: var(--bg-active);
-  border-radius: 6px;
-}
-
-.kt-mode-item {
   flex: 1;
-  padding: 4px 6px;
+  padding: 6px 12px;
   border: none;
-  border-radius: 4px;
+  border-radius: 9999px;
   background: transparent;
   color: var(--text-muted);
   font-size: 11.5px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: background-color 0.22s ease, color 0.22s ease;
+  text-align: center;
 }
 
-.kt-mode-item:hover:not(.active) {
+.kt-subject-tag:hover:not(.active) {
+  background: var(--bg-hover);
   color: var(--text-secondary);
 }
 
-/* 选中态：纯白底色 + 细微阴影，模拟物理滑块 */
-.kt-mode-item.active {
-  background: var(--bg-card);
-  color: var(--text-primary);
+.kt-subject-tag.active {
+  background: var(--bg-active);
+  color: var(--accent);
   font-weight: 600;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  cursor: default;
 }
 
+/* ═══ 第 3 层：模式 — 全圆角浮岛胶囊 ═══ */
+.kt-mode-segment {
+  display: flex;
+  width: 100%;
+  padding: 4px;
+  gap: 4px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 9999px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
+}
+
+.kt-mode-item {
+  flex: 1;
+  padding: 6px 12px;
+  border: none;
+  border-radius: 9999px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.22s ease, color 0.22s ease;
+  text-align: center;
+}
+
+.kt-mode-item:hover:not(.active) {
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+}
+
+.kt-mode-item.active {
+  background: var(--bg-active);
+  color: var(--accent);
+  font-weight: 600;
+  cursor: default;
+}
+
+/* 暗色模式：胶囊底座使用 card 背景，选中项使用 active 背景 */
+[data-theme='dark'] .kt-stage-row,
+[data-theme='dark'] .kt-subject-row,
+[data-theme='dark'] .kt-mode-segment {
+  background: var(--bg-card);
+  border-color: var(--border-color);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3);
+}
+
+[data-theme='dark'] .kt-stage-tab.active,
+[data-theme='dark'] .kt-subject-tag.active,
 [data-theme='dark'] .kt-mode-item.active {
-  background: var(--bg-input);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  background: var(--bg-active);
+  color: var(--accent);
 }
 
 /* "全部题目"快捷项 */
@@ -913,11 +961,12 @@ onMounted(async () => {
   font-weight: 600;
 }
 
-/* 树列表 */
+/* 树列表：左右内边距，避免高亮色块顶满边缘 */
 .kt-nav-list {
   display: flex;
   flex-direction: column;
   gap: 1px;
+  padding: 4px 8px 8px;
 }
 
 .kt-nav-loading {
@@ -927,15 +976,18 @@ onMounted(async () => {
   font-size: 12.5px;
 }
 
+/* 节点行：顶部对齐（支持多行文本），相对定位承载虚线 */
 .kt-nav-row {
+  position: relative;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 4px;
-  padding: 5px 8px;
-  border-radius: 5px;
+  padding: 6px 8px;
+  border-radius: 8px;
   cursor: pointer;
-  transition: background 0.12s;
+  transition: background 0.15s ease, color 0.15s ease;
   font-size: 12.5px;
+  line-height: 1.5;
   color: var(--text-primary);
   user-select: none;
 }
@@ -950,13 +1002,30 @@ onMounted(async () => {
   font-weight: 600;
 }
 
-/* ── 树节点展开/折叠按钮 ── */
+/* ── 层级虚线引导线：根据 depth 绝对定位垂直虚线 ── */
+.indent-guide {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  border-left: 1px dashed var(--border-strong);
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+/* 选中态时虚线变浅，避免与背景色冲突 */
+.kt-nav-row.selected .indent-guide {
+  opacity: 0.3;
+}
+
+/* ── 树节点展开/折叠按钮：顶部对齐多行文本首行 ── */
 .row-expand {
   display: flex;
   align-items: center;
   justify-content: center;
   width: 18px;
   height: 18px;
+  margin-top: 2px; /* 与首行文字视觉对齐（line-height 1.5 × 12.5px ≈ 18.75px） */
   border-radius: 4px;
   background: transparent;
   border: none;
@@ -965,7 +1034,7 @@ onMounted(async () => {
   cursor: pointer;
   flex-shrink: 0;
   transition: background-color 0.15s ease, color 0.15s ease, transform 0.15s ease;
-  margin-right: 1px;
+  margin-right: 2px;
 }
 
 .row-expand:hover {
@@ -1000,22 +1069,27 @@ onMounted(async () => {
   border-radius: 50%;
   background: var(--border-strong);
   flex-shrink: 0;
-  margin: 0 8px;
+  margin-top: 8px; /* 与首行文字视觉对齐 */
+  margin-right: 8px;
 }
 
 .kt-nav-row.selected .row-dot {
   background: var(--accent);
 }
 
+/* 节点文本：允许自然换行，不截断 */
 .row-name {
   flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  min-width: 0;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  padding-top: 1px;
 }
 
 .row-count {
   flex-shrink: 0;
+  margin-top: 2px; /* 与首行文字视觉对齐 */
   padding: 0 6px;
   border-radius: var(--radius-full);
   background: var(--bg-active);
