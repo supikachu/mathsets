@@ -14,9 +14,9 @@
       <div class="ql-main">
     <!-- ===== Apple风格吸顶工具栏 ===== -->
     <div class="ql-sticky-bar">
-      <!-- ===== 单行一体化 Header 工具栏：左-中-右 等分布局（搜索框绝对居中） ===== -->
+      <!-- ===== 单行 Header 工具栏：左-中-右 简化三段式 ===== -->
       <div class="ql-header-bar">
-        <!-- ── 左侧容器：侧栏开关 + 状态 Tabs（flex-1 平分剩余空间，紧凑靠左） ── -->
+        <!-- ── 左侧容器：侧栏开关 + 状态下拉（常驻，全屏通用） ── -->
         <div class="ql-header-left">
           <!-- 0. 知识树面板 Toggle 图标按钮（Notion/Linear 风格） -->
           <button
@@ -30,26 +30,8 @@
             <AppIcon name="panel-left" :size="16" />
           </button>
 
-          <!-- 1. 状态切换：宽屏 Segmented Tab / 窄屏 Select 下拉 -->
-          <div class="ql-seg-ctrl ql-status-wide">
-            <button
-              v-for="tab in statusTabs"
-              :key="tab.value"
-              class="ql-seg-item"
-              :class="{ active: currentStatus === tab.value }"
-              @click="switchStatus(tab.value)"
-            >
-              <AppIcon :name="tab.icon" :size="14" class="ql-seg-icon" />
-              <span class="ql-seg-label">{{ tab.label }}</span>
-              <span
-                v-if="tab.value === 'pending' && pendingReviewCount > 0"
-                class="ql-seg-badge"
-              >{{ pendingReviewCount > 99 ? '99+' : pendingReviewCount }}</span>
-            </button>
-          </div>
-          <!-- 窄屏自定义状态下拉：对齐筛选面板样式，触发按钮标签化 -->
+          <!-- 1. 状态切换：全局常驻下拉菜单（ALL → 纯文字 / 非 ALL → 蓝色标签 + × 清除） -->
           <div class="ql-status-dropdown" :class="{ 'is-open': openDropdown === 'header-status' }">
-            <!-- 触发按钮：ALL → 低调纯文字；非 ALL → 蓝色标签 + × 清除 -->
             <button
               v-if="currentStatus === 'ALL'"
               type="button"
@@ -87,7 +69,7 @@
           </div>
         </div>
 
-        <!-- ── 中间容器：搜索框（shrink-0 绝对居中，窄屏下弹性伸缩） ── -->
+        <!-- ── 中间容器：搜索框（弹性伸缩，占据剩余空间） ── -->
         <div class="ql-header-center">
           <div class="ql-search-wrap" :class="{ 'is-expanded': isSearchFocused || !!query.keyword }">
             <AppIcon name="search" :size="14" class="ql-search-icon" />
@@ -103,7 +85,7 @@
           </div>
         </div>
 
-        <!-- ── 右侧容器：筛选 + 试题篮 + 新建题目 + 统计（flex-1 平分剩余空间，紧凑靠右） ── -->
+        <!-- ── 右侧容器：筛选 + 试题篮 + 新建题目 + 统计（shrink-0 不可压缩） ── -->
         <div class="ql-header-actions">
           <button class="ql-filter-btn" :class="{ active: showFilter || hasAnyFilter }" @click="toggleFilter">
             <AppIcon name="filter" :size="14" />
@@ -1147,7 +1129,7 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-/* ===== 融合单行工具栏 (Header Bar)：左-中-右 等分布局 ===== */
+/* ===== 融合单行工具栏 (Header Bar)：简化三段式 Flex 布局 ===== */
 .ql-header-bar {
   display: flex;
   align-items: center;
@@ -1155,38 +1137,41 @@ onBeforeUnmount(() => {
   width: 100%;
   height: 56px;
   padding: 0 16px;
+  gap: 16px;
+  overflow: visible; /* 关键：允许下拉菜单溢出 header 区域，不被裁剪 */
   border-bottom: 1px solid var(--divider);
   background: var(--bg-primary);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
   position: relative;
-  z-index: 10;
+  z-index: 20; /* 高于下方 .ql-scroll-area (z-index:1)，低于 .ql-sticky-bar (z-index:100) */
 }
 
-/* 左侧容器：侧栏开关 + 状态 Tabs — flex-1 平分剩余空间，紧凑靠左 */
+/* 左侧容器：侧栏开关 + 状态下拉 — shrink-0 不可压缩 */
 .ql-header-left {
   display: flex;
-  flex: 1;
   align-items: center;
   justify-content: flex-start;
-  gap: 16px;
-  min-width: 0;
-}
-
-/* 中间容器：搜索框 — shrink-0 绝对居中，不被两侧挤压 */
-.ql-header-center {
-  display: flex;
-  justify-content: center;
+  gap: 12px;
   flex-shrink: 0;
 }
 
-/* 右侧容器：筛选 + 新建 + 统计 — flex-1 平分剩余空间，紧凑靠右 */
+/* 中间容器：搜索框 — flex-1 弹性伸缩，max-w-400px */
+.ql-header-center {
+  display: flex;
+  justify-content: center;
+  flex: 1;
+  min-width: 140px;
+  max-width: 400px;
+  flex-shrink: 1;
+}
+
+/* 右侧容器：筛选 + 新建 + 统计 — shrink-0 不可压缩 */
 .ql-header-actions {
   display: flex;
-  flex: 1;
   align-items: center;
   justify-content: flex-end;
   gap: 12px;
-  min-width: 0;
+  flex-shrink: 0;
 }
 
 /* 筛选激活小原点 */
@@ -1244,20 +1229,9 @@ onBeforeUnmount(() => {
   color: var(--accent);
 }
 
-/* Segmented Control — Apple 风格胶囊分段控制器 */
-.ql-seg-ctrl {
-  display: inline-flex;
-  align-items: center;
-  background: var(--bg-input);
-  border: 1px solid var(--border-color);
-  border-radius: 10px;
-  padding: 3px;
-  gap: 2px;
-}
-
-/* 窄屏状态自定义下拉：默认隐藏，< 1280px 时显示替代 Segmented */
+/* 状态下拉菜单：全局常驻，所有屏幕尺寸通用 */
 .ql-status-dropdown {
-  display: none;
+  display: block;
   position: relative;
   flex-shrink: 0;
 }
@@ -1352,93 +1326,6 @@ onBeforeUnmount(() => {
   color: var(--text-muted);
   font-weight: 400;
   margin-left: 2px;
-}
-
-.ql-seg-item {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 14px;
-  border: none;
-  background: transparent;
-  border-radius: 7px;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-secondary);
-  cursor: pointer;
-  transition: all 0.28s cubic-bezier(0.4, 0, 0.2, 1);
-  white-space: nowrap;
-  user-select: none;
-}
-
-.ql-seg-icon {
-  flex-shrink: 0;
-  opacity: 0.7;
-  transition: opacity 0.28s ease;
-}
-
-.ql-seg-item:hover:not(.active) {
-  color: var(--text-primary);
-  background: var(--bg-hover);
-}
-
-.ql-seg-item:hover:not(.active) .ql-seg-icon {
-  opacity: 0.9;
-}
-
-.ql-seg-item.active {
-  background: var(--bg-canvas);
-  color: var(--text-primary);
-  font-weight: 600;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.06);
-}
-
-.ql-seg-item.active .ql-seg-icon {
-  opacity: 1;
-  color: var(--accent);
-}
-
-[data-theme='dark'] .ql-seg-item.active {
-  background: var(--bg-active);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
-}
-
-.ql-seg-label {
-  line-height: 1;
-}
-
-/* 待审核数字徽标 — 红色小圆角，与文字保持间距 */
-.ql-seg-badge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 18px;
-  height: 17px;
-  margin-left: 4px;
-  padding: 0 5px;
-  border-radius: 9999px;
-  background: var(--danger);
-  color: #fff;
-  font-size: 10.5px;
-  font-weight: 700;
-  line-height: 1;
-  letter-spacing: 0.02em;
-  box-shadow: 0 0 0 2px var(--bg-input);
-  animation: ql-badge-pop 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
-}
-
-.ql-seg-item.active .ql-seg-badge {
-  box-shadow: 0 0 0 2px var(--bg-canvas);
-}
-
-[data-theme='dark'] .ql-seg-item.active .ql-seg-badge {
-  box-shadow: 0 0 0 2px var(--bg-active);
-}
-
-@keyframes ql-badge-pop {
-  0% { transform: scale(0); opacity: 0; }
-  100% { transform: scale(1); opacity: 1; }
 }
 
 /* ===== Apple风格吸顶工具栏 ===== */
@@ -2636,18 +2523,7 @@ onBeforeUnmount(() => {
 
 /* ── 中窄屏 (< 1280px)：极简图标化 + 动态收缩策略 ── */
 @media (max-width: 1279px) {
-  /* 1. 状态 Tabs 下拉化：隐藏 Segmented，显示自定义下拉 */
-  .ql-status-wide {
-    display: none;
-  }
-  .ql-status-dropdown {
-    display: block;
-  }
-  .ql-status-dropdown.is-open .ql-status-plain {
-    color: var(--accent);
-  }
-
-  /* 2. +新建题目 图标化：隐藏文字，缩为方形图标按钮 */
+  /* +新建题目 图标化：隐藏文字，缩为方形图标按钮 */
   .ql-new-label {
     display: none;
   }
@@ -2688,15 +2564,13 @@ onBeforeUnmount(() => {
     flex-wrap: wrap;
     height: auto;
     padding: 8px 12px;
+    overflow: visible;
   }
-  /* 小屏下取消左-中-右等分，改为两行布局：第一行左侧+右侧，第二行搜索框 */
-  .ql-header-left,
-  .ql-header-actions {
-    flex: 0 0 auto;
-  }
+  /* 小屏两行布局：第一行左侧+右侧，第二行搜索框整行 */
   .ql-header-center {
     order: 3;
     flex: 1 0 100%;
+    max-width: none;
     width: 100%;
     margin-top: 8px;
   }
