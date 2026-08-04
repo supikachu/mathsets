@@ -1619,9 +1619,10 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 16px 20px 14px;
-  background: var(--bg-card);
+  padding: 16px 20px 16px;
+  background: var(--bg-primary); /* 极淡灰背景，区别于下方纯白题目卡片 */
   border-top: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border-color); /* 底部清晰分割线，隔断与题目列表的联系 */
 }
 
 /* —— 平铺标签行 —— */
