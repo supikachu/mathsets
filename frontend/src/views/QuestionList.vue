@@ -47,16 +47,44 @@
               >{{ pendingReviewCount > 99 ? '99+' : pendingReviewCount }}</span>
             </button>
           </div>
-          <!-- 窄屏下拉选择器：默认隐藏，< 1280px 时显示替代 Segmented -->
-          <select
-            class="ql-status-select"
-            :value="currentStatus"
-            @change="switchStatus(($event.target as HTMLSelectElement).value)"
-          >
-            <option v-for="tab in statusTabs" :key="tab.value" :value="tab.value">
-              {{ tab.label }}<template v-if="tab.value === 'pending' && pendingReviewCount > 0"> ({{ pendingReviewCount > 99 ? '99+' : pendingReviewCount }})</template>
-            </option>
-          </select>
+          <!-- 窄屏自定义状态下拉：对齐筛选面板样式，触发按钮标签化 -->
+          <div class="ql-status-dropdown" :class="{ 'is-open': openDropdown === 'header-status' }">
+            <!-- 触发按钮：ALL → 低调纯文字；非 ALL → 蓝色标签 + × 清除 -->
+            <button
+              v-if="currentStatus === 'ALL'"
+              type="button"
+              class="ql-status-trigger ql-status-plain"
+              @click.stop="toggleDropdown('header-status')"
+            >
+              <span>{{ currentStatusLabel }}</span>
+              <AppIcon name="chevron-down" :size="11" class="ql-status-caret" />
+            </button>
+            <span v-else class="ql-status-trigger ql-status-chip">
+              {{ currentStatusLabel }}
+              <button
+                class="ql-status-chip-x"
+                @click.stop="switchStatus('ALL'); openDropdown = null"
+                :title="`清除筛选，恢复全部`"
+              >
+                <AppIcon name="x" :size="10" />
+              </button>
+            </span>
+            <!-- 下拉面板：悬浮白底卡片，对齐 .ql-dd-panel 风格 -->
+            <div v-if="openDropdown === 'header-status'" class="ql-dd-panel ql-status-panel">
+              <button
+                v-for="tab in statusTabs"
+                :key="tab.value"
+                class="ql-dd-opt"
+                :class="{ active: currentStatus === tab.value }"
+                @click.stop="switchStatus(tab.value); openDropdown = null"
+              >
+                {{ tab.label }}
+                <template v-if="tab.value === 'pending' && pendingReviewCount > 0">
+                  <span class="ql-status-badge-inline">({{ pendingReviewCount > 99 ? '99+' : pendingReviewCount }})</span>
+                </template>
+              </button>
+            </div>
+          </div>
         </div>
 
         <!-- ── 中间容器：搜索框（shrink-0 绝对居中，窄屏下弹性伸缩） ── -->
@@ -558,6 +586,12 @@ const totalCount = ref(0)
 // 搜索框聚焦态：驱动窄屏下搜索框的弹性伸缩（聚焦或有内容时展开）
 const isSearchFocused = ref(false)
 
+// 当前状态的中文标签（用于窄屏下拉触发按钮显示）
+const currentStatusLabel = computed(() => {
+  const tab = statusTabs.find((t) => t.value === currentStatus.value)
+  return tab?.label ?? '全部'
+})
+
 function switchStatus(value: string) {
   currentStatus.value = value
   // 同步到 query.status（ALL → undefined 表示不过滤）
@@ -658,10 +692,10 @@ function clearAllFilters() {
   fetchList()
 }
 
-// 下拉面板点击外部关闭
+// 下拉面板点击外部关闭（同时处理筛选面板下拉和 Header 状态下拉）
 function onDropdownClickOutside(e: MouseEvent) {
-  const target = e.target as Node
-  if (!(e.target as HTMLElement).closest('.ql-matrix-dropdown')) {
+  const el = e.target as HTMLElement
+  if (!el.closest('.ql-matrix-dropdown') && !el.closest('.ql-status-dropdown')) {
     openDropdown.value = null
   }
 }
@@ -886,7 +920,7 @@ watch(() => filters.region, () => {
 })
 
 // 底部下拉面板展开状态（同时只展开一个）
-const openDropdown = ref<null | 'year' | 'grade' | 'semester' | 'region' | 'city' | 'status'>(null)
+const openDropdown = ref<null | 'year' | 'grade' | 'semester' | 'region' | 'city' | 'status' | 'header-status'>(null)
 function toggleDropdown(key: typeof openDropdown.value) {
   openDropdown.value = openDropdown.value === key ? null : key
 }
@@ -1323,9 +1357,103 @@ onBeforeUnmount(() => {
   gap: 2px;
 }
 
-/* 窄屏状态 Select 下拉：默认隐藏，< 1280px 时显示替代 Segmented */
-.ql-status-select {
+/* 窄屏状态自定义下拉：默认隐藏，< 1280px 时显示替代 Segmented */
+.ql-status-dropdown {
   display: none;
+  position: relative;
+  flex-shrink: 0;
+}
+
+/* 触发按钮通用基础 */
+.ql-status-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  transition: color 0.18s ease, background-color 0.18s ease, border-color 0.18s ease;
+  user-select: none;
+  white-space: nowrap;
+}
+
+/* 普通态（ALL）：低调纯文字，带下拉箭头 */
+.ql-status-plain {
+  padding: 4px 0;
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.ql-status-plain:hover {
+  color: var(--text-primary);
+}
+
+/* 标签态（非 ALL）：蓝色边框标签 + × 清除按钮，对齐 .ql-dd-chip */
+.ql-status-chip {
+  gap: 4px;
+  padding: 3px 4px 3px 10px;
+  border-radius: 6px;
+  background: #fff;
+  border: 1px solid #bfdbfe; /* blue-200 */
+  color: #3b82f6; /* blue-500 */
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  transition: background-color 0.18s ease, color 0.18s ease, border-color 0.18s ease;
+}
+
+/* Hover：极浅蓝底 + 加深蓝字，禁止使用 --accent-hover（实为深蓝 #0077ed） */
+.ql-status-chip:hover {
+  background: #eff6ff; /* blue-50 */
+  color: #2563eb; /* blue-600 */
+  border-color: #93c5fd; /* blue-300 */
+}
+
+/* 标签内 × 清除按钮 */
+.ql-status-chip-x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border: none;
+  background: transparent;
+  color: #3b82f6; /* blue-500 */
+  cursor: pointer;
+  border-radius: 50%;
+  padding: 0;
+  flex-shrink: 0;
+  transition: background-color 0.18s ease, color 0.18s ease;
+}
+
+.ql-status-chip-x:hover {
+  background: #dbeafe; /* blue-100，柔和提示而非深蓝块 */
+  color: #2563eb; /* blue-600 */
+}
+
+/* 下拉箭头图标 */
+.ql-status-caret {
+  color: var(--text-muted);
+  transition: transform 0.2s, color 0.2s;
+}
+
+.ql-status-dropdown.is-open .ql-status-caret {
+  transform: rotate(180deg);
+  color: var(--accent);
+}
+
+/* 下拉面板扩展：确保 .ql-dd-panel 在 Header 下拉中正确定位 */
+.ql-status-panel {
+  min-width: 140px;
+  z-index: 300; /* 高于筛选面板的 200，确保 Header 下拉在筛选面板之上 */
+}
+
+/* 待审核数量内联徽标（下拉选项中显示） */
+.ql-status-badge-inline {
+  color: var(--text-muted);
+  font-weight: 400;
+  margin-left: 2px;
 }
 
 .ql-seg-item {
@@ -2596,40 +2724,15 @@ onBeforeUnmount(() => {
 
 /* ── 中窄屏 (< 1280px)：极简图标化 + 动态收缩策略 ── */
 @media (max-width: 1279px) {
-  /* 1. 状态 Tabs 下拉化：隐藏 Segmented，显示 Select */
+  /* 1. 状态 Tabs 下拉化：隐藏 Segmented，显示自定义下拉 */
   .ql-status-wide {
     display: none;
   }
-  .ql-status-select {
+  .ql-status-dropdown {
     display: block;
-    width: 112px; /* w-28 */
-    height: 34px;
-    padding: 0 8px;
-    border-radius: 9px;
-    background: var(--bg-input);
-    border: 1px solid var(--border-color);
-    color: var(--text-primary);
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
-    flex-shrink: 0;
-    /* 自定义箭头外观 */
-    appearance: none;
-    -webkit-appearance: none;
-    background-image: linear-gradient(45deg, transparent 50%, var(--text-muted) 50%),
-      linear-gradient(135deg, var(--text-muted) 50%, transparent 50%);
-    background-position: calc(100% - 14px) 50%, calc(100% - 10px) 50%;
-    background-size: 4px 4px;
-    background-repeat: no-repeat;
-    transition: border-color 0.18s ease, box-shadow 0.18s ease;
   }
-  .ql-status-select:hover {
-    border-color: var(--accent);
-  }
-  .ql-status-select:focus {
-    outline: none;
-    border-color: var(--accent);
-    box-shadow: 0 0 0 3px var(--accent-light);
+  .ql-status-dropdown.is-open .ql-status-plain {
+    color: var(--accent);
   }
 
   /* 2. +新建题目 图标化：隐藏文字，缩为方形图标按钮 */
