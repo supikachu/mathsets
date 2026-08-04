@@ -474,6 +474,7 @@ onMounted(async () => {
   height: 56px;
   padding: 0 14px;
   border-bottom: 1px solid var(--divider);
+  background: var(--bg-primary);
   flex-shrink: 0;
 }
 
