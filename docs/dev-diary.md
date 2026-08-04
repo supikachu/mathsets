@@ -1,6 +1,6 @@
 # 开发日记
 
-> 项目：协同题库系统 (mathset)
+> 项目：协同题库系统 (mathsets)
 > 技术栈：Rust + Axum 0.8 + PostgreSQL 17 | Vue 3 + Element Plus + Tailwind CSS
 
 ---
@@ -24,7 +24,7 @@
 #### 3. 数据库搭建
 - 安装 PostgreSQL 17.9 本地服务
 - 配置 `pg_hba.conf` 为 trust 认证
-- 创建数据库 `mathset`
+- 创建数据库 `mathsets`
 - 编写 SQLx 迁移：`users` / `groups` / `group_members` / `questions` / `knowledge_points` 等 8 张表
 
 #### 4. 后端 API 实现
@@ -70,7 +70,7 @@
 ### 项目结构总览
 
 ```
-mathset/
+mathsets/
 ├── Cargo.toml
 ├── .env
 ├── .cargo/config.toml       ← PATH 持久化（MinGW + PostgreSQL）

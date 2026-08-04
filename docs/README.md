@@ -1,4 +1,4 @@
-# MathSet 文档中心
+# MathSets 文档中心
 
 > 面向教师的 AI 驱动数学题库系统
 
@@ -30,6 +30,6 @@ docs/
 
 ## 相关资源
 
-- 🏠 [项目首页](https://github.com/your-org/mathset)
-- 🐛 [问题反馈](https://github.com/your-org/mathset/issues)
-- 💬 [讨论区](https://github.com/your-org/mathset/discussions)
+- 🏠 [项目首页](https://github.com/supikachu/mathsets)
+- 🐛 [问题反馈](https://github.com/supikachu/mathsets/issues)
+- 💬 [讨论区](https://github.com/supikachu/mathsets/discussions)

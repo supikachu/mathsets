@@ -1,4 +1,4 @@
-# MathSet 📐
+# MathSets 📐
 
 > 面向教师的 **AI 驱动数学题库系统** —— 智能录入、协同编辑、公式完美渲染
 
@@ -35,7 +35,7 @@
 ## 📁 项目结构
 
 ```
-mathset/
+mathsets/
 ├── src/                    # Rust 后端
 │   ├── handlers/           # API 处理器（题目、空间、审核、AI 等）
 │   ├── models/             # 数据模型与 DTO
@@ -62,7 +62,7 @@ mathset/
 - **Rust** ≥ 1.85
 - **Node.js** ≥ 20
 - **PostgreSQL** ≥ 17
-- **pnpm**（推荐）或 npm
+- **npm** ≥ 10
 
 ### 1. 克隆与安装
 
@@ -72,7 +72,7 @@ cd mathsets
 
 # 前端依赖
 cd frontend
-pnpm install
+npm install
 cd ..
 ```
 
@@ -82,11 +82,11 @@ cd ..
 cp .env.example .env
 ```
 
-编辑 `.env` 文件，填入必要的配置：
+ 编辑 `.env` 文件，填入必要的配置：
 
 ```bash
 # 数据库连接（必填）
-DATABASE_URL=postgres://user:password@localhost:5432/mathset
+DATABASE_URL=postgres://user:password@localhost:5432/mathsets
 
 # JWT 密钥（生产环境必须修改）
 JWT_SECRET=your_secure_secret_key_here
@@ -116,7 +116,7 @@ cargo run
 
 ```bash
 cd frontend
-pnpm dev
+npm run dev
 # 前端启动于 http://127.0.0.1:5173
 # 自动代理 /api 请求到后端
 ```
@@ -126,7 +126,7 @@ pnpm dev
 ```bash
 # 前端构建
 cd frontend
-pnpm build
+npm run build
 
 # 后端构建
 cd ..
