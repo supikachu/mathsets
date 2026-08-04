@@ -1205,6 +1205,9 @@ onBeforeUnmount(() => {
   padding: 0 16px;
   border-bottom: 1px solid var(--divider);
   background: var(--bg-primary);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+  position: relative;
+  z-index: 10;
 }
 
 /* 右侧操作聚合区 */
