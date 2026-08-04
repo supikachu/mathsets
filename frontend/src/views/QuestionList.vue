@@ -1201,7 +1201,8 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 8px 16px;
+  height: 56px;
+  padding: 0 16px;
   border-bottom: 1px solid var(--divider);
   background: var(--bg-primary);
 }
