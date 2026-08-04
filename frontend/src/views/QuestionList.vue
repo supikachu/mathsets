@@ -412,19 +412,21 @@
             </div>
 
             <!-- Row 2: Body — 题干 + 选项 -->
-            <div class="q-card-body" :ref="setCardBodyRef(card.id)" @click="goDetail(card)">
+            <div class="q-card-body" @click="goDetail(card)">
               <div class="q-stem">
                 <LatexRender :text="card.stem" />
               </div>
-              <!-- 选择题选项（列表页不标注正确答案） -->
-              <div v-if="card.question_type === 'choice' && card.parsedOptions.length > 0" class="q-options" :class="optionLayoutClass(card.id)">
+              <!-- 选择题选项（列表页不标注正确答案）— 严格断点列数控制 1→2→4 -->
+              <div v-if="card.question_type === 'choice' && card.parsedOptions.length > 0" class="q-options">
                 <div
                   v-for="opt in card.parsedOptions"
                   :key="opt.label"
                   class="q-option"
                 >
                   <span class="q-option-label">{{ opt.label }}</span>
-                  <LatexRender :text="opt.content" :inline="true" />
+                  <span class="q-option-content">
+                    <LatexRender :text="opt.content" :inline="true" />
+                  </span>
                 </div>
               </div>
             </div>
@@ -542,7 +544,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick, type ComponentPublicInstance } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { questionApi, type QuestionSummary, type QuestionDetail, type QuestionQuery, type GradeLevel, type SemesterType, type ExamType, type KnowledgeNodeSummary } from '@/api/client'
 import LatexRender from '@/components/LatexRender.vue'
@@ -1014,108 +1016,6 @@ function parseOptions(raw: any): { label: string; content: string }[] {
   })
 }
 
-// ---- 选项自适应布局：基于 KaTeX 渲染后真实宽度测量 ----
-const OPTION_GAP = 16 // 选项间距 (px)
-const OPTION_PADDING = 44 // 选项内 label 圆 + padding 估算 (px)
-const optionLayoutMap = reactive<Record<string, 'grid-4' | 'grid-2' | 'grid-1'>>({})
-const cardBodyRefs = reactive<Record<string, HTMLElement | null>>({})
-const resizeObservers: ResizeObserver[] = []
-let layoutDebounce: ReturnType<typeof setTimeout> | null = null
-
-/** 为某张卡片计算选项布局 */
-function computeOptionLayout(cardId: string) {
-  const container = cardBodyRefs[cardId]
-  if (!container) return
-  const containerWidth = container.clientWidth
-  if (containerWidth === 0) return
-
-  // 获取该卡片内选项容器
-  const optionsEl = container.querySelector<HTMLElement>('.q-options')
-  if (!optionsEl) return
-
-  const optionEls = optionsEl.querySelectorAll<HTMLElement>('.q-option')
-  if (optionEls.length === 0) return
-
-  // 临时切换为非Grid布局以测量选项内容真实宽度
-  const prevDisplay = optionsEl.style.display
-  const prevCols = optionsEl.style.gridTemplateColumns
-  optionsEl.style.display = 'block'
-  optionsEl.style.gridTemplateColumns = ''
-
-  let maxWidth = 0
-  const prevStyles: { el: HTMLElement; display: string; width: string }[] = []
-  optionEls.forEach(el => {
-    prevStyles.push({ el, display: el.style.display, width: el.style.width })
-    el.style.display = 'inline-flex'
-    el.style.width = 'auto'
-    el.style.whiteSpace = 'nowrap'
-    const w = el.scrollWidth
-    if (w > maxWidth) maxWidth = w
-    el.style.whiteSpace = ''
-  })
-
-  // 恢复选项元素样式
-  prevStyles.forEach(({ el, display, width }) => {
-    el.style.display = display
-    el.style.width = width
-  })
-
-  // 恢复选项容器布局
-  optionsEl.style.display = prevDisplay
-  optionsEl.style.gridTemplateColumns = prevCols
-
-  if (maxWidth === 0) return
-
-  // 布局判定
-  const slot = maxWidth + OPTION_GAP
-  let layout: 'grid-4' | 'grid-2' | 'grid-1'
-  if (slot * 4 <= containerWidth) {
-    layout = 'grid-4'
-  } else if (slot * 2 <= containerWidth) {
-    layout = 'grid-2'
-  } else {
-    layout = 'grid-1'
-  }
-  optionLayoutMap[cardId] = layout
-}
-
-/** 对所有卡片重新计算布局（防抖） */
-function recomputeAllLayouts() {
-  if (layoutDebounce) clearTimeout(layoutDebounce)
-  layoutDebounce = setTimeout(() => {
-    Object.keys(cardBodyRefs).forEach(id => computeOptionLayout(id))
-  }, 150)
-}
-
-/** 设置卡片 body 的 ref，并注册 ResizeObserver */
-function setCardBodyRef(cardId: string) {
-  return (el: Element | ComponentPublicInstance | null) => {
-    if (el instanceof HTMLElement) {
-      cardBodyRefs[cardId] = el
-      // 注册 ResizeObserver 监听容器宽度变化
-      const ro = new ResizeObserver(() => recomputeAllLayouts())
-      ro.observe(el)
-      resizeObservers.push(ro)
-    } else {
-      delete cardBodyRefs[cardId]
-    }
-  }
-}
-
-/** 获取某张卡片的选项布局类名 */
-function optionLayoutClass(cardId: string): string {
-  return optionLayoutMap[cardId] || 'grid-2'
-}
-
-// 监听 cardList 变化，在 DOM 更新后触发首次布局计算
-watch(cardList, () => {
-  nextTick(() => {
-    setTimeout(() => {
-      Object.keys(cardBodyRefs).forEach(id => computeOptionLayout(id))
-    }, 100)
-  })
-})
-
 // ---- 工具函数：解析正确答案 ----
 function extractAnswerItem(item: any): string {
   if (typeof item === 'string') return item
@@ -1243,8 +1143,6 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   if (searchTimer) clearTimeout(searchTimer)
-  if (layoutDebounce) clearTimeout(layoutDebounce)
-  resizeObservers.forEach(ro => ro.disconnect())
 })
 </script>
 
@@ -2449,26 +2347,25 @@ onBeforeUnmount(() => {
 }
 
 /* ---- Options (choice question — no correct marking in list view) ---- */
-/* 选择题选项布局: 基于KaTeX真实宽度测量的自适应Grid */
+/* 选择题选项布局：严格断点列数控制，杜绝 3 列异常排版
+   默认 1 列 → md(≥768px) 2 列 → 2xl(≥1536px) 4 列 */
 .q-options {
   display: grid;
-  gap: 16px;
+  gap: 12px;
   margin-top: 14px;
+  grid-template-columns: 1fr; /* 默认 1 列（移动端） */
 }
 
-/* 一行四列 */
-.q-options.grid-4 {
-  grid-template-columns: repeat(4, 1fr);
+@media (min-width: 768px) {
+  .q-options {
+    grid-template-columns: repeat(2, 1fr); /* 平板/中屏：2 列 */
+  }
 }
 
-/* 两行两列 */
-.q-options.grid-2 {
-  grid-template-columns: repeat(2, 1fr);
-}
-
-/* 四行一列 */
-.q-options.grid-1 {
-  grid-template-columns: 1fr;
+@media (min-width: 1536px) {
+  .q-options {
+    grid-template-columns: repeat(4, 1fr); /* 超宽屏：4 列 */
+  }
 }
 
 .q-option {
@@ -2481,11 +2378,26 @@ onBeforeUnmount(() => {
   border: 1px solid transparent;
   font-size: 13.5px;
   line-height: 1.6;
+  min-width: 0; /* 关键：允许 flex 子项收缩，防止内容撑爆容器 */
   transition: var(--transition-fast);
 }
 
 .q-option:hover {
   background: var(--bg-hover);
+}
+
+/* 选项内容容器：公式防挤压 + 局部横向滚动 + 隐藏滚动条 */
+.q-option-content {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  /* scrollbar-hide：Webkit + Firefox */
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* IE10+ */
+}
+.q-option-content::-webkit-scrollbar {
+  display: none; /* Chrome/Safari/Edge */
 }
 
 .q-option-label {
