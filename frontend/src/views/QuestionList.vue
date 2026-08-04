@@ -14,55 +14,72 @@
       <div class="ql-main">
     <!-- ===== Apple风格吸顶工具栏 ===== -->
     <div class="ql-sticky-bar">
-      <!-- ===== 单行一体化响应式 Header 工具栏 ===== -->
+      <!-- ===== 单行一体化 Header 工具栏：左-中-右 等分布局（搜索框绝对居中） ===== -->
       <div class="ql-header-bar">
-        <!-- 0. 最左侧：知识树面板 Toggle 图标按钮（Notion/Linear 风格） -->
-        <button
-          type="button"
-          class="ql-nav-toggle"
-          :class="{ active: isKnowledgeTreeOpen }"
-          :title="isKnowledgeTreeOpen ? '收起知识树导航' : '展开知识树导航'"
-          :aria-label="isKnowledgeTreeOpen ? '收起知识树导航' : '展开知识树导航'"
-          @click="isKnowledgeTreeOpen = !isKnowledgeTreeOpen"
-        >
-          <AppIcon name="panel-left" :size="16" />
-        </button>
-
-        <!-- 1. 左侧：状态切换 Segmented Tab -->
-        <div class="ql-seg-ctrl">
+        <!-- ── 左侧容器：侧栏开关 + 状态 Tabs（flex-1 平分剩余空间，紧凑靠左） ── -->
+        <div class="ql-header-left">
+          <!-- 0. 知识树面板 Toggle 图标按钮（Notion/Linear 风格） -->
           <button
-            v-for="tab in statusTabs"
-            :key="tab.value"
-            class="ql-seg-item"
-            :class="{ active: currentStatus === tab.value }"
-            @click="switchStatus(tab.value)"
+            type="button"
+            class="ql-nav-toggle"
+            :class="{ active: isKnowledgeTreeOpen }"
+            :title="isKnowledgeTreeOpen ? '收起知识树导航' : '展开知识树导航'"
+            :aria-label="isKnowledgeTreeOpen ? '收起知识树导航' : '展开知识树导航'"
+            @click="isKnowledgeTreeOpen = !isKnowledgeTreeOpen"
           >
-            <AppIcon :name="tab.icon" :size="14" class="ql-seg-icon" />
-            <span class="ql-seg-label">{{ tab.label }}</span>
-            <span
-              v-if="tab.value === 'pending' && pendingReviewCount > 0"
-              class="ql-seg-badge"
-            >{{ pendingReviewCount > 99 ? '99+' : pendingReviewCount }}</span>
+            <AppIcon name="panel-left" :size="16" />
           </button>
+
+          <!-- 1. 状态切换：宽屏 Segmented Tab / 窄屏 Select 下拉 -->
+          <div class="ql-seg-ctrl ql-status-wide">
+            <button
+              v-for="tab in statusTabs"
+              :key="tab.value"
+              class="ql-seg-item"
+              :class="{ active: currentStatus === tab.value }"
+              @click="switchStatus(tab.value)"
+            >
+              <AppIcon :name="tab.icon" :size="14" class="ql-seg-icon" />
+              <span class="ql-seg-label">{{ tab.label }}</span>
+              <span
+                v-if="tab.value === 'pending' && pendingReviewCount > 0"
+                class="ql-seg-badge"
+              >{{ pendingReviewCount > 99 ? '99+' : pendingReviewCount }}</span>
+            </button>
+          </div>
+          <!-- 窄屏下拉选择器：默认隐藏，< 1280px 时显示替代 Segmented -->
+          <select
+            class="ql-status-select"
+            :value="currentStatus"
+            @change="switchStatus(($event.target as HTMLSelectElement).value)"
+          >
+            <option v-for="tab in statusTabs" :key="tab.value" :value="tab.value">
+              {{ tab.label }}<template v-if="tab.value === 'pending' && pendingReviewCount > 0"> ({{ pendingReviewCount > 99 ? '99+' : pendingReviewCount }})</template>
+            </option>
+          </select>
         </div>
 
-        <!-- 2. 中间：弹性伸缩搜索框 -->
-        <div class="ql-search-wrap">
-          <AppIcon name="search" :size="14" class="ql-search-icon" />
-          <input
-            v-model="query.keyword"
-            class="ql-search-input"
-            placeholder="搜索题目（输入即搜）"
-            @input="onSearchInput"
-            @keydown.enter="onSearchSubmit"
-          />
+        <!-- ── 中间容器：搜索框（shrink-0 绝对居中，窄屏下弹性伸缩） ── -->
+        <div class="ql-header-center">
+          <div class="ql-search-wrap" :class="{ 'is-expanded': isSearchFocused || !!query.keyword }">
+            <AppIcon name="search" :size="14" class="ql-search-icon" />
+            <input
+              v-model="query.keyword"
+              class="ql-search-input"
+              placeholder="搜索题目（输入即搜）"
+              @input="onSearchInput"
+              @keydown.enter="onSearchSubmit"
+              @focus="isSearchFocused = true"
+              @blur="isSearchFocused = false"
+            />
+          </div>
         </div>
 
-        <!-- 3. 右侧：操作区（筛选 + 试题篮 + 新建题目 + 统计） -->
+        <!-- ── 右侧容器：筛选 + 试题篮 + 新建题目 + 统计（flex-1 平分剩余空间，紧凑靠右） ── -->
         <div class="ql-header-actions">
           <button class="ql-filter-btn" :class="{ active: showFilter || hasAnyFilter }" @click="toggleFilter">
             <AppIcon name="filter" :size="14" />
-            <span>筛选</span>
+            <span class="ql-filter-label">筛选</span>
             <span v-if="hasAnyFilter" class="ql-filter-dot"></span>
           </button>
 
@@ -77,7 +94,7 @@
 
           <button class="ql-new-btn" @click="$router.push('/questions/new')">
             <AppIcon name="plus" :size="15" />
-            <span>新建题目</span>
+            <span class="ql-new-label">新建题目</span>
           </button>
 
           <span class="ql-status-text">共 <strong>{{ totalCount }}</strong> 道</span>
@@ -537,6 +554,9 @@ const statusTabs = [
 const currentStatus = ref<string>('ALL')
 const pendingReviewCount = ref(0)
 const totalCount = ref(0)
+
+// 搜索框聚焦态：驱动窄屏下搜索框的弹性伸缩（聚焦或有内容时展开）
+const isSearchFocused = ref(false)
 
 function switchStatus(value: string) {
   currentStatus.value = value
@@ -1195,12 +1215,12 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-/* ===== 融合单行工具栏 (Header Bar) ===== */
+/* ===== 融合单行工具栏 (Header Bar)：左-中-右 等分布局 ===== */
 .ql-header-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  width: 100%;
   height: 56px;
   padding: 0 16px;
   border-bottom: 1px solid var(--divider);
@@ -1210,12 +1230,31 @@ onBeforeUnmount(() => {
   z-index: 10;
 }
 
-/* 右侧操作聚合区 */
+/* 左侧容器：侧栏开关 + 状态 Tabs — flex-1 平分剩余空间，紧凑靠左 */
+.ql-header-left {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 16px;
+  min-width: 0;
+}
+
+/* 中间容器：搜索框 — shrink-0 绝对居中，不被两侧挤压 */
+.ql-header-center {
+  display: flex;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+/* 右侧容器：筛选 + 新建 + 统计 — flex-1 平分剩余空间，紧凑靠右 */
 .ql-header-actions {
   display: flex;
+  flex: 1;
   align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
+  justify-content: flex-end;
+  gap: 12px;
+  min-width: 0;
 }
 
 /* 筛选激活小原点 */
@@ -1282,6 +1321,11 @@ onBeforeUnmount(() => {
   border-radius: 10px;
   padding: 3px;
   gap: 2px;
+}
+
+/* 窄屏状态 Select 下拉：默认隐藏，< 1280px 时显示替代 Segmented */
+.ql-status-select {
+  display: none;
 }
 
 .ql-seg-item {
@@ -1459,43 +1503,55 @@ onBeforeUnmount(() => {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 
-/* 搜索框 — 弹性自适应宽度，在中间自然拉伸 */
+/* 搜索框 — 固定宽度居中，聚焦高亮提升到父容器（focus-within），消除图标与输入框的样式割裂 */
 .ql-search-wrap {
-  flex: 1;
-  max-width: 320px;
-  min-width: 150px;
   display: flex;
   align-items: center;
-  gap: 0;
-  height: 34px;
+  width: 280px;
+  height: 36px;
+  padding: 0 12px;
   background: var(--bg-input);
   border: 1px solid var(--border-color);
   border-radius: 9px;
-  transition: var(--transition-fast);
-  overflow: hidden;
-  flex-shrink: 1;
+  transition: background-color 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
 }
 
+/* 聚焦时整容器统一高亮：背景转白 + 边框变蓝 + 4px 蓝色光晕，图标与输入框同处一个视觉容器 */
 .ql-search-wrap:focus-within {
+  background: var(--bg-card);
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-light);
+  box-shadow: 0 0 0 4px var(--accent-light);
 }
 
 .ql-search-icon {
   color: var(--text-muted);
   flex-shrink: 0;
-  margin-left: 12px;
+  transition: color 0.18s ease;
+}
+
+.ql-search-wrap:focus-within .ql-search-icon {
+  color: var(--accent);
 }
 
 .ql-search-input {
   flex: 1;
+  min-width: 0;
+  height: 100%;
+  margin-left: 8px;
+  padding: 0;
   border: none;
   outline: none;
   background: transparent;
   font-size: 14px;
   color: var(--text-primary);
-  padding: 0 12px;
-  height: 100%;
+}
+
+/* 彻底剥离 input 自带焦点样式，防止与父容器 focus-within 光晕叠加产生割裂 */
+.ql-search-input:focus,
+.ql-search-input:focus-visible {
+  outline: none;
+  border: none;
+  box-shadow: none;
 }
 
 .ql-search-input::placeholder {
@@ -1605,6 +1661,9 @@ onBeforeUnmount(() => {
 .ql-filter-collapse.is-open {
   max-height: 600px;
   opacity: 1;
+  /* 关键：展开态解除裁剪，让 .ql-dd-panel 绝对定位下拉菜单能溢出面板内容区，
+     否则 overflow:hidden 会以下拉菜单父级的实际内容高度裁切下拉浮层 */
+  overflow: visible;
 }
 
 /* 展开态：解除裁剪，让底部下拉面板 .ql-dd-panel 能自由溢出父容器 */
@@ -1856,6 +1915,8 @@ onBeforeUnmount(() => {
 
 /* ===== 可滚动列表区域（独立滚动域） ===== */
 .ql-scroll-area {
+  position: relative; /* 建立层叠上下文，确保 z-index 生效 */
+  z-index: 1; /* 双保险：永远低于顶部 .ql-sticky-bar (z-index:100) 及其内部下拉浮层 */
   flex: 1;
   min-height: 0; /* Flex 子项允许收缩，使 flex:1 + overflow-y:auto 生效 */
   overflow-y: auto;
@@ -2532,16 +2593,101 @@ onBeforeUnmount(() => {
 }
 
 /* ===== Responsive ===== */
+
+/* ── 中窄屏 (< 1280px)：极简图标化 + 动态收缩策略 ── */
+@media (max-width: 1279px) {
+  /* 1. 状态 Tabs 下拉化：隐藏 Segmented，显示 Select */
+  .ql-status-wide {
+    display: none;
+  }
+  .ql-status-select {
+    display: block;
+    width: 112px; /* w-28 */
+    height: 34px;
+    padding: 0 8px;
+    border-radius: 9px;
+    background: var(--bg-input);
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    flex-shrink: 0;
+    /* 自定义箭头外观 */
+    appearance: none;
+    -webkit-appearance: none;
+    background-image: linear-gradient(45deg, transparent 50%, var(--text-muted) 50%),
+      linear-gradient(135deg, var(--text-muted) 50%, transparent 50%);
+    background-position: calc(100% - 14px) 50%, calc(100% - 10px) 50%;
+    background-size: 4px 4px;
+    background-repeat: no-repeat;
+    transition: border-color 0.18s ease, box-shadow 0.18s ease;
+  }
+  .ql-status-select:hover {
+    border-color: var(--accent);
+  }
+  .ql-status-select:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-light);
+  }
+
+  /* 2. +新建题目 图标化：隐藏文字，缩为方形图标按钮 */
+  .ql-new-label {
+    display: none;
+  }
+  .ql-new-btn {
+    padding: 0;
+    width: 36px;
+    justify-content: center;
+  }
+
+  /* 3. 筛选按钮图标化：隐藏文字 */
+  .ql-filter-label {
+    display: none;
+  }
+  .ql-filter-btn {
+    padding: 0;
+    width: 36px;
+    justify-content: center;
+  }
+
+  /* 4. 弹性扩展搜索框：默认 w-36 (144px)，聚焦或有内容时展开至 w-60 (240px) */
+  .ql-search-wrap {
+    width: 144px;
+    transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+      background-color 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+  }
+  .ql-search-wrap.is-expanded {
+    width: 240px;
+  }
+
+  /* 隐藏右侧统计文本，进一步节省横向空间 */
+  .ql-status-text {
+    display: none;
+  }
+}
+
 @media (max-width: 960px) {
   .ql-header-bar {
     flex-wrap: wrap;
-    gap: 8px 12px;
+    height: auto;
     padding: 8px 12px;
   }
-  .ql-search-wrap {
+  /* 小屏下取消左-中-右等分，改为两行布局：第一行左侧+右侧，第二行搜索框 */
+  .ql-header-left,
+  .ql-header-actions {
+    flex: 0 0 auto;
+  }
+  .ql-header-center {
     order: 3;
     flex: 1 0 100%;
-    max-width: 100%;
+    width: 100%;
+    margin-top: 8px;
+  }
+  .ql-search-wrap,
+  .ql-search-wrap.is-expanded {
+    width: 100%;
   }
   .ql-status-text {
     display: none;
