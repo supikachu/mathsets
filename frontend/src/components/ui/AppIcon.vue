@@ -145,6 +145,10 @@ withDefaults(
     <template v-else-if="name === 'list'">
       <path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" />
     </template>
+    <template v-else-if="name === 'panel-left'">
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M9 4v16" />
+    </template>
     <template v-else-if="name === 'lightbulb'">
       <path d="M9 18h6M10 22h4" />
       <path d="M15.09 14c.18-.58.27-1.23.27-1.9a5.36 5.36 0 1 0-10.72 0c0 .67.09 1.32.27 1.9.31 1.05 1.12 1.85 1.78 2.65.66.8 1.31 1.96 1.31 3.35h4c0-1.39.65-2.55 1.31-3.35.66-.8 1.47-1.6 1.78-2.65z" />

@@ -9,7 +9,7 @@
  *
  * 视觉规范：260px 宽，右侧 1px 分割线，扁平化树渲染，全部 CSS 变量
  */
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import { AppIcon, AppEmpty } from '@/components/ui'
 import {
   knowledgeTreeApi,
@@ -26,8 +26,10 @@ const props = withDefaults(
     selectedId?: string
     /** 锁定知识树 ID（不传则允许在多棵树之间切换） */
     treeId?: string
+    /** 面板全局开关（由父组件 Header Toggle 控制，Notion/Linear 风格） */
+    open?: boolean
   }>(),
-  { selectedId: '', treeId: '' },
+  { selectedId: '', treeId: '', open: true },
 )
 
 const emit = defineEmits<{
@@ -72,41 +74,10 @@ watch(currentSubject, (val) => {
   localStorage.setItem('nav_selected_subject', val)
 })
 
-// ─── 响应式：窗口宽度监测 ──────────────────────────────────────────────
-const winWidth = ref(window.innerWidth)
-const isDrawerMode = computed(() => winWidth.value < 1280)
-/** 抽屉模式下，树面板是否展开（默认收起） */
-const drawerOpen = ref(false)
-
-function onResize() {
-  winWidth.value = window.innerWidth
-  if (isDrawerMode.value) {
-    drawerOpen.value = false
-  } else {
-    // 恢复全尺寸大屏 (>= 1280px) 时，知识树导航默认展开且可见
-    collapsed.value = false
-  }
-}
-
-onUnmounted(() => window.removeEventListener('resize', onResize))
-
 // ─── 状态 ──────────────────────────────────────────────────────────────
-// 知识树收起状态持久化：仅在全尺寸模式且用户显式折叠时持久化
-const collapsed = ref(
-  window.innerWidth >= 1280
-    ? localStorage.getItem('knowledge-tree-collapsed') === 'true'
-    : false,
-)
-watch(collapsed, (val) => {
-  if (!isDrawerMode.value) {
-    localStorage.setItem('knowledge-tree-collapsed', String(val))
-  }
-})
+// 知识树面板显隐由父组件 `open` prop 全局控制（Notion/Linear 风格 Header Toggle）
+const isCollapsed = computed(() => !props.open)
 
-/** 统一判断当前知识树是否处于折叠/关闭状态 */
-const isCollapsed = computed(() => {
-  return isDrawerMode.value ? !drawerOpen.value : collapsed.value
-})
 const trees = ref<KnowledgeTree[]>([])
 const activeTreeId = ref<string>('')
 const treeData = ref<KnowledgeNodeTreeNode[]>([])
@@ -187,20 +158,6 @@ const flatList = computed<FlatItem[]>(() => {
 })
 
 // ─── 方法 ──────────────────────────────────────────────────────────────
-function toggleCollapse() {
-  if (isDrawerMode.value) {
-    // 抽屉模式：切换抽屉开关
-    drawerOpen.value = !drawerOpen.value
-  } else {
-    // 正常模式：收起 / 展开面板宽度
-    collapsed.value = !collapsed.value
-  }
-}
-
-function closeDrawer() {
-  drawerOpen.value = false
-}
-
 function toggleExpand(id: string) {
   const next = new Set(expandedIds.value)
   if (next.has(id)) {
@@ -332,7 +289,6 @@ watch([currentStage, currentSubject, treeMode], () => {
 })
 
 onMounted(async () => {
-  window.addEventListener('resize', onResize, { passive: true })
   await loadTrees()
   if (activeTreeId.value) await loadTreeData()
 })
@@ -343,44 +299,18 @@ onMounted(async () => {
     class="kt-nav-wrapper"
     :class="{
       'is-collapsed': isCollapsed,
-      'is-drawer-mode': isDrawerMode,
-      'drawer-open': isDrawerMode && drawerOpen,
     }"
   >
-    <!-- 抽屉模式背景遮罩 -->
-    <Transition name="kt-backdrop">
-      <div
-        v-if="isDrawerMode && drawerOpen"
-        class="kt-drawer-backdrop"
-        @click="closeDrawer"
-      />
-    </Transition>
-
-    <!-- 实际侧栏：折叠时宽度为 0，内容隐藏 -->
+    <!-- 实际侧栏：折叠时宽度为 0 + 透明度 0 + 左移 16px，配合 overflow-hidden 像拉窗帘一样裁切 -->
     <aside class="kt-nav" :class="{ 'is-collapsed': isCollapsed }">
       <header class="kt-nav-header">
         <div class="kt-nav-title">
           <AppIcon name="list" :size="14" />
           <span>知识树导航</span>
         </div>
-        <!-- Header 内嵌折叠按鈕：所有模式均可用 -->
-        <button
-          type="button"
-          class="kt-header-toggle"
-          :title="isDrawerMode ? '关闭导航' : (collapsed ? '展开导航' : '收起导航')"
-          :aria-label="isDrawerMode ? '关闭导航' : (collapsed ? '展开导航' : '收起导航')"
-          @click="toggleCollapse"
-        >
-          <AppIcon
-            :name="isDrawerMode ? 'x' : 'chevron-left'"
-            class="header-toggle-icon"
-            :class="{ rotated: !isDrawerMode && collapsed }"
-            :size="15"
-          />
-        </button>
       </header>
 
-      <!-- 全部 + 树切换 + 列表 共用滚动区：使用 v-show="!isCollapsed" 彻底防止 Ghost DOM 挤压与溢出 -->
+      <!-- 主体内容：固定宽度 260px，外层像"拉窗帘"一样裁切，防止文字换行错乱 -->
       <div v-show="!isCollapsed" class="kt-nav-body">
         <!-- ===== 顶部筛选区组：三行等宽无界 Tab + 底部分割线 ===== -->
         <div class="kt-filter-group">
@@ -492,55 +422,32 @@ onMounted(async () => {
         </div>
       </div>
     </aside>
-
-    <!-- 边缘悬浮 Toggle 把手：仅在正常模式（非抽屉）下显示，独立剥离在外层容器上 -->
-    <button
-      v-if="!isDrawerMode"
-      type="button"
-      class="kt-nav-edge-toggle"
-      :class="{ 'is-collapsed': collapsed }"
-      :title="collapsed ? '展开知识树导航' : '收起知识树导航'"
-      :aria-label="collapsed ? '展开知识树导航' : '收起知识树导航'"
-      @click="toggleCollapse"
-    >
-      <AppIcon
-        name="chevron-left"
-        class="toggle-chevron"
-        :size="14"
-      />
-    </button>
-
-    <!-- 抽屉模式：展开触发器（仅在 769px~1279px Mini 侧边栏模式且面板关闭时，紧贴侧边栏 64px 右边缘） -->
-    <button
-      v-if="winWidth >= 769 && isDrawerMode && !drawerOpen"
-      type="button"
-      class="kt-drawer-trigger"
-      title="展开知识树导航"
-      aria-label="展开知识树导航"
-      @click="toggleCollapse"
-    >
-      <AppIcon name="chevron-right" :size="15" />
-    </button>
   </div>
 </template>
 
 <style scoped>
-/* ── 外层 wrapper：负责宽度平滑过渡 (260px -> 0px)，独立承载悬浮把手 ── */
+/* ── 外层 wrapper：负责宽度平滑过渡 (260px -> 0px)，像拉窗帘一样裁切内部 ── */
 .kt-nav-wrapper {
   position: relative;
   flex-shrink: 0;
   height: 100%;
   width: 260px;
-  overflow: visible; /* 必须保持 visible，确保外部挂载的拉环按钮永远不被裁切 */
-  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  /* 关键：overflow hidden 让外层裁切内部固定宽度内容，防止文字换行错乱 */
+  overflow: hidden;
+  /* 丝滑滑动过渡：宽度 + 透明度 + 位移 */
+  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 0.3s ease, transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-.kt-nav-wrapper.is-collapsed:not(.is-drawer-mode) {
-  width: 0 !important;
-  overflow: visible !important; /* 关键：wrapper 宽归零，但悬浮拉环按钮依然保留悬挂于视口分割线处 */
+/* 收起状态：宽度归零 + 透明度 0 + 向左微移 16px + 移除外边距 */
+.kt-nav-wrapper.is-collapsed {
+  width: 0;
+  opacity: 0;
+  transform: translateX(-16px);
+  margin: 0;
 }
 
-/* ── 实际侧栏：纯白浮动卡片（Apple 风格） ── */
+/* ── 实际侧栏：纯白浮动卡片（Apple 风格），固定宽度 260px ── */
 .kt-nav {
   width: 260px;
   height: 100%;
@@ -551,193 +458,12 @@ onMounted(async () => {
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-sm);
   overflow: hidden;
-  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.25s ease,
-    box-shadow 0.28s ease;
+  transition: box-shadow 0.28s ease;
 }
 
 /* 悬停时阴影加深，增强卡片浮动感 */
 .kt-nav-wrapper:hover .kt-nav:not(.is-collapsed) {
   box-shadow: var(--shadow-md);
-}
-
-.kt-nav.is-collapsed:not(.is-drawer-mode) {
-  width: 0 !important;
-  opacity: 0;
-  pointer-events: none;
-  overflow: hidden !important;
-}
-
-/* ── 抽屉模式（width < 1280px）── */
-/* wrapper 占位宽度归零，让右侧内容区独占全部空间 */
-.kt-nav-wrapper.is-drawer-mode {
-  width: 0 !important;
-  overflow: visible; /* 让绝对/固定定位子元素溢出 */
-}
-
-/* 抽屉面板：固定浮层，从 mini 侧边栏右边缘滑入，赋予强烈右侧深层阴影 (shadow-2xl) */
-.kt-nav-wrapper.is-drawer-mode .kt-nav {
-  position: fixed;
-  top: 0;
-  left: var(--sidebar-mini-width, 64px); /* 与 mini 侧边栏右边缘精准对齐 */
-  height: 100vh;
-  z-index: 200;
-  box-shadow: 10px 0 32px rgba(0, 0, 0, 0.22), 2px 0 8px rgba(0, 0, 0, 0.08); /* 强烈右侧立体阴影 */
-  transform: translateX(-100%);
-  transition:
-    transform 0.32s cubic-bezier(0.4, 0, 0.2, 1),
-    opacity 0.25s ease;
-  opacity: 0;
-  pointer-events: none;
-}
-
-/* 抽屉打开时滑入 */
-.kt-nav-wrapper.is-drawer-mode.drawer-open .kt-nav {
-  transform: translateX(0);
-  opacity: 1;
-  pointer-events: auto;
-}
-
-/* 抽屉模式下不需要普通 is-collapsed 的 0 宽度 */
-.kt-nav-wrapper.is-drawer-mode.is-collapsed .kt-nav {
-  width: 260px !important;
-}
-
-/* 背景遮罩 */
-.kt-drawer-backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.35);
-  backdrop-filter: blur(2px);
-  -webkit-backdrop-filter: blur(2px);
-  z-index: 199;
-  cursor: pointer;
-}
-
-/* 遮罩动画 */
-.kt-backdrop-enter-active,
-.kt-backdrop-leave-active {
-  transition: opacity 0.28s ease;
-}
-.kt-backdrop-enter-from,
-.kt-backdrop-leave-to {
-  opacity: 0;
-}
-
-/* ── Header 内嵌折叠/关闭按钮 ── */
-.kt-header-toggle {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border-radius: 9999px; /* rounded-full 圆形按钮 */
-  background: transparent;
-  border: none;
-  color: var(--text-muted);
-  cursor: pointer;
-  flex-shrink: 0;
-  transition: background-color 0.18s ease, color 0.18s ease, transform 0.15s ease;
-  outline: none;
-}
-
-.kt-header-toggle:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
-
-.kt-header-toggle:active {
-  transform: scale(0.92);
-}
-
-.header-toggle-icon {
-  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.header-toggle-icon.rotated {
-  transform: rotate(180deg);
-}
-
-/* ── 抽屉触发器：贴附在 Mini 侧边栏 (64px / w-16) 右边缘 (fixed left-[64px] top-1/2 -translate-y-1/2 z-50) ── */
-.kt-drawer-trigger {
-  position: fixed;
-  top: 50%;
-  left: 64px; /* 紧贴 Mini 侧边栏 64px (w-16) 的右边缘 */
-  transform: translateY(-50%);
-  width: 22px;
-  height: 44px;
-  border-radius: 0 12px 12px 0;
-  background: var(--bg-card);
-  border: 1px solid var(--border-color);
-  border-left: none;
-  color: var(--text-muted);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  z-index: 50;
-  box-shadow: 3px 0 10px rgba(0, 0, 0, 0.12); /* shadow-md 吸附拉环立体阴影 */
-  outline: none;
-  transition: all 0.18s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.kt-drawer-trigger:hover {
-  background: var(--bg-hover);
-  color: var(--accent);
-  border-color: var(--accent-light);
-  box-shadow: 4px 0 14px rgba(0, 0, 0, 0.16);
-  transform: translateY(-50%) scale(1.05);
-}
-
-.kt-drawer-trigger:active {
-  transform: translateY(-50%) scale(0.95);
-}
-
-/* ── 边缘悬浮 Toggle 按钮：精细化侧栏折叠拉环 ── */
-.kt-nav-edge-toggle {
-  position: absolute;
-  top: 50%;
-  right: -12px; /* 精准半靠在分割线上 */
-  transform: translateY(-50%);
-  width: 22px;
-  height: 40px;
-  border-radius: 0 12px 12px 0; /* 贴边半圆拉环 */
-  background: var(--bg-card);
-  border: 1px solid var(--border-color);
-  border-left: none;
-  box-shadow: 2px 0 8px rgba(0, 0, 0, 0.08);
-  color: var(--text-muted);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  z-index: 30;
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-  outline: none;
-}
-
-/* Icon 旋转效果 */
-.toggle-chevron {
-  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1), color 0.15s ease;
-}
-
-.kt-nav-edge-toggle.is-collapsed .toggle-chevron {
-  transform: rotate(180deg);
-}
-
-/* Hover 浮跃与色值高亮 */
-.kt-nav-edge-toggle:hover {
-  background: var(--bg-hover);
-  color: var(--accent);
-  border-color: var(--accent-light);
-  box-shadow: 3px 0 12px rgba(0, 0, 0, 0.14);
-  transform: translateY(-50%) scale(1.06);
-}
-
-/* Active 弹簧按压反馈 */
-.kt-nav-edge-toggle:active {
-  transform: translateY(-50%) scale(0.95);
 }
 
 /* ── 顶部标题栏 ── */

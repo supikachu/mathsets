@@ -3,7 +3,12 @@
     <!-- ===== 主体：左侧知识树导航 + 右侧列表区 ===== -->
     <div class="ql-body">
       <!-- 左侧常驻知识树导航（替代旧的 KpTreePanel） -->
-      <KnowledgeTreeNav :selected-id="navNodeId" @select="handleKnowledgeNodeSelect" @context-change="handleContextChange" />
+      <KnowledgeTreeNav
+        :selected-id="navNodeId"
+        :open="isKnowledgeTreeOpen"
+        @select="handleKnowledgeNodeSelect"
+        @context-change="handleContextChange"
+      />
 
       <!-- 右侧：工具栏 + 列表区 -->
       <div class="ql-main">
@@ -11,6 +16,18 @@
     <div class="ql-sticky-bar">
       <!-- ===== 单行一体化响应式 Header 工具栏 ===== -->
       <div class="ql-header-bar">
+        <!-- 0. 最左侧：知识树面板 Toggle 图标按钮（Notion/Linear 风格） -->
+        <button
+          type="button"
+          class="ql-nav-toggle"
+          :class="{ active: isKnowledgeTreeOpen }"
+          :title="isKnowledgeTreeOpen ? '收起知识树导航' : '展开知识树导航'"
+          :aria-label="isKnowledgeTreeOpen ? '收起知识树导航' : '展开知识树导航'"
+          @click="isKnowledgeTreeOpen = !isKnowledgeTreeOpen"
+        >
+          <AppIcon name="panel-left" :size="16" />
+        </button>
+
         <!-- 1. 左侧：状态切换 Segmented Tab -->
         <div class="ql-seg-ctrl">
           <button
@@ -505,6 +522,9 @@ const basket = useQuestionBasket()
 
 // 左侧知识树导航选中的节点 ID（空字符串 = 全部题目）
 const navNodeId = ref('')
+
+// 知识树面板全局开关（Notion/Linear 风格 Header Toggle 控制）
+const isKnowledgeTreeOpen = ref(true)
 
 // ===== 状态切换 Segmented Tab =====
 const statusTabs = [
@@ -1217,6 +1237,36 @@ onBeforeUnmount(() => {
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   margin: 0 2px;
+}
+
+/* 知识树面板 Toggle 图标按钮（Notion/Linear 风格无边框 IconButton） */
+.ql-nav-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background-color 0.18s ease, color 0.18s ease;
+  flex-shrink: 0;
+}
+
+.ql-nav-toggle:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.ql-nav-toggle.active {
+  color: var(--text-secondary);
+}
+
+.ql-nav-toggle.active:hover {
+  color: var(--accent);
 }
 
 /* Segmented Control — Apple 风格胶囊分段控制器 */
