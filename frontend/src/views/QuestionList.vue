@@ -373,7 +373,7 @@
 
             <!-- 学校角标：绝对定位，贴右上角边缘（与来源角标镜像） -->
             <span v-if="schoolName(card)" class="q-school-tag" :title="schoolName(card)">
-              <AppIcon name="bookmark" :size="11" :stroke="2" />
+              <AppIcon name="landmark" :size="11" :stroke="1.6" />
               <span class="q-school-name">{{ schoolName(card) }}</span>
             </span>
 

@@ -233,6 +233,14 @@ withDefaults(
     <template v-else-if="name === 'bookmark'">
       <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
     </template>
+    <template v-else-if="name === 'landmark'">
+      <path d="M3 22h18" />
+      <path d="M6 18v-7" />
+      <path d="M10 18v-7" />
+      <path d="M14 18v-7" />
+      <path d="M18 18v-7" />
+      <path d="M3 10l9-7 9 7" />
+    </template>
     <template v-else-if="name === 'shopping-cart'">
       <circle cx="8" cy="21" r="1" />
       <circle cx="19" cy="21" r="1" />
