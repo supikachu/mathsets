@@ -398,19 +398,11 @@
               <div class="q-stem">
                 <LatexRender :text="card.stem" />
               </div>
-              <!-- 选择题选项（列表页不标注正确答案）— 严格断点列数控制 1→2→4 -->
-              <div v-if="card.question_type === 'choice' && card.parsedOptions.length > 0" class="q-options">
-                <div
-                  v-for="opt in card.parsedOptions"
-                  :key="opt.label"
-                  class="q-option"
-                >
-                  <span class="q-option-label">{{ opt.label }}</span>
-                  <span class="q-option-content">
-                    <LatexRender :text="opt.content" :inline="true" />
-                  </span>
-                </div>
-              </div>
+              <!-- 选择题选项（列表页不标注正确答案）— 紧凑型 4/2/1 动态列数控制 -->
+              <QuestionOptions
+                v-if="card.question_type === 'choice' && card.parsedOptions.length > 0"
+                :options="card.parsedOptions"
+              />
             </div>
 
             <!-- 展开解析区域 -->
@@ -537,6 +529,7 @@ import { ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick } 
 import { useRouter } from 'vue-router'
 import { questionApi, type QuestionSummary, type QuestionDetail, type QuestionQuery, type GradeLevel, type SemesterType, type ExamType, type KnowledgeNodeSummary } from '@/api/client'
 import LatexRender from '@/components/LatexRender.vue'
+import QuestionOptions from '@/components/QuestionOptions.vue'
 import KnowledgeTreeNav from '@/components/KnowledgeTreeNav.vue'
 import { AppButton, AppSelect, AppPagination, AppIcon, AppBadge } from '@/components/ui'
 import { useQuestionBasket } from '@/composables/useQuestionBasket'
@@ -2240,44 +2233,9 @@ onBeforeUnmount(() => {
   margin: 8px 0;
 }
 
-/* ---- Options (choice question — no correct marking in list view) ---- */
-/* 选择题选项布局：严格断点列数控制，杜绝 3 列异常排版
-   默认 1 列 → md(≥768px) 2 列 → 2xl(≥1536px) 4 列 */
+/* ---- Options (choice question — QuestionOptions component) ---- */
 .q-options {
-  display: grid;
-  gap: 12px;
   margin-top: 14px;
-  grid-template-columns: 1fr; /* 默认 1 列（移动端） */
-}
-
-@media (min-width: 768px) {
-  .q-options {
-    grid-template-columns: repeat(2, 1fr); /* 平板/中屏：2 列 */
-  }
-}
-
-@media (min-width: 1536px) {
-  .q-options {
-    grid-template-columns: repeat(4, 1fr); /* 超宽屏：4 列 */
-  }
-}
-
-.q-option {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 8px 12px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-input);
-  border: 1px solid transparent;
-  font-size: 13.5px;
-  line-height: 1.6;
-  min-width: 0; /* 关键：允许 flex 子项收缩，防止内容撑爆容器 */
-  transition: var(--transition-fast);
-}
-
-.q-option:hover {
-  background: var(--bg-hover);
 }
 
 /* 选项内容容器：公式防挤压 + 局部横向滚动 + 隐藏滚动条 */
