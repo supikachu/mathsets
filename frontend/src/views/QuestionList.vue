@@ -14,14 +14,13 @@
       <div class="ql-main">
     <!-- ===== Apple风格吸顶工具栏 ===== -->
     <div class="ql-sticky-bar">
-      <!-- ===== 单行 Header 工具栏：左-中-右 简化三段式 ===== -->
-      <div class="ql-header-bar">
-        <!-- ── 左侧容器：侧栏开关 + 状态下拉（常驻，全屏通用） ── -->
-        <div class="ql-header-left">
-          <!-- 0. 知识树面板 Toggle 图标按钮（Notion/Linear 风格） -->
+      <!-- ===== 单行 Header 工具栏：左-中-右 结构化三段式 ===== -->
+      <div class="ql-header-bar flex items-center justify-between w-full gap-4 pb-4 border-b border-gray-100 dark:border-slate-800 flex-nowrap">
+        <!-- ── 1. 左侧控制组 (Left Group: 侧栏切换 + 状态下拉) ── -->
+        <div class="ql-header-left flex items-center gap-2 shrink-0">
           <button
             type="button"
-            class="ql-nav-toggle"
+            class="ql-nav-toggle flex items-center justify-center w-9 h-9 rounded-lg text-gray-500 hover:bg-gray-100 dark:hover:bg-slate-800 transition-colors"
             :class="{ active: isKnowledgeTreeOpen }"
             :title="isKnowledgeTreeOpen ? '收起知识树导航' : '展开知识树导航'"
             :aria-label="isKnowledgeTreeOpen ? '收起知识树导航' : '展开知识树导航'"
@@ -30,28 +29,27 @@
             <AppIcon name="panel-left" :size="16" />
           </button>
 
-          <!-- 1. 状态切换：全局常驻下拉菜单（ALL → 纯文字 / 非 ALL → 蓝色标签 + × 清除） -->
-          <div class="ql-status-dropdown" :class="{ 'is-open': openDropdown === 'header-status' }">
+          <div class="ql-status-dropdown relative" :class="{ 'is-open': openDropdown === 'header-status' }">
             <button
               v-if="currentStatus === 'ALL'"
               type="button"
-              class="ql-status-trigger ql-status-plain"
+              class="ql-status-trigger ql-status-plain flex items-center gap-1 h-9 px-3 bg-gray-100/70 dark:bg-slate-800/70 hover:bg-gray-200/50 dark:hover:bg-slate-700/50 rounded-lg text-sm text-gray-700 dark:text-gray-200 cursor-pointer transition-colors"
               @click.stop="toggleDropdown('header-status')"
             >
               <span>{{ currentStatusLabel }}</span>
-              <AppIcon name="chevron-down" :size="11" class="ql-status-caret" />
+              <AppIcon name="chevron-down" :size="11" class="ql-status-caret text-gray-400" />
             </button>
-            <span v-else class="ql-status-trigger ql-status-chip">
+            <span v-else class="ql-status-trigger ql-status-chip flex items-center gap-1.5 h-9 px-3 bg-blue-50 dark:bg-blue-950/40 text-blue-600 dark:text-blue-400 rounded-lg text-sm font-medium border border-blue-200 dark:border-blue-800">
               {{ currentStatusLabel }}
               <button
-                class="ql-status-chip-x"
+                class="ql-status-chip-x text-blue-400 hover:text-blue-600"
                 @click.stop="switchStatus('ALL'); openDropdown = null"
                 :title="`清除筛选，恢复全部`"
               >
                 <AppIcon name="x" :size="10" />
               </button>
             </span>
-            <!-- 下拉面板：悬浮白底卡片，对齐 .ql-dd-panel 风格 -->
+
             <div v-if="openDropdown === 'header-status'" class="ql-dd-panel ql-status-panel">
               <button
                 v-for="tab in statusTabs"
@@ -69,13 +67,13 @@
           </div>
         </div>
 
-        <!-- ── 中间容器：搜索框（弹性伸缩，占据剩余空间） ── -->
-        <div class="ql-header-center">
-          <div class="ql-search-wrap" :class="{ 'is-expanded': isSearchFocused || !!query.keyword }">
-            <AppIcon name="search" :size="14" class="ql-search-icon" />
+        <!-- ── 2. 中间搜索组 (Center Group: 柔和融合搜索框) ── -->
+        <div class="ql-header-center flex-1 max-w-[500px] w-full shrink mx-auto">
+          <div class="ql-search-wrap relative flex items-center w-full">
+            <AppIcon name="search" :size="14" class="ql-search-icon absolute left-3 text-gray-400 pointer-events-none" />
             <input
               v-model="query.keyword"
-              class="ql-search-input"
+              class="ql-search-input w-full bg-gray-100/70 dark:bg-slate-800/70 border border-transparent text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 pl-9 pr-4 h-9 rounded-lg transition-all focus:bg-white dark:focus:bg-slate-900 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 focus:outline-none"
               placeholder="搜索题目（输入即搜）"
               @input="onSearchInput"
               @keydown.enter="onSearchSubmit"
@@ -85,24 +83,31 @@
           </div>
         </div>
 
-        <!-- ── 右侧容器：筛选 + 试题篮 + 新建题目 + 空间切换器 ── -->
-        <div class="ql-header-actions">
-          <button class="ql-filter-btn" :class="{ active: showFilter || hasAnyFilter }" @click="toggleFilter">
+        <!-- ── 3. 右侧操作组 (Right Group: 筛选 + 试题篮 + 新建 + 空间切换) ── -->
+        <div class="ql-header-actions flex items-center gap-3 shrink-0">
+          <button
+            class="ql-filter-btn flex items-center gap-2 px-3.5 h-9 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-slate-700/50 hover:text-blue-600 dark:hover:text-blue-400 hover:border-blue-200 dark:hover:border-blue-800 transition-all cursor-pointer shadow-sm"
+            :class="{ '!border-blue-500 !text-blue-600 !bg-blue-50/50 dark:!bg-blue-950/30': showFilter || hasAnyFilter }"
+            @click="toggleFilter"
+          >
             <AppIcon name="filter" :size="14" />
             <span class="ql-filter-label">筛选</span>
-            <span v-if="hasAnyFilter" class="ql-filter-dot"></span>
+            <span v-if="hasAnyFilter" class="ql-filter-dot w-1.5 h-1.5 rounded-full bg-blue-500"></span>
           </button>
 
           <button
             v-if="basket.count.value > 0"
-            class="ql-basket-btn"
+            class="ql-basket-btn relative flex items-center h-9 px-3 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-lg text-sm text-gray-700 dark:text-gray-200 hover:border-blue-500 hover:text-blue-600 transition-all shrink-0 shadow-sm"
             @click="toast.info(`试题篮中有 ${basket.count.value} 道题目`)"
           >
             <AppIcon name="shopping-cart" :size="15" />
             <span class="ql-basket-count">{{ basket.count.value }}</span>
           </button>
 
-          <button class="ql-new-btn" @click="$router.push('/questions/new')">
+          <button
+            class="ql-new-btn flex items-center gap-1.5 h-9 px-3.5 bg-gray-900 dark:bg-white text-white dark:text-gray-900 rounded-lg text-sm font-semibold hover:opacity-90 active:scale-[0.98] transition-all shrink-0 shadow-sm"
+            @click="$router.push('/questions/new')"
+          >
             <AppIcon name="plus" :size="15" />
             <span class="ql-new-label">新建题目</span>
           </button>
@@ -1406,50 +1411,11 @@ onBeforeUnmount(() => {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 
-/* 搜索框 — 固定宽度居中，聚焦高亮提升到父容器（focus-within），消除图标与输入框的样式割裂 */
+/* 搜索框与筛选按钮基础样式微调 */
 .ql-search-wrap {
-  display: flex;
-  align-items: center;
-  width: 280px;
-  height: 36px;
-  padding: 0 12px;
-  background: var(--bg-input);
-  border: 1px solid var(--border-color);
-  border-radius: 9px;
-  transition: background-color 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+  position: relative;
 }
 
-/* 聚焦时整容器统一高亮：背景转白 + 边框变蓝 + 4px 蓝色光晕，图标与输入框同处一个视觉容器 */
-.ql-search-wrap:focus-within {
-  background: var(--bg-card);
-  border-color: var(--accent);
-  box-shadow: 0 0 0 4px var(--accent-light);
-}
-
-.ql-search-icon {
-  color: var(--text-muted);
-  flex-shrink: 0;
-  transition: color 0.18s ease;
-}
-
-.ql-search-wrap:focus-within .ql-search-icon {
-  color: var(--accent);
-}
-
-.ql-search-input {
-  flex: 1;
-  min-width: 0;
-  height: 100%;
-  margin-left: 8px;
-  padding: 0;
-  border: none;
-  outline: none;
-  background: transparent;
-  font-size: 14px;
-  color: var(--text-primary);
-}
-
-/* 彻底剥离 input 自带焦点样式，防止与父容器 focus-within 光晕叠加产生割裂 */
 .ql-search-input:focus,
 .ql-search-input:focus-visible {
   outline: none;
@@ -1457,54 +1423,9 @@ onBeforeUnmount(() => {
   box-shadow: none;
 }
 
-.ql-search-input::placeholder {
-  color: var(--text-muted);
-}
-
-/* 独立筛选按钮（从搜索框分离） */
-.ql-filter-btn {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  height: 36px;
-  padding: 0 14px;
-  border-radius: 10px;
-  background: var(--bg-input);
-  border: 1px solid var(--border-color);
-  color: var(--text-secondary);
-  font-size: 13px;
-  font-weight: 500;
-  transition: var(--transition-fast);
-  white-space: nowrap;
-  flex-shrink: 0;
-  cursor: pointer;
-}
-
-.ql-filter-btn:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: var(--accent-light);
-}
-
-.ql-filter-btn:active {
-  transform: scale(0.96);
-}
-
-/* 新建题目按钮 */
-.ql-new-btn {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  height: 36px;
-  padding: 0 16px;
-  border-radius: 10px;
-  background: var(--text-primary);
-  color: var(--bg-primary);
-  font-size: 13px;
-  font-weight: 600;
-  transition: var(--transition-fast);
-  white-space: nowrap;
-  flex-shrink: 0;
+.ql-filter-btn:active,
+.ql-new-btn:active {
+  transform: scale(0.97);
 }
 
 .ql-new-btn:hover {
@@ -2498,37 +2419,10 @@ onBeforeUnmount(() => {
     justify-content: center;
   }
 
-  /* 4. 弹性扩展搜索框：默认 w-36 (144px)，聚焦或有内容时展开至 w-60 (240px) */
-  .ql-search-wrap {
-    width: 144px;
-    transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1),
-      background-color 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
-  }
-  .ql-search-wrap.is-expanded {
-    width: 240px;
-  }
+
 }
 
-@media (max-width: 960px) {
-  .ql-header-bar {
-    flex-wrap: wrap;
-    height: auto;
-    padding: 8px 12px;
-    overflow: visible;
-  }
-  /* 小屏两行布局：第一行左侧+右侧，第二行搜索框整行 */
-  .ql-header-center {
-    order: 3;
-    flex: 1 0 100%;
-    max-width: none;
-    width: 100%;
-    margin-top: 8px;
-  }
-  .ql-search-wrap,
-  .ql-search-wrap.is-expanded {
-    width: 100%;
-  }
-}
+
 
 /* ── 移动端元信息：窄屏独占，替代左上角 source-badge 和左下角知识点 ── */
 .q-mobile-meta {
