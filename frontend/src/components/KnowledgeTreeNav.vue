@@ -554,7 +554,7 @@ onMounted(async () => {
   font-size: 12.5px;
   font-weight: 500;
   cursor: pointer;
-  transition: background-color 0.22s ease, color 0.22s ease;
+  transition: transform 0.22s ease;
   text-align: center;
 }
 
@@ -593,7 +593,7 @@ onMounted(async () => {
   font-size: 11.5px;
   font-weight: 500;
   cursor: pointer;
-  transition: background-color 0.22s ease, color 0.22s ease;
+  transition: transform 0.22s ease;
   text-align: center;
 }
 
@@ -631,7 +631,7 @@ onMounted(async () => {
   font-size: 11.5px;
   font-weight: 500;
   cursor: pointer;
-  transition: background-color 0.22s ease, color 0.22s ease;
+  transition: transform 0.22s ease;
   text-align: center;
 }
 
@@ -676,7 +676,7 @@ onMounted(async () => {
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  transition: background-color 0.18s ease, color 0.18s ease;
+  transition: transform 0.18s ease;
   text-align: left;
   width: 100%;
   margin-bottom: 4px;
@@ -731,7 +731,7 @@ onMounted(async () => {
   padding: 4px 8px; /* 收紧行距 py-1.5，提升信息密度 */
   border-radius: 8px; /* rounded-lg，柔和的 hover 底色提示 */
   cursor: pointer;
-  transition: background-color 0.15s ease, color 0.15s ease;
+  transition: transform 0.15s ease;
   font-size: 12.5px;
   line-height: 1.5;
   color: var(--text-primary);
@@ -779,7 +779,7 @@ onMounted(async () => {
   color: var(--text-secondary); /* 加深至 gray-400 级别，增强可读性 */
   cursor: pointer;
   flex-shrink: 0;
-  transition: background-color 0.15s ease, color 0.15s ease, transform 0.15s ease;
+  transition: transform 0.15s ease;
   margin-right: 2px;
 }
 

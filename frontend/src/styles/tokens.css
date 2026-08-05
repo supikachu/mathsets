@@ -73,10 +73,14 @@
   --max-width: 1360px;
   --spacing-unit: 24px;
 
-  /* ---- Motion ---- */
-  --transition: all 0.28s cubic-bezier(0.4, 0, 0.2, 1);
-  --transition-fast: all 0.18s cubic-bezier(0.4, 0, 0.2, 1);
-  --transition-spring: all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+  /* ---- Motion ----
+     严禁使用 all：主题切换时会导致所有引用此变量的元素
+     同时动画 background/border-color/color/box-shadow，
+     引发大面积闪烁和卡顿。仅过渡 transform（hover 缩放/位移），
+     其余属性瞬间切换（肉眼无感）。 */
+  --transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-fast: transform 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-spring: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
   --transition-bounce: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
 
   /* ---- Misc ---- */

@@ -17,7 +17,11 @@ html {
   scroll-behavior: smooth;
   height: 100%;
   overflow: hidden !important;
+  scrollbar-gutter: stable;
 }
+
+/* 主题过渡由 useTheme.ts 的 transition-suppression 技术处理，
+   此处无需声明任何全局 transition 规则 */
 
 body {
   font-family:
@@ -43,7 +47,6 @@ body {
   height: 100%;
   margin: 0;
   overflow: hidden !important;
-  transition: background-color var(--transition), color var(--transition);
 }
 
 .app-container {

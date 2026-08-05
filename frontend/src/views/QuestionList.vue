@@ -1214,7 +1214,7 @@ onBeforeUnmount(() => {
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
-  transition: background-color 0.18s ease, color 0.18s ease;
+  transition: transform 0.18s ease;
   flex-shrink: 0;
 }
 
@@ -1244,7 +1244,7 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 4px;
   cursor: pointer;
-  transition: color 0.18s ease, background-color 0.18s ease, border-color 0.18s ease;
+  transition: transform 0.18s ease;
   user-select: none;
   white-space: nowrap;
 }
@@ -1274,7 +1274,7 @@ onBeforeUnmount(() => {
   font-size: 12.5px;
   font-weight: 600;
   line-height: 1.4;
-  transition: background-color 0.18s ease, color 0.18s ease, border-color 0.18s ease;
+  transition: transform 0.18s ease;
 }
 
 /* Hover：极浅蓝底 + 加深蓝字，禁止使用 --accent-hover（实为深蓝 #0077ed） */
@@ -1298,7 +1298,7 @@ onBeforeUnmount(() => {
   border-radius: 50%;
   padding: 0;
   flex-shrink: 0;
-  transition: background-color 0.18s ease, color 0.18s ease;
+  transition: transform 0.18s ease;
 }
 
 .ql-status-chip-x:hover {
@@ -1907,7 +1907,10 @@ onBeforeUnmount(() => {
   border-radius: 16px; /* rounded-2xl */
   border: 1px solid transparent;
   box-shadow: var(--shadow-sm);
-  transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+  /* 仅过渡 transform（hover 上浮动效所需）
+     严禁过渡 all：会导致主题切换时 50-200 张卡片同时
+     动画 background/box-shadow/border-color，引发卡顿闪烁 */
+  transition: transform 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
 }
 
 .q-card:hover {
