@@ -83,10 +83,11 @@
           </div>
         </div>
 
-        <!-- ── 3. 右侧操作组 (Right Group: 筛选 + 试题篮 + 新建 + 空间切换) ── -->
+        <!-- ── 3. 右侧操作组 (Right Group: 统一 rounded-full 胶囊圆角风格) ── -->
         <div class="ql-header-actions flex items-center gap-3 shrink-0">
+          <!-- 筛选按钮 (Outline 胶囊按钮) -->
           <button
-            class="ql-filter-btn flex items-center gap-2 px-3.5 h-9 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-slate-700/50 hover:text-blue-600 dark:hover:text-blue-400 hover:border-blue-200 dark:hover:border-blue-800 transition-all cursor-pointer shadow-sm"
+            class="ql-filter-btn flex items-center gap-2 px-4 h-9 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 text-gray-700 dark:text-gray-200 hover:border-blue-500 hover:text-blue-500 rounded-full text-sm font-medium transition-colors cursor-pointer shadow-sm shrink-0"
             :class="{ '!border-blue-500 !text-blue-600 !bg-blue-50/50 dark:!bg-blue-950/30': showFilter || hasAnyFilter }"
             @click="toggleFilter"
           >
@@ -95,23 +96,26 @@
             <span v-if="hasAnyFilter" class="ql-filter-dot w-1.5 h-1.5 rounded-full bg-blue-500"></span>
           </button>
 
+          <!-- 试题篮按钮 (胶囊按钮) -->
           <button
             v-if="basket.count.value > 0"
-            class="ql-basket-btn relative flex items-center h-9 px-3 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-lg text-sm text-gray-700 dark:text-gray-200 hover:border-blue-500 hover:text-blue-600 transition-all shrink-0 shadow-sm"
+            class="ql-basket-btn relative flex items-center h-9 px-3 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-full text-sm text-gray-700 dark:text-gray-200 hover:border-blue-500 hover:text-blue-500 transition-colors shrink-0 shadow-sm"
             @click="toast.info(`试题篮中有 ${basket.count.value} 道题目`)"
           >
             <AppIcon name="shopping-cart" :size="15" />
             <span class="ql-basket-count">{{ basket.count.value }}</span>
           </button>
 
+          <!-- 新建题目按钮 (Primary CTA: bg-blue-500 hover:bg-blue-600 rounded-full) -->
           <button
-            class="ql-new-btn flex items-center gap-1.5 h-9 px-3.5 bg-gray-900 dark:bg-white text-white dark:text-gray-900 rounded-lg text-sm font-semibold hover:opacity-90 active:scale-[0.98] transition-all shrink-0 shadow-sm"
+            class="ql-new-btn flex items-center gap-1.5 px-4 h-9 bg-blue-500 hover:bg-blue-600 active:bg-blue-700 text-white rounded-full text-sm font-medium shadow-sm transition-colors cursor-pointer shrink-0"
             @click="$router.push('/questions/new')"
           >
             <AppIcon name="plus" :size="15" />
             <span class="ql-new-label">新建题目</span>
           </button>
 
+          <!-- 空间切换器 (胶囊按钮) -->
           <SpaceSwitcher />
         </div>
       </div>
@@ -493,19 +497,22 @@
                 <span class="truncate min-w-0">{{ sourceMeta(card) }}</span>
               </span>
 
-              <!-- 右侧操作按钮组：强防挤压 shrink-0 -->
+              <!-- 右侧操作按钮组：窄屏纯圆形图标/宽屏胶囊按钮 rounded-full -->
               <div class="q-actions flex items-center gap-2 shrink-0">
-                <button class="q-action-btn q-action--ghost" @click="toggleAnalysis(card.id)">
+                <button
+                  class="q-action-btn q-action--ghost w-8 h-8 md:w-auto md:h-auto md:px-3 md:py-1.5 flex items-center justify-center gap-1.5 rounded-full shrink-0 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 text-gray-600 dark:text-gray-300 hover:text-blue-500 hover:border-blue-200 dark:hover:border-blue-800 transition-colors cursor-pointer"
+                  @click="toggleAnalysis(card.id)"
+                >
                   <AppIcon
                     :name="expandedIds.has(card.id) ? 'chevron-up' : 'lightbulb'"
                     :size="14"
                     :stroke="2"
                   />
-                  <span class="q-action-label">{{ expandedIds.has(card.id) ? '收起解析' : '答案解析' }}</span>
+                  <span class="q-action-label hidden md:inline">{{ expandedIds.has(card.id) ? '收起解析' : '答案解析' }}</span>
                 </button>
                 <button
-                  class="q-action-btn"
-                  :class="{ 'q-action--active': basket.isInBasket(card.id) }"
+                  class="q-action-btn w-8 h-8 md:w-auto md:h-auto md:px-3 md:py-1.5 flex items-center justify-center gap-1.5 rounded-full shrink-0 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 text-gray-600 dark:text-gray-300 hover:text-blue-500 hover:border-blue-200 dark:hover:border-blue-800 transition-colors cursor-pointer"
+                  :class="{ '!bg-blue-50 dark:!bg-blue-950/40 !border-blue-500 !text-blue-600 dark:!text-blue-400': basket.isInBasket(card.id) }"
                   @click="toggleBasket(card.id)"
                 >
                   <AppIcon
@@ -513,7 +520,7 @@
                     :size="14"
                     :stroke="2.5"
                   />
-                  <span class="q-action-label">{{ basket.isInBasket(card.id) ? '已加入' : '加入试题篮' }}</span>
+                  <span class="q-action-label hidden md:inline">{{ basket.isInBasket(card.id) ? '已加入' : '加入试题篮' }}</span>
                 </button>
               </div>
             </div>

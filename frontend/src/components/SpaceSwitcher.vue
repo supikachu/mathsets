@@ -1,28 +1,27 @@
 <template>
   <div class="space-switcher relative inline-block shrink-0" ref="switcherRef">
-    <!-- 极简触发按钮 (Ghost 风格) -->
-    <button
-      type="button"
-      class="ss-trigger group flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-gray-700 dark:text-gray-200 rounded-lg hover:bg-gray-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
-      :class="{ 'bg-gray-100 dark:bg-slate-800': open }"
-      @click="open = !open"
-    >
-      <!-- 空间 Icon/头像 -->
-      <span class="ss-icon flex-shrink-0" :class="`ss-icon--${currentKind}`">
-        <AppIcon :name="kindIcon(currentKind)" :size="14" />
-      </span>
+    <!-- 极简 Avatar 纯圆形触发按钮（带有手写自定义 Tooltip） -->
+    <div class="group relative inline-block">
+      <button
+        type="button"
+        class="ss-trigger w-9 h-9 rounded-full bg-gray-100 dark:bg-slate-800 hover:bg-gray-200 dark:hover:bg-slate-700 flex items-center justify-center shrink-0 cursor-pointer transition-colors border border-transparent"
+        :class="{ 'bg-gray-200 dark:bg-slate-700': open }"
+        @click="open = !open"
+      >
+        <!-- 空间 Icon/头像 -->
+        <span class="ss-icon flex items-center justify-center shrink-0" :class="`ss-icon--${currentKind}`">
+          <AppIcon :name="kindIcon(currentKind)" :size="16" />
+        </span>
+      </button>
 
-      <!-- 空间名称 (已精简，彻底删除“当前空间”文字) -->
-      <span class="ss-name truncate max-w-[140px] text-left">{{ currentName }}</span>
-
-      <!-- 展开细化箭头 -->
-      <AppIcon
-        name="chevron-down"
-        :size="16"
-        class="ss-chevron text-gray-400 flex-shrink-0 transition-transform duration-200"
-        :class="{ 'rotate-180': open }"
-      />
-    </button>
+      <!-- 自定义现代 Tooltip：下拉未打开且 Hover 时显现 -->
+      <div
+        v-if="!open"
+        class="absolute right-0 top-full mt-2 pointer-events-none px-2.5 py-1.5 bg-gray-900/90 dark:bg-slate-800/95 text-white text-xs font-medium rounded-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50 shadow-xl whitespace-nowrap backdrop-blur-sm"
+      >
+        {{ '当前空间：' + (currentName || '切换空间') }}
+      </div>
+    </div>
 
     <!-- 现代化的下拉面板 (Vercel / Notion 极简质感) -->
     <Transition name="ss-pop">
@@ -209,7 +208,17 @@ onUnmounted(() => document.removeEventListener('click', onDocumentClick))
 </script>
 
 <style scoped>
-.ss-icon,
+.ss-icon {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: #fff;
+}
+
 .ss-item-icon {
   width: 22px;
   height: 22px;
