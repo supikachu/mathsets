@@ -446,7 +446,7 @@
             </Transition>
 
             <!-- Row 3: Footer — 知识点（窄屏隐藏） + 移动端元信息（窄屏独占） + 操作按钮（图标化） -->
-            <div class="q-card-footer">
+            <div class="q-card-footer flex items-center justify-between w-full gap-2">
               <!-- 知识点标签组：窄屏隐藏 -->
               <div
                 class="q-footer-kp"
@@ -478,12 +478,18 @@
                 </div>
               </div>
 
-              <!-- 移动端元信息：窄屏独占（替代左上角 source-badge 和左下角知识点） -->
-              <span v-if="card && sourceMeta(card)" class="q-mobile-meta" :title="sourceMeta(card)">
-                {{ sourceMeta(card) }}
+              <!-- 移动端元信息：窄屏独占（w-fit 紧凑包裹，消除贪婪拉伸） -->
+              <span
+                v-if="card && sourceMeta(card)"
+                class="q-mobile-meta inline-flex items-center gap-1.5 w-fit max-w-full min-w-0 shrink"
+                :title="sourceMeta(card)"
+              >
+                <AppIcon name="book-open" :size="11" :stroke="1.6" class="shrink-0" />
+                <span class="truncate min-w-0">{{ sourceMeta(card) }}</span>
               </span>
 
-              <div class="q-actions">
+              <!-- 右侧操作按钮组：强防挤压 shrink-0 -->
+              <div class="q-actions flex items-center gap-2 shrink-0">
                 <button class="q-action-btn q-action--ghost" @click="toggleAnalysis(card.id)">
                   <AppIcon
                     :name="expandedIds.has(card.id) ? 'chevron-up' : 'lightbulb'"
@@ -2529,7 +2535,7 @@ onBeforeUnmount(() => {
   display: none; /* 默认隐藏（桌面端） */
   align-items: center;
   gap: 4px;
-  flex: 1;
+  width: fit-content;
   min-width: 0;
   font-size: 11px;
   color: var(--text-muted);
@@ -2560,15 +2566,37 @@ onBeforeUnmount(() => {
     border-right: none;
   }
 
-  /* --- 隐藏次要信息，显示移动端元信息，图标化按钮 --- */
+  /* --- 移动端卡片紧凑化 + 隐藏次要信息，显示移动端元微标签 --- */
+  .q-card-header {
+    padding: 12px 14px 10px; /* 移除顶部 26px 源角标避让空白 */
+  }
+
   .q-school-tag,
   .q-source-badge,
   .q-footer-kp {
     display: none;
   }
+
   .q-mobile-meta {
-    display: flex;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 10px;
+    font-size: 11.5px;
+    font-weight: 500;
+    color: var(--text-muted);
+    background: var(--bg-input);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+    max-width: 100%;
+    width: fit-content;
+    flex-shrink: 1;
   }
+
   .q-action-label {
     display: none;
   }
@@ -2578,9 +2606,6 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 640px) {
-  .q-card-header {
-    padding: 12px 14px 10px; /* source-badge 已在 <768px 隐藏，无需顶部避让 */
-  }
   .q-card-body {
     padding: 12px 14px;
   }
@@ -2589,10 +2614,6 @@ onBeforeUnmount(() => {
   }
   .q-analysis-section {
     padding: 0 14px;
-  }
-  .q-actions {
-    width: 100%;
-    justify-content: flex-end;
   }
 }
 </style>
