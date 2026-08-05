@@ -85,7 +85,7 @@
           </div>
         </div>
 
-        <!-- ── 右侧容器：筛选 + 试题篮 + 新建题目 + 统计（shrink-0 不可压缩） ── -->
+        <!-- ── 右侧容器：筛选 + 试题篮 + 新建题目 + 空间切换器 ── -->
         <div class="ql-header-actions">
           <button class="ql-filter-btn" :class="{ active: showFilter || hasAnyFilter }" @click="toggleFilter">
             <AppIcon name="filter" :size="14" />
@@ -107,7 +107,7 @@
             <span class="ql-new-label">新建题目</span>
           </button>
 
-          <span class="ql-status-text">共 <strong>{{ totalCount }}</strong> 道</span>
+          <SpaceSwitcher />
         </div>
       </div>
 
@@ -531,6 +531,7 @@ import { questionApi, type QuestionSummary, type QuestionDetail, type QuestionQu
 import LatexRender from '@/components/LatexRender.vue'
 import QuestionOptions from '@/components/QuestionOptions.vue'
 import KnowledgeTreeNav from '@/components/KnowledgeTreeNav.vue'
+import SpaceSwitcher from '@/components/SpaceSwitcher.vue'
 import { AppButton, AppSelect, AppPagination, AppIcon, AppBadge } from '@/components/ui'
 import { useQuestionBasket } from '@/composables/useQuestionBasket'
 import { useToast } from '@/composables/useToast'
@@ -1180,23 +1181,6 @@ onBeforeUnmount(() => {
   height: 6px;
   border-radius: 50%;
   background: var(--accent);
-}
-
-/* 统计文本（与右侧操作并排） */
-.ql-status-text {
-  font-size: 12.5px;
-  color: var(--text-muted);
-  white-space: nowrap;
-  letter-spacing: -0.01em;
-  line-height: 1;
-  margin-left: 4px;
-}
-
-.ql-status-text strong {
-  color: var(--text-secondary);
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  margin: 0 2px;
 }
 
 /* 知识树面板 Toggle 图标按钮（Notion/Linear 风格无边框 IconButton） */
@@ -2517,11 +2501,6 @@ onBeforeUnmount(() => {
   .ql-search-wrap.is-expanded {
     width: 240px;
   }
-
-  /* 隐藏右侧统计文本，进一步节省横向空间 */
-  .ql-status-text {
-    display: none;
-  }
 }
 
 @media (max-width: 960px) {
@@ -2542,9 +2521,6 @@ onBeforeUnmount(() => {
   .ql-search-wrap,
   .ql-search-wrap.is-expanded {
     width: 100%;
-  }
-  .ql-status-text {
-    display: none;
   }
 }
 

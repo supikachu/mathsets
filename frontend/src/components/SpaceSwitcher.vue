@@ -211,36 +211,40 @@ onUnmounted(() => document.removeEventListener('click', onDocumentClick))
 <style scoped>
 .space-switcher {
   position: relative;
-  margin: 0 6px 14px;
+  margin: 0;
+  display: inline-block;
+  flex-shrink: 0;
 }
 
 /* ===== Trigger ===== */
 .ss-trigger {
   display: flex;
   align-items: center;
-  gap: 9px;
-  width: 100%;
-  padding: 8px 10px;
-  border-radius: var(--radius-xs);
-  background: var(--bg-hover);
-  border: 1px solid transparent;
+  gap: 7px;
+  height: 36px;
+  padding: 0 10px;
+  border-radius: 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
   cursor: pointer;
   transition: var(--transition-fast);
+  white-space: nowrap;
 }
 
 .ss-trigger:hover {
-  background: var(--bg-secondary);
+  background: var(--bg-hover);
+  border-color: var(--accent);
 }
 
 .ss-trigger.active {
-  background: var(--bg-secondary);
-  border-color: var(--border-color);
+  background: var(--bg-hover);
+  border-color: var(--accent);
 }
 
 .ss-icon {
-  width: 28px;
-  height: 28px;
-  border-radius: 7px;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -261,31 +265,31 @@ onUnmounted(() => document.removeEventListener('click', onDocumentClick))
 }
 
 .ss-info {
-  flex: 1;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: 0;
   overflow: hidden;
   min-width: 0;
+  max-width: 120px;
 }
 
 .ss-label {
-  font-size: 10px;
+  font-size: 9px;
   color: var(--text-muted);
   letter-spacing: 0.02em;
-  line-height: 1.2;
+  line-height: 1;
 }
 
 .ss-name {
-  font-size: 13px;
+  font-size: 12.5px;
   font-weight: 600;
   color: var(--text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 100%;
-  line-height: 1.3;
+  line-height: 1.2;
 }
 
 .ss-chevron {
@@ -302,8 +306,9 @@ onUnmounted(() => document.removeEventListener('click', onDocumentClick))
 .ss-dropdown {
   position: absolute;
   top: calc(100% + 6px);
-  left: 0;
   right: 0;
+  left: auto;
+  min-width: 220px;
   background: var(--bg-card);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-sm);

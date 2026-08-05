@@ -12,6 +12,7 @@
               <span v-if="!isMini">协同题库</span>
             </div>
             <!-- 通知铃只在完整模式显示 -->
+            <!-- NotificationBell -->
             <NotificationBell
               v-if="!isMini"
               :unread-count="unreadCount"
@@ -19,9 +20,6 @@
               @toggle="showNotifDrawer = !showNotifDrawer"
             />
           </div>
-
-          <!-- SpaceSwitcher：mini 模式彻底隐藏 -->
-          <SpaceSwitcher v-if="!isMini" />
 
           <!-- 导航项 -->
           <router-link
@@ -116,7 +114,6 @@ import { useSpaceStore } from '@/stores/space'
 import { useNavItems } from '@/composables/useNavItems'
 import { AppIcon } from '@/components/ui'
 import BottomNav from '@/components/BottomNav.vue'
-import SpaceSwitcher from '@/components/SpaceSwitcher.vue'
 import ThemeToggle from '@/components/ThemeToggle.vue'
 import NotificationBell from '@/components/NotificationBell.vue'
 import NotificationDrawer from '@/components/NotificationDrawer.vue'
