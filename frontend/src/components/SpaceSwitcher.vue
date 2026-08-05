@@ -1,74 +1,82 @@
 <template>
-  <div class="space-switcher" ref="switcherRef">
+  <div class="space-switcher relative inline-block shrink-0" ref="switcherRef">
+    <!-- 极简触发按钮 (Ghost 风格) -->
     <button
       type="button"
-      class="ss-trigger"
-      :class="{ active: open }"
+      class="ss-trigger group flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-gray-700 dark:text-gray-200 rounded-lg hover:bg-gray-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+      :class="{ 'bg-gray-100 dark:bg-slate-800': open }"
       @click="open = !open"
     >
-      <span class="ss-icon" :class="`ss-icon--${currentKind}`">
-        <AppIcon :name="kindIcon(currentKind)" :size="15" />
+      <!-- 空间 Icon/头像 -->
+      <span class="ss-icon flex-shrink-0" :class="`ss-icon--${currentKind}`">
+        <AppIcon :name="kindIcon(currentKind)" :size="14" />
       </span>
-      <div class="ss-info">
-        <span class="ss-label">当前空间</span>
-        <span class="ss-name">{{ currentName }}</span>
-      </div>
-      <!-- 团队空间：显示设置入口 -->
-      <span
-        v-if="currentKind === 'team'"
-        class="ss-settings-btn"
-        title="空间设置"
-        @click.stop="goSettings"
-      >
-        <AppIcon name="settings" :size="14" />
-      </span>
+
+      <!-- 空间名称 (已精简，彻底删除“当前空间”文字) -->
+      <span class="ss-name truncate max-w-[140px] text-left">{{ currentName }}</span>
+
+      <!-- 展开细化箭头 -->
       <AppIcon
         name="chevron-down"
-        :size="13"
-        class="ss-chevron"
-        :class="{ rotated: open }"
+        :size="16"
+        class="ss-chevron text-gray-400 flex-shrink-0 transition-transform duration-200"
+        :class="{ 'rotate-180': open }"
       />
     </button>
 
+    <!-- 现代化的下拉面板 (Vercel / Notion 极简质感) -->
     <Transition name="ss-pop">
-      <div v-if="open" class="ss-dropdown">
+      <div
+        v-if="open"
+        class="ss-dropdown absolute right-0 mt-2 w-64 bg-white dark:bg-slate-900 rounded-xl shadow-xl border border-gray-100 dark:border-slate-800 overflow-hidden z-50 py-1"
+      >
         <template v-for="group in groupedSpaces" :key="group.label">
           <div v-if="group.items.length > 0" class="ss-section">
-            <div class="ss-section-label">{{ group.label }}</div>
+            <!-- 分组标题：极简大写微型字体 -->
+            <div class="px-3 pt-3 pb-1 text-xs font-semibold text-gray-400 uppercase tracking-wider">
+              {{ group.label }}
+            </div>
             <button
               v-for="s in group.items"
               :key="s.id"
               type="button"
-              class="ss-item"
-              :class="{ active: s.id === currentId }"
+              class="ss-item group/item flex items-center justify-between w-full px-3 py-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer hover:bg-gray-50 dark:hover:bg-slate-800/60 transition-colors rounded-md"
+              :class="{ 'font-semibold': s.id === currentId }"
               @click="select(s.id)"
             >
-              <span class="ss-item-icon" :class="`ss-item-icon--${s.kind}`">
-                <AppIcon :name="kindIcon(s.kind)" :size="14" />
-              </span>
-              <span class="ss-item-name">{{ s.name }}</span>
-              <!-- 团队空间项：hover 显示设置图标 -->
-              <span
-                v-if="s.kind === 'team'"
-                class="ss-item-settings"
-                title="空间设置"
-                @click.stop="goSettingsById(s.id)"
-              >
-                <AppIcon name="settings" :size="12" />
-              </span>
-              <AppIcon
-                v-if="s.id === currentId"
-                name="check"
-                :size="13"
-                class="ss-item-check"
-              />
+              <div class="flex items-center gap-2.5 min-w-0 pr-2">
+                <span class="ss-item-icon flex-shrink-0" :class="`ss-item-icon--${s.kind}`">
+                  <AppIcon :name="kindIcon(s.kind)" :size="14" />
+                </span>
+                <span class="truncate">{{ s.name }}</span>
+              </div>
+              <div class="flex items-center gap-1.5 flex-shrink-0">
+                <span
+                  v-if="s.kind === 'team'"
+                  class="ss-item-settings opacity-0 group-hover/item:opacity-100 p-1 hover:text-blue-500 rounded transition-opacity"
+                  title="空间设置"
+                  @click.stop="goSettingsById(s.id)"
+                >
+                  <AppIcon name="settings" :size="13" />
+                </span>
+                <AppIcon
+                  v-if="s.id === currentId"
+                  name="check"
+                  :size="15"
+                  class="text-blue-500 dark:text-blue-400"
+                />
+              </div>
             </button>
           </div>
         </template>
 
-        <!-- 创建团队空间 -->
-        <div class="ss-create-section">
-          <button type="button" class="ss-create-btn" @click="showCreateModal = true">
+        <!-- 底部固定操作：创建团队空间 -->
+        <div class="border-t border-gray-100 dark:border-slate-800 bg-gray-50/60 dark:bg-slate-800/40 p-1 mt-1">
+          <button
+            type="button"
+            class="flex items-center gap-2 w-full px-3 py-2 text-sm text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white hover:bg-gray-200/50 dark:hover:bg-slate-700/50 rounded-lg transition-colors"
+            @click="showCreateModal = true"
+          >
             <AppIcon name="plus" :size="14" />
             创建团队空间
           </button>
@@ -154,13 +162,6 @@ function select(id: string) {
   open.value = false
 }
 
-// ── 跳转空间设置 ──
-function goSettings() {
-  if (!currentId.value) return
-  open.value = false
-  router.push(`/spaces/${currentId.value}/settings`)
-}
-
 function goSettingsById(id: string) {
   open.value = false
   router.push(`/spaces/${id}/settings`)
@@ -189,7 +190,6 @@ async function createTeam() {
   }
 }
 
-// 弹窗打开时自动聚焦输入框
 watch(showCreateModal, (v) => {
   if (v) {
     nextTick(() => createInputRef.value?.focus())
@@ -209,39 +209,8 @@ onUnmounted(() => document.removeEventListener('click', onDocumentClick))
 </script>
 
 <style scoped>
-.space-switcher {
-  position: relative;
-  margin: 0;
-  display: inline-block;
-  flex-shrink: 0;
-}
-
-/* ===== Trigger ===== */
-.ss-trigger {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  height: 36px;
-  padding: 0 10px;
-  border-radius: 10px;
-  background: var(--bg-input);
-  border: 1px solid var(--border-color);
-  cursor: pointer;
-  transition: var(--transition-fast);
-  white-space: nowrap;
-}
-
-.ss-trigger:hover {
-  background: var(--bg-hover);
-  border-color: var(--accent);
-}
-
-.ss-trigger.active {
-  background: var(--bg-hover);
-  border-color: var(--accent);
-}
-
-.ss-icon {
+.ss-icon,
+.ss-item-icon {
   width: 22px;
   height: 22px;
   border-radius: 6px;
@@ -252,211 +221,19 @@ onUnmounted(() => document.removeEventListener('click', onDocumentClick))
   color: #fff;
 }
 
-.ss-icon--personal {
-  background: linear-gradient(135deg, #5b8def, #4178d6);
-}
-
-.ss-icon--team {
-  background: linear-gradient(135deg, #34c759, #2da44e);
-}
-
-.ss-icon--public {
-  background: linear-gradient(135deg, #ff9500, #e68600);
-}
-
-.ss-info {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 0;
-  overflow: hidden;
-  min-width: 0;
-  max-width: 120px;
-}
-
-.ss-label {
-  font-size: 9px;
-  color: var(--text-muted);
-  letter-spacing: 0.02em;
-  line-height: 1;
-}
-
-.ss-name {
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 100%;
-  line-height: 1.2;
-}
-
-.ss-chevron {
-  color: var(--text-muted);
-  flex-shrink: 0;
-  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.ss-chevron.rotated {
-  transform: rotate(180deg);
-}
-
-/* ===== Dropdown ===== */
-.ss-dropdown {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  left: auto;
-  min-width: 220px;
-  background: var(--bg-card);
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-sm);
-  box-shadow: var(--shadow-md);
-  padding: 6px;
-  z-index: 150;
-  max-height: 360px;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-}
-
-.ss-section + .ss-section {
-  margin-top: 4px;
-  padding-top: 4px;
-  border-top: 1px solid var(--border-light);
-}
-
-.ss-section-label {
-  font-size: 10px;
-  font-weight: 600;
-  color: var(--text-muted);
-  padding: 4px 8px 3px;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.ss-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  text-align: left;
-  padding: 7px 8px;
-  border-radius: var(--radius-xs);
-  font-size: 13px;
-  color: var(--text-primary);
-  transition: var(--transition-fast);
-  cursor: pointer;
-}
-
-.ss-item:hover {
-  background: var(--bg-hover);
-}
-
-.ss-item.active {
-  background: var(--accent-light);
-  color: var(--accent);
-  font-weight: 600;
-}
-
-.ss-item-icon {
-  width: 22px;
-  height: 22px;
-  border-radius: 5px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  color: #fff;
-}
-
+.ss-icon--personal,
 .ss-item-icon--personal {
   background: linear-gradient(135deg, #5b8def, #4178d6);
 }
 
+.ss-icon--team,
 .ss-item-icon--team {
   background: linear-gradient(135deg, #34c759, #2da44e);
 }
 
+.ss-icon--public,
 .ss-item-icon--public {
   background: linear-gradient(135deg, #ff9500, #e68600);
-}
-
-.ss-item-name {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.ss-item-check {
-  color: var(--accent);
-  flex-shrink: 0;
-}
-
-/* ===== Settings gear in trigger ===== */
-.ss-settings-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  border-radius: var(--radius-xs);
-  color: var(--text-muted);
-  flex-shrink: 0;
-  transition: var(--transition-fast);
-}
-
-.ss-settings-btn:hover {
-  background: var(--bg-secondary);
-  color: var(--accent);
-}
-
-/* ===== Settings icon in dropdown items ===== */
-.ss-item-settings {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border-radius: 4px;
-  color: var(--text-muted);
-  opacity: 0;
-  transition: var(--transition-fast);
-  flex-shrink: 0;
-}
-
-.ss-item:hover .ss-item-settings {
-  opacity: 1;
-}
-
-.ss-item-settings:hover {
-  background: var(--accent-light);
-  color: var(--accent);
-}
-
-/* ===== Create team space ===== */
-.ss-create-section {
-  margin-top: 4px;
-  padding-top: 6px;
-  border-top: 1px solid var(--border-light);
-}
-
-.ss-create-btn {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 8px 8px;
-  border-radius: var(--radius-xs);
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--accent);
-  transition: var(--transition-fast);
-}
-
-.ss-create-btn:hover {
-  background: var(--accent-light);
 }
 
 /* ===== Create modal ===== */
