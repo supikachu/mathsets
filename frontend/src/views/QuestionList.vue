@@ -371,7 +371,7 @@
               {{ sourceMeta(card) }}
             </span>
 
-            <!-- 学校角标：绝对定位，贴右上角边缘（与来源角标镜像） -->
+            <!-- 学校角标：绝对定位，贴右上角边缘（窄屏隐藏） -->
             <span v-if="schoolName(card)" class="q-school-tag" :title="schoolName(card)">
               <AppIcon name="landmark" :size="11" :stroke="1.6" />
               <span class="q-school-name">{{ schoolName(card) }}</span>
@@ -453,8 +453,9 @@
               </div>
             </Transition>
 
-            <!-- Row 3: Footer — 知识点（流式自适应 + hover-expand 多行展开） + 操作按钮 -->
+            <!-- Row 3: Footer — 知识点（窄屏隐藏） + 移动端元信息（窄屏独占） + 操作按钮（图标化） -->
             <div class="q-card-footer">
+              <!-- 知识点标签组：窄屏隐藏 -->
               <div
                 class="q-footer-kp"
                 :class="{ 'has-more': kpExpandIds.has(card.id) }"
@@ -484,6 +485,12 @@
                   >{{ kn.name }}</span>
                 </div>
               </div>
+
+              <!-- 移动端元信息：窄屏独占（替代左上角 source-badge 和左下角知识点） -->
+              <span v-if="card && sourceMeta(card)" class="q-mobile-meta" :title="sourceMeta(card)">
+                {{ sourceMeta(card) }}
+              </span>
+
               <div class="q-actions">
                 <button class="q-action-btn q-action--ghost" @click="toggleAnalysis(card.id)">
                   <AppIcon
@@ -491,7 +498,7 @@
                     :size="14"
                     :stroke="2"
                   />
-                  {{ expandedIds.has(card.id) ? '收起解析' : '答案解析' }}
+                  <span class="q-action-label">{{ expandedIds.has(card.id) ? '收起解析' : '答案解析' }}</span>
                 </button>
                 <button
                   class="q-action-btn"
@@ -503,7 +510,7 @@
                     :size="14"
                     :stroke="2.5"
                   />
-                  {{ basket.isInBasket(card.id) ? '已加入' : '加入试题篮' }}
+                  <span class="q-action-label">{{ basket.isInBasket(card.id) ? '已加入' : '加入试题篮' }}</span>
                 </button>
               </div>
             </div>
@@ -2583,9 +2590,62 @@ onBeforeUnmount(() => {
   }
 }
 
+/* ── 移动端元信息：窄屏独占，替代左上角 source-badge 和左下角知识点 ── */
+.q-mobile-meta {
+  display: none; /* 默认隐藏（桌面端） */
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── 响应式：窄屏（<768px）修复布局高度链 + 隐藏次要信息 ── */
+@media (max-width: 767px) {
+  /* --- 高度链修复：absolute → flex 流式布局 --- */
+  .ql-page {
+    position: relative;
+    inset: auto;
+    flex: 1;
+    min-height: 0;
+  }
+
+  .ql-body {
+    padding: 0;
+    gap: 0;
+  }
+
+  .ql-main {
+    min-width: 0; /* 移除 600px 下限，允许自适应窄屏 */
+    border-radius: 0;
+    border-left: none;
+    border-right: none;
+  }
+
+  /* --- 隐藏次要信息，显示移动端元信息，图标化按钮 --- */
+  .q-school-tag,
+  .q-source-badge,
+  .q-footer-kp {
+    display: none;
+  }
+  .q-mobile-meta {
+    display: flex;
+  }
+  .q-action-label {
+    display: none;
+  }
+  .q-action-btn {
+    padding: 8px; /* 正方形点击热区 */
+  }
+}
+
 @media (max-width: 640px) {
   .q-card-header {
-    padding: 26px 14px 10px; /* 移动端同步顶部避让来源角标 */
+    padding: 12px 14px 10px; /* source-badge 已在 <768px 隐藏，无需顶部避让 */
   }
   .q-card-body {
     padding: 12px 14px;
@@ -2603,10 +2663,14 @@ onBeforeUnmount(() => {
 }
 </style>
 
-<!-- 非 scoped 样式：打通父级高度链，让 .ql-page 的 absolute/inset:0 能撑满 .view.active -->
+<!-- 非 scoped 样式：打通父级高度链，桌面端绝对定位 + 移动端 flex 流式 -->
 <style>
 .view.active {
+  flex: 1;
+  min-height: 0;
   height: 100%;
-  position: relative; /* 配合子元素 .ql-page 的 absolute inset:0 撑满 */
+  position: relative; /* 桌面端配合子元素 .ql-page 的 absolute inset:0 撑满 */
+  display: flex;
+  flex-direction: column;
 }
 </style>

@@ -456,8 +456,11 @@ onUnmounted(() => {
 @media (max-width: 768px) {
   .layout-root {
     width: 100%;
-    height: auto;
-    overflow: visible;
+    height: 100vh;
+    height: 100dvh; /* 动态视口高度，排除移动端地址栏 */
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
   }
 
   .sidebar {
@@ -465,11 +468,14 @@ onUnmounted(() => {
   }
 
   .app-container {
-    padding: 16px;
-    padding-bottom: calc(var(--nav-height) + 16px);
+    padding: 0; /* 移动端取消外层 padding，由各页面自行控制间距 */
+    padding-bottom: var(--nav-height);
     width: 100%;
-    height: auto;
-    overflow: visible;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
   }
 }
 
