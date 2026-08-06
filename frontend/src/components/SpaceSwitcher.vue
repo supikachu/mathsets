@@ -1,38 +1,27 @@
 <template>
-  <div class="space-switcher relative inline-block shrink-0" ref="switcherRef">
-    <!-- 极简 Avatar 纯圆形触发按钮（带有手写自定义 Tooltip） -->
-    <div class="group relative inline-block">
-      <button
-        type="button"
-        class="ss-trigger w-9 h-9 rounded-full bg-gray-100 dark:bg-slate-800 hover:bg-gray-200 dark:hover:bg-slate-700 flex items-center justify-center shrink-0 cursor-pointer transition-colors border border-transparent"
-        :class="{ 'bg-gray-200 dark:bg-slate-700': open }"
-        @click="open = !open"
-      >
-        <!-- 空间 Icon/头像 -->
-        <span class="ss-icon flex items-center justify-center shrink-0" :class="`ss-icon--${currentKind}`">
-          <AppIcon :name="kindIcon(currentKind)" :size="16" />
-        </span>
-      </button>
+  <div class="space-switcher group relative inline-block shrink-0">
+    <!-- 极简 Avatar 纯圆形触发按钮（Hover 驱动，移除多余的 Tooltip） -->
+    <button
+      type="button"
+      class="ss-trigger w-9 h-9 rounded-full bg-gray-100 dark:bg-slate-800 hover:bg-gray-200 dark:hover:bg-slate-700 flex items-center justify-center shrink-0 cursor-pointer transition-colors border border-transparent"
+    >
+      <!-- 空间 Icon/头像 -->
+      <span class="ss-icon flex items-center justify-center shrink-0" :class="`ss-icon--${currentKind}`">
+        <AppIcon :name="kindIcon(currentKind)" :size="16" />
+      </span>
+    </button>
 
-      <!-- 自定义现代 Tooltip：下拉未打开且 Hover 时显现 -->
+    <!-- 纯 CSS Hover 驱动的下拉面板 (pt-2 作为鼠标移动桥梁) -->
+    <div
+      class="absolute right-0 top-full pt-2 w-64 z-50 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 origin-top-right scale-95 group-hover:scale-100"
+    >
       <div
-        v-if="!open"
-        class="absolute right-0 top-full mt-2 pointer-events-none px-2.5 py-1.5 bg-gray-900/90 dark:bg-slate-800/95 text-white text-xs font-medium rounded-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50 shadow-xl whitespace-nowrap backdrop-blur-sm"
-      >
-        {{ '当前空间：' + (currentName || '切换空间') }}
-      </div>
-    </div>
-
-    <!-- 现代化的下拉面板 (Vercel / Notion 极简质感) -->
-    <Transition name="ss-pop">
-      <div
-        v-if="open"
-        class="ss-dropdown absolute right-0 mt-2 w-64 bg-white dark:bg-slate-900 rounded-xl shadow-xl border border-gray-100 dark:border-slate-800 overflow-hidden z-50 py-1"
+        class="bg-white dark:bg-slate-900 rounded-xl shadow-xl border border-gray-100 dark:border-slate-800 overflow-hidden py-1"
       >
         <template v-for="group in groupedSpaces" :key="group.label">
           <div v-if="group.items.length > 0" class="ss-section">
             <!-- 分组标题：极简大写微型字体 -->
-            <div class="px-3 pt-3 pb-1 text-xs font-semibold text-gray-400 uppercase tracking-wider">
+            <div class="px-3 pt-2.5 pb-1 text-xs font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wider">
               {{ group.label }}
             </div>
             <button
@@ -40,7 +29,7 @@
               :key="s.id"
               type="button"
               class="ss-item group/item flex items-center justify-between w-full px-3 py-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer hover:bg-gray-50 dark:hover:bg-slate-800/60 transition-colors rounded-md"
-              :class="{ 'font-semibold': s.id === currentId }"
+              :class="{ 'font-semibold text-blue-600 dark:text-blue-400': s.id === currentId }"
               @click="select(s.id)"
             >
               <div class="flex items-center gap-2.5 min-w-0 pr-2">
@@ -81,7 +70,7 @@
           </button>
         </div>
       </div>
-    </Transition>
+    </div>
 
     <!-- 创建团队空间弹窗 -->
     <Teleport to="body">
@@ -114,7 +103,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import { ref, computed, nextTick, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSpaceStore } from '@/stores/space'
 import { spaceApi } from '@/api/client'
@@ -125,12 +114,9 @@ import type { SpaceSummary } from '@/api/client'
 const router = useRouter()
 const space = useSpaceStore()
 const toast = useToast()
-const open = ref(false)
-const switcherRef = ref<HTMLElement | null>(null)
 
 const currentId = computed(() => space.currentSpaceId)
 const currentSpace = computed(() => space.currentSpace)
-const currentName = computed(() => currentSpace.value?.name || '未选择')
 const currentKind = computed(() => currentSpace.value?.kind || 'personal')
 
 function kindIcon(kind: string): string {
@@ -158,11 +144,9 @@ const groupedSpaces = computed<SpaceGroup[]>(() => {
 
 function select(id: string) {
   space.setCurrentSpace(id)
-  open.value = false
 }
 
 function goSettingsById(id: string) {
-  open.value = false
   router.push(`/spaces/${id}/settings`)
 }
 
@@ -194,17 +178,6 @@ watch(showCreateModal, (v) => {
     nextTick(() => createInputRef.value?.focus())
   }
 })
-
-function onDocumentClick(e: MouseEvent) {
-  if (!open.value) return
-  const el = switcherRef.value
-  if (el && !el.contains(e.target as Node)) {
-    open.value = false
-  }
-}
-
-onMounted(() => document.addEventListener('click', onDocumentClick))
-onUnmounted(() => document.removeEventListener('click', onDocumentClick))
 </script>
 
 <style scoped>
@@ -338,18 +311,5 @@ onUnmounted(() => document.removeEventListener('click', onDocumentClick))
 .ss-modal-fade-enter-from,
 .ss-modal-fade-leave-to {
   opacity: 0;
-}
-
-/* ===== Transition ===== */
-.ss-pop-enter-active {
-  transition: opacity 0.18s ease, transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1);
-}
-.ss-pop-leave-active {
-  transition: opacity 0.12s ease, transform 0.12s ease;
-}
-.ss-pop-enter-from,
-.ss-pop-leave-to {
-  opacity: 0;
-  transform: translateY(-4px) scale(0.97);
 }
 </style>

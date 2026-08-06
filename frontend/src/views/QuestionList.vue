@@ -50,11 +50,11 @@
               </button>
             </span>
 
-            <div v-if="openDropdown === 'header-status'" class="ql-dd-panel ql-status-panel">
+            <div v-if="openDropdown === 'header-status'" class="ql-dd-panel ql-status-panel bg-white dark:bg-slate-900 border border-gray-100 dark:border-slate-800 shadow-xl rounded-xl text-gray-700 dark:text-gray-200">
               <button
                 v-for="tab in statusTabs"
                 :key="tab.value"
-                class="ql-dd-opt"
+                class="ql-dd-opt hover:bg-gray-50 dark:hover:bg-slate-800/60 transition-colors"
                 :class="{ active: currentStatus === tab.value }"
                 @click.stop="switchStatus(tab.value); openDropdown = null"
               >
