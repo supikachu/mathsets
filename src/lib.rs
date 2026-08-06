@@ -127,6 +127,12 @@ pub fn build_app(state: AppState) -> Router {
                 .route("/users/avatar", post(handlers::users::upload_avatar))
                 .layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
         )
+        // 题目配图上传单独套 10MB 限制（几何大图/坐标系需更高上限）
+        .merge(
+            Router::new()
+                .route("/uploads/images", post(handlers::uploads::upload_image))
+                .layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
+        )
         // 管理员用户管理
         .route("/admin/users", get(handlers::auth::list_users).post(handlers::auth::create_user))
         .route("/admin/users/{id}", get(handlers::auth::get_user).delete(handlers::auth::delete_user))

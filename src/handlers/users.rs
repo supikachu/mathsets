@@ -89,8 +89,8 @@ pub struct PasswordChangeResponse {
 /// 头像文件最大字节数：2 MB
 const MAX_AVATAR_BYTES: usize = 2 * 1024 * 1024;
 
-/// 允许的图片 MIME 类型白名单
-const ALLOWED_MIME_TYPES: &[&str] = &["image/jpeg", "image/png", "image/webp"];
+/// 允许的图片 MIME 类型白名单（pub 供 uploads 模块复用）
+pub const ALLOWED_MIME_TYPES: &[&str] = &["image/jpeg", "image/png", "image/webp"];
 
 /// Multipart 表单字段名（前端必须用这个名字）
 const AVATAR_FIELD_NAME: &str = "avatar";
@@ -522,7 +522,7 @@ fn is_valid_email(email: &str) -> bool {
 ///   - 两者一致
 ///
 /// 失败返回 None，由调用方返回 415 Unsupported Media Type
-fn validate_image_type(bytes: &[u8], client_mime: Option<&str>) -> Option<&'static str> {
+pub fn validate_image_type(bytes: &[u8], client_mime: Option<&str>) -> Option<&'static str> {
     // 用 infer crate 识别 Magic Bytes
     let detected_kind = infer::get(bytes)?;
 

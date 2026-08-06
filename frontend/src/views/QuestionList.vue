@@ -390,14 +390,30 @@
           </button>
         </div>
 
-        <!-- ===== 题目卡片列表 ===== -->
-        <div v-else class="q-card-list">
-          <div
-            v-for="card in cardList"
-            :key="card.id"
-            class="q-card"
-            :class="{ 'is-expanded': expandedIds.has(card.id) }"
-          >
+        <!-- ===== 题目卡片列表（虚拟滚动） =====
+             使用 DynamicScroller 支持题卡动态高度（题干长短/有无配图/有无解析均不同）。
+             page-mode 复用 window 滚动，最小侵入既有布局；
+             DynamicScrollerItem 内置 ResizeObserver，图片加载完成或解析展开时自动重测高度。 -->
+        <DynamicScroller
+          v-else
+          :items="cardList"
+          :min-item-size="200"
+          key-field="id"
+          page-mode
+          :buffer="200"
+          class="q-card-list"
+        >
+          <template #default="{ item: card, active }">
+            <DynamicScrollerItem
+              :item="card"
+              :active="active"
+              :data-index="card.id"
+              class="q-card-slot"
+            >
+              <div
+                class="q-card"
+                :class="{ 'is-expanded': expandedIds.has(card.id) }"
+              >
             <!-- 来源角标：绝对定位，贴左上角边缘 -->
             <span v-if="sourceMeta(card)" class="q-source-badge" :title="sourceMeta(card)">
               {{ sourceMeta(card) }}
@@ -555,7 +571,9 @@
               </div>
             </div>
           </div>
-        </div>
+            </DynamicScrollerItem>
+          </template>
+        </DynamicScroller>
 
         <AppPagination
           v-if="cardList.length > 0"
@@ -578,6 +596,8 @@ import { useRouter } from 'vue-router'
 import { questionApi, type QuestionSummary, type QuestionDetail, type QuestionQuery, type GradeLevel, type SemesterType, type ExamType, type KnowledgeNodeSummary } from '@/api/client'
 import LatexRender from '@/components/LatexRender.vue'
 import QuestionOptions from '@/components/QuestionOptions.vue'
+import { DynamicScroller, DynamicScrollerItem } from 'vue-virtual-scroller'
+import 'vue-virtual-scroller/dist/vue-virtual-scroller.css'
 import KnowledgeTreeNav from '@/components/KnowledgeTreeNav.vue'
 import SpaceSwitcher from '@/components/SpaceSwitcher.vue'
 import { AppButton, AppSelect, AppPagination, AppIcon, AppBadge } from '@/components/ui'
@@ -1946,9 +1966,18 @@ onBeforeUnmount(() => {
 
 /* ===== Card List ===== */
 .q-card-list {
-  display: flex;
-  flex-direction: column;
-  gap: 16px; /* gap-4 */
+  /* DynamicScroller 使用绝对定位摆放 DynamicScrollerItem，flex/gap 已不适用。
+     保留 class 用于 descendant selector 上下文与暗色主题覆盖。 */
+  position: relative;
+}
+
+/* 单个题卡 slot：DynamicScrollerItem 的根元素。
+   padding-bottom 替代原 flex gap 作为项间分隔 ——
+   关键：padding 计入 box-sizing:border-box 高度，ResizeObserver
+   测得的尺寸即包含此间距，下一项的 translateY 不会重叠。 */
+.q-card-slot {
+  padding-bottom: 16px;
+  box-sizing: border-box;
 }
 
 /* ===== Question Card ===== */

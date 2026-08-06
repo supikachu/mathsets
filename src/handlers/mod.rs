@@ -11,4 +11,5 @@ pub mod public_library;
 pub mod questions;
 pub mod spaces;
 pub mod tags;
+pub mod uploads;
 pub mod users;

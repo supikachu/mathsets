@@ -9,13 +9,16 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@types/viewerjs": "^0.7.2",
     "axios": "^1.7",
     "idb-keyval": "^6.3.0",
     "katex": "^0.16",
     "pdfjs-dist": "^6.1.200",
     "pinia": "^3.0",
+    "viewerjs": "^1.11.8",
     "vue": "^3.5",
-    "vue-router": "^4.5"
+    "vue-router": "^4.5",
+    "vue-virtual-scroller": "^3.0.4"
   },
   "devDependencies": {
     "@tailwindcss/typography": "^0.5",

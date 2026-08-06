@@ -299,6 +299,7 @@ import { getKnowledgeTreeList } from '@/composables/useKnowledgeTreeCache'
 import { useSpaceStore } from '@/stores/space'
 import { useAuthStore } from '@/stores/auth'
 import { hasUnfinishedSnapshot } from '@/utils/batchSnapshot'
+import { processMarkdownImages, type UploadCache } from '@/utils/markdownImages'
 
 // Imports of child components
 import EditFormChoice from './edit/components/EditFormChoice.vue'
@@ -725,12 +726,53 @@ const reviewableMembers = computed(() =>
   spaceMembers.value.filter(m => m.user_id !== auth.userId && m.role !== 'viewer'),
 )
 
+// ── 保存拦截器：持久化表单中所有 blob: 图片为后端永久 URL ──
+// 触发场景：用户在编辑器上传本地图片后，Markdown 中存的是 blob: 临时指针，
+//          保存到后端前必须转存为永久 URL，否则页面刷新后图片永久失效。
+const BLOB_URL_QUICK_CHECK = /!\[[^\]]*\]\(blob:[^)]+\)/
+
+async function persistFormImages() {
+  // 快速短路：表单中没有任何 blob: URL 时跳过整个流程
+  const hasBlob =
+    BLOB_URL_QUICK_CHECK.test(form.stem) ||
+    form.solutions.some((s) => BLOB_URL_QUICK_CHECK.test(s)) ||
+    (form.options || []).some((o) => BLOB_URL_QUICK_CHECK.test(o.content))
+  if (!hasBlob) return
+
+  // 跨字段共享上传缓存：同一张图在 stem / solution / option 中只上传一次
+  const cache: UploadCache = new Map()
+  try {
+    // 处理题干
+    form.stem = await processMarkdownImages(form.stem, cache)
+    // 处理解析（每条解析都可能含图）
+    form.solutions = await Promise.all(
+      form.solutions.map((s) => processMarkdownImages(s, cache)),
+    )
+    // 处理选项内容
+    if (form.options && form.options.length > 0) {
+      await Promise.all(
+        form.options.map(async (opt) => {
+          opt.content = await processMarkdownImages(opt.content, cache)
+        }),
+      )
+    }
+  } catch (e) {
+    // 整体流程不应失败（单图失败已在 processMarkdownImages 内捕获），
+    // 此处兜底仅记录日志，不影响后续 buildPayload / 提交
+    console.error('[persistFormImages] 持久化流程异常:', e)
+  }
+}
+
 async function handleSave(submitAfter: boolean) {
   if (!form.stem.trim()) { toast.warning('请输入题干'); return }
   if (form.question_type === 'choice' && !hasCorrectAnswer.value) { toast.warning('请选择正确答案'); return }
   const flag = submitAfter ? submitting : saving
   flag.value = true
   try {
+    // 【保存拦截器】提交前持久化所有 blob: 图片为后端永久 URL
+    // 失败不阻断：单图上传失败时保留 blob URL，由用户重试或后续保存
+    await persistFormImages()
+
     const data = buildPayload()
     const res = isNew ? await questionApi.create(data) : await questionApi.update(route.params.id as string, data)
     const qid = res.data.id
@@ -1591,6 +1633,11 @@ watch(() => form.question_type, () => {
 .interactive-column {
   height: 100%;
   min-height: 0;
+  /* overflow: hidden 确保中栏(LivePreviewCard)/右栏(AttributeSidePanel)的
+     内部内容不会撑破列容器高度。左栏(.edit-col)已自带 overflow:hidden。
+     内部滚动由 :deep(.preview-col-inner) / :deep(.asp-body) / .edit-col-inner 处理。
+     下拉/弹窗组件通常用 position:fixed 或 <Teleport>，不受此裁剪影响。 */
+  overflow: hidden;
   border: 1px solid var(--border-color);
   border-radius: var(--radius-lg);
   opacity: 0.7;
@@ -1609,11 +1656,14 @@ watch(() => form.question_type, () => {
   box-shadow: 0 0 0 3px var(--purple-light), var(--shadow-md);
 }
 
-/* 细滚动条：Firefox */
+/* 细滚动条：Firefox + 滚动链切断（关键修复）
+   overscroll-behavior: contain 阻止子容器滚动到边界时
+   将滚动事件冒泡到父级，避免"页面被拉上去、底部漏出空白" */
 .edit-col-inner,
 .interactive-column :deep(.preview-col-inner),
 .interactive-column :deep(.asp-body) {
   scrollbar-width: thin;
+  overscroll-behavior: contain;
 }
 
 /* 细滚动条：WebKit（6px 极简风） */

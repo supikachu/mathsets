@@ -1005,6 +1005,23 @@ export const userApi = {
   },
 }
 
+// ── 通用图片上传 API（题目配图等） ──────────────────────────────
+
+export const uploadsApi = {
+  /**
+   * 上传题目配图等通用图片
+   * @param file 浏览器 File 对象
+   * @returns 持久化后的 URL（如 /uploads/questions/xxx.png）
+   */
+  uploadImage(file: File) {
+    const formData = new FormData()
+    formData.append('image', file)
+    return client.post<{ url: string }>('/uploads/images', formData, {
+      timeout: 60000, // 大图可能较慢，给 60s
+    })
+  },
+}
+
 // ── 管理员用户管理 API（阶段三新增） ──────────────────────────────
 
 export interface AdminUser {
