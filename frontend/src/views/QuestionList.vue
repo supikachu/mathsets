@@ -73,7 +73,7 @@
             <AppIcon name="search" :size="14" class="ql-search-icon absolute left-3 text-gray-400 pointer-events-none" />
             <input
               v-model="query.keyword"
-              class="ql-search-input w-full bg-gray-100/70 dark:bg-slate-800/70 border border-transparent text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 pl-9 pr-4 h-9 rounded-lg transition-all focus:bg-white dark:focus:bg-slate-900 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 focus:outline-none"
+              class="ql-search-input w-full bg-gray-100/70 dark:bg-slate-800/70 border border-transparent text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 pl-9 pr-4 h-9 rounded-lg transition-colors outline-none focus:outline-none focus-visible:outline-none focus:bg-white dark:focus:bg-slate-900 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
               placeholder="搜索题目（输入即搜）"
               @input="onSearchInput"
               @keydown.enter="onSearchSubmit"
@@ -571,8 +571,17 @@ const basket = useQuestionBasket()
 // 左侧知识树导航选中的节点 ID（空字符串 = 全部题目）
 const navNodeId = ref('')
 
+// 本地存储键：持久化知识树侧边栏折叠/展开偏好（跨路由跳转与重新加载保持）
+const STORAGE_KEY_KT_OPEN = 'mathset_kt_nav_open'
+
 // 知识树面板全局开关（Notion/Linear 风格 Header Toggle 控制）
-const isKnowledgeTreeOpen = ref(true)
+const isKnowledgeTreeOpen = ref<boolean>(
+  localStorage.getItem(STORAGE_KEY_KT_OPEN) !== 'false'
+)
+
+watch(isKnowledgeTreeOpen, (val) => {
+  localStorage.setItem(STORAGE_KEY_KT_OPEN, String(val))
+})
 
 // ===== 状态切换 Segmented Tab =====
 const statusTabs = [
@@ -1423,11 +1432,11 @@ onBeforeUnmount(() => {
   position: relative;
 }
 
+.ql-search-input,
 .ql-search-input:focus,
 .ql-search-input:focus-visible {
-  outline: none;
-  border: none;
-  box-shadow: none;
+  outline: none !important;
+  outline-offset: 0 !important;
 }
 
 .ql-filter-btn:active,
