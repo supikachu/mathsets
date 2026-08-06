@@ -106,7 +106,7 @@
             <section class="edit-section" :class="{ 'ai-highlight': aiGeneratedFields.has('stem') }">
               <div class="section-label"><AppIcon name="book-open" :size="16" /> <span>题干</span><span class="required">*</span></div>
               <div class="stem-wrap">
-                <textarea ref="stemTextareaRef" v-model="form.stem" rows="4" class="edit-textarea stem-textarea" placeholder="输入题目内容，LaTeX 公式用 $...$ 包裹。例如：已知集合 $A = \{x | x^2 - 2x = 0\}$..." @input="autoResize"></textarea>
+                <textarea ref="stemTextareaRef" v-model="form.stem" class="edit-textarea stem-textarea" placeholder="输入题目内容，LaTeX 公式用 $...$ 包裹。例如：已知集合 $A = \{x | x^2 - 2x = 0\}$..."></textarea>
                 <button type="button" class="img-upload-btn" @click="handleImageUpload">
                   <AppIcon name="paperclip" :size="13" />
                   <span>上传配图</span>
@@ -156,10 +156,8 @@
                   <div class="solution-textarea-wrap">
                     <textarea
                       v-model="form.solutions[i]"
-                      rows="6"
                       class="edit-textarea solution-textarea"
                       :placeholder="`解法${cnNum(i + 1)}的解题思路，支持 $...$ LaTeX`"
-                      @input="autoResize"
                     ></textarea>
                     <button type="button" class="img-upload-btn" @click="handleSolutionImageUpload(i)">
                       <AppIcon name="paperclip" :size="13" />
@@ -449,9 +447,7 @@ function handleAi() {
 }
 
 function onAiApplied() {
-  nextTick(() => {
-    resizeAllTextareas()
-  })
+  // field-sizing: content 自动处理 textarea 高度，无需 JS 重算
 }
 
 // Main reactive form
@@ -574,21 +570,8 @@ function removeSolution(i: number) {
   if (form.solutions.length === 0) form.solutions.push('')
 }
 
-// Textarea height auto-resizers
+// Stem textarea ref —— 仅用于图片上传时的光标位置插入（高度由 CSS field-sizing 管理）
 const stemTextareaRef = ref<HTMLTextAreaElement>()
-
-function resizeTextarea(el: HTMLTextAreaElement) {
-  el.style.height = 'auto'
-  el.style.height = el.scrollHeight + 'px'
-}
-function autoResize(e: Event) {
-  resizeTextarea(e.target as HTMLTextAreaElement)
-}
-function resizeAllTextareas() {
-  document.querySelectorAll<HTMLTextAreaElement>('.edit-textarea').forEach(el => {
-    resizeTextarea(el)
-  })
-}
 
 // Image Uploaders
 function handleImageUpload() {
@@ -617,7 +600,6 @@ function handleImageUpload() {
       ta.focus()
       const newPos = pos + insert.length
       ta.setSelectionRange(newPos, newPos)
-      resizeTextarea(ta)
     })
   }
   input.click()
@@ -649,7 +631,6 @@ function handleSolutionImageUpload(index: number) {
       ta.focus()
       const newPos = pos + insert.length
       ta.setSelectionRange(newPos, newPos)
-      resizeTextarea(ta)
     })
   }
   input.click()
@@ -889,7 +870,6 @@ watch(activeIndex, async (newIdx, oldIdx) => {
       applyFormSnapshot(target)
       // 等待响应式更新与被闸门屏蔽的 watcher 完成
       await nextTick()
-      resizeAllTextareas()
     }
   } finally {
     isSwitchingTab.value = false
@@ -949,7 +929,6 @@ async function doRestoreDraft() {
   pendingDraft = null
   restoreDialog.value = false
   await nextTick()
-  resizeAllTextareas()
   document.querySelectorAll('textarea').forEach(el => {
     el.dispatchEvent(new Event('input'))
   })
@@ -1168,7 +1147,6 @@ async function loadQuestion() {
     isLoading.value = false
     if (!isNew) {
       await nextTick()
-      resizeAllTextareas()
     }
   }
 }
@@ -1312,7 +1290,6 @@ function loadBatchMockData() {
   activeIndex.value = 0
   // 直接将第一道题应用到 form（绕过 watcher，避免误触发 autosave）
   applyFormSnapshot(questionList.value[0])
-  nextTick(() => resizeAllTextareas())
 }
 
 // ============================================================
@@ -1411,7 +1388,6 @@ function handleBatchParsed(questions: ParsedQuestion[]) {
   try {
     applyFormSnapshot(questionList.value[0])
     nextTick(() => {
-      resizeAllTextareas()
       isSwitchingTab.value = false
     })
   } catch (e) {
@@ -1868,6 +1844,13 @@ watch(() => form.question_type, () => {
   resize: none;
   outline: none;
   box-sizing: border-box;
+  /* CSS 原生按内容撑开 —— 替代旧 JS scrollHeight 动态计算
+     Chrome 123+ 支持；Firefox/Safari 暂不支持时会 fallback 到默认高度 */
+  field-sizing: content;
+  min-height: 120px;
+  max-height: 60vh;  /* 防止撑破屏幕，超出后内部滚动 */
+  overflow-y: auto;
+  overscroll-behavior: contain;  /* 与三栏滚动链修复一致 */
 }
 
 .img-upload-btn {
