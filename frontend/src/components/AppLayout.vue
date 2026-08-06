@@ -45,7 +45,13 @@
       <!-- 主内容区 -->
       <div class="main-content">
         <div class="view active">
-          <router-view />
+          <!-- keep-alive：仅缓存题库列表页，避免从详情页返回时整页重挂载+重请数据
+               其它页面（详情/编辑/设置）不缓存，保证进入时拿到最新数据 -->
+          <router-view v-slot="{ Component }">
+            <keep-alive :include="['QuestionList']">
+              <component :is="Component" />
+            </keep-alive>
+          </router-view>
         </div>
       </div>
     </div>

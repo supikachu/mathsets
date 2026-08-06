@@ -593,6 +593,9 @@ import {
   statusBadgeColor,
 } from '@/utils/questionDisplay'
 
+// keep-alive 缓存匹配名：AppLayout 中 <keep-alive :include="['QuestionList']"> 据此识别
+defineOptions({ name: 'QuestionList' })
+
 const router = useRouter()
 const toast = useToast()
 const space = useSpaceStore()
@@ -690,12 +693,9 @@ function handleContextChange(payload: { stage: string; subject: string }) {
 const showFilter = ref(false)
 
 function toggleFilter() {
+  // 纯 UI 显隐切换：仅反转布尔值，绝不触发数据重载。
+  // 筛选条件由 selectFilter → applyFilters 即时应用，收起面板无需再次请求。
   showFilter.value = !showFilter.value
-  if (!showFilter.value) {
-    // 收起时执行搜索
-    page.value = 1
-    fetchList()
-  }
 }
 
 // 是否有任何筛选条件被激活（用于显示"清空筛选"按钮）
@@ -790,7 +790,8 @@ interface QuestionCard {
 }
 
 const cardList = ref<QuestionCard[]>([])
-const loading = ref(false)
+// 初始即为 true：避免组件首次挂载、onMounted 尚未执行的那一帧闪现"没有找到匹配的题目"空状态
+const loading = ref(true)
 const page = ref(1)
 const pageSize = 20
 const hasMore = ref(false)
@@ -1092,6 +1093,10 @@ function isCorrectOption(card: QuestionCard, label: string): boolean {
 }
 
 // ---- 获取列表 + 批量获取详情 ----
+// 模块级详情缓存：按 questionId 缓存 QuestionDetail，避免换页/切筛选时重复请求已见过的题目。
+// 根治 N+1 需后端扩展 list 接口返回完整字段，此缓存作为前端缓解：命中缓存的题目零请求。
+const detailCache = new Map<string, QuestionDetail>()
+
 async function fetchList() {
   loading.value = true
   try {
@@ -1103,13 +1108,18 @@ async function fetchList() {
     totalCount.value = (res as any).total ?? summaries.length
     hasMore.value = summaries.length >= pageSize
 
-    // 并发获取每道题的详情
-    const details = await Promise.all(
-      summaries.map((s) => questionApi.get(s.id).catch(() => null))
+    // 仅对缓存未命中的题目发请求（命中缓存的零请求），减少 N+1 实际请求数
+    const missIds = summaries.map((s) => s.id).filter((id) => !detailCache.has(id))
+    const fetchedDetails = await Promise.all(
+      missIds.map((id) => questionApi.get(id).catch(() => null))
     )
+    for (let i = 0; i < missIds.length; i++) {
+      const d = fetchedDetails[i]?.data
+      if (d) detailCache.set(missIds[i], d)
+    }
 
-    cardList.value = summaries.map((s, i) => {
-      const detail: QuestionDetail | null = details[i]?.data ?? null
+    cardList.value = summaries.map((s) => {
+      const detail: QuestionDetail | null = detailCache.get(s.id) ?? null
       const meta = (detail?.metadata ?? {}) as Record<string, unknown>
       const province = String(meta.region_province ?? '').trim()
       const city = String(meta.region_city ?? '').trim()

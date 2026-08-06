@@ -12,13 +12,15 @@
 import { ref, computed, watch, onMounted } from 'vue'
 import { AppIcon, AppEmpty } from '@/components/ui'
 import {
-  knowledgeTreeApi,
-  knowledgeNodeApi,
   type KnowledgeTree,
   type KnowledgeTreeKind,
   type KnowledgeNodeTreeNode,
 } from '@/api/client'
-import { unwrapTreeResponse } from '@/composables/useKnowledgeTreeCache'
+import {
+  unwrapTreeResponse,
+  getKnowledgeTreeList,
+  getKnowledgeTreeData,
+} from '@/composables/useKnowledgeTreeCache'
 
 const props = withDefaults(
   defineProps<{
@@ -215,8 +217,9 @@ function setMode(m: TreeMode) {
  */
 async function loadTrees() {
   try {
-    const res = await knowledgeTreeApi.list()
-    trees.value = res.data
+    // 使用全局缓存：全量树元数据整个页面生命周期内只拉一次，
+    // Tab 来回切换、学段切出再切回均零请求
+    trees.value = await getKnowledgeTreeList()
 
     let matched: KnowledgeTree | undefined
     if (props.treeId) {
@@ -234,9 +237,11 @@ async function loadTrees() {
       // 当前模式无匹配树 → 清空，由 emptyHint 兜底
       activeTreeId.value = ''
       treeData.value = []
+      loading.value = false // 无匹配时停止 loading（loadTreeData 不会被触发）
     }
   } catch (e) {
     console.error('[TreeNav] 加载知识树列表失败', e)
+    loading.value = false
   }
 }
 
@@ -247,8 +252,9 @@ async function loadTreeData() {
   }
   loading.value = true
   try {
-    const res = await knowledgeNodeApi.getTree(activeTreeId.value)
-    treeData.value = unwrapTreeResponse(res.data)
+    // 使用全局缓存：单棵树数据按 treeId 缓存，切回已访问的标签零请求
+    const data = await getKnowledgeTreeData(activeTreeId.value)
+    treeData.value = unwrapTreeResponse(data)
     // 默认折叠：初始不展开任何节点（削顶后顶层即真实内容根，保持清爽视图）
     expandedIds.value = new Set()
   } catch (e) {
@@ -278,13 +284,26 @@ watch(activeTreeId, () => {
   loadTreeData()
 })
 
-// 学段 / 学科 / 模式 联动：清空选中 + 重新加载树
-watch([currentStage, currentSubject, treeMode], () => {
+// 学段 / 学科 联动：清空选中 + 通知父组件重载列表 + 重新加载树
+watch([currentStage, currentSubject], () => {
   internalSelected.value = ''
   expandedIds.value = new Set()
+  // 关键：先置 loading=true，再清 activeTreeId。
+  // 这样 loadTreeData 的早退分支（清 treeData）被 loading 遮挡，不会闪现"暂无知识树"空状态。
+  loading.value = true
   activeTreeId.value = ''
-  treeData.value = []
-  emit('select', '')
+  emit('select', '') // 通知父组件：上下文变了，右侧列表需重载
+  loadTrees()
+})
+
+// 分类视角切换（章节/知识点/解题方法）：仅重新加载左侧树，不影响右侧列表
+// 右侧列表保持当前数据，直到用户明确点击新树上的某个节点
+watch(treeMode, () => {
+  expandedIds.value = new Set()
+  loading.value = true
+  activeTreeId.value = ''
+  // 不 emit('select', ...) —— 分类视角切换不应触发右侧列表重载
+  // 不清 internalSelected —— 旧选中 ID 在新树中无匹配节点，自然无高亮；切回原模式时恢复高亮
   loadTrees()
 })
 
