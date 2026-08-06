@@ -138,8 +138,12 @@
         </div>
       </div>
 
-      <!-- ===== 多维属性矩阵筛选面板 ===== -->
-      <div class="ql-filter-collapse" :class="{ 'is-open': showFilter }">
+      <!-- ===== 多维属性矩阵筛选面板：CSS Grid 0fr→1fr 高度过渡 =====
+           外层 grid 切换 grid-template-rows，内层 .ql-filter-clip 裁剪
+           overflow 延迟切换：展开后 0.3s 切到 visible（让下拉菜单溢出），
+           收起时立即切回 hidden（裁剪内容） -->
+      <div class="ql-filter-grid" :class="{ 'is-open': showFilter }">
+        <div class="ql-filter-clip">
         <div class="ql-matrix-panel">
 
           <!-- ── 顶层平铺标签组 ── -->
@@ -357,6 +361,7 @@
           </div>
 
         </div>
+        </div>
       </div>
     </div>
 
@@ -432,45 +437,52 @@
               />
             </div>
 
-            <!-- 展开解析区域 -->
-            <Transition name="q-analysis">
-              <div v-if="expandedIds.has(card.id)" class="q-analysis-section">
-                <div class="q-analysis-title">
-                  <AppIcon name="lightbulb" :size="14" :stroke="2" />
-                  <span>答案解析</span>
-                </div>
+            <!-- 展开解析区域：CSS Grid 0fr→1fr 高度过渡
+                 方案：外层 grid 切换 grid-template-rows，内层 overflow:hidden 裁剪
+                 优势：DOM 常驻（LaTeX 仅渲染一次），完美过渡到内容实际高度 -->
+            <div
+              class="q-analysis-grid"
+              :class="{ 'is-expanded': expandedIds.has(card.id) }"
+            >
+              <div class="q-analysis-clip">
+                <div class="q-analysis-section">
+                  <div class="q-analysis-title">
+                    <AppIcon name="lightbulb" :size="14" :stroke="2" />
+                    <span>答案解析</span>
+                  </div>
 
-                <!-- 正确答案高亮卡片（选择题 / 填空题） -->
-                <div
-                  v-if="card.correctAnswer && (card.question_type === 'choice' || card.question_type === 'fill')"
-                  class="q-answer-card"
-                  :class="`q-answer-card--${card.question_type}`"
-                >
-                  <span class="q-answer-card-label">正确答案</span>
-                  <span class="q-answer-card-value"><LatexRender :text="card.correctAnswer" :inline="true" /></span>
-                  <AppIcon
-                    name="check-circle"
-                    :size="16"
-                    :stroke="2.2"
-                    class="q-answer-card-icon"
-                  />
-                </div>
+                  <!-- 正确答案高亮卡片（选择题 / 填空题） -->
+                  <div
+                    v-if="card.correctAnswer && (card.question_type === 'choice' || card.question_type === 'fill')"
+                    class="q-answer-card"
+                    :class="`q-answer-card--${card.question_type}`"
+                  >
+                    <span class="q-answer-card-label">正确答案</span>
+                    <span class="q-answer-card-value"><LatexRender :text="card.correctAnswer" :inline="true" /></span>
+                    <AppIcon
+                      name="check-circle"
+                      :size="16"
+                      :stroke="2.2"
+                      class="q-answer-card-icon"
+                    />
+                  </div>
 
-                <!-- 解答题正确答案 -->
-                <div
-                  v-if="card.correctAnswer && card.question_type === 'solution'"
-                  class="q-answer-inline"
-                >
-                  <span class="q-answer-inline-label">参考答案</span>
-                  <span class="q-answer-inline-value"><LatexRender :text="card.correctAnswer" :inline="true" /></span>
-                </div>
+                  <!-- 解答题正确答案 -->
+                  <div
+                    v-if="card.correctAnswer && card.question_type === 'solution'"
+                    class="q-answer-inline"
+                  >
+                    <span class="q-answer-inline-label">参考答案</span>
+                    <span class="q-answer-inline-value"><LatexRender :text="card.correctAnswer" :inline="true" /></span>
+                  </div>
 
-                <div v-if="card.analysis" class="q-analysis-body">
-                  <LatexRender :text="card.analysis" />
+                  <div v-if="card.analysis" class="q-analysis-body">
+                    <LatexRender :text="card.analysis" />
+                  </div>
+                  <div v-else class="q-analysis-empty">暂无解析内容</div>
                 </div>
-                <div v-else class="q-analysis-empty">暂无解析内容</div>
               </div>
-            </Transition>
+            </div>
 
             <!-- Row 3: Footer — 知识点（窄屏隐藏） + 移动端元信息（窄屏独占） + 操作按钮（图标化） -->
             <div class="q-card-footer flex items-center justify-between w-full gap-2">
@@ -1507,26 +1519,28 @@ onBeforeUnmount(() => {
   padding: 0 4px;
 }
 
-/* ===== 筛选面板展开/折叠动画 (max-height 方案, 确保折叠时高度归零) ===== */
-.ql-filter-collapse {
-  max-height: 0;
+/* ===== 筛选面板展开/折叠动画：CSS Grid 0fr→1fr 高度过渡 =====
+   外层 grid 切换 grid-template-rows，内层 .ql-filter-clip 裁剪内容。
+   overflow 延迟切换技巧：
+   - 展开(is-open 加上)：overflow 延迟 0.3s 后切到 visible（等 grid 撑开后让下拉菜单溢出）
+   - 收起(is-open 移除)：overflow 立即切回 hidden（裁剪收缩中的内容）
+   transition-delay 随状态切换而切换，实现“开延迟/关立即”的非对称行为 */
+.ql-filter-grid {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.ql-filter-grid.is-open {
+  grid-template-rows: 1fr;
+}
+.ql-filter-clip {
+  min-height: 0; /* 关键：覆盖 grid item 默认 min-content，允许收缩至 0 */
   overflow: hidden;
-  opacity: 0;
-  transition: max-height 0.35s cubic-bezier(0.32, 0.72, 0, 1),
-    opacity 0.25s ease;
+  transition: overflow 0s linear 0s; /* 收起：立即切回 hidden */
 }
-
-.ql-filter-collapse.is-open {
-  max-height: 600px;
-  opacity: 1;
-  /* 关键：展开态解除裁剪，让 .ql-dd-panel 绝对定位下拉菜单能溢出面板内容区，
-     否则 overflow:hidden 会以下拉菜单父级的实际内容高度裁切下拉浮层 */
-  overflow: visible;
-}
-
-/* 展开态：解除裁剪，让底部下拉面板 .ql-dd-panel 能自由溢出父容器 */
-.ql-filter-collapse.is-open > .ql-matrix-panel {
-  overflow: visible;
+.ql-filter-grid.is-open > .ql-filter-clip {
+  overflow: visible; /* 展开：让 .ql-dd-panel 绝对定位下拉菜单溢出面板 */
+  transition: overflow 0s linear 0.3s; /* 延迟 0.3s 切到 visible（等 grid 撑开） */
 }
 
 /* ===== 多维属性矩阵筛选面板 ===== */
@@ -2417,30 +2431,21 @@ onBeforeUnmount(() => {
   opacity: 0;
   transform: translateY(-4px) scale(0.96);
 }
-.q-analysis-enter-active {
-  transition: max-height 0.4s cubic-bezier(0.4, 0, 0.2, 1),
-              opacity 0.3s ease,
-              padding 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+/* ---- Analysis expand: CSS Grid 0fr→1fr 高度过渡
+   外层 grid 切换 grid-template-rows，内层 overflow:hidden + min-height:0 裁剪
+   关键：min-height:0 让 grid item 可收缩至 0（覆盖默认 min-content）
+   优势：无需 JS 计算高度，完美过渡到 auto；DOM 常驻避免 LaTeX 重渲染 */
+.q-analysis-grid {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
-
-.q-analysis-leave-active {
-  transition: max-height 0.3s cubic-bezier(0.4, 0, 0.2, 1),
-              opacity 0.2s ease,
-              padding 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+.q-analysis-grid.is-expanded {
+  grid-template-rows: 1fr;
 }
-
-.q-analysis-enter-from,
-.q-analysis-leave-to {
-  max-height: 0;
-  opacity: 0;
-  padding-top: 0;
-  padding-bottom: 0;
-}
-
-.q-analysis-enter-to,
-.q-analysis-leave-from {
-  max-height: 600px;
-  opacity: 1;
+.q-analysis-clip {
+  min-height: 0;
+  overflow: hidden;
 }
 
 /* ===== Responsive ===== */
