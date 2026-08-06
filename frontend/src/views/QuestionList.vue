@@ -13,9 +13,9 @@
       <!-- 右侧：工具栏 + 列表区 -->
       <div class="ql-main">
     <!-- ===== Apple风格吸顶工具栏 ===== -->
-    <div class="ql-sticky-bar">
+    <div class="ql-sticky-bar relative z-[60]">
       <!-- ===== 单行 Header 工具栏：左-中-右 结构化三段式 ===== -->
-      <div class="ql-header-bar flex items-center justify-between w-full gap-4 pb-4 border-b border-gray-100 dark:border-slate-800 flex-nowrap">
+      <div class="ql-header-bar flex items-center justify-between w-full gap-4 pb-4 border-b border-gray-100 dark:border-slate-800 flex-nowrap relative z-[60]">
         <!-- ── 1. 左侧控制组 (Left Group: 侧栏切换 + 状态下拉) ── -->
         <div class="ql-header-left flex items-center gap-2 shrink-0">
           <button
@@ -29,41 +29,59 @@
             <AppIcon name="panel-left" :size="16" />
           </button>
 
-          <div class="ql-status-dropdown relative" :class="{ 'is-open': openDropdown === 'header-status' }">
+          <div class="ql-status-dropdown relative inline-block">
+            <!-- 1. 触发器：点击触发 toggleDropdown('header-status') -->
             <button
               v-if="currentStatus === 'ALL'"
               type="button"
-              class="ql-status-trigger ql-status-plain flex items-center gap-1 h-9 px-3 bg-gray-100/70 dark:bg-slate-800/70 hover:bg-gray-200/50 dark:hover:bg-slate-700/50 rounded-lg text-sm text-gray-700 dark:text-gray-200 cursor-pointer transition-colors"
+              class="ql-status-trigger flex items-center gap-1.5 h-9 px-3 bg-gray-100/70 dark:bg-slate-800/70 hover:bg-gray-200/50 dark:hover:bg-slate-700/50 rounded-lg text-sm text-gray-700 dark:text-gray-200 cursor-pointer transition-colors"
               @click.stop="toggleDropdown('header-status')"
             >
               <span>{{ currentStatusLabel }}</span>
-              <AppIcon name="chevron-down" :size="11" class="ql-status-caret text-gray-400" />
+              <AppIcon
+                name="chevron-down"
+                :size="11"
+                class="text-gray-400 transition-transform duration-200"
+                :class="{ 'rotate-180': openDropdown === 'header-status' }"
+              />
             </button>
-            <span v-else class="ql-status-trigger ql-status-chip flex items-center gap-1.5 h-9 px-3 bg-blue-50 dark:bg-blue-950/40 text-blue-600 dark:text-blue-400 rounded-lg text-sm font-medium border border-blue-200 dark:border-blue-800">
+            <span
+              v-else
+              class="ql-status-trigger flex items-center gap-1.5 h-9 px-3 bg-blue-50 dark:bg-blue-950/40 text-blue-600 dark:text-blue-400 rounded-lg text-sm font-medium border border-blue-200 dark:border-blue-800 cursor-pointer"
+              @click.stop="toggleDropdown('header-status')"
+            >
               {{ currentStatusLabel }}
               <button
-                class="ql-status-chip-x text-blue-400 hover:text-blue-600"
+                type="button"
+                class="text-blue-400 hover:text-blue-600 cursor-pointer p-0.5 rounded-full hover:bg-blue-100 dark:hover:bg-blue-900/60 transition-colors"
                 @click.stop="switchStatus('ALL'); openDropdown = null"
-                :title="`清除筛选，恢复全部`"
+                title="清除筛选，恢复全部"
               >
                 <AppIcon name="x" :size="10" />
               </button>
             </span>
 
-            <div v-if="openDropdown === 'header-status'" class="ql-dd-panel ql-status-panel bg-white dark:bg-slate-900 border border-gray-100 dark:border-slate-800 shadow-xl rounded-xl text-gray-700 dark:text-gray-200">
-              <button
-                v-for="tab in statusTabs"
-                :key="tab.value"
-                class="ql-dd-opt hover:bg-gray-50 dark:hover:bg-slate-800/60 transition-colors"
-                :class="{ active: currentStatus === tab.value }"
-                @click.stop="switchStatus(tab.value); openDropdown = null"
+            <!-- 2. JS 点击驱动 + Vue Transition 过渡动画的下拉面板 (加固 z-[100] 层级) -->
+            <Transition name="ql-pop">
+              <div
+                v-if="openDropdown === 'header-status'"
+                class="absolute left-0 top-full mt-1.5 w-36 z-[100] bg-white dark:bg-slate-900 rounded-xl shadow-xl border border-gray-100 dark:border-slate-800 overflow-hidden p-1 flex flex-col gap-0.5"
               >
-                {{ tab.label }}
-                <template v-if="tab.value === 'pending' && pendingReviewCount > 0">
-                  <span class="ql-status-badge-inline">({{ pendingReviewCount > 99 ? '99+' : pendingReviewCount }})</span>
-                </template>
-              </button>
-            </div>
+                <button
+                  v-for="tab in statusTabs"
+                  :key="tab.value"
+                  type="button"
+                  class="flex items-center justify-between w-full px-3 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-slate-800/60 transition-colors rounded-lg cursor-pointer text-left"
+                  :class="{ 'font-semibold text-blue-600 dark:text-blue-400 bg-blue-50/60 dark:bg-blue-950/40': currentStatus === tab.value }"
+                  @click.stop="switchStatus(tab.value); openDropdown = null"
+                >
+                  <span>{{ tab.label }}</span>
+                  <template v-if="tab.value === 'pending' && pendingReviewCount > 0">
+                    <span class="text-xs text-gray-400 dark:text-gray-500 font-normal">({{ pendingReviewCount > 99 ? '99+' : pendingReviewCount }})</span>
+                  </template>
+                </button>
+              </div>
+            </Transition>
           </div>
         </div>
 
@@ -1376,7 +1394,7 @@ onBeforeUnmount(() => {
 .ql-sticky-bar {
   position: sticky;
   top: 0;
-  z-index: 100;
+  z-index: 200;
   flex-shrink: 0;
   background: var(--bg-card);
 }
@@ -1513,8 +1531,8 @@ onBeforeUnmount(() => {
 
 /* ===== 多维属性矩阵筛选面板 ===== */
 .ql-matrix-panel {
-  position: relative; /* 建立堆叠上下文，凌驾于下方题目列表之上 */
-  z-index: 100;
+  position: relative; /* 建立堆叠上下文，凌驾于下方题目列表(z-1)之上，但低于顶部Header(z-200) */
+  z-index: 10;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -2388,6 +2406,17 @@ onBeforeUnmount(() => {
 }
 
 /* ===== Transitions ===== */
+.ql-pop-enter-active {
+  transition: opacity 0.18s ease, transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.ql-pop-leave-active {
+  transition: opacity 0.12s ease, transform 0.12s ease;
+}
+.ql-pop-enter-from,
+.ql-pop-leave-to {
+  opacity: 0;
+  transform: translateY(-4px) scale(0.96);
+}
 .q-analysis-enter-active {
   transition: max-height 0.4s cubic-bezier(0.4, 0, 0.2, 1),
               opacity 0.3s ease,

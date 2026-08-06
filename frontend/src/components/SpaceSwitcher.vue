@@ -13,7 +13,7 @@
 
     <!-- 纯 CSS Hover 驱动的下拉面板 (pt-2 作为鼠标移动桥梁) -->
     <div
-      class="absolute right-0 top-full pt-2 w-64 z-50 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 origin-top-right scale-95 group-hover:scale-100"
+      class="absolute right-0 top-full pt-2 w-64 z-[100] opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 origin-top-right scale-95 group-hover:scale-100"
     >
       <div
         class="bg-white dark:bg-slate-900 rounded-xl shadow-xl border border-gray-100 dark:border-slate-800 overflow-hidden py-1"
