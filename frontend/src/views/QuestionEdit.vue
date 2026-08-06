@@ -1845,12 +1845,13 @@ watch(() => form.question_type, () => {
   outline: none;
   box-sizing: border-box;
   /* CSS 原生按内容撑开 —— 替代旧 JS scrollHeight 动态计算
-     Chrome 123+ 支持；Firefox/Safari 暂不支持时会 fallback 到默认高度 */
+     Chrome 123+ 支持；Firefox/Safari 暂不支持时会 fallback 到默认高度
+     不设 max-height / overflow:hidden —— textarea 随内容无限增高，
+     由外层 .edit-col-inner 的 overflow-y:auto 统一滚动，避免双重滚动条 */
   field-sizing: content;
   min-height: 120px;
-  max-height: 60vh;  /* 防止撑破屏幕，超出后内部滚动 */
-  overflow-y: auto;
-  overscroll-behavior: contain;  /* 与三栏滚动链修复一致 */
+  overflow: hidden;
+  overscroll-behavior: contain;
 }
 
 .img-upload-btn {
