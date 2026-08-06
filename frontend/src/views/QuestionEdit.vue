@@ -1851,7 +1851,6 @@ watch(() => form.question_type, () => {
   field-sizing: content;
   min-height: 120px;
   overflow: hidden;
-  overscroll-behavior: contain;
 }
 
 .img-upload-btn {
