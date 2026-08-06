@@ -10,7 +10,6 @@
 html {
   color-scheme: light;
 }
-
 html[data-theme='dark'] {
   color-scheme: dark;
 }
@@ -39,3 +38,7 @@ html[data-theme='dark'] {
 #app .katex .cjk_fallback {
   font-family: var(--font-cn-isolated);
 }
+
+/* 主题切换过渡由 useTheme.ts 的 transition-suppression 技术处理：
+   切换前注入 * { transition: none !important }，切换后移除。
+   无需在 CSS 中声明任何全局/KaTeX 过渡规则。 */

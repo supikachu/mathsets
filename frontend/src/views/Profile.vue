@@ -1,196 +1,254 @@
 <template>
   <div class="profile-page">
-    <!-- ===== Apple风格吸顶标题栏 ===== -->
+    <!-- ===== 吸顶顶栏 ===== -->
     <div class="profile-sticky-bar">
       <div class="profile-header">
         <button class="back-btn" @click="$router.back()" aria-label="返回">
           <AppIcon name="chevron-left" :size="18" />
         </button>
-        <h1 class="page-title">个人中心</h1>
-        <ThemeToggle />
+        <h1 class="page-title">个人中心与设置</h1>
       </div>
     </div>
 
-    <!-- ===== 主体滚动区域 ===== -->
+    <!-- ===== 主体双栏内容区域 ===== -->
     <div class="profile-scroll-area">
-      <div class="profile-container">
-        <!-- ════════════════════════════════════════
-             1. 头像区
-             ════════════════════════════════════════ -->
-        <section class="profile-card avatar-section">
-          <div class="section-title">
-            <AppIcon name="camera" :size="16" />
-            <span>头像</span>
+      <div class="w-full max-w-6xl mx-auto p-4 sm:p-6 md:p-8 flex flex-col md:flex-row gap-6 md:gap-8 items-start">
+        
+        <!-- 左侧设置导航栏 -->
+        <aside class="w-full md:w-56 shrink-0 flex flex-col gap-1.5 bg-white dark:bg-slate-900 p-3 rounded-2xl border border-gray-100 dark:border-slate-800 shadow-sm select-none">
+          <div class="px-3 py-1.5 text-xs font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wider">
+            设置分类
           </div>
+          
+          <button
+            v-for="tab in navTabs"
+            :key="tab.id"
+            type="button"
+            class="flex items-center gap-3 px-3.5 py-2.5 text-sm font-medium rounded-xl transition-all cursor-pointer text-left"
+            :class="activeTab === tab.id
+              ? 'bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 font-semibold shadow-xs'
+              : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-slate-800/60 hover:text-gray-900 dark:hover:text-gray-100'"
+            @click="activeTab = tab.id"
+          >
+            <AppIcon :name="tab.icon" :size="17" />
+            <span>{{ tab.label }}</span>
+          </button>
+        </aside>
 
-          <div class="avatar-block">
-            <!-- 头像预览：128px 圆形，object-fit: cover 防拉伸 -->
-            <div class="avatar-preview-wrap">
-              <img
-                v-if="avatarPreviewSrc"
-                :src="avatarPreviewSrc"
-                class="avatar-preview"
-                alt="头像预览"
-              />
-              <div v-else class="avatar-fallback">
-                {{ avatarLetter }}
+        <!-- 右侧动态内容区 -->
+        <main class="flex-1 min-w-0 flex flex-col gap-6 w-full">
+          
+          <!-- TAB 1: 个人资料 -->
+          <template v-if="activeTab === 'profile'">
+            <!-- 1.1 顶端头像与身份卡片 -->
+            <section class="flex flex-col sm:flex-row items-center justify-between gap-6 p-6 bg-white dark:bg-slate-900 rounded-2xl border border-gray-100 dark:border-slate-800 shadow-sm">
+              <div class="flex items-center gap-5 min-w-0 w-full sm:w-auto">
+                <div class="relative w-20 h-20 rounded-full overflow-hidden shrink-0 border-2 border-gray-100 dark:border-slate-800 shadow-sm bg-gray-100 dark:bg-slate-800">
+                  <img
+                    v-if="avatarPreviewSrc"
+                    :src="avatarPreviewSrc"
+                    class="w-full h-full object-cover"
+                    alt="头像预览"
+                  />
+                  <div v-else class="w-full h-full bg-gradient-to-br from-blue-500 to-indigo-600 text-white flex items-center justify-center text-2xl font-bold">
+                    {{ avatarLetter }}
+                  </div>
+                  <!-- 上传中遮罩 -->
+                  <div v-if="avatarState === 'uploading'" class="absolute inset-0 bg-black/50 backdrop-blur-xs flex items-center justify-center text-white">
+                    <AppProgress statusText="" :size="20" />
+                  </div>
+                </div>
+
+                <div class="flex flex-col min-w-0 gap-1">
+                  <div class="flex items-center gap-2.5 flex-wrap">
+                    <h2 class="text-lg font-bold text-gray-900 dark:text-gray-100 truncate">{{ auth.displayName || '未命名用户' }}</h2>
+                    <AppBadge :color="roleBadgeColor">{{ roleLabel }}</AppBadge>
+                  </div>
+                  <p class="text-xs text-gray-500 dark:text-gray-400 truncate">{{ profile?.email || '暂无邮箱' }}</p>
+                </div>
               </div>
 
-              <!-- 上传中遮罩 -->
-              <div v-if="avatarState === 'uploading'" class="avatar-mask">
-                <AppProgress statusText="" :size="20" />
+              <!-- 更载/更换头像按钮与逻辑 -->
+              <div class="flex flex-col items-center sm:items-end gap-2 shrink-0 w-full sm:w-auto border-t sm:border-t-0 border-gray-100 dark:border-slate-800 pt-4 sm:pt-0">
+                <input
+                  ref="fileInputRef"
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp"
+                  class="hidden"
+                  @change="onFileSelected"
+                />
+                <AppButton
+                  variant="outline"
+                  size="md"
+                  :loading="avatarState === 'uploading'"
+                  @click="fileInputRef?.click()"
+                >
+                  <AppIcon name="upload" :size="14" />
+                  <span class="ml-1.5">{{ avatarState === 'uploading' ? '上传中…' : '更换头像' }}</span>
+                </AppButton>
+                <span class="text-xs text-gray-400 dark:text-gray-500">支持 JPG/PNG/WebP，最大 2MB</span>
+                <span v-if="avatarState === 'error'" class="text-xs text-red-500">{{ avatarErrorMsg }}</span>
               </div>
-            </div>
+            </section>
 
-            <div class="avatar-actions">
-              <input
-                ref="fileInputRef"
-                type="file"
-                accept="image/jpeg,image/png,image/webp"
-                class="avatar-input-hidden"
-                @change="onFileSelected"
-              />
-              <AppButton
-                variant="outline"
-                size="md"
-                :loading="avatarState === 'uploading'"
-                @click="fileInputRef?.click()"
-              >
-                <AppIcon name="upload" :size="14" />
-                <span style="margin-left: 4px;">{{ avatarState === 'uploading' ? '上传中…' : '选择图片' }}</span>
-              </AppButton>
-              <p class="avatar-hint">
-                支持 JPG / PNG / WebP，最大 2 MB；推荐正方形图片。
-              </p>
-              <p v-if="avatarState === 'error'" class="avatar-error">{{ avatarErrorMsg }}</p>
-            </div>
-          </div>
-        </section>
-
-        <!-- ════════════════════════════════════════
-             2. 基础信息区
-             ════════════════════════════════════════ -->
-        <section class="profile-card info-section">
-          <div class="section-title">
-            <AppIcon name="user" :size="16" />
-            <span>基础信息</span>
-          </div>
-
-          <div class="info-grid">
-            <AppInput
-              v-model="form.displayName"
-              label="昵称"
-              placeholder="请输入昵称"
-              :error="errors.displayName"
-            />
-            <AppInput
-              v-model="form.email"
-              label="邮箱"
-              type="email"
-              placeholder="user@example.com"
-              :error="errors.email"
-            />
-            <AppInput
-              :modelValue="profile?.username || ''"
-              label="账号（只读）"
-              disabled
-            />
-            <div class="form-group">
-              <label class="form-label">注册时间</label>
-              <div class="readonly-field">
-                {{ profile ? formatTime(profile.created_at) : '—' }}
+            <!-- 1.2 基础信息表单卡片 (两列网格布局) -->
+            <section class="p-6 bg-white dark:bg-slate-900 rounded-2xl border border-gray-100 dark:border-slate-800 shadow-sm flex flex-col gap-6">
+              <div class="flex items-center gap-2 text-sm font-semibold text-gray-900 dark:text-gray-100 border-b border-gray-100 dark:border-slate-800/80 pb-3">
+                <AppIcon name="user" :size="16" class="text-blue-500" />
+                <span>基础资料信息</span>
               </div>
-            </div>
-            <div class="form-group">
-              <label class="form-label">角色</label>
-              <div class="readonly-field">
-                <AppBadge :color="roleBadgeColor">{{ roleLabel }}</AppBadge>
+
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-5">
+                <AppInput
+                  v-model="form.displayName"
+                  label="昵称"
+                  placeholder="请输入昵称"
+                  :error="errors.displayName"
+                />
+                <AppInput
+                  v-model="form.email"
+                  label="邮箱"
+                  type="email"
+                  placeholder="user@example.com"
+                  :error="errors.email"
+                />
+                <AppInput
+                  :modelValue="profile?.username || ''"
+                  label="账号用户名（只读）"
+                  disabled
+                />
+                <div class="form-group flex flex-col gap-1.5">
+                  <label class="text-xs font-medium text-gray-600 dark:text-gray-400">注册时间</label>
+                  <div class="px-3 py-2 bg-gray-50 dark:bg-slate-800/60 rounded-lg text-sm text-gray-700 dark:text-gray-300 min-h-[38px] flex items-center border border-gray-100 dark:border-slate-800">
+                    {{ profile ? formatTime(profile.created_at) : '—' }}
+                  </div>
+                </div>
+                <div class="form-group flex flex-col gap-1.5">
+                  <label class="text-xs font-medium text-gray-600 dark:text-gray-400">用户身份角色</label>
+                  <div class="px-3 py-2 bg-gray-50 dark:bg-slate-800/60 rounded-lg text-sm text-gray-700 dark:text-gray-300 min-h-[38px] flex items-center border border-gray-100 dark:border-slate-800">
+                    <AppBadge :color="roleBadgeColor">{{ roleLabel }}</AppBadge>
+                  </div>
+                </div>
               </div>
-            </div>
-          </div>
 
-          <div class="info-actions">
-            <AppButton
-              variant="primary"
-              :loading="savingProfile"
-              :disabled="!hasProfileChanges"
-              @click="onSaveProfile"
-            >
-              <AppIcon name="save" :size="14" />
-              <span style="margin-left: 4px;">保存修改</span>
-            </AppButton>
-          </div>
-        </section>
+              <div class="flex justify-end pt-2 border-t border-gray-100 dark:border-slate-800/80">
+                <AppButton
+                  variant="primary"
+                  :loading="savingProfile"
+                  :disabled="!hasProfileChanges"
+                  @click="onSaveProfile"
+                >
+                  <AppIcon name="save" :size="14" />
+                  <span class="ml-1.5">保存修改</span>
+                </AppButton>
+              </div>
+            </section>
+          </template>
 
-        <!-- ════════════════════════════════════════
-             3. 安全设置区
-             ════════════════════════════════════════ -->
-        <section class="profile-card security-section">
-          <div class="section-title">
-            <AppIcon name="lock" :size="16" />
-            <span>安全设置</span>
-          </div>
+          <!-- TAB 2: 安全设置 (修改密码) -->
+          <template v-else-if="activeTab === 'security'">
+            <section class="p-6 bg-white dark:bg-slate-900 rounded-2xl border border-gray-100 dark:border-slate-800 shadow-sm flex flex-col gap-6">
+              <div class="flex items-center gap-2 text-sm font-semibold text-gray-900 dark:text-gray-100 border-b border-gray-100 dark:border-slate-800/80 pb-3">
+                <AppIcon name="lock" :size="16" class="text-blue-500" />
+                <span>账号登录密码修改</span>
+              </div>
 
-          <div class="info-grid">
-            <AppInput
-              v-model="pwForm.oldPassword"
-              label="当前密码"
-              type="password"
-              placeholder="请输入当前密码"
-              autocomplete="current-password"
-              :error="pwErrors.oldPassword"
-            />
-            <AppInput
-              v-model="pwForm.newPassword"
-              label="新密码"
-              type="password"
-              placeholder="至少 8 位"
-              autocomplete="new-password"
-              :error="pwErrors.newPassword"
-            />
-            <AppInput
-              v-model="pwForm.confirmPassword"
-              label="确认新密码"
-              type="password"
-              placeholder="再次输入新密码"
-              autocomplete="new-password"
-              :error="pwErrors.confirmPassword"
-            />
-          </div>
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-5">
+                <AppInput
+                  v-model="pwForm.oldPassword"
+                  label="当前原密码"
+                  type="password"
+                  placeholder="请输入当前原密码"
+                  autocomplete="current-password"
+                  :error="pwErrors.oldPassword"
+                  class="sm:col-span-2 max-w-md"
+                />
+                <AppInput
+                  v-model="pwForm.newPassword"
+                  label="新设置密码"
+                  type="password"
+                  placeholder="至少 8 位"
+                  autocomplete="new-password"
+                  :error="pwErrors.newPassword"
+                />
+                <AppInput
+                  v-model="pwForm.confirmPassword"
+                  label="确认新密码"
+                  type="password"
+                  placeholder="再次输入新密码"
+                  autocomplete="new-password"
+                  :error="pwErrors.confirmPassword"
+                />
+              </div>
 
-          <div class="info-actions">
-            <AppButton
-              variant="primary"
-              :loading="changingPassword"
-              :disabled="!canSubmitPassword"
-              @click="onChangePassword"
-            >
-              <AppIcon name="key" :size="14" />
-              <span style="margin-left: 4px;">修改密码</span>
-            </AppButton>
-            <p class="security-hint">
-              修改成功后将自动退出登录，请使用新密码重新登录。
-            </p>
-          </div>
-        </section>
+              <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 pt-2 border-t border-gray-100 dark:border-slate-800/80">
+                <p class="text-xs text-gray-400 dark:text-gray-500">
+                  修改成功后将自动注销登录，请使用新密码重新登录。
+                </p>
+                <AppButton
+                  variant="primary"
+                  :loading="changingPassword"
+                  :disabled="!canSubmitPassword"
+                  @click="onChangePassword"
+                >
+                  <AppIcon name="key" :size="14" />
+                  <span class="ml-1.5">修改密码</span>
+                </AppButton>
+              </div>
+            </section>
+          </template>
+
+          <!-- TAB 3: 外观与偏好 (主题切换) -->
+          <template v-else-if="activeTab === 'appearance'">
+            <section class="p-6 bg-white dark:bg-slate-900 rounded-2xl border border-gray-100 dark:border-slate-800 shadow-sm flex flex-col gap-6">
+              <div class="flex items-center gap-2 text-sm font-semibold text-gray-900 dark:text-gray-100 border-b border-gray-100 dark:border-slate-800/80 pb-3">
+                <AppIcon name="sun" :size="16" class="text-blue-500" />
+                <span>系统界面外观偏好</span>
+              </div>
+
+              <div class="flex items-center justify-between p-4 bg-gray-50 dark:bg-slate-800/50 rounded-xl border border-gray-100 dark:border-slate-800">
+                <div class="flex flex-col gap-1">
+                  <span class="text-sm font-medium text-gray-900 dark:text-gray-100">明暗主题模式</span>
+                  <span class="text-xs text-gray-500 dark:text-gray-400">选择您偏好的系统颜色主题（浅色 / 深色模式瞬间切换）</span>
+                </div>
+                <ThemeToggle />
+              </div>
+            </section>
+          </template>
+
+        </main>
       </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, reactive } from 'vue'
+import { ref, computed, onMounted, reactive, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
 import { userApi, type UserProfile } from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
 import { useToast } from '@/composables/useToast'
-import { compressImage, blobToFile } from '@/utils/imageCompressor'
+import { useTheme } from '@/composables/useTheme'
+import { compressImage } from '@/utils/imageCompressor'
 import { AppButton, AppIcon, AppInput, AppBadge, AppProgress } from '@/components/ui'
 import ThemeToggle from '@/components/ThemeToggle.vue'
 
 const router = useRouter()
 const auth = useAuthStore()
 const toast = useToast()
+const { isDark } = useTheme()
+
+// ---------------------------------------------------------------------------
+// 动态 Tab 控制
+// ---------------------------------------------------------------------------
+type TabType = 'profile' | 'security' | 'appearance'
+const activeTab = ref<TabType>('profile')
+
+const navTabs = [
+  { id: 'profile', label: '个人资料', icon: 'user' },
+  { id: 'security', label: '安全设置', icon: 'lock' },
+  { id: 'appearance', label: '外观与偏好', icon: 'sun' },
+] as const
 
 // ---------------------------------------------------------------------------
 // Profile 数据
@@ -269,21 +327,17 @@ async function onFileSelected(e: Event) {
   const file = input.files?.[0]
   if (!file) return
 
-  // 重置错误状态
   avatarState.value = 'idle'
   avatarErrorMsg.value = ''
 
-  // 1. 大小预校验（2MB）
   if (file.size > MAX_AVATAR_BYTES) {
     avatarState.value = 'error'
     avatarErrorMsg.value = '图片大小不能超过 2MB'
     toast.error('图片大小不能超过 2MB')
-    // 清空 input 让用户可以重新选择同一文件
     input.value = ''
     return
   }
 
-  // 2. MIME 类型预校验
   const allowedTypes = ['image/jpeg', 'image/png', 'image/webp']
   if (!allowedTypes.includes(file.type)) {
     avatarState.value = 'error'
@@ -293,19 +347,14 @@ async function onFileSelected(e: Event) {
     return
   }
 
-  // 3. 上传（先压缩，复用题目图片压缩工具）
   avatarState.value = 'uploading'
   try {
-    // 头像压缩：长边 ≤ 256 足矣，但复用 compressImage（长边 2000）也无所谓
-    // 注：compressImage 会自动转 WebP，后端 Magic Bytes 校验兼容
     const compressedBlob = await compressImage(file)
-    // 修正 MIME（与之前图片上传补丁一致 — 防止 blob.type 为空）
     const mimeType = compressedBlob.type || 'image/webp'
     const compressedFile = new File([compressedBlob], file.name || 'avatar.webp', {
       type: mimeType,
     })
 
-    // 调用 store 上传 — 成功后 store 会自动同步 localStorage
     const newAvatarUrl = await auth.uploadAvatar(compressedFile)
     avatarPreviewSrc.value = newAvatarUrl
     avatarState.value = 'idle'
@@ -315,7 +364,6 @@ async function onFileSelected(e: Event) {
     avatarErrorMsg.value = e?.response?.data?.error || '头像上传失败'
     toast.error(e?.response?.data?.error || '头像上传失败')
   } finally {
-    // 清空 input 让用户可以重新选择同一文件
     input.value = ''
   }
 }
@@ -350,7 +398,6 @@ function validateProfile(): boolean {
     errors.email = '邮箱不能为空'
     return false
   }
-  // 简易邮箱正则
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
   if (!emailRegex.test(email)) {
     errors.email = '邮箱格式不正确'
@@ -372,7 +419,6 @@ async function onSaveProfile() {
     toast.success('个人资料已更新')
   } catch (e: any) {
     const msg = e?.response?.data?.error || '更新失败'
-    // 字段级错误识别
     if (msg.includes('邮箱')) {
       errors.email = msg
     } else if (msg.includes('昵称')) {
@@ -430,13 +476,10 @@ async function onChangePassword() {
     })
     toast.success('密码修改成功，即将跳转登录页…')
 
-    // 清空表单（防止密码在内存中残留）
     pwForm.oldPassword = ''
     pwForm.newPassword = ''
     pwForm.confirmPassword = ''
 
-    // ⚠️ 安全约束：修改成功后必须强制登出 + 跳转登录页
-    // 给 toast 一点展示时间再跳转
     setTimeout(() => {
       auth.logout()
     }, 1200)
@@ -456,7 +499,6 @@ async function onChangePassword() {
 // ---------------------------------------------------------------------------
 const roleLabel = computed(() => {
   if (!profile.value) return ''
-  // global_role 类型为 'super_admin' | 'teacher'，直接匹配即可
   if (profile.value.global_role === 'super_admin') return '系统管理员'
   return '教师'
 })
@@ -481,7 +523,6 @@ function formatTime(iso: string): string {
   }
 }
 
-// 离开页面时清空密码字段（防止浏览器后退泄露）
 onMounted(() => {
   window.addEventListener('beforeunload', () => {
     pwForm.oldPassword = ''
@@ -490,8 +531,6 @@ onMounted(() => {
   })
 })
 
-// 路由离开时也清空
-import { onBeforeUnmount } from 'vue'
 onBeforeUnmount(() => {
   pwForm.oldPassword = ''
   pwForm.newPassword = ''
@@ -553,193 +592,12 @@ onBeforeUnmount(() => {
   margin: 0;
 }
 
-/* ===== 滚动区域（独立滚动域，参考 QuestionList 滚动隔离约束）===== */
+/* ===== 独立滚动域 ===== */
 .profile-scroll-area {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
   background: var(--bg-primary);
-}
-
-.profile-container {
-  max-width: 720px;
-  margin: 0 auto;
-  padding: 24px 24px 48px;
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-}
-
-/* ===== 卡片样式（与 QuestionList 的 .q-item 高度一致） ===== */
-.profile-card {
-  background: var(--bg-card);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-sm);
-  padding: 20px 24px;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  transition: var(--transition);
-}
-
-.section-title {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
-}
-
-/* ===== 头像区 ===== */
-.avatar-block {
-  display: flex;
-  align-items: center;
-  gap: 20px;
-  flex-wrap: wrap;
-}
-
-.avatar-preview-wrap {
-  position: relative;
-  width: 96px;
-  height: 96px;
-  flex-shrink: 0;
-}
-
-.avatar-preview {
-  width: 96px;
-  height: 96px;
-  border-radius: 50%;
-  object-fit: cover; /* ⚠️ 关键约束：防非正方形图片被拉伸 */
-  background: var(--bg-input);
-  box-shadow: var(--shadow-xs);
-}
-
-.avatar-fallback {
-  width: 96px;
-  height: 96px;
-  border-radius: 50%;
-  background: var(--accent-gradient);
-  color: #fff;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 36px;
-  font-weight: 700;
-  box-shadow: var(--shadow-xs);
-}
-
-.avatar-mask {
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  background: rgba(0, 0, 0, 0.45);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #fff;
-}
-
-.avatar-actions {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  flex: 1;
-  min-width: 200px;
-}
-
-.avatar-input-hidden {
-  display: none;
-}
-
-.avatar-hint {
-  font-size: 12px;
-  color: var(--text-muted);
-  margin: 0;
-}
-
-.avatar-error {
-  font-size: 12px;
-  color: var(--danger);
-  margin: 0;
-}
-
-/* ===== 表单区域 ===== */
-.info-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 16px 20px;
-}
-
-@media (max-width: 640px) {
-  .info-grid {
-    grid-template-columns: 1fr;
-  }
-}
-
-.form-group {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.form-label {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-secondary);
-}
-
-.readonly-field {
-  padding: 9px 12px;
-  background: var(--bg-input);
-  border-radius: var(--radius-xs);
-  font-size: 14px;
-  color: var(--text-primary);
-  min-height: 38px;
-  display: flex;
-  align-items: center;
-}
-
-/* ⚠️ AppInput 内部 <input> 的样式继承 — 与 QuestionList 保持一致 */
-:deep(.form-group input) {
-  width: 100%;
-  padding: 9px 12px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-xs);
-  background: var(--bg-input);
-  font-size: 14px;
-  color: var(--text-primary);
-  outline: none;
-  transition: var(--transition-fast);
-  font-family: inherit;
-}
-
-:deep(.form-group input:focus) {
-  border-color: var(--accent);
-  background: var(--bg-card);
-  box-shadow: 0 0 0 3px var(--accent-light);
-}
-
-:deep(.form-group input:disabled) {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-/* ===== 操作按钮区 ===== */
-.info-actions {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-  padding-top: 4px;
-}
-
-.security-hint {
-  font-size: 12px;
-  color: var(--text-muted);
-  margin: 0;
 }
 </style>
