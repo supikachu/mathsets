@@ -2045,7 +2045,7 @@ onBeforeUnmount(() => {
 
 .asp-section.ai-highlight,
 .asp-meta-cell.ai-highlight {
-  animation: asp-ai-breathe 2s ease-in-out infinite;
+  animation: asp-ai-breathe 2s ease-in-out 3;
   border-radius: var(--radius-sm);
 }
 

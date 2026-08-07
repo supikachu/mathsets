@@ -2057,7 +2057,7 @@ watch(() => form.question_type, () => {
 }
 
 .ai-highlight {
-  animation: ai-breathe 2s ease-in-out infinite;
+  animation: ai-breathe 2s ease-in-out 3;
   border-radius: var(--radius-md);
   transition: box-shadow 0.5s ease;
 }

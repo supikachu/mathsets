@@ -29,6 +29,26 @@ function normalizeEmptyset(s: string): string {
   return s.replace(/\u2205/g, '\\varnothing')
 }
 
+/**
+ * 将国内教材中的圆弧变体命令统一替换为 \htmlClass{math-arc}{...}
+ *
+ * KaTeX 原生的 \overgroup 虽能拉伸但两端带向下的"倒钩"，
+ * 不符合国内初高中教材中的平滑几何圆弧规范。
+ * 业界最高级方案：注入 CSS 类，用 border-radius 绘制无倒钩圆弧。
+ *
+ * 覆盖的圆弧变体：
+ *   \overset{\frown}{AB}  —— 通用圆弧标记
+ *   \overparen{AB}        —— 数学圆弧（部分宏包）
+ *   \wideparen{AB}        —— 宽圆弧（部分宏包）
+ *   \overgroup{AB}        —— KaTeX 原生（带倒钩）
+ */
+function normalizeArcs(s: string): string {
+  return s.replace(
+    /\\(?:overset\s*\{?\\frown\}?|overparen|wideparen|overgroup)\s*\{([^}]+)\}/g,
+    '\\htmlClass{math-arc}{$1}',
+  )
+}
+
 function escapeHtml(s: string): string {
   return s
     .replace(/&/g, '&amp;')
@@ -124,15 +144,15 @@ function shouldDisableInvert(alt: string, url: string, urlField: string): boolea
  */
 function renderKatex(formula: string, displayMode: boolean): string {
   try {
-    const raw = normalizeEmptyset(formula.trim())
+    const raw = normalizeArcs(normalizeEmptyset(formula.trim()))
     return katex.renderToString(raw, {
       displayMode,
       throwOnError: false,
-      // 【安全】显式 trust:false —— 拒绝 \href / \htmlClass / \htmlId 等
-      //   生成 HTML 的命令（默认即 false，此处显式声明防御未来改动）
-      trust: false,
-      strict: 'warn', // 非法命令仅警告不执行
-      macros: katexMacros, // 固定宏映射（无用户输入参与宏定义）
+      // 开启 \htmlClass 信任 —— 仅允许该命令注入 CSS 类绘制教材级圆弧
+      // 其他 HTML 生成命令（\href / \htmlId 等）仍被拒绝
+      trust: (context: { command: string }) => context.command === '\\htmlClass',
+      strict: false, // 屏蔽 \htmlClass 相关的严格模式警告
+      macros: katexMacros,
     })
   } catch {
     return `<span class="katex-error">${escapeHtml(formula)}</span>`
@@ -409,6 +429,31 @@ onBeforeUnmount(() => {
 [data-theme='dark'] .latex-render img.latex-img:not([data-no-invert="true"]) {
   filter: invert(1) hue-rotate(180deg);
   background: #f5f5f7;
+}
+
+/* ============ 教材级 CSS 圆弧（替代 KaTeX \overgroup 倒钩） ============
+ * 痛点：KaTeX 原生 \overgroup 两端带向下的"倒钩"，不符合国内初高中
+ *       教材中平滑几何圆弧规范。
+ * 原理：通过 \htmlClass{math-arc}{AB} 注入 CSS 类，
+ *       用 border-top + border-radius 绘制无倒钩的贝塞尔圆弧。
+ */
+.latex-render .math-arc {
+  position: relative;
+  display: inline-block;
+  /* 稍微增加一点顶部内边距，给饱满的弧线留足空间 */
+  padding-top: 0.35em;
+}
+.latex-render .math-arc::before {
+  content: "";
+  position: absolute;
+  top: 0.08em; /* 距离顶部的微调 */
+  left: 0;
+  right: 0;
+  height: 0.25em; /* 控制弧线拱起的高度 */
+  /* 使用 0.07em 的相对粗细，完美匹配 KaTeX 默认的连线粗细，彻底告别发虚 */
+  border-top: 0.07em solid currentColor;
+  /* 完美的半椭圆曲线：水平半径 50%，垂直半径 100% */
+  border-radius: 50% 50% 0 0 / 100% 100% 0 0;
 }
 
 /* ============ 小问数字徽章 ============ */

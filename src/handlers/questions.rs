@@ -4,8 +4,10 @@ use axum::{
     Json,
 };
 use axum_extra::extract::Query;
+use regex::Regex;
 use serde::Serialize;
 use serde_json::json;
+use std::collections::HashSet;
 use uuid::Uuid;
 
 use crate::auth::middleware::AuthUser;
@@ -1036,6 +1038,49 @@ pub async fn update_question(
     let old_version = existing.version;
     let new_version = old_version + 1;
 
+    // ── 图片差集计算：找出被用户删除/替换的旧图片 ──
+    // 正则匹配 /uploads/questions/xxx.png 格式的文件名
+    let re = Regex::new(r"/uploads/questions/([a-zA-Z0-9_\-\.]+\.(?:png|jpg|jpeg|gif|webp))")
+        .map_err(|e| db_err(format!("正则编译失败: {}", e)))?;
+
+    // 提取旧文本中的图片集合
+    let mut old_images: HashSet<String> = HashSet::new();
+    for cap in re.captures_iter(&existing.stem) {
+        if let Some(f) = cap.get(1) { old_images.insert(f.as_str().to_string()); }
+    }
+    if let Some(ref analysis) = existing.analysis {
+        for cap in re.captures_iter(analysis) {
+            if let Some(f) = cap.get(1) { old_images.insert(f.as_str().to_string()); }
+        }
+    }
+    if let Some(ref options) = existing.options {
+        for cap in re.captures_iter(&options.to_string()) {
+            if let Some(f) = cap.get(1) { old_images.insert(f.as_str().to_string()); }
+        }
+    }
+
+    // 提取新文本中的图片集合（COALESCE 语义：未提供的字段保留旧值）
+    let new_stem = req.stem.as_deref().unwrap_or(&existing.stem);
+    let mut new_images: HashSet<String> = HashSet::new();
+    for cap in re.captures_iter(new_stem) {
+        if let Some(f) = cap.get(1) { new_images.insert(f.as_str().to_string()); }
+    }
+    let new_analysis = req.analysis.as_deref().or(existing.analysis.as_deref());
+    if let Some(analysis) = new_analysis {
+        for cap in re.captures_iter(analysis) {
+            if let Some(f) = cap.get(1) { new_images.insert(f.as_str().to_string()); }
+        }
+    }
+    let new_options = req.options.as_ref().or(existing.options.as_ref());
+    if let Some(options) = new_options {
+        for cap in re.captures_iter(&options.to_string()) {
+            if let Some(f) = cap.get(1) { new_images.insert(f.as_str().to_string()); }
+        }
+    }
+
+    // 差集：存在于旧文本中但已不存在于新文本中的图片 = 被遗弃的旧图片
+    let orphaned_images: Vec<String> = old_images.difference(&new_images).cloned().collect();
+
     let mut tx = state.pool.begin().await.map_err(|e| db_err(format!("开启事务失败: {}", e)))?;
 
     let query_result = sqlx::query(
@@ -1143,6 +1188,12 @@ pub async fn update_question(
         .await
         .map_err(|e| db_err(format!("提交事务失败: {}", e)))?;
 
+    // ── 删后：异步清理被遗弃的旧图片文件 ──
+    //    DB 更新已成功提交，物理文件删除失败不应阻断 API 响应
+    if !orphaned_images.is_empty() {
+        cleanup_question_images(&state.upload_dir, &orphaned_images);
+    }
+
     let question = sqlx::query_as::<_, Question>("SELECT * FROM questions WHERE id = $1")
         .bind(id)
         .fetch_one(&state.pool)
@@ -1195,13 +1246,115 @@ pub async fn delete_question(
         return Err((StatusCode::FORBIDDEN, Json(json!({"error": "无权删除该题目，仅空间 Owner 或管理员可删除"}))));
     }
 
+    // ── 删前：提取所有图片文件名（含子题目） ──
+    //    必须在 DELETE 之前查询，否则数据已被删除无法获取
+    let image_filenames = extract_image_filenames(&state.pool, id).await?;
+
+    // 先删子题目（复合题结构），再删主题目
+    sqlx::query("DELETE FROM questions WHERE parent_id = $1")
+        .bind(id)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| db_err(format!("删除子题目失败: {}", e)))?;
+
     sqlx::query("DELETE FROM questions WHERE id = $1")
         .bind(id)
         .execute(&state.pool)
         .await
         .map_err(|e| db_err(format!("删除题目失败: {}", e)))?;
 
+    // ── 删后：异步清理物理图片文件（孤儿文件 GC） ──
+    //    DB 删除已成功提交，物理文件删除失败不应阻断 API 响应
+    cleanup_question_images(&state.upload_dir, &image_filenames);
+
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// 提取题目文本中所有引用 `/uploads/questions/` 的图片文件名。
+///
+/// 扫描字段：stem / analysis / options(JSON 序列化后扫描)
+/// 兼容复合题：同时扫描 parent_id = question_id 的所有子题目
+fn extract_image_filenames(
+    pool: &sqlx::PgPool,
+    question_id: Uuid,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<String>, (StatusCode, Json<serde_json::Value>)>> + Send + '_>> {
+    Box::pin(async move {
+        // 匹配 /uploads/questions/xxx.png 格式的图片文件名
+        // 安全：文件名字符集限制 [a-zA-Z0-9_\-\.]，防止路径穿越
+        let re = Regex::new(r"/uploads/questions/([a-zA-Z0-9_\-\.]+\.(?:png|jpg|jpeg|gif|webp))")
+            .map_err(|e| db_err(format!("正则编译失败: {}", e)))?;
+
+        let mut filenames: Vec<String> = Vec::new();
+
+        // 收集主题目 + 所有子题目
+        let rows = sqlx::query_as::<_, Question>(
+            "SELECT * FROM questions WHERE id = $1 OR parent_id = $1 ORDER BY sub_order NULLS FIRST",
+        )
+        .bind(question_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| db_err(format!("查询题目及子题目失败: {}", e)))?;
+
+        for q in &rows {
+            // stem
+            for cap in re.captures_iter(&q.stem) {
+                if let Some(f) = cap.get(1) {
+                    filenames.push(f.as_str().to_string());
+                }
+            }
+            // analysis
+            if let Some(ref analysis) = q.analysis {
+                for cap in re.captures_iter(analysis) {
+                    if let Some(f) = cap.get(1) {
+                        filenames.push(f.as_str().to_string());
+                    }
+                }
+            }
+            // options (JSONB → 序列化后扫描)
+            if let Some(ref options) = q.options {
+                let options_str = options.to_string();
+                for cap in re.captures_iter(&options_str) {
+                    if let Some(f) = cap.get(1) {
+                        filenames.push(f.as_str().to_string());
+                    }
+                }
+            }
+        }
+
+        // 去重（同一张图可能被多次引用）
+        filenames.sort();
+        filenames.dedup();
+
+        Ok(filenames)
+    })
+}
+
+/// 异步清理题目图片文件 —— spawn 隔离，失败仅 log，不阻断 API 响应。
+///
+/// 路径拼接：`{upload_dir}/questions/{filename}`
+/// 容错：文件不存在 → 静默忽略；其他 IO 错误 → warn 日志
+fn cleanup_question_images(upload_dir: &str, filenames: &[String]) {
+    if filenames.is_empty() {
+        return;
+    }
+    let dir = std::path::PathBuf::from(upload_dir).join("questions");
+    let to_delete: Vec<String> = filenames.to_vec();
+    tokio::spawn(async move {
+        for filename in &to_delete {
+            let file_path = dir.join(filename);
+            match tokio::fs::remove_file(&file_path).await {
+                Ok(()) => {
+                    tracing::info!("已清理题目图片: {}", filename);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // 文件已不存在 — 静默忽略
+                }
+                Err(e) => {
+                    tracing::warn!("清理题目图片失败 {}: {}", filename, e);
+                }
+            }
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------

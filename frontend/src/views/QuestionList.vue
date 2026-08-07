@@ -591,7 +591,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount, onActivated, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { questionApi, type QuestionSummary, type QuestionDetail, type QuestionQuery, type GradeLevel, type SemesterType, type ExamType, type KnowledgeNodeSummary } from '@/api/client'
 import LatexRender from '@/components/LatexRender.vue'
@@ -1211,6 +1211,14 @@ onMounted(() => {
   fetchList()
   fetchPendingCount()
 })
+
+// keep-alive 缓存组件从详情页返回时触发 —— onMounted 不会再次执行
+// 确保删除/编辑后列表数据为最新
+onActivated(() => {
+  fetchList()
+  fetchPendingCount()
+})
+
 onBeforeUnmount(() => {
   if (searchTimer) clearTimeout(searchTimer)
 })
