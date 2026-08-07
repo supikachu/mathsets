@@ -41,7 +41,7 @@
 
             <!-- bounded 确保选区坐标严格锁在 Canvas 范围内 -->
             <cropper-selection
-              initial-coverage="0.8"
+              initial-coverage="0.75"
               movable
               resizable
               bounded
@@ -305,44 +305,45 @@ onBeforeUnmount(() => {
   }
 }
 
-/* 画布填满内层，允许锚点凸出渲染在 24px 缓冲带中 */
+/* 画布填满内层，隐藏溢出选区（防选区逃逸到 padding 带） */
 :deep(cropper-canvas) {
   width: 100%;
   height: 100%;
   display: block;
-  overflow: visible !important; /* 关键：允许锚点凸出 Canvas */
+  overflow: hidden !important; /* 选区无论怎么拖都不会渲染到画布外 */
 }
 
 /* ==========================================
-   使用 :deep() 穿透样式
+   样式复原：蓝色虚线边框 + 蓝色锚点
+   使用 :deep() 击穿 Scoped 隔离，否则 transparent !important 会失效
    ========================================== */
 
-/* 1. 选区透明，无蓝雾 */
+/* 1. 彻底清除选区内部与拖拽层的背景蓝色，恢复完全透明（防蓝雾） */
 :deep(cropper-selection),
 :deep(cropper-handle[action="move"]) {
   background-color: transparent !important;
   background: transparent !important;
 }
 
-/* 2. Stitch 风格白色高亮边框与圆角 */
+/* 2. 选区边框：1.5px 经典蓝色虚线，直角边框 */
 :deep(cropper-selection) {
-  border: 2px solid #ffffff !important;
-  border-radius: 12px !important;
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.2), 0 8px 24px rgba(0, 0, 0, 0.4) !important;
+  border: 1.5px dashed #3399ff !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
   outline: none !important;
 }
 
-/* 3. 精致手柄：苹果蓝 + 白色外边框的圆形锚点 */
+/* 3. 拖拽锚点：纯蓝色微圆角正方形小手柄 */
 :deep(cropper-handle:not([action="move"])) {
-  background-color: #007aff !important;
-  border: 2px solid #ffffff !important;
-  width: 12px !important;
-  height: 12px !important;
-  border-radius: 50% !important;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3) !important;
+  background-color: #3399ff !important;
+  border: none !important;
+  width: 10px !important;
+  height: 10px !important;
+  border-radius: 2px !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3) !important;
 }
 
-/* 4. 暗色遮罩透明度 */
+/* 4. 暗色遮罩 */
 :deep(cropper-shade) {
   background-color: rgba(0, 0, 0, 0.55) !important;
 }
