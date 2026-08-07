@@ -204,7 +204,14 @@
         </div>
 
         <!-- 中栏：试卷化预览 -->
-        <LivePreviewCard class="interactive-column" tabindex="0" @click="focusColumn" :form="form" />
+        <LivePreviewCard
+          class="interactive-column"
+          tabindex="0"
+          @click="focusColumn"
+          :form="form"
+          :image-editable="true"
+          @image-click="handleImageClick"
+        />
 
         <!-- 右栏：常驻属性面板（含 AI 智能打标） -->
         <AttributeSidePanel
@@ -284,6 +291,23 @@
         <AppButton variant="primary" :disabled="!selectedReviewerId" :loading="submitting" @click="confirmSubmitWithReviewer">确认提交</AppButton>
       </div>
     </AppModal>
+
+    <!-- 图片调节浮窗（编辑模式专属：宽度/对齐/裁剪） -->
+    <ImageAdjustmentPanel
+      :visible="imageAdjustPanelVisible"
+      :target="imageAdjustTarget"
+      :image-data="imageAdjustData"
+      @update-config="handleUpdateConfig"
+      @crop-request="handleCropRequest"
+      @close="imageAdjustPanelVisible = false"
+    />
+
+    <!-- 图片裁剪弹窗 -->
+    <CropperDialog
+      v-model:visible="cropperDialogVisible"
+      :image-url="cropperImageUrl"
+      @cropped="handleCropped"
+    />
   </div>
 </template>
 
@@ -298,6 +322,10 @@ import { useSpaceStore } from '@/stores/space'
 import { useAuthStore } from '@/stores/auth'
 import { hasUnfinishedSnapshot } from '@/utils/batchSnapshot'
 import { processMarkdownImages, type UploadCache } from '@/utils/markdownImages'
+import { uploadsApi } from '@/api/client'
+import ImageAdjustmentPanel from '@/components/ImageAdjustmentPanel.vue'
+import CropperDialog from '@/components/CropperDialog.vue'
+import type { ImageConfig, ImageClickPayload } from '@/components/LatexRender.vue'
 
 // Imports of child components
 import EditFormChoice from './edit/components/EditFormChoice.vue'
@@ -1455,6 +1483,105 @@ watch(() => form.question_type, () => {
     form.gradingSteps = []
   }
 })
+
+// ============================================================
+// 图片调节面板 & 裁剪弹窗集成
+// ------------------------------------------------------------
+// 仅题干预览区开启 editable 模式：用户点击图片后，弹出浮窗调节
+// 宽度/对齐（等比例缩放，禁止 float），或触发裁剪弹窗。修改后的配置
+// 精准反写到 form.stem 的 Markdown 语法 ![alt](url){config}。
+// ============================================================
+
+const imageAdjustPanelVisible = ref(false)
+const imageAdjustTarget = ref<HTMLElement | null>(null)
+const imageAdjustData = ref<{ url: string; mdId: string; config: ImageConfig } | null>(null)
+const cropperDialogVisible = ref(false)
+const cropperImageUrl = ref('')
+const cropperProcessing = ref(false)
+
+/** 处理 LivePreviewCard 转发的图片点击事件：打开调节面板 */
+function handleImageClick(payload: ImageClickPayload) {
+  imageAdjustTarget.value = payload.target
+  imageAdjustData.value = {
+    url: payload.url,
+    mdId: payload.mdId,
+    config: payload.config,
+  }
+  imageAdjustPanelVisible.value = true
+}
+
+/**
+ * 精准反写 Markdown（补丁2：严格相等判断）：
+ *   - 全局遍历所有 `![alt](url){oldConfig}` 或 `![alt](url)` 语法
+ *   - 提取 imgUrl 后与目标 url 进行 **严格绝对相等判断** (`imgUrl.trim() === url.trim()`)
+ *   - 仅匹配项替换为新 configString；不匹配项原样返回
+ *   - 当 configString 为空字符串时，尾部 {} 被彻底移除（恢复默认）
+ *
+ * 严禁使用 .includes() 匹配 URL —— 会误杀同名后缀或子串相似的图片。
+ */
+function updateImageConfigInMarkdown(md: string, url: string, configString: string): string {
+  const imgRegex = /!\[([^\]]*)\]\(([^)]+)\)(?:\{[^}]*\})?/g
+  return md.replace(imgRegex, (match, alt, imgUrl) => {
+    // 严格绝对相等判断：提取 Markdown 中的 imgUrl 与目标 url 逐字符比对
+    if (imgUrl.trim() !== url.trim()) {
+      return match // URL 不匹配，原样返回
+    }
+    return `![${alt}](${imgUrl})${configString}`
+  })
+}
+
+/** 调节面板配置变化时：精准反写到 form.stem */
+function handleUpdateConfig({ configString }: { mdId: string; configString: string }) {
+  if (!imageAdjustData.value) return
+  const url = imageAdjustData.value.url
+  form.stem = updateImageConfigInMarkdown(form.stem, url, configString)
+}
+
+/** 调节面板触发裁剪：打开 CropperDialog */
+function handleCropRequest({ url }: { url: string; mdId: string }) {
+  cropperImageUrl.value = url
+  cropperDialogVisible.value = true
+}
+
+/**
+ * 裁剪完成回调（补丁4：前端不删图）：
+ *   1. 将 Blob 上传到后端获取持久化 URL
+ *   2. 严格相等匹配 form.stem 中的旧 URL 并替换为新 URL（保留 alt 与 {config}）
+ *   3. 关闭裁剪弹窗与调节面板，避免引用过期 DOM
+ *
+ * 【重要】前端绝对不调用任何"删除旧图片"的 API。
+ *         旧图的物理清理由后端 update_question handler 的差集比对自动完成。
+ */
+async function handleCropped(blob: Blob) {
+  if (!imageAdjustData.value || cropperProcessing.value) return
+  cropperProcessing.value = true
+  const oldUrl = imageAdjustData.value.url
+
+  try {
+    const ext = (blob.type.split('/')[1] || 'png').toLowerCase()
+    const file = new File([blob], `cropped.${ext}`, { type: blob.type || 'image/png' })
+    const res = await uploadsApi.uploadImage(file)
+    const newUrl = res.data.url
+
+    // 严格相等匹配替换 URL（保留 alt 和 {config}，不调用任何删除 API）
+    const imgRegex = /!\[([^\]]*)\]\(([^)]+)\)/g
+    form.stem = form.stem.replace(imgRegex, (match, alt, imgUrl) => {
+      if (imgUrl.trim() !== oldUrl.trim()) {
+        return match
+      }
+      return `![${alt}](${newUrl})`
+    })
+
+    toast.success('图片裁剪并上传成功')
+    cropperDialogVisible.value = false
+    imageAdjustPanelVisible.value = false
+  } catch (e) {
+    console.error('[handleCropped] 裁剪图片上传失败:', e)
+    toast.error('裁剪图片上传失败，请重试')
+  } finally {
+    cropperProcessing.value = false
+  }
+}
 </script>
 
 <style scoped>

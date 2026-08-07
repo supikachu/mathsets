@@ -4,7 +4,15 @@ import { fileURLToPath } from 'node:url'
 
 export default defineConfig({
   plugins: [
-    vue(),
+    vue({
+      // cropperjs v2 使用 Web Components（cropper-canvas / cropper-image 等）
+      // 告知 Vue 模板编译器：cropper-* 前缀的标签是自定义元素，不要发出告警
+      template: {
+        compilerOptions: {
+          isCustomElement: (tag: string) => tag.startsWith('cropper-'),
+        },
+      },
+    }),
   ],
   resolve: {
     alias: {

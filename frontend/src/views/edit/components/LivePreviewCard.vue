@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { AppIcon } from '@/components/ui'
-import LatexRender from '@/components/LatexRender.vue'
+import LatexRender, { type ImageClickPayload } from '@/components/LatexRender.vue'
 import { useOptionsLayout } from '@/composables/useOptionsLayout'
 
 const props = defineProps<{
@@ -16,6 +16,11 @@ const props = defineProps<{
     difficulty: string
     difficulty_coefficient: number
   }
+  imageEditable?: boolean
+}>()
+
+const emit = defineEmits<{
+  (e: 'image-click', payload: ImageClickPayload): void
 }>()
 
 // Writable options layout tracking
@@ -124,7 +129,11 @@ function splitSolution(text: string): { body: string; conclusion: string } {
 
         <!-- 题干 -->
         <div class="paper-stem">
-          <LatexRender :text="form.stem || ''" />
+          <LatexRender
+            :text="form.stem || ''"
+            :mode="imageEditable ? 'editable' : 'readonly'"
+            @image-click="emit('image-click', $event)"
+          />
         </div>
 
         <!-- 选择题选项 -->
