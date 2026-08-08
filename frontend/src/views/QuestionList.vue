@@ -431,13 +431,14 @@
                 <AppBadge :color="typeBadgeColor(card.question_type)" class="flex-shrink-0">
                   {{ typeLabel(card.question_type) }}
                 </AppBadge>
-                <AppBadge :color="diffBadgeColor(card.difficulty)" class="flex-shrink-0">
+                <span class="q-ghost-tag flex-shrink-0">
                   {{ diffLabel(card.difficulty) }}
-                </AppBadge>
-                <AppBadge :color="statusBadgeColor(card.status)" class="flex items-center gap-1 flex-shrink-0">
-                  <AppIcon :name="statusIcon(card.status)" :size="11" :stroke="2" />
+                  <span class="q-dot" :class="`q-dot--${diffBadgeColor(card.difficulty)}`"></span>
+                </span>
+                <span class="q-ghost-tag flex-shrink-0">
                   {{ statusLabel(card.status) }}
-                </AppBadge>
+                  <span class="q-dot" :class="`q-dot--${statusBadgeColor(card.status)}`"></span>
+                </span>
               </div>
             </div>
 
@@ -609,7 +610,6 @@ import {
   typeBadgeColor,
   diffLabel,
   diffBadgeColor,
-  statusIcon,
   statusBadgeColor,
 } from '@/utils/questionDisplay'
 
@@ -2102,6 +2102,37 @@ onBeforeUnmount(() => {
   min-width: 0;
   overflow: hidden;
 }
+
+/* ---- Ghost Tag（难度/状态）：文字 + 彩色小圆点，降噪头部彩色块 ----
+   题型保留 AppBadge 彩色胶囊作为核心标识；
+   难度/状态降级为“纯文字 + 小圆点”幽灵样式，文字用 text-secondary，
+   仅靠 6px 圆点承载语义色，头部彩色块从 3 个降到 1 个。 */
+.q-ghost-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 4px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.q-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* 圆点配色与 AppBadge 文字色对齐（复用同一套语义色变量） */
+.q-dot--green { background: var(--success); }
+.q-dot--yellow { background: var(--warning); }
+.q-dot--red { background: var(--danger); }
+.q-dot--blue { background: var(--accent); }
+.q-dot--purple { background: var(--purple); }
+.q-dot--gray { background: var(--text-secondary); }
 
 /* ---- 学校角标：贴右上角边缘，绝对定位（与来源角标镜像统一） ---- */
 .q-school-tag {
