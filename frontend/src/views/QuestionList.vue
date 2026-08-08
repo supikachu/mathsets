@@ -1088,20 +1088,39 @@ function extractAnswerItem(item: any): string {
   return String(item)
 }
 
+// 判断是否为选择题答案（单个大写字母 A-Z 数组）
+function isChoiceLabels(arr: string[]): boolean {
+  return arr.length > 0 && arr.every(s => /^[A-Za-z]$/.test(s.trim()))
+}
+
 function parseAnswer(raw: any): string {
   if (raw == null) return ''
   if (typeof raw === 'string') {
     try {
       const parsed = JSON.parse(raw)
       if (typeof parsed === 'string') return parsed
-      if (Array.isArray(parsed)) return parsed.map(extractAnswerItem).join(', ')
+      if (Array.isArray(parsed)) {
+        const items = parsed.map(extractAnswerItem)
+        // 选择题答案：["A", "B"] → $\mathrm{AB}$
+        if (isChoiceLabels(items)) {
+          return `$\\mathrm{${items.map(s => s.trim().toUpperCase()).join('')}}$`
+        }
+        return items.join(', ')
+      }
       if (typeof parsed === 'object') return extractAnswerItem(parsed)
       return String(parsed)
     } catch {
       return raw
     }
   }
-  if (Array.isArray(raw)) return raw.map(extractAnswerItem).join(', ')
+  if (Array.isArray(raw)) {
+    const items = raw.map(extractAnswerItem)
+    // 选择题答案：["A", "B"] → $\mathrm{AB}$
+    if (isChoiceLabels(items)) {
+      return `$\\mathrm{${items.map(s => s.trim().toUpperCase()).join('')}}$`
+    }
+    return items.join(', ')
+  }
   if (typeof raw === 'object') return extractAnswerItem(raw)
   return String(raw)
 }
@@ -1109,6 +1128,12 @@ function parseAnswer(raw: any): string {
 function isCorrectOption(card: QuestionCard, label: string): boolean {
   const ans = card.correctAnswer
   if (!ans) return false
+  // 兼容 $\mathrm{AB}$ 格式：提取字母后逐个匹配
+  const match = ans.match(/\\mathrm\{([A-Za-z]+)\}/)
+  if (match) {
+    return match[1].toUpperCase().includes(label.toUpperCase())
+  }
+  // 兜底：旧的逗号分割格式
   return ans.split(/[,，、\s]+/).includes(label)
 }
 
@@ -1215,6 +1240,8 @@ onMounted(() => {
 // keep-alive 缓存组件从详情页返回时触发 —— onMounted 不会再次执行
 // 确保删除/编辑后列表数据为最新
 onActivated(() => {
+  // 清除模块级详情缓存，避免 fetchList 命中旧数据跳过 API 请求
+  detailCache.clear()
   fetchList()
   fetchPendingCount()
 })

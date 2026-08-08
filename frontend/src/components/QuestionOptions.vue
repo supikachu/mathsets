@@ -9,10 +9,8 @@
       :key="opt.label"
       class="q-option w-fit flex items-center gap-2 whitespace-nowrap"
     >
-      <span class="q-option-label">{{ opt.label }}</span>
-      <span class="q-option-content flex items-center whitespace-nowrap">
-        <LatexRender :text="opt.content" :inline="true" />
-      </span>
+      <!-- 选项前缀与内容统一拼接后送入 KaTeX 渲染 -->
+      <LatexRender :text="`$\\mathrm{${opt.label}.}$ ` + opt.content" :inline="true" />
     </div>
   </div>
 </template>

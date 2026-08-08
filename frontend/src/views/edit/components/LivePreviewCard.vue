@@ -70,9 +70,14 @@ const hasCorrectAnswer = computed(() => {
   return !!props.form.correctAnswer
 })
 
+// 答案预览：统一包裹在单个 $\mathrm{...}$ 中渲染
+// 单选 B → $\mathrm{B}$，多选 A+C → $\mathrm{AC}$
 const displayCorrectAnswer = computed(() => {
-  if (Array.isArray(props.form.correctAnswer)) return props.form.correctAnswer.join('、')
-  return props.form.correctAnswer || ''
+  if (Array.isArray(props.form.correctAnswer)) {
+    if (props.form.correctAnswer.length === 0) return ''
+    return `$\\mathrm{${props.form.correctAnswer.join('')}}$`
+  }
+  return props.form.correctAnswer ? `$\\mathrm{${props.form.correctAnswer}}$` : ''
 })
 
 const cnNums = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十']
@@ -144,8 +149,8 @@ function splitSolution(text: string): { body: string; conclusion: string } {
             class="paper-opt"
             :class="{ correct: isOptionCorrect(opt.label) }"
           >
-            <span class="paper-opt-letter">{{ opt.label }}.</span>
-            <LatexRender :text="opt.content" :inline="true" />
+            <!-- 选项前缀与内容统一拼接后送入 KaTeX 渲染 -->
+            <LatexRender :text="`$\\mathrm{${opt.label}.}$ ` + opt.content" :inline="true" />
           </div>
         </div>
 
@@ -154,7 +159,8 @@ function splitSolution(text: string): { body: string; conclusion: string } {
           <div class="paper-answer-label">答案</div>
           <div class="paper-answer-content">
             <template v-if="form.question_type === 'choice' && hasCorrectAnswer">
-              <span class="paper-correct-answer">{{ displayCorrectAnswer }}</span>
+              <!-- 答案统一用 $\mathrm{...}$ 格式，通过 LatexRender 渲染 -->
+              <LatexRender :text="displayCorrectAnswer" :inline="true" />
             </template>
             <template v-else-if="form.question_type === 'fill' && form.blanks.some(b => b.answer)">
               <span v-for="(blank, i) in form.blanks.filter(b => b.answer)" :key="i">

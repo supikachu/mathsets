@@ -97,8 +97,8 @@
                 class="paper-opt"
                 :class="{ correct: isCorrect(opt.label) }"
               >
-                <span class="paper-opt-letter">{{ opt.label }}.</span>
-                <span class="paper-opt-content"><LatexRender :text="opt.content" :inline="true" /></span>
+                <!-- 选项前缀与内容统一拼接后送入 KaTeX 渲染 -->
+                <LatexRender :text="`$\\mathrm{${opt.label}.}$ ` + opt.content" :inline="true" />
               </div>
             </div>
 
@@ -107,9 +107,9 @@
               <!-- 参考答案卡片（莫兰迪极淡蓝底） -->
               <div v-if="hasAnswer" class="answer-card">
                 <div class="card-section-title">参考答案</div>
-                <!-- 选择题答案 -->
+                <!-- 选择题答案：统一 $\mathrm{...}$ 格式 KaTeX 渲染 -->
                 <div v-if="q?.question_type === 'choice' && correctLabels.length" class="card-answer-content">
-                  <span class="paper-correct-answer" v-for="a in correctLabels" :key="a">{{ a }}</span>
+                  <LatexRender :text="`$\\mathrm{${correctLabels.join('')}}$`" :inline="true" />
                 </div>
                 <!-- 填空题答案 -->
                 <div v-else-if="q?.question_type === 'fill'" class="card-answer-content as-fill-list">
@@ -268,7 +268,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
+import { ref, computed, onMounted, onActivated, onBeforeUnmount, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { questionApi, spaceApi, paperApi, type QuestionDetail, type GradeLevel, type SemesterType, type SpaceMemberInfo, type QuestionPaperItem, publicLibraryApi } from '@/api/client'
 import client from '@/api/client'
@@ -632,6 +632,18 @@ watch(() => spaceStore.currentSpaceId, () => {
 
 onMounted(async () => {
   await fetchDetail()
+})
+
+// keep-alive 缓存时从编辑页返回刷新（当前未缓存，但为安全起见保留）
+onActivated(() => {
+  fetchDetail()
+})
+
+// 同组件内不同 ID 跳转时刷新
+watch(() => route.params.id, (newId, oldId) => {
+  if (newId && newId !== oldId) {
+    fetchDetail()
+  }
 })
 </script>
 
