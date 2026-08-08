@@ -451,6 +451,9 @@ onMounted(async () => {
   flex-shrink: 0;
   height: 100%;
   width: 260px;
+  min-width: 260px;
+  max-width: 260px;
+  box-sizing: border-box;
   /* 关键：overflow hidden 让外层裁切内部固定宽度内容，防止文字换行错乱 */
   overflow: hidden;
   /* 丝滑滑动过渡：宽度 + 透明度 + 位移 */
@@ -469,6 +472,9 @@ onMounted(async () => {
 /* ── 实际侧栏：纯白浮动卡片（Apple 风格），固定宽度 260px ── */
 .kt-nav {
   width: 260px;
+  min-width: 260px;
+  max-width: 260px;
+  box-sizing: border-box;
   height: 100%;
   display: flex;
   flex-direction: column;
@@ -523,8 +529,19 @@ onMounted(async () => {
   flex-direction: column;
   gap: 6px;
   overflow-y: auto;
+  overflow-x: hidden;
   overscroll-behavior: contain;
-  scrollbar-width: thin;
+  /* 隐藏滚动条 — Firefox */
+  scrollbar-width: none;
+  /* 隐藏滚动条 — IE 10+ */
+  -ms-overflow-style: none;
+}
+
+/* 隐藏滚动条 — Chrome, Safari, Edge */
+.kt-nav-body::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 /* ── 顶部筛选区组：胶囊间距 + 极浅灰色分割线 ── */
@@ -535,19 +552,6 @@ onMounted(async () => {
   padding-bottom: 16px;
   margin-bottom: 16px;
   border-bottom: 1px solid var(--divider);
-}
-
-.kt-nav-body::-webkit-scrollbar {
-  width: 6px;
-}
-
-.kt-nav-body::-webkit-scrollbar-thumb {
-  background: var(--border-strong);
-  border-radius: 3px;
-}
-
-.kt-nav-body::-webkit-scrollbar-track {
-  background: transparent;
 }
 
 /* ═══ 第 1 层：学段 — 全圆角浮岛胶囊 (Pill-in-Pill) ═══ */
@@ -842,13 +846,13 @@ onMounted(async () => {
   background: var(--accent);
 }
 
-/* 节点文本：允许自然换行，不截断 */
+/* 节点文本：过长时省略号截断，防止撑开容器宽度 */
 .row-name {
   flex: 1;
   min-width: 0;
-  white-space: normal;
-  word-break: break-word;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   padding-top: 1px;
 }
 

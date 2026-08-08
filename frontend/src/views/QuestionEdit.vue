@@ -107,9 +107,31 @@
 
             <!-- 题干 -->
             <section class="edit-section" :class="{ 'ai-highlight': aiGeneratedFields.has('stem') }">
-              <div class="section-label"><AppIcon name="book-open" :size="16" /> <span>题干</span><span class="required">*</span></div>
+              <div class="section-label-row">
+                <div class="section-label">
+                  <AppIcon name="book-open" :size="16" />
+                  <span>题干</span>
+                  <span class="required">*</span>
+                </div>
+                <div class="quick-toolbar">
+                  <button type="button" class="quick-tool-btn" @click="insertStemBracket" title="在光标处插入全角括号">
+                    <span class="btn-symbol">( )</span>
+                    <span>插入括号</span>
+                  </button>
+                  <button type="button" class="quick-tool-btn" @click="insertStemUnderline" title="在光标处插入下划线">
+                    <span class="btn-symbol">___</span>
+                    <span>插入下划线</span>
+                  </button>
+                </div>
+              </div>
               <div class="stem-wrap">
-                <textarea ref="stemTextareaRef" v-model="form.stem" class="edit-textarea stem-textarea" placeholder="输入题目内容，LaTeX 公式用 $...$ 包裹。例如：已知集合 $A = \{x | x^2 - 2x = 0\}$..."></textarea>
+                <textarea
+                  ref="stemTextareaRef"
+                  v-model="form.stem"
+                  class="edit-textarea stem-textarea"
+                  placeholder="输入题目内容，LaTeX 公式用 $...$ 包裹。例如：已知集合 $A = \{x | x^2 - 2x = 0\}$..."
+                  @keydown.tab.prevent="handleTabIndent($event, 'stem')"
+                ></textarea>
                 <button type="button" class="img-upload-btn" @click="handleImageUpload">
                   <AppIcon name="paperclip" :size="13" />
                   <span>上传配图</span>
@@ -147,20 +169,38 @@
 
             <!-- 解析（多解法） -->
             <section class="edit-section" :class="{ 'ai-highlight': aiGeneratedFields.has('solutions') }">
-              <div class="section-label"><AppIcon name="lightbulb" :size="16" /> <span>解析</span></div>
+              <div class="section-label-row">
+                <div class="section-label">
+                  <AppIcon name="lightbulb" :size="16" />
+                  <span>解析</span>
+                </div>
+                <div class="quick-toolbar">
+                  <button type="button" class="quick-tool-btn" @click="insertSolutionIndent(0)" title="在第一种解法光标处插入首行缩进（4个空格）">
+                    <span class="btn-symbol">⇥</span>
+                    <span>首行缩进</span>
+                  </button>
+                </div>
+              </div>
               <div class="solutions-list">
                 <div v-for="(sol, i) in form.solutions" :key="i" class="solution-item">
                   <div class="solution-head">
                     <span class="solution-name">解法{{ cnNum(i + 1) }}</span>
-                    <button v-if="form.solutions.length > 1" class="solution-del" @click="removeSolution(i)" title="删除此解法">
-                      <AppIcon name="trash-2" :size="14" />
-                    </button>
+                    <div class="solution-head-right">
+                      <button type="button" class="quick-tool-btn solution-indent-btn" @click="insertSolutionIndent(i)" title="在当前解法光标处插入首行缩进">
+                        <span class="btn-symbol">⇥</span>
+                        <span>首行缩进</span>
+                      </button>
+                      <button v-if="form.solutions.length > 1" class="solution-del" @click="removeSolution(i)" title="删除此解法">
+                        <AppIcon name="trash-2" :size="14" />
+                      </button>
+                    </div>
                   </div>
                   <div class="solution-textarea-wrap">
                     <textarea
                       v-model="form.solutions[i]"
                       class="edit-textarea solution-textarea"
                       :placeholder="`解法${cnNum(i + 1)}的解题思路，支持 $...$ LaTeX`"
+                      @keydown.tab.prevent="handleTabIndent($event, 'solution', i)"
                     ></textarea>
                     <button type="button" class="img-upload-btn" @click="handleSolutionImageUpload(i)">
                       <AppIcon name="paperclip" :size="13" />
@@ -669,6 +709,98 @@ function handleSolutionImageUpload(index: number) {
     })
   }
   input.click()
+}
+
+// ── 快捷排版工具栏方法 ──
+
+/** 题干光标处插入全角括号 （  ） 并把光标置于括号中间 */
+function insertStemBracket() {
+  const ta = stemTextareaRef.value
+  const insertText = '（  ）'
+  if (!ta) {
+    form.stem += insertText
+    return
+  }
+  const pos = ta.selectionStart ?? form.stem.length
+  const endPos = ta.selectionEnd ?? pos
+  const before = form.stem.substring(0, pos)
+  const after = form.stem.substring(endPos)
+  form.stem = before + insertText + after
+  nextTick(() => {
+    ta.focus()
+    const newPos = pos + 2 // 偏移 2 字符，停在括号中间
+    ta.setSelectionRange(newPos, newPos)
+  })
+}
+
+/** 题干光标处插入下划线 ______ */
+function insertStemUnderline() {
+  const ta = stemTextareaRef.value
+  const insertText = '______'
+  if (!ta) {
+    form.stem += insertText
+    return
+  }
+  const pos = ta.selectionStart ?? form.stem.length
+  const endPos = ta.selectionEnd ?? pos
+  const before = form.stem.substring(0, pos)
+  const after = form.stem.substring(endPos)
+  form.stem = before + insertText + after
+  nextTick(() => {
+    ta.focus()
+    const newPos = pos + insertText.length
+    ta.setSelectionRange(newPos, newPos)
+  })
+}
+
+/** 解析光标处插入首行缩进（4 个半角空格） */
+function insertSolutionIndent(index: number = 0) {
+  const tas = document.querySelectorAll<HTMLTextAreaElement>('.solution-textarea')
+  const ta = tas[index]
+  const indentText = '    '
+  if (!ta) {
+    if (form.solutions[index] !== undefined) {
+      form.solutions[index] += indentText
+    }
+    return
+  }
+  const pos = ta.selectionStart ?? (form.solutions[index]?.length || 0)
+  const endPos = ta.selectionEnd ?? pos
+  const currentVal = form.solutions[index] || ''
+  const before = currentVal.substring(0, pos)
+  const after = currentVal.substring(endPos)
+  form.solutions[index] = before + indentText + after
+  nextTick(() => {
+    ta.focus()
+    const newPos = pos + indentText.length
+    ta.setSelectionRange(newPos, newPos)
+  })
+}
+
+/** Tab 键快捷缩进，阻止默认焦点切换 */
+function handleTabIndent(e: KeyboardEvent, type: 'stem' | 'solution', index: number = 0) {
+  const ta = e.target as HTMLTextAreaElement
+  if (!ta) return
+  const indentText = '    '
+  const pos = ta.selectionStart ?? 0
+  const endPos = ta.selectionEnd ?? pos
+
+  if (type === 'stem') {
+    const before = form.stem.substring(0, pos)
+    const after = form.stem.substring(endPos)
+    form.stem = before + indentText + after
+  } else {
+    const currentVal = form.solutions[index] || ''
+    const before = currentVal.substring(0, pos)
+    const after = currentVal.substring(endPos)
+    form.solutions[index] = before + indentText + after
+  }
+
+  nextTick(() => {
+    ta.focus()
+    const newPos = pos + indentText.length
+    ta.setSelectionRange(newPos, newPos)
+  })
 }
 
 // Payload construction
@@ -1960,6 +2092,59 @@ async function handleCropped(blob: Blob) {
   font-weight: 650;
   color: var(--text-primary);
   margin-bottom: 2px;
+}
+
+.section-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  margin-bottom: 6px;
+}
+
+.quick-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.quick-tool-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  height: 24px;
+  border: none;
+  background: transparent;
+  color: var(--primary-color, #007aff);
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+
+.quick-tool-btn:hover {
+  background: rgba(0, 122, 255, 0.08);
+  color: #0066d6;
+}
+
+.quick-tool-btn:active {
+  transform: scale(0.96);
+}
+
+.btn-symbol {
+  font-family: SFMono-Regular, Consolas, Monaco, monospace;
+  font-weight: 600;
+  font-size: 11.5px;
+  line-height: 1;
+}
+
+.solution-head-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .section-label span {
