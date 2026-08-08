@@ -26,7 +26,7 @@
             <AppButton variant="danger" size="sm" @click="handleReview('rejected')"><AppIcon name="x-circle" :size="15" /> 驳回</AppButton>
           </template>
           <template v-else-if="q?.status === 'published'">
-            <AppButton variant="outline" size="sm" @click="$router.push(`/questions/${q!.id}/edit`)"><AppIcon name="pencil" :size="15" /> 编辑</AppButton>
+            <AppButton variant="outline" size="sm" @click="$router.push(`/questions/${q!.id}/edit`)"><AppIcon name="pencil" :size="15" /> 纠错</AppButton>
             <!-- 推送到公共题库 / 撤回推库申请 -->
             <AppButton
               v-if="spaceStore.currentSpace?.kind !== 'public' && !hasPendingSubmission"

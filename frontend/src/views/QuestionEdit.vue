@@ -26,8 +26,11 @@
             <span>{{ draftStatus === 'saving' ? '正在保存草稿…' : '已保存' }}</span>
           </span>
           <AppButton v-if="!isNew" variant="outline" size="sm" @click="showHistory = true"><AppIcon name="history" :size="15" /> 历史版本</AppButton>
-          <AppButton variant="outline" size="sm" :loading="saving" :disabled="saving || submitting" @click="handleSave(false)"><AppIcon name="save" :size="15" /> 保存</AppButton>
-          <AppButton variant="primary" size="sm" :loading="submitting" :disabled="saving || submitting" @click="handleSave(true)"><AppIcon name="send" :size="15" /> 提交审核</AppButton>
+          <AppButton v-if="!isLocked && !isPublished" variant="outline" size="sm" :loading="saving" :disabled="saving || submitting" @click="handleSave(false)"><AppIcon name="save" :size="15" /> 保存</AppButton>
+          <AppButton v-if="!isLocked && !isPublished" variant="primary" size="sm" :loading="submitting" :disabled="saving || submitting" @click="handleSave(true)"><AppIcon name="send" :size="15" /> 提交审核</AppButton>
+          <!-- 已发布题目：纠错模式，保存即提交审核 -->
+          <AppButton v-if="!isLocked && isPublished" variant="primary" size="sm" :loading="saving" :disabled="saving || submitting" @click="handleSave(true)"><AppIcon name="pencil" :size="15" /> 提交纠错审核</AppButton>
+          <span v-if="isLocked" class="lock-hint"><AppIcon name="lock" :size="14" /> 题目状态已变更，不可编辑</span>
         </div>
       </header>
 
@@ -346,6 +349,10 @@ const loading = ref(false)
 const saving = ref(false)
 const submitting = ref(false)
 const isLoading = ref(false)
+// 409 状态冲突后锁定编辑：题目状态已变更（如被他人提交审核/通过），禁止重复保存
+const isLocked = ref(false)
+// 已发布题目的纠错编辑：保存按钮文案改为"提交纠错审核"，提交时弹确认框
+const isPublished = computed(() => form.status === 'published')
 
 const showHistory = ref(false)
 const showAiDialog = ref(false)
@@ -775,6 +782,13 @@ async function persistFormImages() {
 async function handleSave(submitAfter: boolean) {
   if (!form.stem.trim()) { toast.warning('请输入题干'); return }
   if (form.question_type === 'choice' && !hasCorrectAnswer.value) { toast.warning('请选择正确答案'); return }
+
+  // 已发布题目纠错：提交前必须用户确认，提示修改将重新进入审核
+  if (isPublished.value) {
+    const confirmed = window.confirm('提交纠错后题目将重新进入审核状态，是否继续？')
+    if (!confirmed) return
+  }
+
   const flag = submitAfter ? submitting : saving
   flag.value = true
   try {
@@ -791,7 +805,11 @@ async function handleSave(submitAfter: boolean) {
     aiHighlightIds.value = []
 
     if (submitAfter) {
-      if (isTeamSpace.value) {
+      if (isPublished.value) {
+        // 已发布题目纠错：PUT 接口后端已自动将状态降级为 pending 并完成提交，
+        // 绝对不要再调用 questionApi.submit()，否则会因状态已是 pending 而触发 409
+        toast.success('纠错申请已提交，等待审核通过后更新')
+      } else if (isTeamSpace.value) {
         // 团队空间：弹出选人对话框
         pendingQuestionId.value = qid
         selectedReviewerId.value = ''
@@ -800,12 +818,18 @@ async function handleSave(submitAfter: boolean) {
         flag.value = false
         return
       } else {
-        // 个人空间：自审自发，直接提交
+        // 个人空间草稿：自审自发，需额外调用 submit 接口完成状态流转
         await questionApi.submit(qid)
         toast.success('已创建并提交审核')
       }
     } else {
       toast.success(isNew ? '草稿已保存' : '已更新')
+    }
+
+    // 纠错提交成功后跳转回详情页
+    if (isPublished.value) {
+      router.replace(`/questions/${qid}`)
+      return
     }
 
     if (isNew) {
@@ -819,10 +843,29 @@ async function handleSave(submitAfter: boolean) {
     }
   } catch (e: any) {
     console.error('[QuestionEdit] 保存失败:', e)
+    // 兼容 Axios 响应拦截器：status 可能在 e.response 或 e 本身
+    const status = e.response?.status || e.status || e.statusCode
     // axum 0.8 Json 拒绝响应体可能是纯字符串（非 JSON 对象），需多级兜底
-    const errData = e.response?.data
+    const errData = e.response?.data || e.data
     const errMsg = typeof errData === 'string' ? errData : (errData?.error || errData?.message)
     toast.error(errMsg || e.message || '保存失败')
+
+    // 409 业务冲突（如"当前状态不允许编辑"）：题目状态已被其他人/流程变更
+    if (status === 409 && !isNew) {
+      try {
+        // 清除未保存标记，防止 loadQuestion 被 beforeRouteLeave 拦截
+        form.hasUnsaved = false
+        clearDraft()
+        // 重新拉取最新题目详情，同步本地状态
+        await loadQuestion()
+        // 锁定编辑：题目状态已不可编辑，阻断二次保存
+        isLocked.value = true
+        toast.warning('题目状态已变更，已为你刷新最新数据并锁定编辑')
+      } catch (reloadErr) {
+        console.error('[QuestionEdit] 重新加载题目失败:', reloadErr)
+        toast.error('重新加载题目数据失败，请刷新页面')
+      }
+    }
   } finally {
     if (!showReviewerDialog.value) {
       flag.value = false
@@ -1663,6 +1706,19 @@ async function handleCropped(blob: Blob) {
 .draft-status.saved {
   color: var(--success, #10b981);
   background: var(--success-light, rgba(16, 185, 129, 0.08));
+}
+
+/* 409 锁定提示 */
+.lock-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #ff9500;
+  padding: 4px 10px;
+  background: rgba(255, 149, 0, 0.1);
+  border-radius: 6px;
 }
 
 @keyframes draft-fade-in {

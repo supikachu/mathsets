@@ -224,7 +224,12 @@ pub async fn can_edit_question(
     creator_id: Option<Uuid>,
     status: &QuestionStatus,
 ) -> Result<bool, sqlx::Error> {
-    if *status != QuestionStatus::Draft && *status != QuestionStatus::Rejected {
+    // 允许编辑的状态：Draft（草稿）、Rejected（被驳回）、Published（纠错）
+    // Pending 状态不可编辑（正在审核中）
+    if *status != QuestionStatus::Draft
+        && *status != QuestionStatus::Rejected
+        && *status != QuestionStatus::Published
+    {
         return Ok(false);
     }
     if is_admin_user(&auth) {

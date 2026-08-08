@@ -1013,11 +1013,14 @@ pub async fn update_question(
         .map_err(|e| db_err(format!("查询空间失败: {}", e)))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "空间不存在"}))))?;
 
-    // 状态机保护：仅 Draft / Rejected 可编辑（已发布/Pending 需走审核流程）
-    if existing.status != QuestionStatus::Draft && existing.status != QuestionStatus::Rejected {
+    // 状态机保护：
+    //   - Draft / Rejected → 直接编辑保存
+    //   - Published → 允许纠错：保存后状态降级为 Pending，重新进入审核流程
+    //   - Pending → 禁止编辑（正在审核中）
+    if existing.status == QuestionStatus::Pending {
         return Err((
             StatusCode::CONFLICT,
-            Json(json!({"error": "当前状态不允许编辑"})),
+            Json(json!({"error": "题目正在审核中，无法编辑"})),
         ));
     }
 
@@ -1083,6 +1086,13 @@ pub async fn update_question(
 
     let mut tx = state.pool.begin().await.map_err(|e| db_err(format!("开启事务失败: {}", e)))?;
 
+    // 纠错降级：Published 题目修改后状态转为 Pending 重新审核；Draft/Rejected 保持 Draft
+    let new_status = if existing.status == QuestionStatus::Published {
+        QuestionStatus::Pending
+    } else {
+        QuestionStatus::Draft
+    };
+
     let query_result = sqlx::query(
         r#"
         UPDATE questions SET
@@ -1096,7 +1106,7 @@ pub async fn update_question(
             images = COALESCE($8, images),
             parent_id = COALESCE($9, parent_id),
             sub_order = COALESCE($10, sub_order),
-            status = 'draft'::question_status,
+            status = $16::question_status,
             updated_by = $11,
             updated_at = $12,
             version = $13
@@ -1118,6 +1128,7 @@ pub async fn update_question(
     .bind(new_version)
     .bind(id)
     .bind(old_version)
+    .bind(new_status)
     .execute(&mut *tx)
     .await
     .map_err(|e| db_err(format!("更新题目失败: {}", e)))?;
@@ -1378,7 +1389,21 @@ pub async fn submit_for_review(
         .map_err(|e| db_err(format!("查询题目失败: {}", e)))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "题目不存在"}))))?;
 
-    // ── 状态校验：仅 draft 可提交 ──
+    // ── 状态校验 ──
+    // Pending 视为幂等：已提交过（如纠错 PUT 自动流转），直接返回当前题目，不重复流转
+    if existing.status == QuestionStatus::Pending {
+        let creator_name = sqlx::query_scalar::<_, String>("SELECT display_name FROM users WHERE id = $1")
+            .bind(existing.creator_id)
+            .fetch_optional(&state.pool)
+            .await
+            .ok()
+            .flatten();
+        let detail = build_detail(&state.pool, &auth_user, existing, creator_name)
+            .await
+            .map_err(|e| db_err(format!("构建详情失败: {}", e)))?;
+        return Ok(Json(detail));
+    }
+    // 仅 Draft 可提交审核
     if existing.status != QuestionStatus::Draft {
         return Err((
             StatusCode::CONFLICT,
