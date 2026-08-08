@@ -1859,7 +1859,7 @@ onBeforeUnmount(() => {
   overflow-y: auto;
   overscroll-behavior: contain; /* 切断滚动链：防止列表触底触发外层滚动/橡皮筋 */
   padding: 16px 20px;
-  background: var(--bg-card);
+  background: var(--bg-primary); /* 画布涂灰：与白色卡片拉开对比，卡片瞬间“跳”出 */
 }
 
 /* ===== Header Actions ===== */
@@ -2007,48 +2007,57 @@ onBeforeUnmount(() => {
 }
 
 /* 单个题卡 slot：DynamicScrollerItem 的根元素。
-   padding-bottom 替代原 flex gap 作为项间分隔 ——
-   关键：padding 计入 box-sizing:border-box 高度，ResizeObserver
-   测得的尺寸即包含此间距，下一项的 translateY 不会重叠。 */
+   上下平分安全边距（各 8px，总间距 16px 不变）——
+   关键 1：padding 计入 box-sizing:border-box 高度，ResizeObserver
+            测得的尺寸即包含此间距，下一项的 translateY 不会重叠；
+   关键 2：padding-top 8px 让 .q-card 不贴死在插槽 y:0 边缘，
+            hover 上浮 translateY(-2px) + 弥散阴影 + 蓝色边框有安全渲染区，
+            避免首卡顶部被外层 overflow 裁切（外层 padding 方案对虚拟列表无效：
+            绝对定位的 item 仍贴在插槽 top:0，溢出照样被外层裁）。 */
 .q-card-slot {
-  padding-bottom: 16px;
+  padding-top: 8px;
+  padding-bottom: 8px;
   box-sizing: border-box;
 }
 
 /* ===== Question Card ===== */
+/* 悬浮卡片方案：纯白本体 + 实体边框 + 弥散阴影，浮于灰色画布之上 */
 .q-card {
   position: relative; /* 来源角标 & hover-expand 面板绝对定位基础 */
   background: var(--bg-card);
-  border-radius: 16px; /* rounded-2xl */
-  border: 1px solid transparent;
-  box-shadow: var(--shadow-sm);
+  border-radius: 12px; /* 现代感圆角 */
+  border: 1px solid var(--border-color); /* 清晰实体边框，强化卡片边界 */
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04); /* 常态轻微弥散阴影，赋予物理厚度 */
   /* 仅过渡 transform（hover 上浮动效所需）
      严禁过渡 all：会导致主题切换时 50-200 张卡片同时
      动画 background/box-shadow/border-color，引发卡顿闪烁 */
   transition: transform 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
 }
 
+/* 强化悬浮交互反馈：上浮 + 阴影加重 + 边框泛起主题色 */
 .q-card:hover {
-  transform: translateY(-4px); /* hover:-translate-y-1 */
-  box-shadow: var(--shadow-md);
+  transform: translateY(-2px); /* 视觉上浮起 */
+  box-shadow: 0 8px 24px rgba(149, 157, 165, 0.15); /* Hover 阴影加重 */
+  border-color: rgba(0, 113, 227, 0.3); /* 边框微微泛起主题色 */
 }
 
 .q-card.is-expanded {
-  box-shadow: var(--shadow-md);
+  box-shadow: 0 8px 24px rgba(149, 157, 165, 0.15);
 }
 
+/* 暗色模式：卡片恢复阴影 + 微亮边框，避免“平铺文本”扁平感 */
 [data-theme='dark'] .q-card {
-  border-color: #3a3a3c;
-  box-shadow: none;
+  border-color: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
 }
 
 [data-theme='dark'] .q-card:hover {
-  border-color: #3a3a3c;
-  box-shadow: none;
+  border-color: rgba(10, 132, 255, 0.4);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
 }
 
 [data-theme='dark'] .q-card.is-expanded {
-  box-shadow: none;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
 }
 
 /* ---- 来源角标：贴左上角边缘，绝对定位（与学校角标镜像统一） ---- */
@@ -2435,14 +2444,23 @@ onBeforeUnmount(() => {
   color: var(--text-muted);
 }
 
-/* ---- Row 3: Footer ---- */
+/* ---- Row 3: Footer ----
+   底部栏涂灰：与题干区用细线隔开，增加视觉稳定感
+   下圆角匹配卡片半径（不靠 overflow:hidden，避免裁剪知识点 hover 展开面板） */
 .q-card-footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 20px;
-  border-top: 1px solid var(--divider);
+  padding: 12px 20px;
+  background-color: #fafbfc; /* 底部栏微涂灰 */
+  border-top: 1px solid #f0f0f2; /* 与题干区用细线隔开 */
+  border-radius: 0 0 12px 12px; /* 匹配卡片下圆角，让涂灰底贴合圆角 */
   gap: 12px;
+}
+
+[data-theme='dark'] .q-card-footer {
+  background-color: rgba(0, 0, 0, 0.15);
+  border-top-color: var(--divider);
 }
 
 /* 左侧知识点区：样式已移至 .q-kp-expand-panel 附近（hover-expand 重构） */

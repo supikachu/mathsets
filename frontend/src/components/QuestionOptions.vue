@@ -51,8 +51,8 @@ defineExpose({
   align-items: center;
   gap: 8px;
   padding: 6px 12px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-input);
+  border-radius: 4px; /* 微积木小圆角，区别于卡片大圆角 */
+  background: #f7f8fa; /* 淡灰底，让选项成为独立“微积木” */
   border: 1px solid transparent;
   font-size: 13.5px;
   line-height: 1.6;
@@ -64,6 +64,11 @@ defineExpose({
 
 .q-option:hover {
   background: var(--bg-hover);
+}
+
+/* 暗色模式：选项微积木改用主题输入态底色，避免 #f7f8fa 过亮 */
+[data-theme='dark'] .q-option {
+  background: var(--bg-input);
 }
 
 .q-option-label {

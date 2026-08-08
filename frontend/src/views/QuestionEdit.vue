@@ -114,13 +114,13 @@
                   <span class="required">*</span>
                 </div>
                 <div class="quick-toolbar">
-                  <button type="button" class="quick-tool-btn" @click="insertStemBracket" title="在光标处插入全角括号">
+                  <button type="button" class="quick-tool-btn" @click="insertStemBracket" title="在光标处插入 KaTeX 括号公式 $(\hspace{2em})$">
                     <span class="btn-symbol">( )</span>
                     <span>插入括号</span>
                   </button>
-                  <button type="button" class="quick-tool-btn" @click="insertStemUnderline" title="在光标处插入下划线">
+                  <button type="button" class="quick-tool-btn" @click="insertStemUnderline" title="在光标处插入 KaTeX 填空线 $\underline{\hspace{4em}}$">
                     <span class="btn-symbol">___</span>
-                    <span>插入下划线</span>
+                    <span>插入填空线</span>
                   </button>
                 </div>
               </div>
@@ -175,7 +175,7 @@
                   <span>解析</span>
                 </div>
                 <div class="quick-toolbar">
-                  <button type="button" class="quick-tool-btn" @click="insertSolutionIndent(0)" title="在第一种解法光标处插入首行缩进（4个空格）">
+                  <button type="button" class="quick-tool-btn" @click="insertSolutionIndent(0)" title="在第一种解法光标处插入 KaTeX 首行缩进 $\hspace{2em}$">
                     <span class="btn-symbol">⇥</span>
                     <span>首行缩进</span>
                   </button>
@@ -186,7 +186,7 @@
                   <div class="solution-head">
                     <span class="solution-name">解法{{ cnNum(i + 1) }}</span>
                     <div class="solution-head-right">
-                      <button type="button" class="quick-tool-btn solution-indent-btn" @click="insertSolutionIndent(i)" title="在当前解法光标处插入首行缩进">
+                      <button type="button" class="quick-tool-btn solution-indent-btn" @click="insertSolutionIndent(i)" title="在当前解法光标处插入 KaTeX 首行缩进 $\hspace{2em}$">
                         <span class="btn-symbol">⇥</span>
                         <span>首行缩进</span>
                       </button>
@@ -713,68 +713,53 @@ function handleSolutionImageUpload(index: number) {
 
 // ── 快捷排版工具栏方法 ──
 
-/** 题干光标处插入全角括号 （  ） 并把光标置于括号中间 */
+/**
+ * 通用光标位置插入函数：在 textarea 当前光标位置插入指定文本
+ * @param ta          目标 textarea 元素（为空时直接追加到末尾）
+ * @param currentValue 当前文本值
+ * @param text         待插入文本
+ * @param setValue     更新文本值的回调
+ */
+function insertText(
+  ta: HTMLTextAreaElement | null | undefined,
+  currentValue: string,
+  text: string,
+  setValue: (v: string) => void,
+) {
+  if (!ta) {
+    setValue(currentValue + text)
+    return
+  }
+  const start = ta.selectionStart ?? currentValue.length
+  const end = ta.selectionEnd ?? start
+  // 拼接新文本
+  const newValue = currentValue.substring(0, start) + text + currentValue.substring(end)
+  setValue(newValue)
+  // 等待 DOM 更新后重置光标位置到插入内容的末尾
+  nextTick(() => {
+    ta.focus()
+    const newCursorPos = start + text.length
+    ta.setSelectionRange(newCursorPos, newCursorPos)
+  })
+}
+
+/** 题干光标处插入 KaTeX 括号公式 $(\hspace{2em})$ */
 function insertStemBracket() {
-  const ta = stemTextareaRef.value
-  const insertText = '（  ）'
-  if (!ta) {
-    form.stem += insertText
-    return
-  }
-  const pos = ta.selectionStart ?? form.stem.length
-  const endPos = ta.selectionEnd ?? pos
-  const before = form.stem.substring(0, pos)
-  const after = form.stem.substring(endPos)
-  form.stem = before + insertText + after
-  nextTick(() => {
-    ta.focus()
-    const newPos = pos + 2 // 偏移 2 字符，停在括号中间
-    ta.setSelectionRange(newPos, newPos)
-  })
+  insertText(stemTextareaRef.value, form.stem, '$(\\hspace{2em})$', (v) => { form.stem = v })
 }
 
-/** 题干光标处插入下划线 ______ */
+/** 题干光标处插入 KaTeX 填空线 $\underline{\hspace{4em}}$ */
 function insertStemUnderline() {
-  const ta = stemTextareaRef.value
-  const insertText = '______'
-  if (!ta) {
-    form.stem += insertText
-    return
-  }
-  const pos = ta.selectionStart ?? form.stem.length
-  const endPos = ta.selectionEnd ?? pos
-  const before = form.stem.substring(0, pos)
-  const after = form.stem.substring(endPos)
-  form.stem = before + insertText + after
-  nextTick(() => {
-    ta.focus()
-    const newPos = pos + insertText.length
-    ta.setSelectionRange(newPos, newPos)
-  })
+  insertText(stemTextareaRef.value, form.stem, '$\\underline{\\hspace{4em}}$', (v) => { form.stem = v })
 }
 
-/** 解析光标处插入首行缩进（4 个半角空格） */
+/** 解析光标处插入 KaTeX 首行缩进 $\hspace{2em}$ */
 function insertSolutionIndent(index: number = 0) {
   const tas = document.querySelectorAll<HTMLTextAreaElement>('.solution-textarea')
   const ta = tas[index]
-  const indentText = '    '
-  if (!ta) {
-    if (form.solutions[index] !== undefined) {
-      form.solutions[index] += indentText
-    }
-    return
-  }
-  const pos = ta.selectionStart ?? (form.solutions[index]?.length || 0)
-  const endPos = ta.selectionEnd ?? pos
-  const currentVal = form.solutions[index] || ''
-  const before = currentVal.substring(0, pos)
-  const after = currentVal.substring(endPos)
-  form.solutions[index] = before + indentText + after
-  nextTick(() => {
-    ta.focus()
-    const newPos = pos + indentText.length
-    ta.setSelectionRange(newPos, newPos)
-  })
+  // 解法不存在时不写入，避免产生稀疏数组
+  if (form.solutions[index] === undefined) return
+  insertText(ta, form.solutions[index], '$\\hspace{2em}$', (v) => { form.solutions[index] = v })
 }
 
 /** Tab 键快捷缩进，阻止默认焦点切换 */
