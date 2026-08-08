@@ -432,12 +432,12 @@
                   {{ typeLabel(card.question_type) }}
                 </AppBadge>
                 <span class="q-ghost-tag flex-shrink-0">
-                  {{ diffLabel(card.difficulty) }}
                   <span class="q-dot" :class="`q-dot--${diffBadgeColor(card.difficulty)}`"></span>
+                  {{ diffLabel(card.difficulty) }}
                 </span>
                 <span class="q-ghost-tag flex-shrink-0">
-                  {{ statusLabel(card.status) }}
                   <span class="q-dot" :class="`q-dot--${statusBadgeColor(card.status)}`"></span>
+                  {{ statusLabel(card.status) }}
                 </span>
               </div>
             </div>

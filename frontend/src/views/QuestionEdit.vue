@@ -114,14 +114,8 @@
                   <span class="required">*</span>
                 </div>
                 <div class="quick-toolbar">
-                  <button type="button" class="quick-tool-btn" @click="insertStemBracket" title="在光标处插入 KaTeX 括号公式 $(\hspace{2em})$">
-                    <span class="btn-symbol">( )</span>
-                    <span>插入括号</span>
-                  </button>
-                  <button type="button" class="quick-tool-btn" @click="insertStemUnderline" title="在光标处插入 KaTeX 填空线 $\underline{\hspace{4em}}$">
-                    <span class="btn-symbol">___</span>
-                    <span>插入填空线</span>
-                  </button>
+                  <button type="button" class="quick-tool-btn" @click="insertStemBracket">插入括号</button>
+                  <button type="button" class="quick-tool-btn" @click="insertStemUnderline">插入填空线</button>
                 </div>
               </div>
               <div class="stem-wrap">
@@ -174,22 +168,13 @@
                   <AppIcon name="lightbulb" :size="16" />
                   <span>解析</span>
                 </div>
-                <div class="quick-toolbar">
-                  <button type="button" class="quick-tool-btn" @click="insertSolutionIndent(0)" title="在第一种解法光标处插入 KaTeX 首行缩进 $\hspace{2em}$">
-                    <span class="btn-symbol">⇥</span>
-                    <span>首行缩进</span>
-                  </button>
-                </div>
               </div>
               <div class="solutions-list">
                 <div v-for="(sol, i) in form.solutions" :key="i" class="solution-item">
                   <div class="solution-head">
                     <span class="solution-name">解法{{ cnNum(i + 1) }}</span>
                     <div class="solution-head-right">
-                      <button type="button" class="quick-tool-btn solution-indent-btn" @click="insertSolutionIndent(i)" title="在当前解法光标处插入 KaTeX 首行缩进 $\hspace{2em}$">
-                        <span class="btn-symbol">⇥</span>
-                        <span>首行缩进</span>
-                      </button>
+                      <button type="button" class="quick-tool-btn solution-indent-btn" @click="insertSolutionIndent(i)">首行缩进</button>
                       <button v-if="form.solutions.length > 1" class="solution-del" @click="removeSolution(i)" title="删除此解法">
                         <AppIcon name="trash-2" :size="14" />
                       </button>
@@ -2117,13 +2102,6 @@ async function handleCropped(blob: Blob) {
 
 .quick-tool-btn:active {
   transform: scale(0.96);
-}
-
-.btn-symbol {
-  font-family: SFMono-Regular, Consolas, Monaco, monospace;
-  font-weight: 600;
-  font-size: 11.5px;
-  line-height: 1;
 }
 
 .solution-head-right {
