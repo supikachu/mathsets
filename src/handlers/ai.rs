@@ -4,8 +4,10 @@ use axum::{
     Json,
 };
 use base64::Engine as _;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::sync::LazyLock;
 
 use crate::ai::cleaner::{clean_and_parse, repair_truncated_batch};
 use crate::ai::ocr::{
@@ -132,6 +134,56 @@ fn ocr_error_brief(e: &OcrError) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 第二道防线：题干选项残留正则剥离
+// ---------------------------------------------------------------------------
+
+/// 匹配题干末尾的选项残留块（A→B→C→D 顺序完整且延伸到字符串结尾）
+///
+/// 设计要点（保守优先，避免误删真实题干）：
+/// - 必须匹配到完整的 A、B、C、D 四个选项前缀（缺一不匹配，避免误伤零散 A/B）
+/// - 选项前缀形如 `A.` `A、` `A)`，前缀前需为行首 / 句末标点（。；;！？），
+///   避免误伤正文里的 "点 A."、"线段 AB."、"已知 A(1,2)" 等
+/// - lazy `.*?` + `$` 锚定到字符串结尾，只剥离尾部完整选项块
+/// - `(?is)`：i 忽略大小写，s 让 `.` 跨换行（选项常跨多行）
+static OPTIONS_RESIDUE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?is)(?:^|\n|[。；;！？])\s*A[\.、\)]\s*.*?B[\.、\)]\s*.*?C[\.、\)]\s*.*?D[\.、\)]\s*.*$",
+    )
+    .expect("选项残留正则编译失败")
+});
+
+/// 第二道防线：正则剥离选择题题干末尾的选项残留
+///
+/// 大模型偶尔不听 Prompt 指令，会把 "A. xxx B. xxx C. xxx D. xxx" 残留在 stem 里，
+/// 导致前端题干区与选项区重复渲染。本函数在结构化解析后做兜底清洗。
+///
+/// - 仅对 choice / multiple 题型生效
+/// - 仅当 `options` 数组已填充时才剥离（否则剥离会丢失唯一选项副本，宁可不剥）
+/// - 命中时剥离残留并追加 warning 供审计
+fn strip_options_residue_from_stem(q: &mut ParsedQuestion) {
+    if !matches!(q.question_type.as_str(), "choice" | "multiple") {
+        return;
+    }
+    // 仅当 options 已填充时剥离——否则剥离会丢失唯一选项副本，宁可不剥
+    let has_options = q.options.as_ref().is_some_and(|o| !o.is_empty());
+    if !has_options {
+        return;
+    }
+    if let Some(m) = OPTIONS_RESIDUE_RE.find(&q.stem) {
+        let new_stem = q.stem[..m.start()].trim_end().to_string();
+        if new_stem != q.stem {
+            tracing::info!(
+                "剥离题干选项残留：{} 字符 → {} 字符",
+                q.stem.chars().count(),
+                new_stem.chars().count()
+            );
+            q.warnings.push("已自动剥离题干中残留的选项文本".into());
+            q.stem = new_stem;
+        }
+    }
+}
+
 /// 单题后处理：清洗 → 校验 question_type → 补全 analysis → 知识点匹配
 async fn post_process_single(
     raw_json: &str,
@@ -152,6 +204,9 @@ async fn post_process_single(
             Json(json!({"error": format!("未知题型: {}", parsed.question_type)})),
         ));
     }
+
+    // 第二道防线：剥离选择题题干末尾的选项残留（防 LLM 不听 Prompt 把选项塞进 stem）
+    strip_options_residue_from_stem(&mut parsed);
 
     // 校验 analysis 至少 1 项（空则补默认项 + warning）
     if parsed.analysis.is_empty() {
@@ -269,6 +324,8 @@ pub(crate) async fn post_process_batch(
                     tracing::warn!("第 {} 题题型无效: {}，跳过", i + 1, q.question_type);
                     continue;
                 }
+                // 第二道防线：剥离选择题题干末尾的选项残留
+                strip_options_residue_from_stem(&mut q);
                 // 校验 analysis
                 if q.analysis.is_empty() {
                     q.analysis = vec![AnalysisMethod {
@@ -1426,5 +1483,110 @@ async fn probe_mineru_private(
         }
         Err(e) if e.is_timeout() => (false, "请求超时".to_string()),
         Err(e) => (false, format!("网络错误: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai::types::ParsedOption;
+
+    /// 构造一个 choice 题型的 ParsedQuestion 用于测试
+    fn make_choice(stem: &str, options_filled: bool) -> ParsedQuestion {
+        ParsedQuestion {
+            question_type: "choice".into(),
+            sub_type: None,
+            difficulty: None,
+            stem: stem.into(),
+            options: if options_filled {
+                Some(vec![
+                    ParsedOption { label: "A".into(), content: "1".into() },
+                    ParsedOption { label: "B".into(), content: "2".into() },
+                    ParsedOption { label: "C".into(), content: "3".into() },
+                    ParsedOption { label: "D".into(), content: "4".into() },
+                ])
+            } else {
+                Some(vec![])
+            },
+            correct_answer: None,
+            analysis: vec![],
+            knowledge_points: vec![],
+            confidence: 0.9,
+            warnings: vec![],
+            image_placeholders: vec![],
+            image_urls: vec![],
+            kp_matches: vec![],
+        }
+    }
+
+    #[test]
+    fn strips_multiline_options_residue() {
+        let mut q = make_choice("下列结论正确的是\nA. 1\nB. 2\nC. 3\nD. 4", true);
+        strip_options_residue_from_stem(&mut q);
+        assert_eq!(q.stem, "下列结论正确的是");
+        assert!(q.warnings.iter().any(|w| w.contains("剥离")));
+    }
+
+    #[test]
+    fn strips_inline_options_after_period() {
+        let mut q = make_choice("求 x 的值。 A. 1 B. 2 C. 3 D. 4", true);
+        strip_options_residue_from_stem(&mut q);
+        assert_eq!(q.stem, "求 x 的值");
+    }
+
+    #[test]
+    fn strips_with_chinese_comma_separators() {
+        // 选项前缀用中文顿号「A、」
+        let mut q = make_choice(
+            "下列哪个正确\nA、选项一\nB、选项二\nC、选项三\nD、选项四",
+            true,
+        );
+        strip_options_residue_from_stem(&mut q);
+        assert_eq!(q.stem, "下列哪个正确");
+    }
+
+    #[test]
+    fn keeps_stem_without_residue() {
+        let mut q = make_choice("下列结论正确的是", true);
+        strip_options_residue_from_stem(&mut q);
+        assert_eq!(q.stem, "下列结论正确的是");
+        assert!(q.warnings.is_empty());
+    }
+
+    #[test]
+    fn skips_non_choice_question() {
+        let mut q = make_choice("求 x\nA. 1\nB. 2\nC. 3\nD. 4", true);
+        q.question_type = "solution".into();
+        strip_options_residue_from_stem(&mut q);
+        // solution 题型不应剥离
+        assert!(q.stem.contains("A. 1"));
+        assert!(q.warnings.is_empty());
+    }
+
+    #[test]
+    fn skips_when_options_empty_to_avoid_data_loss() {
+        // options 为空时剥离会丢失唯一选项副本 → 不剥
+        let mut q = make_choice("求 x\nA. 1\nB. 2\nC. 3\nD. 4", false);
+        strip_options_residue_from_stem(&mut q);
+        assert!(q.stem.contains("A. 1"));
+        assert!(q.warnings.is_empty());
+    }
+
+    #[test]
+    fn preserves_inline_a_in_stem_while_stripping_trailing_block() {
+        // 题干正文含 "点 A."，尾部有真正选项块——只剥尾部，保留 "点 A."
+        // （"点 A." 前是空格，非行首/句末标点，不满足分隔符条件）
+        let mut q = make_choice("已知点 A. 在第一象限\nA. 1\nB. 2\nC. 3\nD. 4", true);
+        strip_options_residue_from_stem(&mut q);
+        assert_eq!(q.stem, "已知点 A. 在第一象限");
+    }
+
+    #[test]
+    fn does_not_strip_partial_options_without_d() {
+        // 只有 A B C，没有 D → 不匹配完整序列，不剥离
+        let mut q = make_choice("求 x\nA. 1\nB. 2\nC. 3", true);
+        strip_options_residue_from_stem(&mut q);
+        assert!(q.stem.contains("A. 1"));
+        assert!(q.warnings.is_empty());
     }
 }
