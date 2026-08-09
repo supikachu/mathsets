@@ -15,15 +15,27 @@ pub struct UserAiSetting {
     pub model_text: Option<String>,
     pub model_vision: Option<String>,
     pub updated_at: DateTime<Utc>,
+    // ── M3：OCR 引擎配置 ──
+    pub ocr_provider: String,
+    pub doc2x_api_key_enc: Option<Vec<u8>>,
+    pub doc2x_api_key_iv: Option<Vec<u8>>,
+    pub mineru_api_endpoint: Option<String>,
+    pub mineru_api_key_enc: Option<Vec<u8>>,
+    pub mineru_api_key_iv: Option<Vec<u8>>,
 }
 
-/// API 响应（不返回明文 Key）
+/// API 响应（不返回明文 Key，仅返回脱敏标志位）
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AiSettingsResponse {
     pub provider: String,
     pub has_api_key: bool,
     pub model_text: Option<String>,
     pub model_vision: Option<String>,
+    // ── M3：OCR 引擎配置（脱敏） ──
+    pub ocr_provider: String,
+    pub has_doc2x_key: bool,
+    pub mineru_endpoint: Option<String>,
+    pub has_mineru_key: bool,
 }
 
 /// 更新请求
@@ -33,6 +45,15 @@ pub struct UpdateAiSettingsRequest {
     pub api_key: Option<String>,
     pub model_text: Option<String>,
     pub model_vision: Option<String>,
+    // ── M3：OCR 引擎配置 ──
+    /// OCR 引擎：auto / doc2x / mineru / qwen_vl
+    pub ocr_provider: Option<String>,
+    /// 明文 Doc2X API Key（后端 AES 加密后存储；空字符串=清除，None=不变）
+    pub doc2x_api_key: Option<String>,
+    /// MinerU 私有部署端点（明文）
+    pub mineru_endpoint: Option<String>,
+    /// 明文 MinerU API Key（后端 AES 加密后存储；M4 启用）
+    pub mineru_api_key: Option<String>,
 }
 
 /// 从 base64 字符串解析 32 字节主密钥

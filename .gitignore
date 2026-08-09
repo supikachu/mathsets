@@ -21,6 +21,7 @@ tmp/
 # 3. 敏感环境变量 (Environment Variables)
 # ==========================================
 .env
+.env.local
 .env.*
 #.env.example 必须被版本控制追踪，因此强制例外：
 !.env.example

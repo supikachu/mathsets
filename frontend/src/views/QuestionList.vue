@@ -468,33 +468,46 @@
                     <span>答案解析</span>
                   </div>
 
-                  <!-- 正确答案高亮卡片（选择题 / 填空题） -->
-                  <div
-                    v-if="card.correctAnswer && (card.question_type === 'choice' || card.question_type === 'fill')"
-                    class="q-answer-card"
-                    :class="`q-answer-card--${card.question_type}`"
-                  >
-                    <span class="q-answer-card-label">正确答案</span>
-                    <span class="q-answer-card-value"><LatexRender :text="card.correctAnswer" :inline="true" /></span>
-                    <AppIcon
-                      name="check-circle"
-                      :size="16"
-                      :stroke="2.2"
-                      class="q-answer-card-icon"
-                    />
-                  </div>
+                  <!-- 答案与解析材质化卡片（镜像 QuestionDetail.vue 结构）-->
+                  <div v-if="card.correctAnswer || card.analysis" class="q-ans-sol-block">
+                    <!-- 参考答案卡片 — 莫兰迪极淡蓝底 -->
+                    <div v-if="card.correctAnswer" class="q-ans-card">
+                      <div class="q-ans-card-title">参考答案</div>
+                      <div class="q-ans-card-content">
+                        <LatexRender :text="card.correctAnswer" :inline="true" />
+                      </div>
+                    </div>
 
-                  <!-- 解答题正确答案 -->
-                  <div
-                    v-if="card.correctAnswer && card.question_type === 'solution'"
-                    class="q-answer-inline"
-                  >
-                    <span class="q-answer-inline-label">参考答案</span>
-                    <span class="q-answer-inline-value"><LatexRender :text="card.correctAnswer" :inline="true" /></span>
-                  </div>
-
-                  <div v-if="card.analysis" class="q-analysis-body">
-                    <LatexRender :text="card.analysis" />
+                    <!-- 解析卡片 — 苹果系统柔和灰底 + 多解法切换 -->
+                    <div v-if="card.analysis" class="q-ana-card">
+                      <div class="q-ana-card-title-row">
+                        <span class="q-ana-card-title">解析</span>
+                        <div v-if="cardSolutions(card).length > 1" class="q-sol-seg">
+                          <button
+                            v-for="(_, i) in cardSolutions(card)"
+                            :key="i"
+                            class="q-sol-seg-btn"
+                            :class="{ active: activeSolutionIndex(card.id) === i }"
+                            @click="setActiveSolution(card.id, i)"
+                          >解法{{ cnNum(i + 1) }}</button>
+                        </div>
+                      </div>
+                      <div class="q-ana-card-body">
+                        <Transition name="q-sol-fade" mode="out-in">
+                          <LatexRender
+                            :key="activeSolutionIndex(card.id)"
+                            :text="splitSolution(cardSolutions(card)[activeSolutionIndex(card.id)]).body"
+                            :sub-question-badge="true"
+                          />
+                        </Transition>
+                      </div>
+                      <div
+                        v-if="splitSolution(cardSolutions(card)[activeSolutionIndex(card.id)]).conclusion"
+                        class="q-ana-conclusion"
+                      >
+                        <LatexRender :text="splitSolution(cardSolutions(card)[activeSolutionIndex(card.id)]).conclusion" />
+                      </div>
+                    </div>
                   </div>
                   <div v-else class="q-analysis-empty">暂无解析内容</div>
                 </div>
@@ -836,6 +849,55 @@ function kpTagClass(kind: string): string {
   if (kind === 'chapter') return 'kp-kind-chapter'
   if (kind === 'ability') return 'kp-kind-method'
   return 'kp-kind-knowledge'
+}
+
+// ===== 多解法切换（镜像 QuestionDetail.vue 逻辑）=====
+const cnNums = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十']
+function cnNum(n: number): string {
+  return cnNums[n - 1] || String(n)
+}
+
+// 每张卡片独立的当前解法索引：cardId → index（默认 0）
+const activeSolutionMap = ref<Map<string, number>>(new Map())
+
+// 拆分多解法：支持 `\n\n---\n\n` 显式分隔 或 `\n解法二/三/...` 隐式分隔
+function cardSolutions(card: QuestionCard): string[] {
+  const analysis = card.analysis
+  if (!analysis) return []
+  if (analysis.includes('\n\n---\n\n')) return analysis.split(/\n\n---\n\n/)
+  if (/\n解法[二三四五六七八九十]/.test(analysis)) {
+    return analysis.split(/\n(?=解法[二三四五六七八九十])/).map(s => s.trim())
+  }
+  return [analysis]
+}
+
+function activeSolutionIndex(cardId: string): number {
+  return activeSolutionMap.value.get(cardId) ?? 0
+}
+
+function setActiveSolution(cardId: string, idx: number) {
+  const next = new Map(activeSolutionMap.value)
+  next.set(cardId, idx)
+  activeSolutionMap.value = next
+}
+
+// 拆分解法正文与结论（故/因此/所以/综上 收尾句）
+function splitSolution(text: string): { body: string; conclusion: string } {
+  if (!text) return { body: '', conclusion: '' }
+  const patterns = [
+    /(?:故|因此|所以|综上)[选答]\s*[A-Z](?:[、,，]\s*[A-Z])*\s*。?\s*$/,
+    /(?:故|因此|所以|综上)[^。\n]*答案[^。\n]*[。]?\s*$/,
+    /(?:故|因此|所以|综上)[^。\n]*[。]?\s*$/,
+    /故选\s*[A-Z](?:[、,，]\s*[A-Z])*\s*。?\s*$/,
+  ]
+  for (const p of patterns) {
+    const m = text.match(p)
+    if (m) {
+      const idx = text.lastIndexOf(m[0])
+      return { body: text.substring(0, idx).trim(), conclusion: m[0].trim() }
+    }
+  }
+  return { body: text.trim(), conclusion: '' }
 }
 
 const query = reactive<QuestionQuery>({
@@ -2374,99 +2436,156 @@ onBeforeUnmount(() => {
   letter-spacing: 0.06em;
 }
 
-/* ---- Correct answer highlight card (choice & fill) ---- */
-.q-answer-card {
+/* ---- 答案与解析材质化卡片（镜像 QuestionDetail.vue .answer-card / .analysis-card）---- */
+.q-ans-sol-block {
+  margin-top: 4px;
+}
+
+/* 参考答案卡片 — 莫兰迪极淡蓝底 */
+.q-ans-card {
+  background: #f4f8fc;
+  border-radius: 12px;
+  padding: 14px 16px;
+  margin-bottom: 10px;
+  border: none;
+  transition: background 0.3s ease;
+}
+
+.q-ans-card:hover {
+  background: #edf3f9;
+}
+
+[data-theme='dark'] .q-ans-card {
+  background: rgba(100, 160, 220, 0.08);
+}
+
+[data-theme='dark'] .q-ans-card:hover {
+  background: rgba(100, 160, 220, 0.12);
+}
+
+/* 解析卡片 — 苹果系统柔和灰底 */
+.q-ana-card {
+  background: #f5f5f7;
+  border-radius: 12px;
+  padding: 14px 16px;
+  border: none;
+  transition: background 0.3s ease;
+}
+
+.q-ana-card:hover {
+  background: #ebebef;
+}
+
+[data-theme='dark'] .q-ana-card {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+[data-theme='dark'] .q-ana-card:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* 卡片小标题 */
+.q-ans-card-title,
+.q-ana-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+  letter-spacing: -0.01em;
+  display: block;
+}
+
+[data-theme='dark'] .q-ans-card-title,
+[data-theme='dark'] .q-ana-card-title {
+  color: var(--text-primary);
+}
+
+.q-ana-card-title-row {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px 14px;
-  border-radius: var(--radius-sm);
-  margin-bottom: 12px;
-  background: var(--bg-card);
-  border: 1px solid var(--border-color);
-  border-left: 2.5px solid var(--text-muted);
-}
-
-.q-answer-card--choice {
-  border-left-color: var(--accent);
-}
-
-.q-answer-card--fill {
-  border-left-color: var(--success);
-}
-
-.q-answer-card-label {
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-muted);
-  letter-spacing: 0.02em;
-  flex-shrink: 0;
-}
-
-.q-answer-card-value {
-  font-size: 16px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-  flex: 1;
-  color: var(--text-primary);
-}
-
-.q-answer-card--choice .q-answer-card-value {
-  color: var(--accent);
-}
-
-.q-answer-card--fill .q-answer-card-value {
-  color: var(--success);
-}
-
-.q-answer-card-icon {
-  flex-shrink: 0;
-  opacity: 0.5;
-}
-
-.q-answer-card--choice .q-answer-card-icon {
-  color: var(--accent);
-}
-
-.q-answer-card--fill .q-answer-card-icon {
-  color: var(--success);
-}
-
-/* ---- Solution answer inline ---- */
-.q-answer-inline {
-  display: flex;
-  align-items: baseline;
+  justify-content: space-between;
   gap: 8px;
-  padding: 8px 0 10px;
+  margin-bottom: 8px;
 }
 
-.q-answer-inline-label {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-muted);
-  flex-shrink: 0;
+.q-ana-card-title-row .q-ana-card-title {
+  margin-bottom: 0;
 }
 
-.q-answer-inline-value {
-  font-size: 14px;
-  font-weight: 600;
+.q-ans-card-content,
+.q-ana-card-body {
+  font-size: 13.5px;
+  line-height: 1.8;
   color: var(--text-primary);
 }
 
-/* ---- Analysis body ---- */
-.q-analysis-body {
-  padding: 4px 0 16px;
-  font-size: 13.5px;
-  line-height: 1.85;
-  color: var(--text-secondary);
+.q-ana-card-body :deep(p) {
+  margin: 0 0 8px;
 }
 
-.q-analysis-body :deep(.katex) {
+.q-ana-card-body :deep(.katex) {
   font-size: 1em;
 }
 
-.q-analysis-body :deep(.katex-display) {
+.q-ana-card-body :deep(.katex-display) {
   margin: 6px 0;
+}
+
+/* 多解法分段切换（镜像 QuestionDetail.vue .sol-seg）*/
+.q-sol-seg {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius-full);
+  background: var(--bg-input);
+  flex-shrink: 0;
+}
+
+.q-sol-seg-btn {
+  padding: 3px 10px;
+  border: none;
+  border-radius: var(--radius-full);
+  background: transparent;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.q-sol-seg-btn:hover {
+  color: var(--text-secondary);
+}
+
+.q-sol-seg-btn.active {
+  background: var(--bg-card);
+  color: var(--accent);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+[data-theme='dark'] .q-sol-seg-btn.active {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+/* 结论收尾段 — 融入卡片底色，纯文本强化 */
+.q-ana-conclusion {
+  margin-top: 16px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.8;
+}
+
+/* 解法淡入淡出过渡 */
+.q-sol-fade-enter-active,
+.q-sol-fade-leave-active {
+  transition: opacity 0.2s ease;
+}
+
+.q-sol-fade-enter-from,
+.q-sol-fade-leave-to {
+  opacity: 0;
 }
 
 .q-analysis-empty {

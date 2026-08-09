@@ -79,6 +79,84 @@ pub fn extract_json_by_bracket_count(s: &str) -> Result<String, String> {
     }
 }
 
+/// 修复被 `max_tokens` 截断的批量 JSON（v1.1，T1.12）
+///
+/// 针对 Stage 2 输出 `{"questions": [ {...}, {...}, {截断...` 的场景：
+/// 保留最后一个**完整**的数组元素，丢弃其后未闭合的残缺元素，
+/// 并补全 `]}` 闭合符，使剩余前 N-1 题可被正常反序列化。
+///
+/// 策略：
+/// 1. 先走 `clean_llm_json` 剥离代码块包裹
+/// 2. 定位 `"questions"` 后的 `[`
+/// 3. 逐字节扫描数组，跟踪 `{}` 深度（相对数组层）与字符串状态，
+///    每当深度归零（一个完整元素闭合）记录其 `}` 位置
+/// 4. 若中途遇到 `]`（数组正常闭合）→ 未截断，返回 `None`
+/// 5. 扫到 EOF 仍未闭合 → 取最后一次完整元素位置，截断后补 `]}`
+///
+/// 返回 `None` 表示：未找到 questions 数组 / 没有任何一个完整元素 / 数组本身未截断。
+pub fn repair_truncated_batch(raw: &str) -> Option<String> {
+    let s = clean_llm_json(raw).ok()?;
+
+    // 定位 "questions" 键后的数组起始 [
+    let q_idx = s.find("\"questions\"")?;
+    let after_key = &s[q_idx..];
+    let colon = after_key.find(':')?;
+    let bracket_rel = after_key[colon..].find('[')?;
+    let bracket_idx = q_idx + colon + bracket_rel;
+
+    let bytes = s.as_bytes();
+    let mut depth: i32 = 0; // {} 深度（相对数组层，0 = 数组层）
+    let mut in_string = false;
+    let mut escape = false;
+    let mut last_complete_end: Option<usize> = None; // 最后一个完整元素 `}` 的索引
+
+    let mut i = bracket_idx + 1;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if escape {
+            escape = false;
+            i += 1;
+            continue;
+        }
+        if b == b'\\' && in_string {
+            escape = true;
+            i += 1;
+            continue;
+        }
+        if b == b'"' {
+            in_string = !in_string;
+            i += 1;
+            continue;
+        }
+        if in_string {
+            i += 1;
+            continue;
+        }
+        match b {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    // 一个完整元素闭合
+                    last_complete_end = Some(i);
+                }
+            }
+            b']' if depth == 0 => {
+                // 数组正常闭合，非截断场景
+                return None;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    // EOF：截断。取最后一个完整元素，补全闭合符
+    let end = last_complete_end?;
+    // s[..=end] 形如 `{"questions": [ {...}, {...}`（末尾为完整元素 `}`）
+    // 补 `]}` 闭合数组与根对象
+    Some(format!("{}]}}", &s[..=end]))
+}
+
 /// 修复 JSON 字符串字面量内部的非法转义反斜杠。
 ///
 /// JSON 规范只允许 9 种转义：`\" \\ \/ \b \f \n \r \t \uXXXX`。
@@ -309,6 +387,49 @@ mod tests {
         // 尾部残缺
         let input = r#"{"stem": "求集合 {x | x > 1} 的元素个数", "answer": "#;
         assert!(extract_json_by_bracket_count(input).is_err());
+    }
+
+    #[test]
+    fn test_repair_truncated_batch_keeps_complete_elements() {
+        // 第 3 题在 stem 中途被截断
+        let input = r#"```json
+{"questions": [
+  {"question_type": "choice", "stem": "第1题"},
+  {"question_type": "fill", "stem": "第2题"},
+  {"question_type": "solution", "stem": "第3题截断"#;
+        let repaired = repair_truncated_batch(input).expect("应修复成功");
+        let parsed: serde_json::Value = serde_json::from_str(&repaired).expect("修复后应可解析");
+        let arr = parsed["questions"].as_array().unwrap();
+        assert_eq!(arr.len(), 2, "应丢弃截断的第 3 题，保留前 2 题");
+        assert_eq!(arr[0]["stem"], "第1题");
+        assert_eq!(arr[1]["stem"], "第2题");
+    }
+
+    #[test]
+    fn test_repair_truncated_batch_returns_none_when_not_truncated() {
+        // 完整 JSON 不应触发修复（返回 None）
+        let input = r#"{"questions": [{"question_type": "choice", "stem": "x"}]}"#;
+        assert!(repair_truncated_batch(input).is_none());
+    }
+
+    #[test]
+    fn test_repair_truncated_batch_returns_none_when_no_complete_element() {
+        // 第一题就截断，没有任何完整元素 → None
+        let input = r#"{"questions": [{"question_type": "choice", "stem": "截"#;
+        assert!(repair_truncated_batch(input).is_none());
+    }
+
+    #[test]
+    fn test_repair_truncated_batch_handles_braces_in_strings() {
+        // 题干含集合 {x | x > 1}，不应误判元素闭合
+        let input = r#"{"questions": [
+  {"question_type": "fill", "stem": "求 {x | x > 1} 的元素个数"},
+  {"question_type": "choice", "stem": "截"#;
+        let repaired = repair_truncated_batch(input).expect("应修复成功");
+        let parsed: serde_json::Value = serde_json::from_str(&repaired).expect("修复后应可解析");
+        let arr = parsed["questions"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["stem"], "求 {x | x > 1} 的元素个数");
     }
 
     #[test]

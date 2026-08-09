@@ -820,6 +820,7 @@ export interface ParsedQuestion {
   confidence: number
   warnings: string[]
   image_placeholders: string[]
+  image_urls: string[]
   kp_matches: KpMatch[]
 }
 
@@ -828,17 +829,25 @@ export interface AiSettings {
   has_api_key: boolean
   model_text: string | null
   model_vision: string | null
+  // M3：OCR 引擎配置（脱敏）
+  ocr_provider: string
+  has_doc2x_key: boolean
+  mineru_endpoint: string | null
+  has_mineru_key: boolean
 }
 
 export const aiApi = {
   parseText(text: string) {
     return client.post<{ data: ParsedQuestion }>('/ai/parse-text', { text })
   },
-  parseImage(file: File) {
+  parseImage(file: File, ocr_provider?: string) {
     const formData = new FormData()
     formData.append('image', file)
+    if (ocr_provider) {
+      formData.append('ocr_provider', ocr_provider)
+    }
     // 不要手动设置 Content-Type — axios + FormData 需要自动生成 boundary
-    return client.post<{ data: ParsedQuestion[] }>('/ai/parse-image', formData, {
+    return client.post<{ data: ParsedQuestion[] }>('/ai/parse-image-v2', formData, {
       timeout: 120000,
     })
   },
@@ -850,8 +859,20 @@ export const aiApi = {
     api_key?: string
     model_text?: string
     model_vision?: string
+    ocr_provider?: string
+    doc2x_api_key?: string
+    mineru_endpoint?: string
+    mineru_api_key?: string
   }) {
     return client.put<AiSettings>('/ai/settings', data)
+  },
+  /// OCR 引擎连接测试（M3 新增）
+  testOcrConnection(data: { provider: string; api_key?: string; endpoint?: string }) {
+    return client.post<{ ok: boolean; latency_ms: number; message: string }>(
+      '/ai/ocr/test-connection',
+      data,
+      { timeout: 15000 },
+    )
   },
 }
 
@@ -935,6 +956,7 @@ export const aiTaggingApi = {
 // ===========================================================================
 
 export type AiTaskStatus = 'pending' | 'processing' | 'completed' | 'failed'
+export type AiTaskSourceType = 'text' | 'image' | 'pdf'
 
 export interface SubmitParseTaskResponse {
   task_id: string
@@ -944,16 +966,34 @@ export interface SubmitParseTaskResponse {
 
 export interface AiParseTaskDetail {
   id: string
+  source_type: AiTaskSourceType
   status: AiTaskStatus
   question_id: string | null
+  /** M4：多题批处理场景下所有生成题目的 UUID 数组（image/pdf 任务优先读取此字段） */
+  question_ids?: string[]
   error_message: string | null
   created_at: string
   updated_at: string
 }
 
 export const aiTaskApi = {
+  /// 文本类异步解析（JSON）
   submitParseTask(raw_text: string) {
     return client.post<SubmitParseTaskResponse>('/ai/parse', { raw_text })
+  },
+  /// 图片 / PDF 异步解析（Multipart，自动判定 source_type）
+  ///
+  /// - 大图或多页 PDF 走异步队列，避免同步接口超时
+  /// - `ocrProvider` 可选引擎覆盖（doc2x / mineru_local / qwen_vl）
+  submitParseTaskMedia(file: File | Blob, ocrProvider?: string) {
+    const form = new FormData()
+    form.append('file', file)
+    if (ocrProvider) {
+      form.append('ocr_provider', ocrProvider)
+    }
+    return client.post<SubmitParseTaskResponse>('/ai/parse-task', form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
   },
   getTaskStatus(task_id: string) {
     return client.get<AiParseTaskDetail>(`/ai/parse/${task_id}`)

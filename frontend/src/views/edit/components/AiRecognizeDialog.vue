@@ -52,6 +52,14 @@ const toast = useToast()
 
 // AI Mode tab: 'markdown' | 'image'
 const aiMode = ref<'markdown' | 'image'>('markdown')
+
+// OCR 引擎本次覆盖（'default' = 跟随系统设置）
+const ocrEngineOverride = ref<'default' | 'doc2x' | 'mineru_local' | 'qwen_vl'>('default')
+
+// 把本次覆盖转换为传给后端的 ocr_provider 参数（default 时返回 undefined 走用户偏好）
+function ocrProviderParam(): string | undefined {
+  return ocrEngineOverride.value === 'default' ? undefined : ocrEngineOverride.value
+}
 const aiText = ref('')
 const aiError = ref('')
 const aiParsing = ref(false)
@@ -249,7 +257,7 @@ async function doImageParse(file: File) {
     const imageFile = new File([compressed], `upload.${ext}`, { type: mimeType })
 
     aiBatchProgress.value = { current: 0, total: 1, text: '正在上传并识别图片（约 10-30 秒）…' }
-    const res = await withBackoffRetry(() => aiApi.parseImage(imageFile))
+    const res = await withBackoffRetry(() => aiApi.parseImage(imageFile, ocrProviderParam()))
     const questions = res.data.data
     await handleBatchResults(questions)
   } catch (e: any) {
@@ -283,7 +291,7 @@ async function doPdfParse(file: File) {
       const blob = await (await fetch(pageImg.dataUrl)).blob()
       const compressed = await compressImage(blob)
       const imageFile = blobToFile(compressed, `page-${pageImg.page}.webp`)
-      const res = await withBackoffRetry(() => aiApi.parseImage(imageFile))
+      const res = await withBackoffRetry(() => aiApi.parseImage(imageFile, ocrProviderParam()))
       return res.data.data
     },
     (cur, total) => {
@@ -413,6 +421,19 @@ defineExpose({
 
           <!-- 图片/PDF 上传区 -->
           <div v-if="aiMode === 'image'" class="ai-upload-section">
+            <!-- OCR 引擎本次覆盖（M3 新增） -->
+            <div class="ocr-engine-selector">
+              <label class="ocr-engine-label">
+                <AppIcon name="sparkles" :size="14" />
+                <span>识别引擎</span>
+              </label>
+              <select v-model="ocrEngineOverride" class="ocr-engine-select">
+                <option value="default">默认（跟随系统设置）</option>
+                <option value="doc2x">Doc2X（高精度公式）</option>
+                <option value="mineru_local">MinerU（私有部署）</option>
+                <option value="qwen_vl">Qwen-VL（通用兜底）</option>
+              </select>
+            </div>
             <div
               class="ai-upload-area"
               :class="{ dragover: aiUploadAreaHover }"
@@ -801,4 +822,36 @@ defineExpose({
 .ai-progress-bar { flex: 1; height: 8px; background: var(--bg-input); border-radius: 4px; overflow: hidden; }
 .ai-progress-fill { height: 100%; background: var(--accent); transition: width 0.3s; border-radius: 4px; }
 .ai-batch-progress span { font-size: 13px; color: var(--text-secondary); white-space: nowrap; }
+
+/* ===== OCR 引擎本次覆盖选择器（M3 新增） ===== */
+.ocr-engine-selector {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: var(--bg-input, #f9fafb);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 8px;
+}
+.ocr-engine-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary, #6b7280);
+  white-space: nowrap;
+}
+.ocr-engine-select {
+  flex: 1;
+  border: none;
+  background: transparent;
+  font-size: 13px;
+  color: var(--text-primary, #111827);
+  cursor: pointer;
+  outline: none;
+}
+.ocr-engine-select:focus {
+  color: var(--purple, #7c3aed);
+}
 </style>

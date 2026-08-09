@@ -95,7 +95,10 @@ impl AiProvider for DeepSeekProvider {
                 },
             ],
             temperature: 0.1,
-            max_tokens: 4096,
+            // v1.1（T1.12）：Stage 2 批量多题结构化需要更大输出空间，
+            // 避免整卷多题被 max_tokens 截断导致 JSON 残缺。
+            // 单题 parse_text 同样受益，DeepSeek-V3 上限内安全。
+            max_tokens: 8192,
         };
 
         let url = format!("{}/v1/chat/completions", self.base_url);

@@ -216,6 +216,110 @@
             </section>
           </template>
 
+          <!-- TAB 4: AI 与 OCR 设置 -->
+          <template v-else-if="activeTab === 'ai'">
+            <section class="bg-white dark:bg-slate-900 rounded-2xl border border-gray-100 dark:border-slate-800 shadow-sm p-6 flex flex-col gap-5">
+              <h2 class="text-lg font-semibold text-gray-900 dark:text-gray-100">AI 模型配置</h2>
+              <p class="text-sm text-gray-500 dark:text-gray-400">配置用于智能录题的文本/视觉大模型 API Key。留空则使用平台默认配置。</p>
+
+              <!-- LLM 服务商 -->
+              <div class="flex flex-col gap-1.5">
+                <label class="text-sm font-medium text-gray-700 dark:text-gray-300">LLM 服务商</label>
+                <select v-model="aiForm.provider" class="ai-input">
+                  <option value="deepseek">DeepSeek（推荐）</option>
+                  <option value="qwen">通义千问</option>
+                  <option value="openai">OpenAI</option>
+                </select>
+              </div>
+
+              <!-- API Key -->
+              <div class="flex flex-col gap-1.5">
+                <label class="text-sm font-medium text-gray-700 dark:text-gray-300">
+                  API Key
+                  <span v-if="aiSettings?.has_api_key" class="text-xs text-green-600 ml-2">已配置</span>
+                </label>
+                <input v-model="aiForm.apiKey" type="password" class="ai-input" placeholder="输入新 Key 以更新，留空保持不变" />
+              </div>
+
+              <!-- 模型名 -->
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div class="flex flex-col gap-1.5">
+                  <label class="text-sm font-medium text-gray-700 dark:text-gray-300">文本模型（可选）</label>
+                  <input v-model="aiForm.modelText" class="ai-input" placeholder="如 deepseek-chat" />
+                </div>
+                <div class="flex flex-col gap-1.5">
+                  <label class="text-sm font-medium text-gray-700 dark:text-gray-300">视觉模型（可选）</label>
+                  <input v-model="aiForm.modelVision" class="ai-input" placeholder="如 qwen-vl-plus" />
+                </div>
+              </div>
+            </section>
+
+            <!-- OCR 引擎设置卡片 -->
+            <section class="bg-white dark:bg-slate-900 rounded-2xl border border-gray-100 dark:border-slate-800 shadow-sm p-6 flex flex-col gap-5">
+              <div class="flex items-center justify-between">
+                <h2 class="text-lg font-semibold text-gray-900 dark:text-gray-100">OCR 模型设置</h2>
+                <span v-if="aiSettings?.has_doc2x_key" class="text-xs px-2 py-1 rounded-full bg-green-50 text-green-700 dark:bg-green-950 dark:text-green-400">Doc2X 已配置</span>
+                <span v-else-if="aiSettings?.has_mineru_key" class="text-xs px-2 py-1 rounded-full bg-blue-50 text-blue-700 dark:bg-blue-950 dark:text-blue-400">MinerU 已配置</span>
+              </div>
+              <p class="text-sm text-gray-500 dark:text-gray-400">选择图片/PDF 识别引擎。Doc2X 公式精度最高但需独立 Key；MinerU 为开源私有部署方案；Qwen-VL 为通用兜底。</p>
+
+              <!-- 引擎选择 -->
+              <div class="flex flex-col gap-1.5">
+                <label class="text-sm font-medium text-gray-700 dark:text-gray-300">OCR 引擎</label>
+                <select v-model="aiForm.ocrProvider" class="ai-input">
+                  <option value="auto">默认自动（跟随系统）</option>
+                  <option value="doc2x">Doc2X 极高精公式引擎（推荐）</option>
+                  <option value="mineru_local">MinerU 私有部署（开源）</option>
+                  <option value="qwen_vl">Qwen-VL 通用（兜底）</option>
+                </select>
+              </div>
+
+              <!-- Doc2X API Key（仅选中 doc2x 时显示） -->
+              <div v-if="aiForm.ocrProvider === 'doc2x'" class="flex flex-col gap-2">
+                <label class="text-sm font-medium text-gray-700 dark:text-gray-300">
+                  Doc2X API Key
+                  <span v-if="aiSettings?.has_doc2x_key" class="text-xs text-green-600 ml-2">已配置</span>
+                </label>
+                <div class="flex gap-2">
+                  <input v-model="aiForm.doc2xApiKey" type="password" class="ai-input flex-1" placeholder="输入 Doc2X API Key（sk-xxx）" />
+                  <AppButton variant="ghost" :loading="testingConnection" @click="testOcrConnection">
+          <AppIcon name="bolt" :size="16" /> 测试连接
+        </AppButton>
+                </div>
+                <p class="text-xs text-gray-400">未填写个人 Key 时使用平台默认 Key。可在 doc2x.noedgeai.com 获取。</p>
+              </div>
+
+              <!-- MinerU 私有部署配置（仅选中 mineru_local 时显示） -->
+              <div v-if="aiForm.ocrProvider === 'mineru_local'" class="flex flex-col gap-3">
+                <div class="flex flex-col gap-1.5">
+                  <label class="text-sm font-medium text-gray-700 dark:text-gray-300">MinerU 服务端点</label>
+                  <input v-model="aiForm.mineruEndpoint" class="ai-input" placeholder="如 http://127.0.0.1:8000" />
+                  <p class="text-xs text-gray-400">填写本地或内网部署的 MinerU 服务地址（无末尾斜杠）。</p>
+                </div>
+                <div class="flex flex-col gap-1.5">
+                  <label class="text-sm font-medium text-gray-700 dark:text-gray-300">
+                    MinerU API Key（可选）
+                    <span v-if="aiSettings?.has_mineru_key" class="text-xs text-blue-600 ml-2">已配置</span>
+                  </label>
+                  <div class="flex gap-2">
+                    <input v-model="aiForm.mineruApiKey" type="password" class="ai-input flex-1" placeholder="若服务前置鉴权网关则填写，否则留空" />
+                    <AppButton variant="ghost" :loading="testingConnection" @click="testOcrConnection">
+                      <AppIcon name="bolt" :size="16" /> 测试连接
+                    </AppButton>
+                  </div>
+                  <p class="text-xs text-gray-400">私有部署默认免鉴权；仅当在 MinerU 前置网关设置了 Bearer Token 时填写。</p>
+                </div>
+              </div>
+            </section>
+
+            <!-- 保存按钮 -->
+            <div class="flex justify-end">
+              <AppButton variant="primary" :loading="savingAi" @click="saveAiSettings">
+                <AppIcon name="check" :size="16" /> 保存设置
+              </AppButton>
+            </div>
+          </template>
+
         </main>
       </div>
     </div>
@@ -225,7 +329,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, reactive, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
-import { userApi, type UserProfile } from '@/api/client'
+import { userApi, aiApi, type UserProfile, type AiSettings } from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
 import { useToast } from '@/composables/useToast'
 import { useTheme } from '@/composables/useTheme'
@@ -241,13 +345,14 @@ const { isDark } = useTheme()
 // ---------------------------------------------------------------------------
 // 动态 Tab 控制
 // ---------------------------------------------------------------------------
-type TabType = 'profile' | 'security' | 'appearance'
+type TabType = 'profile' | 'security' | 'appearance' | 'ai'
 const activeTab = ref<TabType>('profile')
 
 const navTabs = [
   { id: 'profile', label: '个人资料', icon: 'user' },
   { id: 'security', label: '安全设置', icon: 'lock' },
   { id: 'appearance', label: '外观与偏好', icon: 'sun' },
+  { id: 'ai', label: 'AI 与 OCR', icon: 'sparkles' },
 ] as const
 
 // ---------------------------------------------------------------------------
@@ -298,6 +403,97 @@ async function loadProfile() {
 }
 
 onMounted(loadProfile)
+
+// ---------------------------------------------------------------------------
+// AI 与 OCR 设置
+// ---------------------------------------------------------------------------
+const aiSettings = ref<AiSettings | null>(null)
+const savingAi = ref(false)
+const testingConnection = ref(false)
+
+const aiForm = reactive({
+  provider: 'deepseek',
+  apiKey: '',           // 明文输入，保存后清空
+  modelText: '',
+  modelVision: '',
+  ocrProvider: 'auto', // auto / doc2x / mineru_local / qwen_vl
+  doc2xApiKey: '',     // 明文输入，保存后清空
+  mineruEndpoint: '',
+  mineruApiKey: '',    // 明文输入，保存后清空
+})
+
+async function loadAiSettings() {
+  try {
+    const res = await aiApi.getSettings()
+    aiSettings.value = res.data
+    aiForm.provider = res.data.provider
+    aiForm.modelText = res.data.model_text || ''
+    aiForm.modelVision = res.data.model_vision || ''
+    aiForm.ocrProvider = res.data.ocr_provider || 'auto'
+    aiForm.mineruEndpoint = res.data.mineru_endpoint || ''
+    // apiKey / doc2xApiKey / mineruApiKey 留空（脱敏，不回显明文）
+    aiForm.apiKey = ''
+    aiForm.doc2xApiKey = ''
+    aiForm.mineruApiKey = ''
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error || '加载 AI 设置失败')
+  }
+}
+
+async function saveAiSettings() {
+  savingAi.value = true
+  try {
+    const payload: Parameters<typeof aiApi.updateSettings>[0] = {
+      provider: aiForm.provider,
+      model_text: aiForm.modelText || undefined,
+      model_vision: aiForm.modelVision || undefined,
+      ocr_provider: aiForm.ocrProvider,
+    }
+    if (aiForm.apiKey) payload.api_key = aiForm.apiKey
+    if (aiForm.doc2xApiKey) payload.doc2x_api_key = aiForm.doc2xApiKey
+    if (aiForm.mineruEndpoint) payload.mineru_endpoint = aiForm.mineruEndpoint
+    if (aiForm.mineruApiKey) payload.mineru_api_key = aiForm.mineruApiKey
+    const res = await aiApi.updateSettings(payload)
+    aiSettings.value = res.data
+    aiForm.apiKey = ''
+    aiForm.doc2xApiKey = ''
+    aiForm.mineruApiKey = ''
+    toast.success('AI 设置已保存')
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error || '保存失败')
+  } finally {
+    savingAi.value = false
+  }
+}
+
+async function testOcrConnection() {
+  testingConnection.value = true
+  try {
+    const payload: { provider: string; api_key?: string; endpoint?: string } = {
+      provider: aiForm.ocrProvider === 'auto' ? 'qwen_vl' : aiForm.ocrProvider,
+    }
+    // 根据当前选中的引擎填充对应的临时 Key 与 endpoint
+    if (aiForm.ocrProvider === 'doc2x' && aiForm.doc2xApiKey) {
+      payload.api_key = aiForm.doc2xApiKey
+    } else if (aiForm.ocrProvider === 'mineru_local') {
+      if (aiForm.mineruApiKey) payload.api_key = aiForm.mineruApiKey
+      if (aiForm.mineruEndpoint) payload.endpoint = aiForm.mineruEndpoint
+    }
+    const res = await aiApi.testOcrConnection(payload)
+    const { ok, latency_ms, message } = res.data
+    if (ok) {
+      toast.success(`连接成功（${latency_ms}ms）：${message}`)
+    } else {
+      toast.error(`连接失败：${message}`)
+    }
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error || e?.message || '测试连接失败')
+  } finally {
+    testingConnection.value = false
+  }
+}
+
+onMounted(loadAiSettings)
 
 // ---------------------------------------------------------------------------
 // 头像逻辑
@@ -599,5 +795,26 @@ onBeforeUnmount(() => {
   overflow-y: auto;
   overscroll-behavior: contain;
   background: var(--bg-primary);
+}
+
+/* ===== AI 与 OCR 设置表单输入（M3 新增） ===== */
+.ai-input {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 8px;
+  font-size: 14px;
+  background: var(--bg-input, #fff);
+  color: var(--text-primary, #111827);
+  transition: border-color 0.2s;
+}
+.ai-input:focus {
+  outline: none;
+  border-color: var(--purple, #7c3aed);
+}
+.dark .ai-input {
+  background: #0f172a;
+  border-color: #1e293b;
+  color: #e2e8f0;
 }
 </style>

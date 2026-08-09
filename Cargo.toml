@@ -40,7 +40,8 @@ thiserror = "1"
 dotenvy = "0.15"
 
 # AI 录入功能（reqwest 用 rustls-tls 避免 windows-sys/dlltool 原生依赖）
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# M4：启用 multipart 特性以支持 MinerU 引擎的 multipart/form-data 文件上传
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
 aes-gcm = "0.10"
 base64 = "0.22"
 regex = "1"
@@ -58,6 +59,9 @@ dashmap = "6"
 # tokio 流工具（broadcast → Stream 桥接 SSE）
 tokio-stream = "0.1"
 axum-extra = { version = "0.12.6", features = ["query"] }
+
+# ZIP 解压（MinerU 云端 Precision API 返回 zip 包，内含 full.md）
+zip = "2"
 
 [dev-dependencies]
 # Axum 测试工具（oneshot 调用 Router）

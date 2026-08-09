@@ -216,6 +216,8 @@ pub fn build_app(state: AppState) -> Router {
         .route("/ai/parse-text", post(handlers::ai::parse_text))
         .route("/ai/settings", get(handlers::ai::get_settings))
         .route("/ai/settings", put(handlers::ai::update_settings))
+        // OCR 引擎连接测试（轻量探测，不消耗配额，不走 GlobalConcurrencyLimit）
+        .route("/ai/ocr/test-connection", post(handlers::ai::test_ocr_connection))
         // AI 异步解析任务队列（POST 入队 + GET 查询状态）
         .route("/ai/parse", post(handlers::ai_tasks::submit_parse_task))
         .route("/ai/parse/{id}", get(handlers::ai_tasks::get_task_status))
@@ -223,6 +225,9 @@ pub fn build_app(state: AppState) -> Router {
         .merge(
             Router::new()
                 .route("/ai/parse-image", post(handlers::ai::parse_image))
+                .route("/ai/parse-image-v2", post(handlers::ai::parse_image_v2))
+                // M4：图片/PDF 异步任务提交（Multipart），共享全局限流与 body 限制
+                .route("/ai/parse-task", post(handlers::ai_tasks::submit_parse_task_media))
                 .layer(GlobalConcurrencyLimitLayer::new(10))
                 .layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
         )

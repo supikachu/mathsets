@@ -298,6 +298,7 @@ export function parseMarkdownToQuestion(md: string): ParsedQuestion {
     confidence: 0.85,
     warnings,
     image_placeholders: [],
+    image_urls: [],
     kp_matches: [],
   }
 }
