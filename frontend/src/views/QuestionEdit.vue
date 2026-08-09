@@ -117,6 +117,7 @@
                 <div class="quick-toolbar">
                   <button type="button" class="quick-tool-btn" @click="insertStemBracket">插入括号</button>
                   <button type="button" class="quick-tool-btn" @click="insertStemUnderline">插入填空线</button>
+                  <button type="button" class="quick-tool-btn" @click="insertStemImgRow">并排图组</button>
                 </div>
               </div>
               <div class="stem-wrap">
@@ -180,6 +181,7 @@
                     <span class="solution-name">解法{{ cnNum(i + 1) }}</span>
                     <div class="solution-head-right">
                       <button type="button" class="quick-tool-btn solution-indent-btn" @click="insertSolutionIndent(i)">首行缩进</button>
+                      <button type="button" class="quick-tool-btn solution-indent-btn" @click="insertSolutionImgRow(i)">并排图组</button>
                       <button v-if="form.solutions.length > 1" class="solution-del" @click="removeSolution(i)" title="删除此解法">
                         <AppIcon name="trash-2" :size="14" />
                       </button>
@@ -467,7 +469,15 @@ function hasUnsavedBatchChanges(): boolean {
 
 // 统一的"有未保存修改"检查（单题 + 批量）
 function hasUnsavedChanges(): boolean {
-  if (hasUnsavedBatchChanges()) return true
+  // 批量模式（>1 题）：只以 per-question 未保存状态为准，不回退到 form.hasUnsaved。
+  // 原因：保存完最后一题后，markCurrentSaved 会自动 router.replace('/questions')，
+  // 触发 onBeforeRouteLeave。但保存流程会回写 form 字段（version/status 等），
+  // form watch 会把 form.hasUnsaved 再次置 true（stale），而 per-question 的
+  // saved/hasUnsaved 已正确反映「全部已保存」。若回退到 form.hasUnsaved，会出现
+  // unsavedCount=0 却仍弹「0 道题未保存」的矛盾拦截（gate 与 count 逻辑不一致）。
+  if (questionList.value.length > 1) {
+    return hasUnsavedBatchChanges()
+  }
   return form.hasUnsaved
 }
 
@@ -869,6 +879,58 @@ function insertSolutionIndent(index: number = 0) {
   insertText(ta, form.solutions[index], '$\\hspace{2em}$', (v) => { form.solutions[index] = v })
 }
 
+/**
+ * 题干光标处插入并排图组围栏 :::img-row ... :::
+ * 光标自动定位到围栏内部空行，便于立即粘贴或上传图片
+ */
+function insertStemImgRow() {
+  const ta = stemTextareaRef.value
+  const open = '\n:::img-row\n'
+  const close = '\n:::\n'
+  if (!ta) {
+    form.stem += open + close
+    return
+  }
+  const start = ta.selectionStart ?? form.stem.length
+  const end = ta.selectionEnd ?? start
+  const before = form.stem.substring(0, start)
+  const after = form.stem.substring(end)
+  form.stem = before + open + close + after
+  nextTick(() => {
+    ta.focus()
+    // 光标定位到围栏内部（open 之后），便于立即填入图片
+    const cursorPos = start + open.length
+    ta.setSelectionRange(cursorPos, cursorPos)
+  })
+}
+
+/**
+ * 解析光标处插入并排图组围栏 :::img-row ... :::
+ * 光标自动定位到围栏内部空行
+ */
+function insertSolutionImgRow(index: number = 0) {
+  const tas = document.querySelectorAll<HTMLTextAreaElement>('.solution-textarea')
+  const ta = tas[index]
+  if (form.solutions[index] === undefined) return
+  const open = '\n:::img-row\n'
+  const close = '\n:::\n'
+  if (!ta) {
+    form.solutions[index] += open + close
+    return
+  }
+  const start = ta.selectionStart ?? form.solutions[index].length
+  const end = ta.selectionEnd ?? start
+  const currentVal = form.solutions[index]
+  const before = currentVal.substring(0, start)
+  const after = currentVal.substring(end)
+  form.solutions[index] = before + open + close + after
+  nextTick(() => {
+    ta.focus()
+    const cursorPos = start + open.length
+    ta.setSelectionRange(cursorPos, cursorPos)
+  })
+}
+
 /** Tab 键快捷缩进，阻止默认焦点切换 */
 function handleTabIndent(e: KeyboardEvent, type: 'stem' | 'solution', index: number = 0) {
   const ta = e.target as HTMLTextAreaElement
@@ -1161,8 +1223,17 @@ async function confirmSubmitWithReviewer() {
 // 【闸门】切换 Tab 期间不写草稿（避免 applyFormSnapshot 触发的批量字段变更被误判为修改）
 // 用户每次改动 → 立即标记 "saving" → 3s 防抖落盘后切到 "saved" → 2s 后回到 "idle"
 let autoSaveTimer: ReturnType<typeof setTimeout> | null = null
-watch(() => ({ ...form }), () => {
+watch(() => ({ ...form }), (newVal, oldVal) => {
   if (isLoading.value || isSwitchingTab.value) return
+  // 排除「仅 hasUnsaved 元标记自身变化」：保存成功后 form.hasUnsaved=false 的重置会
+  // 触发本 watch，若不拦截会又置回 true（stale），导致 onBeforeRouteLeave 误判
+  // 「有未保存修改」并误弹拦截框，同时还会触发一次无意义的草稿回写（clearDraft 白做）。
+  const prev = oldVal as Record<string, unknown> | undefined
+  const next = newVal as Record<string, unknown>
+  const dataChanged = Object.keys(newVal).some(
+    (k) => k !== 'hasUnsaved' && next[k] !== prev?.[k],
+  )
+  if (!dataChanged) return
   form.hasUnsaved = true
   // 【批量模式】同步当前题的 hasUnsaved 状态到 questionList，驱动顶部 Tab 的 * 修改标记
   if (questionList.value.length > 1 && activeIndex.value >= 0 && activeIndex.value < questionList.value.length) {

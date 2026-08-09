@@ -213,6 +213,135 @@ function parseStyleToConfig(styleStr: string): ImageConfig {
 }
 
 /**
+ * 处理单张 Markdown 图片 `![alt](url){config}` → `<img>` 标签。
+ *
+ * 抽取自原 render() 内联回调，供主图片正则与 :::img-row 围栏共用，
+ * 避免逻辑重复。包含：URL scheme 白名单、深色模式反色判定、
+ * URL 解析、{width, align} 配置解析、唯一 mdId 生成。
+ */
+function processImageTag(
+  match: string,
+  alt: string,
+  urlField: string,
+  configStr: string | undefined,
+): string {
+  const decode = (s: string) => s
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+  const decodedAlt = decode(alt)
+  const decodedUrlField = decode(urlField)
+
+  // 拆分 URL 与可选的尾部标记（如 "url =no-invert"）
+  const tokens = decodedUrlField.split(/\s+/)
+  const decodedUrl = tokens[0]
+
+  if (!isSafeImageSrc(decodedUrl)) {
+    return `<span class="latex-img-invalid">${escapeHtml(match)}</span>`
+  }
+
+  const noInvert = shouldDisableInvert(decodedAlt, decodedUrl, decodedUrlField)
+  const noInvertAttr = noInvert ? ' data-no-invert="true"' : ''
+
+  const finalUrl = resolveImageUrl(decodedUrl)
+
+  // 解析 {width:300, align:left} 配置
+  const config = parseImageConfig(configStr)
+  const hasConfig = configStr && configStr.trim().length > 0
+  const style = buildImageStyle(config)
+
+  // 生成唯一 mdId，用于 editable 模式下定位回写
+  const mdId = `img_${Date.now().toString(36)}_${(imageCounter++).toString(36)}`
+  // 带 {} 配置的强制为块级图片
+  const blockClass = hasConfig ? 'img-block' : ''
+
+  return `<img src="${escapeHtml(finalUrl)}" alt="${escapeHtml(decodedAlt)}" class="latex-img ${blockClass}" data-md-id="${mdId}" style="${style}" loading="lazy" decoding="async" referrerpolicy="no-referrer"${noInvertAttr} />`
+}
+
+/**
+ * 处理 :::img-row ... ::: 围栏：内部图片并排渲染，文本行作为图注。
+ *
+ * 围栏语法：
+ *   :::img-row
+ *   ![图1](url1)
+ *   图1：函数图像
+ *   ![图2](url2)
+ *   :::
+ *
+ * 渲染为：
+ *   <div class="latex-img-row">
+ *     <img .../>
+ *     <div class="latex-img-caption">图1：函数图像</div>
+ *     <img .../>
+ *   </div>
+ *
+ * 防御要点：
+ *   1. 正则用非贪婪 + 行边界锚定，避免跨多组灾难性回溯
+ *   2. 内部按行处理：图片行→img 标签，非空文本行→图注 div
+ *   3. 整体替换为占位符 __IMG_ROW_PLACEHOLDER_N__，待 KaTeX 渲染后回填，
+ *      避免被后续 \n→<br> 替换破坏 flex 布局
+ */
+function processImgRow(html: string, store: string[]): string {
+  // 正则要点：
+  //   (?:^|\n) 吸收围栏起始换行
+  //   (?:\s*\{([^}]*)\})? 匹配可选的围栏配置 {align:left}
+  //   \n:::\n? 吸收围栏尾部换行（防止 <br><br> 叠加产生巨大空白）
+  const rowRegex = /(?:^|\n):::img-row(?:\s*\{([^}]*)\})?\s*\n([\s\S]*?)\n:::\n?/g
+  return html.replace(rowRegex, (_, configStr, inner: string) => {
+    const lines = inner.split('\n')
+    const parts: string[] = []
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      // 整行匹配单张图片
+      const imgMatch = trimmed.match(/^!\[([^\]]*)\]\(([^)]+)\)(?:\{([^}]*)\})?$/)
+      if (imgMatch) {
+        parts.push(processImageTag(imgMatch[0], imgMatch[1], imgMatch[2], imgMatch[3]))
+      } else {
+        // 非图片行 → 图注（独占一行，由 CSS flex-basis:100% 强制换行）
+        parts.push(`<div class="latex-img-caption">${trimmed}</div>`)
+      }
+    }
+    // 解析围栏的 {align} 配置，控制图组整体在页面上的对齐方式
+    // 默认居中；{align:left} → flex-start；{align:right} → flex-end
+    const config = parseImageConfig(configStr)
+    let justifyContent = 'center'
+    if (config.align === 'left') justifyContent = 'flex-start'
+    else if (config.align === 'right') justifyContent = 'flex-end'
+    // parts 内均为单行 HTML，join 后无 \n；防御性 replace 兜底，确保回填 HTML 不含换行
+    const rowHtml = `<div class="latex-img-row" style="justify-content: ${justifyContent};">${parts.join('')}</div>`.replace(/[\r\n]+/g, '')
+    const idx = store.length
+    store.push(rowHtml)
+    return `\n__IMG_ROW_PLACEHOLDER_${idx}__\n`
+  })
+}
+
+/**
+ * 清除元素前后所有连续的 <br> 兄弟节点。
+ *
+ * 用于后处理阶段：图片或图组容器前后的 <br> 会与 display:block 的元素
+ * 叠加产生巨大空白（<br> 换行约 25px + block 隐式换行约 25px + margin 12px ≈ 62px）。
+ *
+ * 抽取为独立函数，供「带配置图片」「无配置图片」「图组容器」共用。
+ */
+function clearAdjacentBR(el: Node): void {
+  let p = el.previousSibling
+  while (p && p.nodeName === 'BR') {
+    const toRemove = p
+    p = p.previousSibling
+    toRemove.remove()
+  }
+  let n = el.nextSibling
+  while (n && n.nodeName === 'BR') {
+    const toRemove = n
+    n = n.nextSibling
+    toRemove.remove()
+  }
+}
+
+/**
  * 渲染单个公式为 KaTeX HTML。
  * 【关键】传入的 formula 必须是 raw string（未经 HTML 转义），
  * 这样 KaTeX 才能正确识别 \sqrt、\frac、\text 等 LaTeX 命令。
@@ -262,6 +391,13 @@ function render() {
   // ---- 阶段 2: 对纯文本做 escapeHtml + 换行格式化 ----
   html = escapeHtml(html)
 
+  // 处理 :::img-row ... ::: 围栏（并排图组语法）
+  // 必须在 escapeHtml 之后、主图片正则之前：围栏内的图片仍走 processImageTag
+  // 整体替换为占位符 __IMG_ROW_PLACEHOLDER_N__，待 KaTeX 渲染后回填，
+  // 避免被后续 \n→<br> 替换破坏 flex 布局
+  const imgRowStore: string[] = []
+  html = processImgRow(html, imgRowStore)
+
   // 小问徽章处理
   if (props.subQuestionBadge) {
     html = html.replace(/\((\d+)\)|（(\d+)）/g, (_, half, full) => {
@@ -270,47 +406,11 @@ function render() {
   }
 
   // 处理 Markdown 图片语法 ![alt](url){config} 或 ![alt](url)
-  // 【新特性】支持可选的 {} 扩展属性：{width:300, align:left}
-  // 【安全】阶段 2 的 escapeHtml 使 alt/url 处于实体态；此处解码后
-  //   必须对 alt 二次转义，否则可构造 alt="x" onerror="..." 属性逃逸。
-  //   src 解码后做 scheme 白名单校验，拒绝 javascript: 等危险协议。
+  // 实现已抽取为 processImageTag 函数，供主图片正则与 :::img-row 围栏共用
+  // 【安全】URL scheme 白名单 + alt 二次转义 + 深色模式反色判定 均在 processImageTag 内
   html = html.replace(
     /!\[([^\]]*)\]\(([^)]+)\)(?:\{([^}]*)\})?/g,
-    (match, alt, urlField, configStr) => {
-      const decode = (s: string) => s
-        .replace(/&amp;/g, '&')
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>')
-        .replace(/&quot;/g, '"')
-        .replace(/&#39;/g, "'")
-      const decodedAlt = decode(alt)
-      const decodedUrlField = decode(urlField)
-
-      // 拆分 URL 与可选的尾部标记（如 "url =no-invert"）
-      const tokens = decodedUrlField.split(/\s+/)
-      const decodedUrl = tokens[0]
-
-      if (!isSafeImageSrc(decodedUrl)) {
-        return `<span class="latex-img-invalid">${escapeHtml(match)}</span>`
-      }
-
-      const noInvert = shouldDisableInvert(decodedAlt, decodedUrl, decodedUrlField)
-      const noInvertAttr = noInvert ? ' data-no-invert="true"' : ''
-
-      const finalUrl = resolveImageUrl(decodedUrl)
-
-      // 解析 {width:300, align:left} 配置
-      const config = parseImageConfig(configStr)
-      const hasConfig = configStr && configStr.trim().length > 0
-      const style = buildImageStyle(config)
-
-      // 生成唯一 mdId，用于 editable 模式下定位回写
-      const mdId = `img_${Date.now().toString(36)}_${(imageCounter++).toString(36)}`
-      // 带 {} 配置的强制为块级图片
-      const blockClass = hasConfig ? 'img-block' : ''
-
-      return `<img src="${escapeHtml(finalUrl)}" alt="${escapeHtml(decodedAlt)}" class="latex-img ${blockClass}" data-md-id="${mdId}" style="${style}" loading="lazy" decoding="async" referrerpolicy="no-referrer"${noInvertAttr} />`
-    },
+    (match, alt, urlField, configStr) => processImageTag(match, alt, urlField, configStr),
   )
 
   // 处理换行
@@ -328,12 +428,30 @@ function render() {
     html = html.split(`__MATH_PLACEHOLDER_${i}__`).join(katexHtml)
   }
 
+  // 回填 :::img-row 围栏的 HTML（必须在 KaTeX 渲染后，避免被 \n→<br> 影响 flex 布局）
+  for (let i = 0; i < imgRowStore.length; i++) {
+    html = html.split(`__IMG_ROW_PLACEHOLDER_${i}__`).join(imgRowStore[i])
+  }
+
   // 设置 innerHTML
   container.value.innerHTML = html
 
-  // 后处理：为无 {} 配置的图片区分块级和行内（带配置的已强制块级）
-  const imgs = container.value.querySelectorAll('img.latex-img:not(.img-block)')
+  // 后处理：清除图片和图组容器相邻的 BR，并区分块级/行内
+  // 【Bug 修复】原 :not(.img-block) 跳过了带 {width} 配置的图片（已有 img-block class），
+  // 导致它们前后的 BR 未被清除，产生巨大空白。现在统一处理所有图片。
+  const imgs = container.value.querySelectorAll('img.latex-img')
   imgs.forEach((img) => {
+    // 跳过 :::img-row 围栏内的图片：它们的样式由 .latex-img-row 容器统一管理，
+    // 不参与 img-block/img-inline 自动分类，否则会被误判为 img-inline（max-height:1.5em 小图标）
+    if (img.closest('.latex-img-row')) return
+
+    // 已带 img-block（带 {} 配置）的图片：只需清除相邻 BR（不重设 style，保留用户 width/align 配置）
+    if (img.classList.contains('img-block')) {
+      clearAdjacentBR(img)
+      return
+    }
+
+    // 无配置图片：判定 block/inline
     const prev = img.previousSibling
     const next = img.nextSibling
     const isBlock =
@@ -341,15 +459,15 @@ function render() {
       (!next || (next.nodeName === 'BR'))
     if (isBlock) {
       img.classList.add('img-block')
-      // 应用默认块级样式（无 width 配置）
-      const style = buildImageStyle({})
-      img.setAttribute('style', style)
-      if (prev?.nodeName === 'BR') prev.remove()
-      if (next?.nodeName === 'BR') next.remove()
+      clearAdjacentBR(img)
     } else {
       img.classList.add('img-inline')
     }
   })
+
+  // 清除并排图组容器相邻的 BR（占位符回填后 <br><div>...</div><br> 的外部 BR 未被清除）
+  const rows = container.value.querySelectorAll('.latex-img-row')
+  rows.forEach((row) => clearAdjacentBR(row))
 }
 
 /**
@@ -444,6 +562,65 @@ onBeforeUnmount(() => {
   max-height: 1.5em;
   max-width: 100%;
   border-radius: 3px;
+}
+
+/* ============ 并排图组容器（:::img-row 围栏） ============
+ * 设计要点：
+ *   1. flex 容器：子项图片自动水平排布
+ *   2. flex-wrap:wrap：窄屏自动折行，防溢出
+ *   3. 子项 flex:1 1 0 + min-width:120px：等宽分配，过窄自动换行
+ *   4. 图注 flex-basis:100%：强制独占一行，不与图片同行
+ *   5. 子项 img 重置 margin:0 + border，覆盖 buildImageStyle 的默认居中
+ */
+.latex-render .latex-img-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: center;
+  align-items: flex-start;
+  margin: 12px 0;
+}
+
+/* 防御：隐藏误入 Flex 容器的 <br> 和空 <p>
+ * 管线兜底 —— JS 层已剔除内部 \n，但若用户在围栏内手写空行或
+ * subQuestionBadge 模式下生成 <p>，此处确保不撑开 Flex 布局 */
+.latex-render .latex-img-row br,
+.latex-render .latex-img-row p:empty {
+  display: none !important;
+}
+
+.latex-render .latex-img-row > img.latex-img {
+  /* 核心修复：不强制拉伸(0)，可缩小(1)，基准尺寸由自身 width 决定(auto)
+     flex:1 1 0 会无视用户通过 {width:60} 设置的 inline style，导致尺寸调节失效 */
+  flex: 0 1 auto;
+  /* 兜底防爆：未设宽度的超大图最多占容器一半（减去 gap 的一半），维持两列并排
+     !important 覆盖 inline style 的 max-width:100%，确保两列并排不被打破 */
+  max-width: calc(50% - 6px) !important;
+  height: auto;
+  object-fit: contain;
+  /* 【关键修复】!important 覆盖 inline style 的 margin:12px auto
+     在 flex 容器中 margin:auto 会吸收主轴剩余空间，把图片推到容器两侧产生巨大空白
+     围栏内图片对齐由容器的 justify-content 控制，子项 margin 必须为 0 */
+  margin: 0 !important;
+  border-radius: 6px;
+  border: 1px solid #f0f0f0;
+  /* 覆盖 buildImageStyle 的 display:block + margin:auto */
+  display: block;
+}
+
+/* 图注：强制独占一行，居中 */
+.latex-render .latex-img-caption {
+  flex-basis: 100%;
+  width: 100%;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-muted, #86868b);
+  margin: 4px 0;
+  line-height: 1.6;
+}
+
+[data-theme='dark'] .latex-render .latex-img-row > img.latex-img {
+  border-color: rgba(255, 255, 255, 0.08);
 }
 
 [data-theme='dark'] .latex-render img.latex-img {
