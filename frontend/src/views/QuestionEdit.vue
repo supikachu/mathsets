@@ -34,34 +34,22 @@
         </div>
       </header>
 
-      <!-- ==================== 批量录题 Tab 切换栏（仅 questionList.length > 1 显示）==================== -->
-      <!-- 设计：可折叠容器 + 简洁"第 N 题"Tab + 状态图标（✓ 已保存 / * 已修改未保存） -->
-      <div v-if="questionList.length > 1" class="batch-tabs" :class="{ 'is-collapsed': batchTabsCollapsed }">
-        <div class="batch-tabs-header" @click="batchTabsCollapsed = !batchTabsCollapsed">
-          <div class="batch-tabs-title">
-            <AppIcon :name="batchTabsCollapsed ? 'chevron-down' : 'chevron-up'" :size="14" />
-            <span>批量录入</span>
-            <span class="batch-tabs-progress">{{ savedCount }}/{{ questionList.length }}</span>
-          </div>
-          <button v-if="allSaved" class="batch-tabs-finish" @click.stop="finishBatch">
-            <AppIcon name="check" :size="13" /> 全部完成，返回列表
-          </button>
-        </div>
-        <div v-show="!batchTabsCollapsed" class="batch-tabs-track">
-          <button
-            v-for="(item, idx) in questionList"
-            :key="idx"
-            class="batch-tab"
-            :class="{
-              'is-active': idx === activeIndex,
-              'is-saved': item.saved,
-            }"
-            :disabled="item.saved || idx === activeIndex"
-            @click="switchToTab(idx)"
-          >
-            <span class="batch-tab-index">第 {{ idx + 1 }} 题</span>
-          </button>
-        </div>
+      <!-- ==================== 批量录题答题卡导航（仅 questionList.length > 1 显示）==================== -->
+      <!-- 设计：纯数字圆角小方块（答题卡风格），三态颜色（默认浅灰/已保存浅绿/选中蓝） -->
+      <div v-if="questionList.length > 1" class="question-nav-grid">
+        <button
+          v-for="(item, idx) in questionList"
+          :key="idx"
+          class="nav-block"
+          :class="{
+            'is-active': idx === activeIndex,
+            'is-saved': item.saved,
+          }"
+          :disabled="idx === activeIndex"
+          @click="switchToTab(idx)"
+        >
+          {{ idx + 1 }}
+        </button>
       </div>
 
       <!-- 知识树分类失败提示条：节点暂存，可重试分类（保存时原样并入，不丢数据） -->
@@ -418,9 +406,7 @@ const activeIndex = ref(0)
 const isSwitchingTab = ref(false)
 
 // 批量模式 UI 状态
-// batchTabsCollapsed：顶部多题切换栏折叠开关（专注编辑当前题时收起获取更大视野）
-// savedCount / allSaved：已保存题数 + 是否全部完成（驱动 Tab 状态图标 + 完成按钮显示）
-const batchTabsCollapsed = ref(false)
+// savedCount / allSaved：已保存题数 + 是否全部完成（驱动 toast 提示）
 const savedCount = computed(() => questionList.value.filter(q => q.saved).length)
 const allSaved = computed(() => questionList.value.length > 1 && savedCount.value === questionList.value.length)
 
@@ -2622,162 +2608,88 @@ async function handleCropped(blob: Blob) {
 }
 
 /* ============ 批量录题 Tab 切换栏 ============ */
-.batch-tabs {
-  flex-shrink: 0;
-  background: var(--bg-card);
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-md);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
-/* 折叠头部：点击折叠/展开，显示进度 + 完成按钮 */
-.batch-tabs-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 8px 12px;
-  cursor: pointer;
-  user-select: none;
-  background: var(--bg-card);
-  border-bottom: 1px solid var(--border-color);
-  transition: background 0.18s ease;
-}
-
-.batch-tabs-header:hover {
-  background: var(--bg-hover);
-}
-
-.batch-tabs.is-collapsed .batch-tabs-header {
-  border-bottom: none;
-}
-
-.batch-tabs-title {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-.batch-tabs-progress {
-  display: inline-flex;
-  align-items: center;
-  padding: 2px 8px;
-  background: var(--bg-hover);
-  border-radius: 10px;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-secondary);
-}
-
-.batch-tabs-finish {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 10px;
-  border: 1px solid #34c759;
-  background: rgba(52, 199, 89, 0.1);
-  color: #34c759;
-  border-radius: 6px;
-  font-size: 11.5px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background 0.18s ease;
-}
-
-.batch-tabs-finish:hover {
-  background: rgba(52, 199, 89, 0.2);
-}
-
-.batch-tabs-track {
-  /* 流式布局：自然折行，填满容器宽度，取消横向滚动 */
+/* 批量录题答题卡导航：纯数字圆角小方块，流式折行 */
+.question-nav-grid {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
-  padding: 10px 12px;
+  gap: 8px;
+  padding: 12px 16px;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border-color);
 }
 
-.batch-tab {
-  /* 默认状态：浅灰背景 + 深灰文字 */
-  padding: 6px 16px;
-  border: none;
-  background: #f3f4f6;
-  border-radius: 999px;
-  font-size: 13px;
-  font-weight: 500;
-  color: #4b5563;
-  cursor: pointer;
-  display: inline-flex;
+/* 1. 默认状态：浅灰小方块 */
+.nav-block {
+  display: flex;
   align-items: center;
   justify-content: center;
-  white-space: nowrap;
+  width: 32px;
+  height: 32px;
+  font-size: 14px;
+  font-weight: 500;
+  border: none;
+  border-radius: 6px;
+  background: #f3f4f6;
+  color: #4b5563;
+  cursor: pointer;
   user-select: none;
-  transition: all 0.3s ease;
+  transition: all 0.2s ease;
 }
 
-.batch-tab:hover:not(:disabled) {
+.nav-block:hover:not(:disabled) {
   background: #e5e7eb;
 }
 
-.batch-tab:disabled {
+.nav-block:disabled {
   cursor: default;
 }
 
-/* 已保存状态：浅绿背景 + 深绿文字（仅未选中时显示，选中时被 is-active 覆盖） */
-.batch-tab.is-saved {
+/* 2. 已保存状态：浅绿 */
+.nav-block.is-saved {
   background: #d1fae5;
   color: #065f46;
 }
 
-.batch-tab.is-saved:hover:not(:disabled) {
+.nav-block.is-saved:hover:not(:disabled) {
   background: #a7f3d0;
 }
 
-/* 选中状态：主题蓝背景 + 白色文字（优先级最高，CSS 顺序在后覆盖） */
-.batch-tab.is-active {
+/* 3. 选中状态：主题蓝（优先级最高，CSS 顺序在后覆盖） */
+.nav-block.is-active {
   background: var(--accent);
   color: #ffffff;
-  font-weight: 500;
-  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.28);
+  box-shadow: 0 2px 6px rgba(37, 99, 235, 0.3);
 }
 
-.batch-tab.is-active:hover:not(:disabled) {
+.nav-block.is-active:hover:not(:disabled) {
   background: var(--accent);
   color: #ffffff;
   filter: brightness(1.08);
 }
 
-.batch-tab-index {
-  letter-spacing: -0.01em;
-}
-
-/* Dark mode 适配：浅灰背景换为深灰 */
-[data-theme='dark'] .batch-tab {
+/* Dark mode 适配 */
+[data-theme='dark'] .nav-block {
   background: #374151;
   color: #d1d5db;
 }
 
-[data-theme='dark'] .batch-tab:hover:not(:disabled) {
+[data-theme='dark'] .nav-block:hover:not(:disabled) {
   background: #4b5563;
   color: #f3f4f6;
 }
 
-[data-theme='dark'] .batch-tab.is-active {
+[data-theme='dark'] .nav-block.is-active {
   background: var(--accent);
   color: #ffffff;
   box-shadow: 0 1px 4px rgba(10, 132, 255, 0.35);
 }
 
-/* Dark mode 已保存：深绿背景 + 浅绿文字 */
-[data-theme='dark'] .batch-tab.is-saved {
+[data-theme='dark'] .nav-block.is-saved {
   background: #064e3b;
   color: #a7f3d0;
 }
 
-[data-theme='dark'] .batch-tab.is-saved:hover:not(:disabled) {
+[data-theme='dark'] .nav-block.is-saved:hover:not(:disabled) {
   background: #065f46;
   color: #d1fae5;
 }
