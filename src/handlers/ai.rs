@@ -967,6 +967,7 @@ pub(crate) async fn resolve_ocr_config(
             api_key,
             base_url,
             model: None,
+            upload_dir: Some(state.upload_dir.clone()),
         });
     }
 
@@ -999,6 +1000,7 @@ pub(crate) async fn resolve_ocr_config(
             api_key,
             base_url: endpoint,
             model: None,
+            upload_dir: Some(state.upload_dir.clone()),
         });
     }
 
@@ -1017,6 +1019,7 @@ pub(crate) async fn resolve_ocr_config(
         api_key,
         base_url,
         model,
+        upload_dir: Some(state.upload_dir.clone()),
     })
 }
 

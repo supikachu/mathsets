@@ -86,6 +86,8 @@ pub struct OcrConfig {
     pub base_url: String,
     /// 视觉模型名（如 `qwen-vl-plus`），None 走 provider 默认；Doc2X 不使用此字段
     pub model: Option<String>,
+    /// 题目图片落盘根目录（如 "./uploads"），用于 MinerU 云端模式解压 zip 时搬运 images/*
+    pub upload_dir: Option<String>,
 }
 
 /// 工厂：按配置创建 OCR 引擎实例
@@ -100,10 +102,10 @@ pub fn create_ocr_provider(cfg: &OcrConfig) -> Box<dyn OcrProvider> {
             cfg.api_key.clone(),
             cfg.base_url.clone(),
         )),
-        "mineru_local" | "mineru_api" => Box::new(MineruProvider::new(
-            cfg.api_key.clone(),
-            cfg.base_url.clone(),
-        )),
+        "mineru_local" | "mineru_api" => Box::new(
+            MineruProvider::new(cfg.api_key.clone(), cfg.base_url.clone())
+                .with_upload_dir(cfg.upload_dir.clone()),
+        ),
         "qwen_vl" | "auto" | "" => Box::new(QwenVlOcrProvider::new(
             cfg.api_key.clone(),
             cfg.base_url.clone(),
@@ -155,6 +157,7 @@ mod tests {
             api_key: "k".into(),
             base_url: "https://example.com".into(),
             model: None,
+            upload_dir: None,
         };
         let p = create_ocr_provider(&cfg);
         assert_eq!(p.id(), "qwen_vl");
@@ -168,6 +171,7 @@ mod tests {
             api_key: "k".into(),
             base_url: "https://example.com".into(),
             model: Some("qwen-vl-plus".into()),
+            upload_dir: None,
         };
         let p = create_ocr_provider(&cfg);
         assert_eq!(p.id(), "qwen_vl");
@@ -181,6 +185,7 @@ mod tests {
             api_key: "sk-test".into(),
             base_url: "https://api.doc2x.noedgex.com/v1".into(),
             model: None,
+            upload_dir: None,
         };
         let p = create_ocr_provider(&cfg);
         assert_eq!(p.id(), "doc2x");
@@ -195,6 +200,7 @@ mod tests {
             api_key: "sk-test".into(),
             base_url: "http://127.0.0.1:8000".into(),
             model: None,
+            upload_dir: None,
         };
         let p = create_ocr_provider(&cfg);
         assert_eq!(p.id(), "mineru_local");
@@ -209,6 +215,7 @@ mod tests {
             api_key: "".into(),
             base_url: "http://mineru.internal".into(),
             model: None,
+            upload_dir: None,
         };
         let p = create_ocr_provider(&cfg);
         assert_eq!(p.id(), "mineru_local");
@@ -221,6 +228,7 @@ mod tests {
             api_key: "k".into(),
             base_url: "https://example.com".into(),
             model: None,
+            upload_dir: None,
         };
         let p = create_ocr_provider(&cfg);
         // 未知引擎兜底为 qwen_vl
@@ -234,6 +242,7 @@ mod tests {
             api_key: "k".into(),
             base_url: "https://example.com".into(),
             model: None,
+            upload_dir: None,
         };
         let p = create_ocr_provider(&cfg);
         let res = p.ocr_pdf_async(b"fake-pdf").await;

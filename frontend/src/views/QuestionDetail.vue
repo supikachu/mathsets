@@ -97,8 +97,12 @@
                 class="paper-opt"
                 :class="{ correct: isCorrect(opt.label) }"
               >
-                <!-- 选项前缀与内容统一拼接后送入 KaTeX 渲染 -->
-                <LatexRender :text="`$\\mathrm{${opt.label}.}$ ` + opt.content" :inline="true" />
+                <!-- 选项标号独立成元素，与内容分离，由父级 flex align-items:center 实现垂直居中 -->
+                <!-- 标号用 LatexRender 渲染 $\mathrm{A.}$ 保持数学罗马体字体样式 -->
+                <span class="paper-opt-letter"><LatexRender :text="`$\\mathrm{${opt.label}.}$`" :inline="true" /></span>
+                <div class="paper-opt-content">
+                  <LatexRender :text="opt.content" :inline="true" />
+                </div>
               </div>
             </div>
 
@@ -1000,7 +1004,22 @@ watch(() => route.params.id, (newId, oldId) => {
 }
 
 .paper-opt-content {
+  flex: 1;
   min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+/* 穿透清除 LatexRender 最后元素 margin-bottom，避免 flex 居中视觉偏移 */
+.paper-opt-content :deep(.latex-render > p:last-child),
+.paper-opt-content :deep(.latex-render p) {
+  margin-bottom: 0 !important;
+  margin-top: 0 !important;
+}
+
+.paper-opt-content :deep(.latex-render img) {
+  margin-bottom: 0 !important;
+  vertical-align: middle;
 }
 
 /* 填空题答案 */

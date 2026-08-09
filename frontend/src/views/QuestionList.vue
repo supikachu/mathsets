@@ -778,16 +778,11 @@ const currentStatusLabel = computed(() => {
 
 function switchStatus(value: string) {
   currentStatus.value = value
-  // 同步到 query.status（ALL → undefined 表示不过滤；incomplete → draft + system_flag）
+  // 同步到 query.status（ALL → undefined 表示不过滤；incomplete 保留原值，由 fetchList 拦截转换）
   if (value === 'ALL') {
     query.status = undefined
-    query.system_flag = undefined
-  } else if (value === 'incomplete') {
-    query.status = 'draft'
-    query.system_flag = 'pending_answer'
   } else {
     query.status = value as any
-    query.system_flag = undefined
   }
   // 同步到矩阵筛选面板的 UI 状态
   filters.status = value === 'ALL' ? '__all' : value
@@ -1212,11 +1207,9 @@ function applyFilters() {
   query.question_type = filters.type === '__all' ? undefined : (filters.type as any)
   // 难度
   query.difficulty = filters.difficulty === '__all' ? undefined : (filters.difficulty as any)
-  // 状态：同步到 segmented tab
+  // 状态：同步到 segmented tab（incomplete 保留原值，由 fetchList 拦截转换）
   query.status = filters.status === '__all' ? undefined : (filters.status as any)
   currentStatus.value = filters.status === '__all' ? 'ALL' : filters.status
-  // 状态筛选面板切换时清除 system_flag（待补全 tab 专属，互斥）
-  query.system_flag = undefined
   // TODO: source / subSource / year / grade / semester / region 待后端支持后映射
   page.value = 1
   fetchList()
@@ -1336,9 +1329,19 @@ const detailCache = new Map<string, QuestionDetail>()
 async function fetchList() {
   loading.value = true
   try {
-    query.page = page.value
-    query.page_size = pageSize
-    const res = await questionApi.list(query)
+    // 拦截 incomplete 虚拟状态：深拷贝 query，在 apiParams 上替换，绝不污染响应式 state
+    // incomplete → system_flag=incomplete（pending_answer OR missing_analysis 并集），与 incomplete_count 的 total 逻辑一致
+    // 不限制 status，因为"待补全"本质是 system_flag 维度的筛选，不是 status 维度
+    const apiParams = { ...query } as QuestionQuery & { system_flag?: string }
+    if ((apiParams.status as string | undefined) === 'incomplete') {
+      delete (apiParams as any).status
+      apiParams.system_flag = 'incomplete'
+    } else {
+      delete apiParams.system_flag
+    }
+    apiParams.page = page.value
+    apiParams.page_size = pageSize
+    const res = await questionApi.list(apiParams)
     const summaries: QuestionSummary[] = res.data
     // 捕获总数：优先取后端 PageResult.total，否则回退到当前已加载条数
     totalCount.value = (res as any).total ?? summaries.length

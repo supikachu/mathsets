@@ -9,8 +9,12 @@
       :key="opt.label"
       class="q-option w-fit flex items-center gap-2 whitespace-nowrap"
     >
-      <!-- 选项前缀与内容统一拼接后送入 KaTeX 渲染 -->
-      <LatexRender :text="`$\\mathrm{${opt.label}.}$ ` + opt.content" :inline="true" />
+      <!-- 选项标号独立成元素，与内容分离，由父级 flex align-items:center 实现垂直居中 -->
+      <!-- 标号用 LatexRender 渲染 $\mathrm{A.}$ 保持数学罗马体字体样式 -->
+      <span class="q-option-label"><LatexRender :text="`$\\mathrm{${opt.label}.}$`" :inline="true" /></span>
+      <div class="q-option-content">
+        <LatexRender :text="opt.content" :inline="true" />
+      </div>
     </div>
   </div>
 </template>
@@ -81,5 +85,19 @@ defineExpose({
   display: inline-flex;
   align-items: center;
   white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+/* 穿透清除 LatexRender 最后元素 margin-bottom，避免 flex 居中视觉偏移 */
+.q-option-content :deep(.latex-render > p:last-child),
+.q-option-content :deep(.latex-render p) {
+  margin-bottom: 0 !important;
+  margin-top: 0 !important;
+}
+
+.q-option-content :deep(.latex-render img) {
+  margin-bottom: 0 !important;
+  vertical-align: middle;
 }
 </style>

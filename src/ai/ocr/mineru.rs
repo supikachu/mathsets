@@ -27,10 +27,14 @@
 
 use async_trait::async_trait;
 use base64::Engine as _;
+use regex::Regex;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io::Read;
+use std::path::Path;
 use std::time::Duration;
+use uuid::Uuid;
 
 use super::{OcrError, OcrProvider};
 
@@ -47,6 +51,8 @@ pub struct MineruProvider {
     api_key: Option<String>,
     base_url: String,
     client: Client,
+    /// 题目图片落盘根目录（如 "./uploads"），云端模式解压 zip 时把 images/* 落盘到这里
+    upload_dir: Option<String>,
 }
 
 impl MineruProvider {
@@ -67,7 +73,14 @@ impl MineruProvider {
             },
             base_url: base_url.trim_end_matches('/').to_string(),
             client,
+            upload_dir: None,
         }
+    }
+
+    /// 链式设置 upload_dir，用于 MinerU 云端模式解压 zip 时搬运 images/* 图片到标准目录
+    pub fn with_upload_dir(mut self, upload_dir: Option<String>) -> Self {
+        self.upload_dir = upload_dir.filter(|s| !s.trim().is_empty());
+        self
     }
 
     /// 构造可选 Authorization Bearer header（仅当 api_key 非空时返回）
@@ -509,9 +522,14 @@ impl MineruProvider {
         Err(OcrError::Timeout)
     }
 
-    /// 下载 zip 并提取 `full.md`
+    /// 下载 zip 并提取 `full.md`，同时把 `images/*` 图片落盘到 `{upload_dir}/questions/`
     ///
-    /// Precision API 完成后返回 `full_zip_url`，下载 zip 包后提取其中的 `full.md`。
+    /// Precision API 完成后返回 `full_zip_url`，下载 zip 包后：
+    /// 1. 提取 `full.md` 文本
+    /// 2. 收集 `images/*.png|.jpg|.jpeg|.gif|.webp` 图片字节
+    /// 3. 若配置了 `upload_dir`，为每张图片生成 UUID 文件名写入 `{upload_dir}/questions/`，
+    ///    并用正则把 md 中的 `![](images/xxx.png)` 引用替换为 `/uploads/questions/{uuid}.ext`
+    /// 4. `upload_dir` 为 None 时（向后兼容）仅返回 md，丢弃图片字节并 warn
     async fn download_and_extract_markdown(&self, zip_url: &str) -> Result<String, OcrError> {
         tracing::info!("MinerU 云端下载结果 zip: {zip_url}");
 
@@ -538,38 +556,138 @@ impl MineruProvider {
             OcrError::Upstream(0, format!("读取 zip 字节失败: {e}"))
         })?;
 
-        // 从 zip 中提取 full.md
         let cursor = std::io::Cursor::new(&zip_bytes[..]);
         let mut archive = zip::ZipArchive::new(cursor).map_err(|e| {
             OcrError::Upstream(0, format!("zip 解压失败: {e}"))
         })?;
+
+        // 收集 full.md 文本 + images/* 图片字节
+        let mut md_content: Option<String> = None;
+        let mut images: Vec<(String, Vec<u8>)> = vec![]; // (zip 内完整路径, 字节)
 
         for i in 0..archive.len() {
             let mut file = archive.by_index(i).map_err(|e| {
                 OcrError::Upstream(0, format!("zip 读取条目失败: {e}"))
             })?;
             let name = file.name().to_string();
-            // 匹配 full.md（可能在子目录中，如 images/.. /full.md）
-            if name.ends_with("full.md") || name == "full.md" {
+            let lower = name.to_lowercase();
+
+            // 提取 full.md（可能在子目录中）
+            if name.ends_with("full.md") {
                 let mut content = String::new();
                 file.read_to_string(&mut content).map_err(|e| {
                     OcrError::Upstream(0, format!("读取 full.md 失败: {e}"))
                 })?;
                 if !content.trim().is_empty() {
-                    tracing::info!(
-                        "MinerU 云端已提取 Markdown ({}, {} 字符)",
-                        name,
-                        content.chars().count()
-                    );
-                    return Ok(content);
+                    md_content = Some(content);
                 }
+                continue;
+            }
+
+            // 提取 images/* 图片（路径含 images/ 前缀，扩展名是常见图片格式）
+            if (lower.contains("images/") || lower.contains("images\\"))
+                && (lower.ends_with(".png")
+                    || lower.ends_with(".jpg")
+                    || lower.ends_with(".jpeg")
+                    || lower.ends_with(".gif")
+                    || lower.ends_with(".webp"))
+            {
+                let mut bytes = Vec::new();
+                if let Err(e) = file.read_to_end(&mut bytes) {
+                    tracing::warn!("读取 zip 内图片 {name} 失败: {e}");
+                    continue;
+                }
+                images.push((name.clone(), bytes));
             }
         }
 
-        Err(OcrError::Upstream(
-            0,
-            "zip 中未找到 full.md".to_string(),
-        ))
+        let mut md = md_content.ok_or_else(|| {
+            OcrError::Upstream(0, "zip 中未找到 full.md".to_string())
+        })?;
+
+        tracing::info!(
+            "MinerU 云端已提取 Markdown ({} 字符) + {} 张图片",
+            md.chars().count(),
+            images.len()
+        );
+
+        // 落盘图片 + 替换 md 路径（仅当配置了 upload_dir）
+        if let Some(upload_dir) = &self.upload_dir {
+            if images.is_empty() {
+                return Ok(md);
+            }
+
+            let questions_dir = format!("{}/questions", upload_dir.trim_end_matches('/'));
+            if let Err(e) = tokio::fs::create_dir_all(&questions_dir).await {
+                tracing::warn!("创建图片目录 {questions_dir} 失败: {e}，跳过图片落盘");
+                return Ok(md);
+            }
+
+            // 构建路径映射：images/xxx.png → /uploads/questions/{uuid}.png
+            let mut url_map: HashMap<String, String> = HashMap::new();
+            let mut written = 0usize;
+
+            for (orig_path, bytes) in &images {
+                // 提取文件名（images/abc.png → abc.png）
+                let orig_filename = Path::new(orig_path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("image");
+                let ext = Path::new(orig_filename)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("png");
+                let new_name = format!("{}.{}", Uuid::new_v4(), ext);
+                let new_path = format!("{}/{}", questions_dir, new_name);
+                let new_url = format!("/uploads/questions/{}", new_name);
+
+                if let Err(e) = tokio::fs::write(&new_path, bytes).await {
+                    tracing::warn!("写入图片失败 {orig_path} -> {new_path}: {e}");
+                    continue;
+                }
+                // 归一化 key：去掉可能的 ./ 或 ../ 前缀，统一为 images/xxx.png
+                let normalized = orig_path
+                    .trim_start_matches("./")
+                    .trim_start_matches("../")
+                    .replace('\\', "/");
+                url_map.insert(normalized, new_url);
+                written += 1;
+            }
+
+            // 用正则替换 md 中所有 ![](images/xxx.png) 和 ![](./images/xxx.png)
+            // group 1 = `![alt](`，group 2 = 可选 `./`|`../`，group 3 = `images/xxx.png`，group 4 = `)`
+            let re = Regex::new(r"(!\[[^\]]*\]\()(\.{1,2}/)?(images/[^\s)]+)(\))")
+                .map_err(|e| OcrError::Upstream(0, format!("正则编译失败: {e}")))?;
+
+            md = re
+                .replace_all(&md, |caps: &regex::Captures| -> String {
+                    // group 3 = images/xxx.png 路径（非可选，必命中）
+                    let orig_path = match caps.get(3) {
+                        Some(m) => m.as_str(),
+                        None => return caps[0].to_string(),
+                    };
+                    match url_map.get(orig_path) {
+                        Some(new_url) => format!("{}{}{}", &caps[1], new_url, &caps[4]),
+                        // 未命中映射（可能图片落盘失败），保留原样
+                        None => caps[0].to_string(),
+                    }
+                })
+                .to_string();
+
+            tracing::info!(
+                "MinerU zip 解压完成: 提取 {} 张图片（成功落盘 {}）到 {}",
+                images.len(),
+                written,
+                questions_dir
+            );
+        } else if !images.is_empty() {
+            tracing::warn!(
+                "MinerU zip 包含 {} 张图片，但未配置 upload_dir，图片被丢弃（md 中保留 images/* 原始引用）",
+                images.len()
+            );
+        }
+
+        Ok(md)
     }
 
     // -----------------------------------------------------------------------

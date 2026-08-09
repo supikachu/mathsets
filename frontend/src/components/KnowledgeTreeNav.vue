@@ -456,14 +456,20 @@ onMounted(async () => {
   box-sizing: border-box;
   /* 关键：overflow hidden 让外层裁切内部固定宽度内容，防止文字换行错乱 */
   overflow: hidden;
-  /* 丝滑滑动过渡：宽度 + 透明度 + 位移 */
+  /* 丝滑滑动过渡：宽度（width + min-width + max-width 同步）+ 透明度 + 位移 */
   transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+    min-width 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+    max-width 0.3s cubic-bezier(0.4, 0, 0.2, 1),
     opacity 0.3s ease, transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 /* 收起状态：宽度归零 + 透明度 0 + 向左微移 16px + 移除外边距 */
+/* 关键：必须同步取消 min-width 和 max-width，否则 flex 布局中 min-width 优先于 width，
+   折叠后仍占 260px 导致右侧主体不延伸撑满 */
 .kt-nav-wrapper.is-collapsed {
   width: 0;
+  min-width: 0;
+  max-width: 0;
   opacity: 0;
   transform: translateX(-16px);
   margin: 0;

@@ -35,18 +35,31 @@
       </header>
 
       <!-- ==================== 批量录题 Tab 切换栏（仅 questionList.length > 1 显示）==================== -->
-      <div v-if="questionList.length > 1" class="batch-tabs">
-        <div class="batch-tabs-track">
+      <!-- 设计：可折叠容器 + 简洁"第 N 题"Tab + 状态图标（✓ 已保存 / * 已修改未保存） -->
+      <div v-if="questionList.length > 1" class="batch-tabs" :class="{ 'is-collapsed': batchTabsCollapsed }">
+        <div class="batch-tabs-header" @click="batchTabsCollapsed = !batchTabsCollapsed">
+          <div class="batch-tabs-title">
+            <AppIcon :name="batchTabsCollapsed ? 'chevron-down' : 'chevron-up'" :size="14" />
+            <span>批量录入</span>
+            <span class="batch-tabs-progress">{{ savedCount }}/{{ questionList.length }}</span>
+          </div>
+          <button v-if="allSaved" class="batch-tabs-finish" @click.stop="finishBatch">
+            <AppIcon name="check" :size="13" /> 全部完成，返回列表
+          </button>
+        </div>
+        <div v-show="!batchTabsCollapsed" class="batch-tabs-track">
           <button
             v-for="(item, idx) in questionList"
             :key="idx"
             class="batch-tab"
-            :class="{ 'is-active': idx === activeIndex }"
+            :class="{
+              'is-active': idx === activeIndex,
+              'is-saved': item.saved,
+            }"
+            :disabled="item.saved || idx === activeIndex"
             @click="switchToTab(idx)"
           >
-            <span class="batch-tab-index">题目 {{ idx + 1 }}</span>
-            <span v-if="item.stem" class="batch-tab-preview">{{ stripStemPreview(item.stem) }}</span>
-            <span v-else class="batch-tab-empty">（空）</span>
+            <span class="batch-tab-index">第 {{ idx + 1 }} 题</span>
           </button>
         </div>
       </div>
@@ -403,6 +416,19 @@ const aiDialogRef = ref<InstanceType<typeof AiRecognizeDialog> | null>(null)
 const questionList = ref<any[]>([])
 const activeIndex = ref(0)
 const isSwitchingTab = ref(false)
+
+// 批量模式 UI 状态
+// batchTabsCollapsed：顶部多题切换栏折叠开关（专注编辑当前题时收起获取更大视野）
+// savedCount / allSaved：已保存题数 + 是否全部完成（驱动 Tab 状态图标 + 完成按钮显示）
+const batchTabsCollapsed = ref(false)
+const savedCount = computed(() => questionList.value.filter(q => q.saved).length)
+const allSaved = computed(() => questionList.value.length > 1 && savedCount.value === questionList.value.length)
+
+// 批量录入全部完成后退出工作台，返回列表页
+function finishBatch() {
+  toast.success(`🎉 批量录入 ${questionList.value.length} 题已全部处理完毕`)
+  router.replace('/questions')
+}
 
 // Selected Knowledge node IDs（与 AttributeSidePanel v-model 双向绑定）
 const knowledgeNodeIds = ref<string[]>([])
@@ -917,8 +943,26 @@ async function handleSave(submitAfter: boolean) {
     await persistFormImages()
 
     const data = buildPayload()
-    const res = isNew ? await questionApi.create(data) : await questionApi.update(route.params.id as string, data)
+    // 【Upsert 修复】批量模式下用 savedQid 判断 create/update
+    // - 批量已保存题再次保存 → update(savedQid) 避免生成重复题目
+    // - 批量未保存题首保存 → create，成功后由 markCurrentSaved 回写 savedQid
+    // - 单题模式保留既有 isNew 逻辑（route.params.id）
+    const isBatchMode = questionList.value.length > 1
+    const batchSavedQid = isBatchMode
+      ? (questionList.value[activeIndex.value]?.savedQid as string | undefined)
+      : null
+    const updateId = batchSavedQid || (isNew ? null : (route.params.id as string))
+    const res = updateId
+      ? await questionApi.update(updateId, data)
+      : await questionApi.create(data)
     const qid = res.data.id
+    // 【Upsert 关键】create/update 成功后立即把 qid 回写到 questionList[activeIndex].savedQid
+    // 防止后续流程（如团队空间弹审稿人对话框后被取消）再次保存时重复 create
+    if (questionList.value.length > 1
+        && activeIndex.value >= 0
+        && activeIndex.value < questionList.value.length) {
+      questionList.value[activeIndex.value].savedQid = qid
+    }
     form.hasUnsaved = false
     clearDraft()
     // 保存成功：AI 高亮节点全部清除（手动修改阶段的视觉反馈到此为止）
@@ -945,6 +989,9 @@ async function handleSave(submitAfter: boolean) {
     } else {
       toast.success(isNew ? '草稿已保存' : '已更新')
     }
+
+    // 【批量模式分支】保存成功 → 标记已保存；不跳路由避免 questionList 丢失，不自动切下一题
+    if (markCurrentSaved(qid)) return
 
     // 纠错提交成功后跳转回详情页
     if (isPublished.value) {
@@ -1004,6 +1051,8 @@ async function confirmSubmitWithReviewer() {
     const qid = pendingQuestionId.value
     pendingQuestionId.value = null
     selectedReviewerId.value = ''
+    // 【批量模式分支】审题人确认提交后 → 标记已保存（与 handleSave 一致，不自动切下一题）
+    if (markCurrentSaved(qid)) return
     if (isNew) {
       router.replace(`/questions/${qid}`)
     } else {
@@ -1030,6 +1079,11 @@ let autoSaveTimer: ReturnType<typeof setTimeout> | null = null
 watch(() => ({ ...form }), () => {
   if (isLoading.value || isSwitchingTab.value) return
   form.hasUnsaved = true
+  // 【批量模式】同步当前题的 hasUnsaved 状态到 questionList，驱动顶部 Tab 的 * 修改标记
+  if (questionList.value.length > 1 && activeIndex.value >= 0 && activeIndex.value < questionList.value.length) {
+    const cur = questionList.value[activeIndex.value]
+    if (cur && !cur.saved) cur.hasUnsaved = true
+  }
   draftStatus.value = 'saving'
   if (draftStatusTimer) { clearTimeout(draftStatusTimer); draftStatusTimer = null }
   if (autoSaveTimer) clearTimeout(autoSaveTimer)
@@ -1051,9 +1105,16 @@ watch(activeIndex, async (newIdx, oldIdx) => {
 
   isSwitchingTab.value = true
   try {
-    // 1. 保存当前题到旧索引槽位
+    // 1. 保存当前题到旧索引槽位（保留 saved/savedQid/hasUnsaved 元信息，避免被纯 form 快照覆盖）
+    //    否则 markCurrentSaved 写入的 saved=true 会被这里的 captureFormSnapshot() 覆盖丢失
     if (oldIdx >= 0 && oldIdx < questionList.value.length) {
-      questionList.value[oldIdx] = captureFormSnapshot()
+      const prev = questionList.value[oldIdx]
+      questionList.value[oldIdx] = {
+        ...captureFormSnapshot(),
+        saved: prev?.saved ?? false,
+        savedQid: prev?.savedQid,
+        hasUnsaved: prev?.hasUnsaved ?? false,
+      }
     }
     // 2. 加载目标题到 form
     const target = questionList.value[newIdx]
@@ -1357,6 +1418,57 @@ function captureFormSnapshot(): any {
   }
 }
 
+// ============================================================
+// 批量模式核心：保存成功后标记当前题已保存 → 自动切下一题
+// ------------------------------------------------------------
+// 返回 true 表示已处理（调用方应 return 跳过单题路由跳转），false 表示未进入批量模式
+// 设计要点：
+//   - 已保存题保留在 questionList 中（带 saved=true 标记 + 浅绿背景）
+//     让老师有视觉进度反馈，但 Tab 不可点击（disabled）
+//   - 自动切下一题：当前题失去 active 后由 is-saved 接管渲染浅绿色
+//     下一道未保存题获得 active 显示蓝色，老师可立即继续编辑
+//   - 全部已保存 → 自动跳列表页 /questions，工作流闭环
+// ============================================================
+function markCurrentSaved(qid: string): boolean {
+  if (questionList.value.length <= 1) return false
+  if (activeIndex.value < 0 || activeIndex.value >= questionList.value.length) return false
+
+  const currentIdx = activeIndex.value
+  const total = questionList.value.length
+
+  // 1. 标记当前题已保存（保留最新编辑态快照，加 saved/savedQid 元信息，hasUnsaved=false）
+  questionList.value[currentIdx] = {
+    ...captureFormSnapshot(),
+    saved: true,
+    savedQid: qid,
+    hasUnsaved: false,
+  }
+
+  // 2. 找下一道未保存题：先向后扫描，再从头扫描
+  let nextIdx = -1
+  for (let i = currentIdx + 1; i < total; i++) {
+    if (!questionList.value[i].saved) { nextIdx = i; break }
+  }
+  if (nextIdx === -1) {
+    for (let i = 0; i < currentIdx; i++) {
+      if (!questionList.value[i].saved) { nextIdx = i; break }
+    }
+  }
+
+  // 3. 全部已保存 → 退出批量模式，跳列表页
+  if (nextIdx === -1) {
+    toast.success(`🎉 第 ${currentIdx + 1} 题保存成功，全部 ${total} 题已处理完毕`)
+    // 注意：用 nextTick 延迟跳转，让 Toast 先渲染、状态先稳定
+    nextTick(() => router.replace('/questions'))
+    return true
+  }
+
+  // 4. 切换到下一题（watch(activeIndex) 会自动 captureFormSnapshot(旧) + applyFormSnapshot(新)）
+  activeIndex.value = nextIdx
+  toast.success(`第 ${currentIdx + 1} 题保存成功（${savedCount.value}/${total}），已切换到第 ${nextIdx + 1} 题`)
+  return true
+}
+
 // 将快照应用回 form（每个字段显式赋值，避免 delete+assign 引发响应式抖动）
 function applyFormSnapshot(s: any) {
   form.stem = s.stem ?? ''
@@ -1563,6 +1675,9 @@ function parsedQuestionToSnapshot(q: ParsedQuestion): any {
     version: 1,
     hasUnsaved: true,
     estimated_time: 5,
+    // 批量模式元信息（显式声明占位，确保 Vue 3 Proxy 追踪）
+    saved: false,
+    savedQid: undefined as string | undefined,
   }
 }
 
@@ -1661,6 +1776,13 @@ watch(() => form.question_type, () => {
 const imageAdjustPanelVisible = ref(false)
 const imageAdjustTarget = ref<HTMLElement | null>(null)
 const imageAdjustData = ref<{ url: string; mdId: string; config: ImageConfig } | null>(null)
+// 图片来源上下文：记录点击的图片属于哪个字段（stem/options[i]/solutions[i]）
+// 通过 DOM 反查 .paper-stem / .paper-opt / .paper-answer-block 确定，用于回写 Markdown
+type ImageSource =
+  | { field: 'stem' }
+  | { field: 'options'; index: number }
+  | { field: 'solutions' }  // 遍历所有 solutions（URL 唯一不会误替换）
+const imageAdjustSource = ref<ImageSource | null>(null)
 const cropperDialogVisible = ref(false)
 const cropperImageUrl = ref('')
 const cropperProcessing = ref(false)
@@ -1673,6 +1795,26 @@ function handleImageClick(payload: ImageClickPayload) {
     mdId: payload.mdId,
     config: payload.config,
   }
+
+  // DOM 反查图片来源：通过 closest() 找到图片所属的预览容器，确定回写目标字段
+  // LivePreviewCard 的 DOM 结构：.paper-stem / .paper-opt / .paper-answer-block
+  const el = payload.target as HTMLElement
+  if (el.closest('.paper-stem')) {
+    imageAdjustSource.value = { field: 'stem' }
+  } else if (el.closest('.paper-opt')) {
+    // 找选项索引：在兄弟 .paper-opt 中的位置
+    const optEl = el.closest('.paper-opt') as Element
+    const siblings = Array.from(optEl.parentElement?.querySelectorAll(':scope > .paper-opt') || [])
+    const idx = siblings.indexOf(optEl)
+    imageAdjustSource.value = { field: 'options', index: idx >= 0 ? idx : 0 }
+  } else if (el.closest('.paper-answer-block')) {
+    // 解析区：遍历所有 solutions 做 URL 匹配替换（URL 唯一不会误替换）
+    imageAdjustSource.value = { field: 'solutions' }
+  } else {
+    // 兜底：默认回写到 stem
+    imageAdjustSource.value = { field: 'stem' }
+  }
+
   imageAdjustPanelVisible.value = true
 }
 
@@ -1696,11 +1838,32 @@ function updateImageConfigInMarkdown(md: string, url: string, configString: stri
   })
 }
 
-/** 调节面板配置变化时：精准反写到 form.stem */
+/** 根据 imageAdjustSource 把 Markdown 更新应用到正确的字段
+ *  统一回写入口：题干 / 选项 / 解析 三种来源分流，避免只写 stem 的旧 Bug */
+function applyMarkdownUpdate(updater: (md: string) => string): boolean {
+  const src = imageAdjustSource.value
+  if (!src) return false
+  if (src.field === 'stem') {
+    form.stem = updater(form.stem)
+    return true
+  }
+  if (src.field === 'options' && src.index != null && form.options[src.index]) {
+    form.options[src.index].content = updater(form.options[src.index].content)
+    return true
+  }
+  if (src.field === 'solutions') {
+    // 遍历所有解析，对每个做 URL 匹配替换（URL 唯一不会误替换）
+    form.solutions = form.solutions.map(md => updater(md))
+    return true
+  }
+  return false
+}
+
+/** 调节面板配置变化时：精准反写到来源字段（stem/options[i]/solutions[]） */
 function handleUpdateConfig({ configString }: { mdId: string; configString: string }) {
   if (!imageAdjustData.value) return
   const url = imageAdjustData.value.url
-  form.stem = updateImageConfigInMarkdown(form.stem, url, configString)
+  applyMarkdownUpdate(md => updateImageConfigInMarkdown(md, url, configString))
 }
 
 /** 调节面板触发裁剪：打开 CropperDialog */
@@ -1730,13 +1893,14 @@ async function handleCropped(blob: Blob) {
     const newUrl = res.data.url
 
     // 严格相等匹配替换 URL（保留 alt 和 {config}，不调用任何删除 API）
+    // 通过 applyMarkdownUpdate 回写到来源字段（stem/options[i]/solutions[]）
     const imgRegex = /!\[([^\]]*)\]\(([^)]+)\)/g
-    form.stem = form.stem.replace(imgRegex, (match, alt, imgUrl) => {
+    applyMarkdownUpdate(md => md.replace(imgRegex, (match, alt, imgUrl) => {
       if (imgUrl.trim() !== oldUrl.trim()) {
         return match
       }
       return `![${alt}](${newUrl})`
-    })
+    }))
 
     toast.success('图片裁剪并上传成功')
     cropperDialogVisible.value = false
@@ -2463,69 +2627,158 @@ async function handleCropped(blob: Blob) {
   background: var(--bg-card);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
-  padding: 4px;
   display: flex;
-  overflow-x: auto;
-  overscroll-behavior: contain;
+  flex-direction: column;
+  overflow: hidden;
 }
 
-.batch-tabs-track {
-  display: inline-flex;
-  gap: 2px;
-  flex-shrink: 0;
-}
-
-.batch-tab {
-  padding: 6px 14px;
-  border: none;
-  background: transparent;
-  border-radius: 6px;
-  font-size: 12.5px;
-  font-weight: 550;
-  color: var(--text-secondary);
+/* 折叠头部：点击折叠/展开，显示进度 + 完成按钮 */
+.batch-tabs-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
   cursor: pointer;
+  user-select: none;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border-color);
+  transition: background 0.18s ease;
+}
+
+.batch-tabs-header:hover {
+  background: var(--bg-hover);
+}
+
+.batch-tabs.is-collapsed .batch-tabs-header {
+  border-bottom: none;
+}
+
+.batch-tabs-title {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  white-space: nowrap;
-  transition: background 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
-}
-
-.batch-tab:hover {
-  background: var(--bg-hover);
+  font-size: 13px;
+  font-weight: 600;
   color: var(--text-primary);
 }
 
+.batch-tabs-progress {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  background: var(--bg-hover);
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.batch-tabs-finish {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border: 1px solid #34c759;
+  background: rgba(52, 199, 89, 0.1);
+  color: #34c759;
+  border-radius: 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.18s ease;
+}
+
+.batch-tabs-finish:hover {
+  background: rgba(52, 199, 89, 0.2);
+}
+
+.batch-tabs-track {
+  /* 流式布局：自然折行，填满容器宽度，取消横向滚动 */
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 12px;
+}
+
+.batch-tab {
+  /* 默认状态：浅灰背景 + 深灰文字 */
+  padding: 6px 16px;
+  border: none;
+  background: #f3f4f6;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #4b5563;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+  user-select: none;
+  transition: all 0.3s ease;
+}
+
+.batch-tab:hover:not(:disabled) {
+  background: #e5e7eb;
+}
+
+.batch-tab:disabled {
+  cursor: default;
+}
+
+/* 已保存状态：浅绿背景 + 深绿文字（仅未选中时显示，选中时被 is-active 覆盖） */
+.batch-tab.is-saved {
+  background: #d1fae5;
+  color: #065f46;
+}
+
+.batch-tab.is-saved:hover:not(:disabled) {
+  background: #a7f3d0;
+}
+
+/* 选中状态：主题蓝背景 + 白色文字（优先级最高，CSS 顺序在后覆盖） */
 .batch-tab.is-active {
   background: var(--accent);
   color: #ffffff;
-  box-shadow: 0 1px 4px rgba(0, 122, 255, 0.25);
+  font-weight: 500;
+  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.28);
+}
+
+.batch-tab.is-active:hover:not(:disabled) {
+  background: var(--accent);
+  color: #ffffff;
+  filter: brightness(1.08);
 }
 
 .batch-tab-index {
-  font-weight: 700;
   letter-spacing: -0.01em;
 }
 
-.batch-tab-preview {
-  font-size: 11.5px;
-  opacity: 0.75;
-  max-width: 140px;
-  overflow: hidden;
-  text-overflow: ellipsis;
+/* Dark mode 适配：浅灰背景换为深灰 */
+[data-theme='dark'] .batch-tab {
+  background: #374151;
+  color: #d1d5db;
 }
 
-.batch-tab.is-active .batch-tab-preview {
-  opacity: 0.9;
-}
-
-.batch-tab-empty {
-  font-size: 11.5px;
-  opacity: 0.5;
-  font-style: italic;
+[data-theme='dark'] .batch-tab:hover:not(:disabled) {
+  background: #4b5563;
+  color: #f3f4f6;
 }
 
 [data-theme='dark'] .batch-tab.is-active {
+  background: var(--accent);
+  color: #ffffff;
   box-shadow: 0 1px 4px rgba(10, 132, 255, 0.35);
+}
+
+/* Dark mode 已保存：深绿背景 + 浅绿文字 */
+[data-theme='dark'] .batch-tab.is-saved {
+  background: #064e3b;
+  color: #a7f3d0;
+}
+
+[data-theme='dark'] .batch-tab.is-saved:hover:not(:disabled) {
+  background: #065f46;
+  color: #d1fae5;
 }
 </style>

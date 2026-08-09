@@ -848,6 +848,12 @@ fn apply_question_filters<'a>(
             "missing_analysis" => {
                 builder.push(" AND q.metadata->'system_flags' @> '{\"missing_analysis\": true}'::jsonb");
             }
+            "incomplete" => {
+                // pending_answer OR missing_analysis 并集
+                // 与 incomplete_count 接口的 total 逻辑保持一致
+                builder.push(" AND (q.metadata->'system_flags' @> '{\"pending_answer\": true}'::jsonb");
+                builder.push(" OR q.metadata->'system_flags' @> '{\"missing_analysis\": true}'::jsonb)");
+            }
             _ => {} // 未知 flag 忽略，避免 SQL 注入
         }
     }

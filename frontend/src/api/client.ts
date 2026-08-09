@@ -257,7 +257,8 @@ export interface QuestionQuery {
   subject?: string
   reviewable_by_me?: boolean
   /// 异步补全机制：按系统标记过滤（命中 GIN 索引）
-  system_flag?: 'pending_answer' | 'missing_analysis'
+  /// 'incomplete' = pending_answer OR missing_analysis 并集（与 incomplete_count 的 total 一致）
+  system_flag?: 'pending_answer' | 'missing_analysis' | 'incomplete'
 }
 
 /// 自建标签输入（B2：category 改为 enum，新增 parent_id）

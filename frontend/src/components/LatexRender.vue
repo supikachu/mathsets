@@ -87,6 +87,7 @@ function isSafeImageSrc(src: string): boolean {
   if (/^(https?:)?\/\//i.test(src)) return true
   if (/^\//.test(src)) return true
   if (/^\.{1,2}\//.test(src)) return true
+  if (/^images\//i.test(src)) return true // 兼容老数据（后端新数据已替换为 /uploads/...）
   if (/^data:image\/(png|jpe?g|gif|webp|bmp);base64,/i.test(src)) return true
   if (/^blob:/i.test(src)) return true
   return false
@@ -106,6 +107,14 @@ function resolveImageUrl(url: string): string {
     if (base) {
       return `${base.replace(/\/$/, '')}${url}`
     }
+    return url
+  }
+  // 兼容老数据：images/xxx.png 前缀补 /（变成 /images/...），由后端静态资源兜底
+  // 注：新数据后端已替换为 /uploads/questions/{uuid}.ext，本分支仅用于回看历史遗留题目
+  if (/^images\//i.test(url)) {
+    const base = import.meta.env.VITE_API_BASE_URL || ''
+    const full = base ? `${base.replace(/\/$/, '')}/${url}` : `/${url}`
+    return full
   }
   return url
 }
@@ -113,11 +122,17 @@ function resolveImageUrl(url: string): string {
 /**
  * 智能豁免判定：是否需要禁止深色模式反色。
  * 判定规则（满足任一即豁免）：
- *   1. URL 后缀为 .jpg / .jpeg
+ *   1. URL 后缀为 .jpg / .jpeg（但 /uploads/questions/ 题目配图目录例外，因 MinerU 提取的 PDF 图多为 jpg 却是黑白几何图）
  *   2. alt 文本或 URL 字段中出现 `=no-invert` 标记
  */
 function shouldDisableInvert(alt: string, url: string, urlField: string): boolean {
-  if (/\.(jpe?g)(\?.*)?$/i.test(url)) return true
+  if (/\.(jpe?g)(\?.*)?$/i.test(url)) {
+    // 题目配图目录（手动上传 + AI 录入）下的 JPEG 不豁免：数学题配图多为黑白几何图/坐标系，应反色
+    // 其他目录（如 /uploads/avatars/）的 JPEG 保持豁免：实拍图/照片反色会失真
+    if (!url.includes('/uploads/questions/')) {
+      return true
+    }
+  }
   if (
     alt.includes('=no-invert') ||
     url.includes('=no-invert') ||
@@ -408,6 +423,12 @@ onBeforeUnmount(() => {
 }
 
 /* ============ 图片样式 ============ */
+
+/* 全局兜底：防止 inline style 未应用时图片溢出 */
+.latex-render img.latex-img {
+  max-width: 100%;
+  height: auto;
+}
 
 /* 块级图片：由内联 style 控制 width/margin，CSS 仅提供边框和圆角 */
 .latex-render img.latex-img.img-block {
