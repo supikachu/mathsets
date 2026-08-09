@@ -1,4 +1,5 @@
 import axios from 'axios'
+import { useToast } from '@/composables/useToast'
 
 // ===========================================================================
 // Axios 实例 & 拦截器（保持不变）
@@ -9,6 +10,22 @@ const client = axios.create({
   timeout: 10000,
   paramsSerializer: { indexes: null },
 })
+
+// ===========================================================================
+// AI 额度耗尽错误识别（与后端 consume_ai_quota 的 ERR_QUOTA_EXCEEDED 对齐）
+// ===========================================================================
+
+/// 后端额度耗尽错误码 — 见 src/handlers/ai.rs::consume_ai_quota
+export const AI_QUOTA_EXCEEDED_CODE = 'ERR_QUOTA_EXCEEDED'
+
+/// 判断一个 axios 错误是否为「今日 AI 额度已耗尽」
+export function isQuotaExceededError(e: unknown): boolean {
+  const err = e as { response?: { status?: number; data?: { code?: string } } }
+  return (
+    err?.response?.status === 403 &&
+    err?.response?.data?.code === AI_QUOTA_EXCEEDED_CODE
+  )
+}
 
 // 请求拦截器：自动注入 Bearer token（login/register 不带）
 client.interceptors.request.use((config) => {
@@ -22,7 +39,11 @@ client.interceptors.request.use((config) => {
   return config
 })
 
-// 响应拦截器：401 → 跳转登录
+// 额度耗尽 toast 去重窗口（毫秒）— 多页 PDF 并发 3 路同时 403 时只弹一次
+const QUOTA_TOAST_DEDUP_MS = 5000
+let lastQuotaToastAt = 0
+
+// 响应拦截器：401 → 跳转登录；AI 额度耗尽 → 集中友好提示
 client.interceptors.response.use(
   (resp) => resp,
   (error) => {
@@ -31,6 +52,15 @@ client.interceptors.response.use(
       localStorage.removeItem('user')
       // 使用 window.location 跳转，避免引入 router/store 造成循环依赖（HMR 问题）
       window.location.href = '/login'
+    } else if (isQuotaExceededError(error)) {
+      // 集中弹一次友好提示，避免每个调用方都自行识别；
+      // 标记 __quotaHandled 让调用方跳过重复 toast（仍 reject 以保留流程控制）。
+      const now = Date.now()
+      if (now - lastQuotaToastAt > QUOTA_TOAST_DEDUP_MS) {
+        lastQuotaToastAt = now
+        useToast().error('今日 AI 识别额度已用尽，请明天再试')
+      }
+      ;(error as Error & { __quotaHandled?: boolean }).__quotaHandled = true
     }
     return Promise.reject(error)
   },

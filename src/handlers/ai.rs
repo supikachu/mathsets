@@ -369,10 +369,16 @@ fn truncation_or_parse_error(
     }
 }
 
+/// 每用户每日 AI 智能录题调用上限（资损熔断阈值）
+///
+/// 50 → 200：原 50/日 在联调与多页 PDF 场景下极易耗尽（10 页 PDF 即 10 次额度），
+/// 且抢占式消耗不退还，导致开发/正常使用中频繁触发 403。提到 200 兼顾成本与可用性。
+const AI_DAILY_QUOTA_LIMIT: i64 = 200;
+
 /// 原子级额度消耗（补丁十一：INSERT...WHERE...RETURNING 防 TOCTOU 竞态超卖）
 ///
 /// 在 Multipart 读取之前抢占额度，确保额度检查与消耗是原子操作。
-/// 每用户每日 50 次上限，超额返回 403。
+/// 每用户每日 `AI_DAILY_QUOTA_LIMIT` 次上限，超额返回 403（携带 `ERR_QUOTA_EXCEEDED`）。
 async fn consume_ai_quota(
     pool: &sqlx::PgPool,
     user_id: uuid::Uuid,
@@ -382,12 +388,13 @@ async fn consume_ai_quota(
         r#"
         INSERT INTO ai_usage_log (user_id, endpoint, created_at)
         SELECT $1, $2, NOW()
-        WHERE (SELECT COUNT(*) FROM ai_usage_log WHERE user_id = $1 AND created_at >= CURRENT_DATE) < 50
+        WHERE (SELECT COUNT(*) FROM ai_usage_log WHERE user_id = $1 AND created_at >= CURRENT_DATE) < $3
         RETURNING id
         "#,
     )
     .bind(user_id)
     .bind(endpoint)
+    .bind(AI_DAILY_QUOTA_LIMIT)
     .fetch_optional(pool)
     .await
     .map_err(|e| {

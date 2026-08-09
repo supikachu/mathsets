@@ -261,6 +261,11 @@ async function doImageParse(file: File) {
     const questions = res.data.data
     await handleBatchResults(questions)
   } catch (e: any) {
+    // 额度耗尽已由 axios 拦截器集中弹窗，这里跳过重复 toast
+    if (e?.__quotaHandled) {
+      await clearBatchSnapshot()
+      return
+    }
     console.error('[doImageParse] 失败:', e?.message || e)
     toast.error(e?.response?.data?.error || e?.message || '图片识别失败')
     await clearBatchSnapshot()
@@ -313,7 +318,13 @@ async function doPdfParse(file: File) {
   }
 
   if (failedPages > 0) {
-    toast.warning(`${failedPages} 页解析失败已跳过，成功识别 ${allQuestions.length} 题`)
+    // 全部失败时（如额度耗尽）「跳过」措辞会误导，改用更明确的提示；
+    // 额度耗尽的具体原因已由 axios 拦截器集中弹窗，这里不再重复。
+    if (failedPages === results.length) {
+      toast.error(`全部 ${failedPages} 页解析失败，请检查配置或额度后重试`)
+    } else {
+      toast.warning(`${failedPages} 页解析失败已跳过，成功识别 ${allQuestions.length} 题`)
+    }
   }
 
   await handleBatchResults(allQuestions)

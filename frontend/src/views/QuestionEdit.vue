@@ -293,17 +293,17 @@
     <AppConfirm
       v-model="leaveDialog"
       title="未保存提示"
-      message="有未保存的修改，确定离开吗？"
+      :message="leaveMessage"
       confirm-text="离开"
       danger
-      @confirm="goBack"
+      @confirm="onLeaveConfirm"
     />
 
     <!-- 草稿恢复确认 -->
     <AppConfirm
       v-model="restoreDialog"
       title="恢复草稿"
-      message="检测到未保存的草稿，是否恢复？"
+      :message="restoreMessage"
       confirm-text="恢复"
       cancel-text="丢弃"
       @confirm="doRestoreDraft"
@@ -350,7 +350,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { useRoute, useRouter, onBeforeRouteLeave } from 'vue-router'
 import { questionApi, spaceApi, tagsApi, paperApi, type SpaceMemberInfo, type Tag, type ParsedQuestion } from '@/api/client'
 import { AppButton, AppBadge, AppModal, AppConfirm, AppIcon } from '@/components/ui'
 import { useToast } from '@/composables/useToast'
@@ -414,6 +414,61 @@ const allSaved = computed(() => questionList.value.length > 1 && savedCount.valu
 function finishBatch() {
   toast.success(`🎉 批量录入 ${questionList.value.length} 题已全部处理完毕`)
   router.replace('/questions')
+}
+
+// ============================================================
+// ===== 批量草稿全量持久化（修复批量录入数据丢失 Bug）=====
+// ------------------------------------------------------------
+// 单题草稿（q-draft-*）只存当前 form，无法覆盖多题工作台。
+// 这里用独立的批量草稿键（q-batch-draft-*）保存完整 questionList + activeIndex，
+// 离开页面后再次进入时按"批量优先 → 单题回退"的顺序恢复。
+// ============================================================
+function getBatchDraftKey() {
+  return isNew ? 'q-batch-draft-new' : `q-batch-draft-${route.params.id}`
+}
+
+// 捕获当前批量工作台完整状态：当前 form 同步进 questionList[activeIndex] 后整体落盘
+function saveBatchDraft() {
+  if (questionList.value.length <= 1) return
+  const key = getBatchDraftKey()
+  try {
+    const idx = activeIndex.value
+    const cur = questionList.value[idx]
+    const list = questionList.value.map((q, i) => {
+      if (i === idx) {
+        // 当前题：用最新 form 快照，保留 saved/savedQid 元信息
+        return {
+          ...captureFormSnapshot(),
+          saved: cur?.saved ?? false,
+          savedQid: cur?.savedQid,
+          hasUnsaved: (cur?.hasUnsaved && !cur?.saved) || form.hasUnsaved,
+        }
+      }
+      return JSON.parse(JSON.stringify(q))
+    })
+    sessionStorage.setItem(key, JSON.stringify({
+      mode: 'batch',
+      activeIndex: idx,
+      questionList: list,
+      savedAt: Date.now(),
+    }))
+  } catch { /* quota exceeded */ }
+}
+
+function clearBatchDraft() {
+  try { sessionStorage.removeItem(getBatchDraftKey()) } catch { /* ignore */ }
+}
+
+// 批量模式是否有未保存到后端的题目（含已保存但有未保存修改的题）
+function hasUnsavedBatchChanges(): boolean {
+  if (questionList.value.length <= 1) return false
+  return questionList.value.some(q => !q.saved || q.hasUnsaved)
+}
+
+// 统一的"有未保存修改"检查（单题 + 批量）
+function hasUnsavedChanges(): boolean {
+  if (hasUnsavedBatchChanges()) return true
+  return form.hasUnsaved
 }
 
 // Selected Knowledge node IDs（与 AttributeSidePanel v-model 双向绑定）
@@ -505,21 +560,65 @@ function toggleTagById(tag: Tag) {
 
 // Navigation back checks
 const leaveDialog = ref(false)
+// leaveConfirmed：用户已确认离开，放行 beforeRouteLeave 守卫（避免无限拦截）
+const leaveConfirmed = ref(false)
+// pendingLeaveTo：非"返回按钮"触发的导航（如点击链接），确认后恢复到该目标路径
+let pendingLeaveTo: string | null = null
+
+// 离开确认弹窗文案（批量模式显示未保存题数，提示可恢复）
+const leaveMessage = computed(() => {
+  if (questionList.value.length > 1) {
+    const unsavedCount = questionList.value.filter(q => !q.saved || q.hasUnsaved).length
+    return `当前批量录入工作台有 ${unsavedCount} 道题尚未保存到服务器，确定离开吗？（离开后可通过"恢复草稿"找回未保存的内容）`
+  }
+  return '有未保存的修改，确定离开吗？'
+})
+
 function handleBack() {
-  if (form.hasUnsaved) {
+  if (hasUnsavedChanges()) {
+    pendingLeaveTo = null // 标记：走 goBack 语义（router.back），而非恢复原导航
     leaveDialog.value = true
   } else {
     goBack()
   }
 }
-function goBack() {
-  if (window.history.state?.back) {
-    router.back()
+
+// 用户在离开确认弹窗点击"离开"
+function onLeaveConfirm() {
+  leaveDialog.value = false
+  if (pendingLeaveTo) {
+    // 恢复被守卫拦截的原始导航（如点击链接跳转）
+    const target = pendingLeaveTo
+    pendingLeaveTo = null
+    leaveConfirmed.value = true
+    router.push(target).finally(() => { leaveConfirmed.value = false })
   } else {
-    if (isNew) router.replace('/questions')
-    else router.replace(`/questions/${route.params.id}`)
+    goBack()
   }
 }
+
+function goBack() {
+  leaveConfirmed.value = true
+  if (window.history.state?.back) {
+    // router.back() 返回 void（基于 popstate 异步触发导航，无法 .finally）
+    // 守卫在 popstate 触发时读取 leaveConfirmed=true 放行；导航成功后组件卸载，标志自然失效
+    router.back()
+  } else {
+    router.replace(isNew ? '/questions' : `/questions/${route.params.id}`)
+      .finally(() => { leaveConfirmed.value = false })
+  }
+}
+
+// 路由守卫：拦截所有离开导航（浏览器后退、链接跳转、编程式导航等）
+// back 按钮已由 handleBack 预拦截；其余导航在此统一拦截
+onBeforeRouteLeave((to) => {
+  if (leaveConfirmed.value) return true
+  if (!hasUnsavedChanges()) return true
+  // 拦截：记录目标路径 + 弹窗，取消本次导航
+  pendingLeaveTo = to.fullPath
+  leaveDialog.value = true
+  return false
+})
 
 // AI trigger
 function handleAi() {
@@ -1077,6 +1176,10 @@ watch(() => ({ ...form }), () => {
     try {
       const key = isNew ? 'q-draft-new' : `q-draft-${route.params.id}`
       sessionStorage.setItem(key, JSON.stringify(form))
+      // 批量模式：同步保存完整 questionList 草稿（修复仅存单题导致的数据丢失）
+      if (questionList.value.length > 1) {
+        saveBatchDraft()
+      }
       draftStatus.value = 'saved'
       draftStatusTimer = setTimeout(() => { draftStatus.value = 'idle' }, 2000)
     } catch { /* quota exceeded */ }
@@ -1109,6 +1212,8 @@ watch(activeIndex, async (newIdx, oldIdx) => {
       // 等待响应式更新与被闸门屏蔽的 watcher 完成
       await nextTick()
     }
+    // 3. 切换后立即持久化批量草稿（保留旧题最新编辑，避免离开后丢失）
+    saveBatchDraft()
   } finally {
     isSwitchingTab.value = false
   }
@@ -1117,12 +1222,37 @@ watch(activeIndex, async (newIdx, oldIdx) => {
 // Draft restore
 const restoreDialog = ref(false)
 let pendingDraft: any = null
+let pendingBatchDraft: any = null
 
 function getDraftKey() {
   return isNew ? 'q-draft-new' : `q-draft-${route.params.id}`
 }
 
+// 草稿恢复弹窗文案（批量模式提示题数）
+const restoreMessage = computed(() => {
+  if (pendingBatchDraft) {
+    const n = pendingBatchDraft.questionList?.length || 0
+    return `检测到未保存的批量草稿（共 ${n} 道题），是否恢复？`
+  }
+  return '检测到未保存的草稿，是否恢复？'
+})
+
 function restoreDraft() {
+  // 优先检查批量草稿（多题工作台全量快照）
+  try {
+    const batchSaved = sessionStorage.getItem(getBatchDraftKey())
+    if (batchSaved) {
+      const batchDraft = JSON.parse(batchSaved)
+      if (batchDraft?.mode === 'batch'
+          && Array.isArray(batchDraft.questionList)
+          && batchDraft.questionList.length > 0) {
+        pendingBatchDraft = batchDraft
+        restoreDialog.value = true
+        return
+      }
+    }
+  } catch { /* ignore */ }
+  // 回退到单题草稿
   const key = getDraftKey()
   try {
     const saved = sessionStorage.getItem(key)
@@ -1136,6 +1266,30 @@ function restoreDraft() {
 }
 
 async function doRestoreDraft() {
+  // 批量草稿恢复：还原整个 questionList + activeIndex，进入多题工作台
+  if (pendingBatchDraft) {
+    try {
+      questionList.value = JSON.parse(JSON.stringify(pendingBatchDraft.questionList))
+      const idx = Math.min(pendingBatchDraft.activeIndex || 0, questionList.value.length - 1)
+      activeIndex.value = idx
+      isSwitchingTab.value = true
+      try {
+        applyFormSnapshot(questionList.value[idx])
+        await nextTick()
+      } finally {
+        isSwitchingTab.value = false
+      }
+      toast.success(`已恢复 ${questionList.value.length} 道题的批量草稿`)
+    } catch (e) {
+      console.error('[restoreDraft] 批量草稿恢复失败', e)
+      toast.error('批量草稿恢复失败')
+    } finally {
+      pendingBatchDraft = null
+      restoreDialog.value = false
+    }
+    return
+  }
+  // 单题草稿恢复（原逻辑）
   if (!pendingDraft) return
   const fields = ['stem', 'question_type', 'sub_type', 'difficulty', 'default_score', 'grade', 'semester',
     'solutions', 'options', 'correctAnswer', 'blanks', 'solutionAnswer', 'sub_answers',
@@ -1173,8 +1327,11 @@ async function doRestoreDraft() {
 }
 
 function discardDraft() {
+  // 丢弃时清除单题 + 批量草稿
   try { sessionStorage.removeItem(getDraftKey()) } catch { /* ignore */ }
+  try { sessionStorage.removeItem(getBatchDraftKey()) } catch { /* ignore */ }
   pendingDraft = null
+  pendingBatchDraft = null
 }
 
 function clearDraft() {
@@ -1429,6 +1586,8 @@ function markCurrentSaved(qid: string): boolean {
     savedQid: qid,
     hasUnsaved: false,
   }
+  // 保存成功后立即持久化批量草稿（反映 saved 状态，避免恢复后对已保存题重复 create）
+  saveBatchDraft()
 
   // 2. 找下一道未保存题：先向后扫描，再从头扫描
   let nextIdx = -1
@@ -1443,6 +1602,9 @@ function markCurrentSaved(qid: string): boolean {
 
   // 3. 全部已保存 → 退出批量模式，跳列表页
   if (nextIdx === -1) {
+    // 全部已保存：批量草稿不再需要，清除以免下次误恢复
+    clearBatchDraft()
+    clearDraft()
     toast.success(`🎉 第 ${currentIdx + 1} 题保存成功，全部 ${total} 题已处理完毕`)
     // 注意：用 nextTick 延迟跳转，让 Toast 先渲染、状态先稳定
     nextTick(() => router.replace('/questions'))
@@ -1684,6 +1846,8 @@ function handleBatchParsed(questions: ParsedQuestion[]) {
     applyFormSnapshot(questionList.value[0])
     nextTick(() => {
       isSwitchingTab.value = false
+      // 批量加载后立即持久化草稿，防止用户快速离开导致数据丢失
+      saveBatchDraft()
     })
   } catch (e) {
     isSwitchingTab.value = false
@@ -1693,27 +1857,17 @@ function handleBatchParsed(questions: ParsedQuestion[]) {
   toast.success(`已加载 ${questions.length} 道题，进入批量录入工作台`)
 }
 
-// Window unload checks
+// Window unload checks（批量模式同样拦截）
 function handleBeforeUnload(e: BeforeUnloadEvent) {
-  if (form.hasUnsaved) { e.preventDefault(); e.returnValue = '' }
+  if (hasUnsavedChanges()) { e.preventDefault(); e.returnValue = '' }
 }
 
 onMounted(() => {
   window.addEventListener('beforeunload', handleBeforeUnload)
   loadSpaceMembers()
   loadTags()
-  loadQuestion().then(() => {
-    if (!isNew) restoreDraft()
-  })
-  if (isNew) restoreDraft()
 
-  // ===== 临时测试入口：URL 加 ?batch=test 即可注入两道 Mock 题目，立即看到 Tab 切换效果 =====
-  if (route.query.batch === 'test') {
-    loadBatchMockData()
-    return
-  }
-
-  // ===== 从其他页面跳转过来时，读取 history.state.parsedQuestions 进入多题工作台 =====
+  // 优先处理：从其他页面携带 parsedQuestions 进入批量工作台（新批次，跳过草稿恢复）
   // 用法：router.push({ path: '/questions/new', state: { parsedQuestions: [...] } })
   const stateQuestions = (window.history.state as any)?.parsedQuestions
   if (Array.isArray(stateQuestions) && stateQuestions.length > 0) {
@@ -1722,7 +1876,20 @@ onMounted(() => {
     try {
       window.history.replaceState({ ...window.history.state, parsedQuestions: undefined }, '')
     } catch { /* ignore */ }
+    return
   }
+
+  // ===== 临时测试入口：URL 加 ?batch=test 即可注入两道 Mock 题目，立即看到 Tab 切换效果 =====
+  if (route.query.batch === 'test') {
+    loadBatchMockData()
+    return
+  }
+
+  // 单题/批量草稿恢复：批量草稿优先 → 单题草稿回退
+  loadQuestion().then(() => {
+    if (!isNew) restoreDraft()
+  })
+  if (isNew) restoreDraft()
 })
 
 onMounted(async () => {
