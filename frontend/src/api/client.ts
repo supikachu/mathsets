@@ -256,6 +256,8 @@ export interface QuestionQuery {
   /// 学科过滤（math / physics）
   subject?: string
   reviewable_by_me?: boolean
+  /// 异步补全机制：按系统标记过滤（命中 GIN 索引）
+  system_flag?: 'pending_answer' | 'missing_analysis'
 }
 
 /// 自建标签输入（B2：category 改为 enum，新增 parent_id）
@@ -382,6 +384,26 @@ export const questionApi = {
   },
   stats(params?: { space_id?: string }) {
     return client.get<QuestionStats>('/questions/stats', { params })
+  },
+  /// 异步补全机制：待补全题目计数（pending_answer / missing_analysis / total）
+  incompleteCount() {
+    return client.get<{ pending_answer: number; missing_analysis: number; total: number }>(
+      '/questions/incomplete-count',
+    ).then((r) => r.data)
+  },
+  /// 异步补全机制：批量提交审核
+  batchSubmit(questionIds: string[]) {
+    return client.post<{
+      total: number
+      succeeded: number
+      failed: number
+      results: Array<{
+        id: string
+        status: 'success' | 'failed'
+        code?: string
+        missing?: string[]
+      }>
+    }>('/questions/batch-submit', { question_ids: questionIds }).then((r) => r.data)
   },
 }
 

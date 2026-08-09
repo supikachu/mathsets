@@ -140,6 +140,16 @@ pub fn build_app(state: AppState) -> Router {
         .route("/admin/users/{id}/status", put(handlers::auth::update_user_status))
         // 题目统计（必须在 {id} 之前注册）
         .route("/questions/stats", get(handlers::questions::question_stats))
+        // 待补全计数（必须在 {id} 之前注册）
+        .route(
+            "/questions/incomplete-count",
+            get(handlers::questions::incomplete_count),
+        )
+        // 批量提交审核（必须在 {id} 之前注册）
+        .route(
+            "/questions/batch-submit",
+            post(handlers::questions::batch_submit_questions),
+        )
         // 题目 CRUD
         .route("/questions", get(handlers::questions::list_questions))
         .route("/questions", post(handlers::questions::create_question))

@@ -178,7 +178,8 @@ pub struct Question {
     // ── 题型与答案 ────────────────────────────────
     pub question_type: QuestionType,
     pub options: Option<serde_json::Value>,
-    pub correct_answer: serde_json::Value,
+    /// 答案 JSONB。允许为空（None / JSON null）以支持「异步补全」草稿
+    pub correct_answer: Option<serde_json::Value>,
     pub analysis: Option<String>,
 
     // ── 难度与评估 ────────────────────────────────
@@ -218,7 +219,9 @@ pub struct CreateQuestionRequest {
     pub question_type: QuestionType,
     pub difficulty: Difficulty,
     pub options: Option<serde_json::Value>,
-    pub correct_answer: serde_json::Value,
+    /// 答案（允许为空，支持「异步补全」草稿；空值将写入 system_flags.pending_answer）
+    #[serde(default)]
+    pub correct_answer: Option<serde_json::Value>,
     pub analysis: Option<String>,
     /// 长尾元数据（academic_year, exam_region, paper_name 等）
     pub metadata: Option<serde_json::Value>,
@@ -307,6 +310,10 @@ pub struct QuestionQuery {
     pub subject: Option<String>,
     /// 仅返回当前用户可审核的待审题
     pub reviewable_by_me: Option<bool>,
+    /// 待补全筛选（pending_answer / missing_analysis）— 命中 GIN 索引
+    ///
+    /// 使用 `@>` 包含操作符过滤 `metadata->'system_flags'`，避免 `->>` 退化为 Seq Scan。
+    pub system_flag: Option<String>,
 }
 
 /// 题目列表响应项
@@ -356,7 +363,7 @@ pub struct QuestionDetail {
     // ── 题型与答案 ──
     pub question_type: QuestionType,
     pub options: Option<serde_json::Value>,
-    pub correct_answer: serde_json::Value,
+    pub correct_answer: Option<serde_json::Value>,
     pub analysis: Option<String>,
 
     // ── 难度与评估 ──
@@ -429,6 +436,82 @@ impl From<(Question, Vec<KnowledgeNodeSummary>)> for QuestionDetail {
             can_review: false,
         }
     }
+}
+
+// ===========================================================================
+// 异步补全：空答案检测 + 系统标签刷新
+// ===========================================================================
+
+/// 检测 correct_answer 是否为「空」
+///
+/// 空值定义：
+/// - `None` / `Value::Null`
+/// - `{"value":{"options":[]}}` 等 options/blanks/subs 为空数组
+/// - `{"value":"   "}` 纯空格字符串（trim 后为空，覆盖 text/math 题型）
+pub fn is_answer_empty(answer: &Option<serde_json::Value>) -> bool {
+    match answer {
+        None => true,
+        Some(serde_json::Value::Null) => true,
+        Some(v) => {
+            if let Some(value) = v.get("value") {
+                // 数组类答案：options/blanks/subs 为空数组
+                if let Some(arr) = value.get("options").and_then(|o| o.as_array()) {
+                    return arr.is_empty();
+                }
+                if let Some(arr) = value.get("blanks").and_then(|b| b.as_array()) {
+                    return arr.is_empty();
+                }
+                if let Some(arr) = value.get("subs").and_then(|s| s.as_array()) {
+                    return arr.is_empty();
+                }
+                // 字符串类答案：纯空格判定（覆盖 text/math 题型）
+                if let Some(s) = value.as_str() {
+                    return s.trim().is_empty();
+                }
+            }
+            false
+        }
+    }
+}
+
+/// 根据答案与解析状态刷新 `metadata.system_flags`
+///
+/// - `pending_answer`：`is_answer_empty(answer)`
+/// - `missing_analysis`：analysis 为空且 `no_analysis_needed != true`
+/// - `no_analysis_needed=true` 时强制 `missing_analysis=false`（豁免，T2-7）
+///
+/// 注意：调用方需保证传入的 metadata 为 JSON 对象（非对象时会被重置为 `{}`）。
+pub fn refresh_system_flags(
+    metadata: &mut serde_json::Value,
+    answer: &Option<serde_json::Value>,
+    analysis: &Option<String>,
+) {
+    if !metadata.is_object() {
+        *metadata = serde_json::json!({});
+    }
+    let flags = metadata
+        .as_object_mut()
+        .expect("metadata 已确保为对象")
+        .entry("system_flags")
+        .or_insert_with(|| serde_json::json!({}));
+
+    let flags_obj = flags
+        .as_object_mut()
+        .expect("system_flags 应为 JSON 对象");
+    let no_analysis_needed = flags_obj
+        .get("no_analysis_needed")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    flags_obj.insert(
+        "pending_answer".to_string(),
+        serde_json::Value::Bool(is_answer_empty(answer)),
+    );
+    let analysis_empty = analysis.as_ref().map_or(true, |s| s.trim().is_empty());
+    flags_obj.insert(
+        "missing_analysis".to_string(),
+        serde_json::Value::Bool(analysis_empty && !no_analysis_needed),
+    );
 }
 
 /// 驳回请求（reject_question 专用）

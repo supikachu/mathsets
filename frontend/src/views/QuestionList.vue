@@ -79,6 +79,9 @@
                   <template v-if="tab.value === 'pending' && pendingReviewCount > 0">
                     <span class="text-xs text-gray-400 dark:text-gray-500 font-normal">({{ pendingReviewCount > 99 ? '99+' : pendingReviewCount }})</span>
                   </template>
+                  <template v-if="tab.value === 'incomplete' && incompleteCount > 0">
+                    <span class="text-xs text-amber-500 dark:text-amber-400 font-normal">({{ incompleteCount > 99 ? '99+' : incompleteCount }})</span>
+                  </template>
                 </button>
               </div>
             </Transition>
@@ -103,6 +106,19 @@
 
         <!-- ── 3. 右侧操作组 (Right Group: 统一 rounded-full 胶囊圆角风格) ── -->
         <div class="ql-header-actions flex items-center gap-3 shrink-0">
+          <!-- 批量提交审核按钮（多选时显示） -->
+          <button
+            v-if="selectedIds.size > 0"
+            class="ql-batch-btn flex items-center gap-1.5 px-4 h-9 bg-emerald-500 hover:bg-emerald-600 active:bg-emerald-700 text-white rounded-full text-sm font-medium shadow-sm transition-colors cursor-pointer shrink-0"
+            :disabled="batchSubmitting"
+            :class="{ 'opacity-60 cursor-not-allowed': batchSubmitting }"
+            @click="handleBatchSubmit"
+          >
+            <AppIcon name="send" :size="14" />
+            <span>批量提交审核</span>
+            <span class="ql-batch-count">{{ selectedIds.size }}</span>
+          </button>
+
           <!-- 筛选按钮 (Outline 胶囊按钮) -->
           <button
             class="ql-filter-btn flex items-center gap-2 px-4 h-9 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 text-gray-700 dark:text-gray-200 hover:border-blue-500 hover:text-blue-500 rounded-full text-sm font-medium transition-colors cursor-pointer shadow-sm shrink-0"
@@ -439,7 +455,23 @@
                   <span class="q-dot" :class="`q-dot--${statusBadgeColor(card.status)}`"></span>
                   {{ statusLabel(card.status) }}
                 </span>
+                <span v-if="card.systemFlags?.pending_answer" class="q-flag-tag q-flag--answer flex-shrink-0">
+                  <AppIcon name="alert-circle" :size="11" :stroke="2" />
+                  答案待补全
+                </span>
+                <span v-if="card.systemFlags?.missing_analysis" class="q-flag-tag q-flag--analysis flex-shrink-0">
+                  <AppIcon name="alert-circle" :size="11" :stroke="2" />
+                  解析待补全
+                </span>
               </div>
+              <!-- 多选 Checkbox（批量提交审核） -->
+              <label class="q-select-check flex-shrink-0" @click.stop>
+                <input
+                  type="checkbox"
+                  :checked="selectedIds.has(card.id)"
+                  @change="toggleSelect(card.id)"
+                />
+              </label>
             </div>
 
             <!-- Row 2: Body — 题干 + 选项 -->
@@ -601,6 +633,78 @@
     </div>
   </div>
 
+  <!-- 批量提交审核结果 Modal -->
+  <AppModal v-model="showBatchResult" title="批量提交审核结果" size="lg">
+    <div v-if="batchResult" class="batch-result-body">
+      <!-- 汇总统计 -->
+      <div class="batch-summary-row">
+        <div class="batch-summary-item">
+          <span class="batch-summary-label">总数</span>
+          <span class="batch-summary-value">{{ batchResult.total }}</span>
+        </div>
+        <div class="batch-summary-item batch-summary--success">
+          <span class="batch-summary-label">成功</span>
+          <span class="batch-summary-value">{{ batchResult.succeeded }}</span>
+        </div>
+        <div class="batch-summary-item batch-summary--failed">
+          <span class="batch-summary-label">失败</span>
+          <span class="batch-summary-value">{{ batchResult.failed }}</span>
+        </div>
+      </div>
+
+      <!-- 逐题结果列表 -->
+      <div class="batch-result-list">
+        <div
+          v-for="r in batchResult.results"
+          :key="r.id"
+          class="batch-result-item"
+          :class="{ 'is-failed': r.status === 'failed' }"
+        >
+          <div class="batch-result-icon">
+            <AppIcon
+              v-if="r.status === 'success'"
+              name="check"
+              :size="16"
+              :stroke="2.5"
+              class="text-emerald-500"
+            />
+            <AppIcon
+              v-else
+              name="x"
+              :size="16"
+              :stroke="2.5"
+              class="text-red-500"
+            />
+          </div>
+          <div class="batch-result-info">
+            <span class="batch-result-id">{{ r.id }}</span>
+            <template v-if="r.status === 'failed'">
+              <span class="batch-result-error">{{ batchErrorCodeLabel(r.code) }}</span>
+              <span v-if="r.missing && r.missing.length > 0" class="batch-result-missing">
+                缺失字段：{{ r.missing.join('、') }}
+              </span>
+            </template>
+          </div>
+        </div>
+      </div>
+
+      <!-- 操作按钮 -->
+      <div class="batch-result-actions">
+        <button
+          v-if="batchResult.failed > 0"
+          type="button"
+          class="batch-action-btn batch-action--primary"
+          @click="goToFirstFailed"
+        >
+          查看失败题目
+        </button>
+        <button type="button" class="batch-action-btn batch-action--ghost" @click="closeBatchResult">
+          关闭
+        </button>
+      </div>
+    </div>
+  </AppModal>
+
 
 </template>
 
@@ -614,7 +718,7 @@ import { DynamicScroller, DynamicScrollerItem } from 'vue-virtual-scroller'
 import 'vue-virtual-scroller/dist/vue-virtual-scroller.css'
 import KnowledgeTreeNav from '@/components/KnowledgeTreeNav.vue'
 import SpaceSwitcher from '@/components/SpaceSwitcher.vue'
-import { AppButton, AppSelect, AppPagination, AppIcon, AppBadge } from '@/components/ui'
+import { AppButton, AppSelect, AppPagination, AppIcon, AppBadge, AppModal } from '@/components/ui'
 import { useQuestionBasket } from '@/composables/useQuestionBasket'
 import { useToast } from '@/composables/useToast'
 import { useSpaceStore } from '@/stores/space'
@@ -655,10 +759,12 @@ const statusTabs = [
   { label: '已发布', value: 'published', icon: 'check' },
   { label: '草稿', value: 'draft', icon: 'pencil' },
   { label: '待审核', value: 'pending', icon: 'clock' },
+  { label: '待补全', value: 'incomplete', icon: 'alert-circle' },
 ] as const
 
 const currentStatus = ref<string>('ALL')
 const pendingReviewCount = ref(0)
+const incompleteCount = ref(0)
 const totalCount = ref(0)
 
 // 搜索框聚焦态：驱动窄屏下搜索框的弹性伸缩（聚焦或有内容时展开）
@@ -672,8 +778,17 @@ const currentStatusLabel = computed(() => {
 
 function switchStatus(value: string) {
   currentStatus.value = value
-  // 同步到 query.status（ALL → undefined 表示不过滤）
-  query.status = value === 'ALL' ? undefined : (value as any)
+  // 同步到 query.status（ALL → undefined 表示不过滤；incomplete → draft + system_flag）
+  if (value === 'ALL') {
+    query.status = undefined
+    query.system_flag = undefined
+  } else if (value === 'incomplete') {
+    query.status = 'draft'
+    query.system_flag = 'pending_answer'
+  } else {
+    query.status = value as any
+    query.system_flag = undefined
+  }
   // 同步到矩阵筛选面板的 UI 状态
   filters.status = value === 'ALL' ? '__all' : value
   page.value = 1
@@ -699,6 +814,16 @@ async function fetchPendingCount() {
     }
   } catch {
     pendingReviewCount.value = 0
+  }
+}
+
+// 获取待补全题目数量（独立轻量请求）
+async function fetchIncompleteCount() {
+  try {
+    const data = await questionApi.incompleteCount()
+    incompleteCount.value = data.total ?? 0
+  } catch {
+    incompleteCount.value = 0
   }
 }
 
@@ -747,6 +872,7 @@ function clearAllFilters() {
   query.question_type = undefined
   query.difficulty = undefined
   query.status = undefined
+  query.system_flag = undefined
   query.knowledge_node_ids = undefined
   query.include_descendants = undefined
   navNodeId.value = ''
@@ -820,6 +946,7 @@ interface QuestionCard {
   correctAnswer: string
   analysis: string | null
   knowledgeNodes: KnowledgeNodeSummary[]
+  systemFlags: { pending_answer?: boolean; missing_analysis?: boolean; no_analysis_needed?: boolean }
 }
 
 const cardList = ref<QuestionCard[]>([])
@@ -1088,6 +1215,8 @@ function applyFilters() {
   // 状态：同步到 segmented tab
   query.status = filters.status === '__all' ? undefined : (filters.status as any)
   currentStatus.value = filters.status === '__all' ? 'ALL' : filters.status
+  // 状态筛选面板切换时清除 system_flag（待补全 tab 专属，互斥）
+  query.system_flag = undefined
   // TODO: source / subSource / year / grade / semester / region 待后端支持后映射
   page.value = 1
   fetchList()
@@ -1230,6 +1359,7 @@ async function fetchList() {
       const meta = (detail?.metadata ?? {}) as Record<string, unknown>
       const province = String(meta.region_province ?? '').trim()
       const city = String(meta.region_city ?? '').trim()
+      const rawFlags = (meta.system_flags ?? {}) as Record<string, unknown>
       return {
         id: s.id,
         stem: s.stem,
@@ -1252,6 +1382,11 @@ async function fetchList() {
         correctAnswer: parseAnswer(detail?.correct_answer),
         analysis: detail?.analysis ?? null,
         knowledgeNodes: detail?.knowledge_nodes ?? [],
+        systemFlags: {
+          pending_answer: !!rawFlags.pending_answer,
+          missing_analysis: !!rawFlags.missing_analysis,
+          no_analysis_needed: !!rawFlags.no_analysis_needed,
+        },
       }
     })
   } catch (e: any) {
@@ -1286,6 +1421,72 @@ function toggleBasket(id: string) {
   }
 }
 
+// ===== 批量提交审核（T3-7）=====
+// 多选：卡片头部 Checkbox，选中 ID 集合
+const selectedIds = ref<Set<string>>(new Set())
+const batchSubmitting = ref(false)
+const showBatchResult = ref(false)
+const batchResult = ref<{
+  total: number
+  succeeded: number
+  failed: number
+  results: Array<{ id: string; status: 'success' | 'failed'; code?: string; missing?: string[] }>
+} | null>(null)
+
+function toggleSelect(id: string) {
+  const next = new Set(selectedIds.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  selectedIds.value = next
+}
+
+function clearSelection() {
+  selectedIds.value = new Set()
+}
+
+// 批量提交审核：调用后端 batch-submit 接口，展示结构化结果 Modal
+async function handleBatchSubmit() {
+  if (selectedIds.value.size === 0 || batchSubmitting.value) return
+  batchSubmitting.value = true
+  try {
+    const res = await questionApi.batchSubmit(Array.from(selectedIds.value))
+    batchResult.value = res
+    showBatchResult.value = true
+  } catch (e: any) {
+    toast.error(e.response?.data?.error || e.response?.data?.message || e.message || '批量提交失败')
+  } finally {
+    batchSubmitting.value = false
+  }
+}
+
+// 错误代码 → 中文描述
+function batchErrorCodeLabel(code?: string): string {
+  if (!code) return '未知错误'
+  if (code === 'ERR_ANSWER_INCOMPLETE') return '答案不完整'
+  if (code === 'ERR_OPTIONS_INCOMPLETE') return '选项不完整'
+  if (code === 'ERR_ANALYSIS_INCOMPLETE') return '解析不完整'
+  return code
+}
+
+// 跳转到第一个失败题目的编辑页
+function goToFirstFailed() {
+  const failed = batchResult.value?.results.find(r => r.status === 'failed')
+  if (failed) {
+    showBatchResult.value = false
+    router.push(`/questions/${failed.id}/edit`)
+  }
+}
+
+// 关闭结果弹窗：刷新列表 + 计数 + 清空选择
+function closeBatchResult() {
+  showBatchResult.value = false
+  batchResult.value = null
+  clearSelection()
+  fetchList()
+  fetchIncompleteCount()
+  fetchPendingCount()
+}
+
 // 左侧导航节点变化已由 handleKnowledgeNodeSelect 处理，无需 watch
 
 watch(() => space.currentSpaceId, (newId) => {
@@ -1297,6 +1498,7 @@ watch(() => space.currentSpaceId, (newId) => {
 onMounted(() => {
   fetchList()
   fetchPendingCount()
+  fetchIncompleteCount()
 })
 
 // keep-alive 缓存组件从详情页返回时触发 —— onMounted 不会再次执行
@@ -1306,6 +1508,7 @@ onActivated(() => {
   detailCache.clear()
   fetchList()
   fetchPendingCount()
+  fetchIncompleteCount()
 })
 
 onBeforeUnmount(() => {
@@ -2180,6 +2383,38 @@ onBeforeUnmount(() => {
   color: var(--text-secondary);
 }
 
+/* 系统标记徽标：答案/解析待补全（淡底色 + 深色文字，极简风格） */
+.q-flag-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 7px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  font-weight: 550;
+  line-height: 1.5;
+}
+
+.q-flag--answer {
+  background: rgba(249, 115, 22, 0.1); /* orange-500/10 */
+  color: #c2410c; /* orange-700 */
+}
+
+.q-flag--analysis {
+  background: rgba(234, 179, 8, 0.12); /* yellow-500/12 */
+  color: #a16207; /* yellow-700 */
+}
+
+[data-theme='dark'] .q-flag--answer {
+  background: rgba(251, 146, 60, 0.16);
+  color: #fdba74;
+}
+
+[data-theme='dark'] .q-flag--analysis {
+  background: rgba(250, 204, 21, 0.16);
+  color: #fde047;
+}
+
 .q-dot {
   display: inline-block;
   width: 6px;
@@ -2688,6 +2923,193 @@ onBeforeUnmount(() => {
 .q-analysis-clip {
   min-height: 0;
   overflow: hidden;
+}
+
+/* ===== 批量提交审核按钮 ===== */
+.ql-batch-btn {
+  border: none;
+}
+
+.ql-batch-btn:active {
+  transform: scale(0.97);
+}
+
+.ql-batch-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.25);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+/* ===== 卡片多选 Checkbox ===== */
+.q-select-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 2px;
+}
+
+.q-select-check input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  accent-color: var(--accent, #007aff);
+  border-radius: 4px;
+}
+
+/* ===== 批量提交结果 Modal 内容 ===== */
+.batch-result-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 4px 0;
+}
+
+.batch-summary-row {
+  display: flex;
+  gap: 12px;
+}
+
+.batch-summary-item {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 14px 12px;
+  border-radius: 10px;
+  background: var(--bg-input);
+}
+
+.batch-summary-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.batch-summary-value {
+  font-size: 24px;
+  font-weight: 800;
+  color: var(--text-primary);
+  letter-spacing: -0.02em;
+}
+
+.batch-summary--success {
+  background: rgba(16, 185, 129, 0.08);
+}
+
+.batch-summary--success .batch-summary-value {
+  color: #10b981;
+}
+
+.batch-summary--failed {
+  background: rgba(239, 68, 68, 0.08);
+}
+
+.batch-summary--failed .batch-summary-value {
+  color: #ef4444;
+}
+
+.batch-result-list {
+  max-height: 320px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 2px;
+}
+
+.batch-result-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--bg-input);
+}
+
+.batch-result-item.is-failed {
+  background: rgba(239, 68, 68, 0.05);
+}
+
+.batch-result-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.batch-result-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+
+.batch-result-id {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-family: monospace;
+  word-break: break-all;
+}
+
+.batch-result-error {
+  font-size: 12px;
+  font-weight: 550;
+  color: #ef4444;
+}
+
+.batch-result-missing {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.batch-result-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.batch-action-btn {
+  padding: 8px 18px;
+  border-radius: 9999px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  border: none;
+}
+
+.batch-action--primary {
+  background: var(--accent, #007aff);
+  color: #fff;
+}
+
+.batch-action--primary:hover {
+  opacity: 0.9;
+}
+
+.batch-action--ghost {
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+}
+
+.batch-action--ghost:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
 }
 
 /* ===== Responsive ===== */

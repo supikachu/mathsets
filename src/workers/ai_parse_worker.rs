@@ -12,7 +12,7 @@ use crate::handlers::ai::{post_process_batch, resolve_ai_config, resolve_ocr_con
 use crate::handlers::ai_tagging::{match_knowledge_nodes, KnowledgeNodeMatch};
 use crate::handlers::questions::{save_version, upsert_ai_knowledge_nodes};
 use crate::models::ai_task::{AiParseTask, AiTaskSourceType};
-use crate::models::question::{Difficulty, QuestionStatus, QuestionType};
+use crate::models::question::{refresh_system_flags, Difficulty, QuestionStatus, QuestionType};
 use crate::AppState;
 
 // ---------------------------------------------------------------------------
@@ -468,11 +468,12 @@ async fn save_parsed_question(
         .options
         .as_ref()
         .map(|opts| serde_json::to_value(opts).unwrap_or(serde_json::Value::Null));
-    // Option<ParsedAnswer>：None → null，Some → 枚举 JSON
-    // （post_process 已确保 None 被填充为空默认值，此处兜底防 panic）
-    let correct_answer_json = match &parsed.correct_answer {
-        Some(a) => serde_json::to_value(a).map_err(|e| format!("序列化 correct_answer 失败: {e}"))?,
-        None => serde_json::Value::Null,
+    // Option<ParsedAnswer>：None → JSON null 落库（非 SQL NULL），自动触发 pending_answer
+    let correct_answer_opt: Option<serde_json::Value> = match &parsed.correct_answer {
+        Some(a) => Some(
+            serde_json::to_value(a).map_err(|e| format!("序列化 correct_answer 失败: {e}"))?,
+        ),
+        None => None,
     };
 
     // analysis 拼接：项目约定用 \n\n---\n\n 分隔多解法（前端反向 split）
@@ -488,6 +489,21 @@ async fn save_parsed_question(
                 .join("\n\n---\n\n"),
         )
     };
+
+    // ── AI 异常降级 ──
+    // stem 兜底：AI 连题干都未提取出（全黑/乱码图片）时填入占位符，
+    // 避免空 stem 影响后续审阅（NOT NULL 不违约，但空 stem 无业务价值）
+    let stem = if parsed.stem.trim().is_empty() {
+        tracing::warn!("AI 提取题干失败，填入占位符等待人工补充");
+        "[AI提取题干失败，请老师人工补充]".to_string()
+    } else {
+        parsed.stem.clone()
+    };
+
+    // ── 异步补全：根据 AI 提取结果刷新 system_flags ──
+    // correct_answer 为 None → pending_answer=true；analysis 为空 → missing_analysis=true
+    let mut metadata = serde_json::json!({});
+    refresh_system_flags(&mut metadata, &correct_answer_opt, &analysis_str);
 
     // 4. 知识点模糊匹配（B3 修复：批量录题不丢失知识点关联）
     let (ai_matches, primary_node_id): (Vec<KnowledgeNodeMatch>, Option<Uuid>) =
@@ -551,14 +567,14 @@ async fn save_parsed_question(
         "#,
     )
     .bind(id)
-    .bind(&parsed.stem)
+    .bind(&stem)
     .bind(question_type)
     .bind(&options_json)
-    .bind(&correct_answer_json)
+    .bind(correct_answer_opt.as_ref().unwrap_or(&serde_json::Value::Null))
     .bind(&analysis_str)
     .bind(difficulty)
     .bind(5)
-    .bind(None::<serde_json::Value>)
+    .bind(&metadata)
     .bind(QuestionStatus::Draft)
     .bind(space_id)
     .bind(creator_id)

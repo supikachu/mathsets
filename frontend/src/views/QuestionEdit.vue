@@ -142,6 +142,10 @@
                   <button type="button" class="seg-btn" :class="{ active: form.sub_type === 'multi' }" @click="switchChoiceMode('multi')">多选</button>
                 </div>
               </div>
+              <!-- 答案待补全提示：仅编辑已有题目且答案为空时显示 -->
+              <div v-if="!isNew && !hasCorrectAnswer && !isLocked" class="answer-pending-hint">
+                📝 答案待补全 — 请补充参考答案后提交审核
+              </div>
               <!-- 选择题选项 -->
               <EditFormChoice
                 v-if="form.question_type === 'choice'"
@@ -197,6 +201,10 @@
               <button class="add-solution-btn" @click="addSolution">
                 <AppIcon name="plus" :size="15" /> 添加新解法
               </button>
+              <label class="no-analysis-check">
+                <input type="checkbox" v-model="noAnalysisNeeded" />
+                <span>无需解析（如纯计算题/默写题）</span>
+              </label>
             </section>
 
             <!-- 高级设置 -->
@@ -585,6 +593,9 @@ const hasCorrectAnswer = computed(() => {
   return !!form.correctAnswer
 })
 
+// 无需解析标记（如纯计算题/默写题）：保存时写入 metadata.system_flags.no_analysis_needed
+const noAnalysisNeeded = ref(false)
+
 function switchChoiceMode(mode: 'single' | 'multi') {
   if (mode === 'multi') {
     form.sub_type = 'multi'
@@ -787,6 +798,8 @@ function buildPayload() {
   if (form.sub_source_type) metadata.sub_source_type = form.sub_source_type
   metadata.stage = form.stage
   metadata.subject = form.subject
+  // 异步补全机制：无需解析标记写入 metadata.system_flags.no_analysis_needed
+  metadata.system_flags = { no_analysis_needed: noAnalysisNeeded.value }
 
   // 三组节点 ID 合并去重为统一 knowledge_node_ids（后端无感知前端拆分）
   // pendingNodes：树分类元数据加载失败时暂存的节点，原样并入——不丢数据、不错分
@@ -883,7 +896,12 @@ async function persistFormImages() {
 
 async function handleSave(submitAfter: boolean) {
   if (!form.stem.trim()) { toast.warning('请输入题干'); return }
-  if (form.question_type === 'choice' && !hasCorrectAnswer.value) { toast.warning('请选择正确答案'); return }
+  // 异步补全机制：保存草稿允许答案/解析为空（后端 system_flags.pending_answer 自动标记）
+  // 仅在「提交审核」动作时才进行非空校验，由后端校验门兜底（ERR_ANSWER_INCOMPLETE 等）
+  if (submitAfter && form.question_type === 'choice' && !hasCorrectAnswer.value) {
+    toast.warning('请选择正确答案')
+    return
+  }
 
   // 已发布题目纠错：提交前必须用户确认，提示修改将重新进入审核
   if (isPublished.value) {
@@ -1205,6 +1223,9 @@ async function loadQuestion() {
     form.sub_source_type = meta.sub_source_type || ''
     form.stage = meta.stage === 'junior' ? 'junior' : 'senior'
     form.subject = meta.subject === 'physics' ? 'physics' : 'math'
+    // 异步补全机制：回填无需解析标记
+    const rawFlags = (meta.system_flags ?? {}) as Record<string, any>
+    noAnalysisNeeded.value = !!rawFlags.no_analysis_needed
     const raw = d.analysis || ''
     if (raw.includes('\n\n---\n\n')) {
       form.solutions = raw.split(/\n\n---\n\n/)
@@ -2054,6 +2075,24 @@ async function handleCropped(blob: Blob) {
   gap: 8px;
 }
 
+/* 答案待补全提示条 */
+.answer-pending-hint {
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  background: #fffbeb; /* amber-50 */
+  border: 1px solid #fde68a; /* amber-200 */
+  color: #b45309; /* amber-700 */
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+
+[data-theme='dark'] .answer-pending-hint {
+  background: rgba(251, 191, 36, 0.08);
+  border-color: rgba(251, 191, 36, 0.25);
+  color: #fbbf24;
+}
+
 .section-label {
   display: flex;
   align-items: center;
@@ -2276,6 +2315,27 @@ async function handleCropped(blob: Blob) {
   border-color: var(--accent);
   color: var(--accent);
   background: var(--accent-light);
+}
+
+/* 无需解析 Checkbox */
+.no-analysis-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+  margin-top: 4px;
+}
+
+.no-analysis-check input[type='checkbox'] {
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+  accent-color: var(--accent, #007aff);
+  border-radius: 4px;
 }
 
 /* ============ 高级折叠面板 ============ */
