@@ -331,13 +331,18 @@
       </div>
     </AppModal>
 
-    <!-- 图片调节浮窗（编辑模式专属：宽度/对齐/裁剪） -->
+    <!-- 图片调节浮窗（编辑模式专属：宽度/对齐/裁剪 + 并排图组操作） -->
     <ImageAdjustmentPanel
       :visible="imageAdjustPanelVisible"
       :target="imageAdjustTarget"
       :image-data="imageAdjustData"
+      :in-img-row="imageAdjustSource?.inImgRow ?? false"
+      :row-align="imageAdjustSource?.rowAlign"
       @update-config="handleUpdateConfig"
       @crop-request="handleCropRequest"
+      @add-row-right="handleAddRowRight"
+      @remove-from-row="handleRemoveFromRow"
+      @update-row-align="handleUpdateRowAlign"
       @close="imageAdjustPanelVisible = false"
     />
 
@@ -351,7 +356,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick, defineAsyncComponent } from 'vue'
 import { useRoute, useRouter, onBeforeRouteLeave } from 'vue-router'
 import { questionApi, spaceApi, tagsApi, paperApi, type SpaceMemberInfo, type Tag, type ParsedQuestion } from '@/api/client'
 import { AppButton, AppBadge, AppModal, AppConfirm, AppIcon } from '@/components/ui'
@@ -359,20 +364,26 @@ import { useToast } from '@/composables/useToast'
 import { getKnowledgeTreeList } from '@/composables/useKnowledgeTreeCache'
 import { useSpaceStore } from '@/stores/space'
 import { useAuthStore } from '@/stores/auth'
-import { hasUnfinishedSnapshot } from '@/utils/batchSnapshot'
+import { hasUnfinishedSnapshot, type BatchSnapshot } from '@/utils/batchSnapshot'
 import { processMarkdownImages, type UploadCache } from '@/utils/markdownImages'
 import { uploadsApi } from '@/api/client'
-import ImageAdjustmentPanel from '@/components/ImageAdjustmentPanel.vue'
-import CropperDialog from '@/components/CropperDialog.vue'
 import type { ImageConfig, ImageClickPayload } from '@/components/LatexRender.vue'
 
-// Imports of child components
-import EditFormChoice from './edit/components/EditFormChoice.vue'
-import EditFormFill from './edit/components/EditFormFill.vue'
-import EditFormSolution from './edit/components/EditFormSolution.vue'
+// 常驻组件（首屏即需）
 import LivePreviewCard from './edit/components/LivePreviewCard.vue'
 import AttributeSidePanel from './edit/components/AttributeSidePanel.vue'
-import AiRecognizeDialog from './edit/components/AiRecognizeDialog.vue'
+
+// 懒加载组件（按需加载，拆分独立 chunk 以缩减主包体积）
+// - EditFormChoice/Fill/Solution：按 question_type 互斥渲染，三选一
+// - ImageAdjustmentPanel：仅在用户点击图片时显示
+// - CropperDialog：仅在用户触发裁剪时显示（含 cropperjs ~50KB）
+// - AiRecognizeDialog：仅在用户开启 AI 识别时显示（含 pdfjs-dist ~300KB）
+const EditFormChoice = defineAsyncComponent(() => import('./edit/components/EditFormChoice.vue'))
+const EditFormFill = defineAsyncComponent(() => import('./edit/components/EditFormFill.vue'))
+const EditFormSolution = defineAsyncComponent(() => import('./edit/components/EditFormSolution.vue'))
+const ImageAdjustmentPanel = defineAsyncComponent(() => import('@/components/ImageAdjustmentPanel.vue'))
+const CropperDialog = defineAsyncComponent(() => import('@/components/CropperDialog.vue'))
+const AiRecognizeDialog = defineAsyncComponent(() => import('./edit/components/AiRecognizeDialog.vue'))
 
 const route = useRoute()
 const router = useRouter()
@@ -399,6 +410,10 @@ const aiHighlightIds = ref<string[]>([])
 const selectionCache = new Map<string, { chapter: string[]; knowledge: string[]; method: string[] }>()
 const applyingAiResult = ref(false)
 const aiDialogRef = ref<InstanceType<typeof AiRecognizeDialog> | null>(null)
+// AiRecognizeDialog 异步加载前的待恢复快照：
+// onMounted 时若异步组件尚未挂载，aiDialogRef.value 为 null，
+// 缓存快照并 watch aiDialogRef 变化，组件就绪后补发 triggerSnapshotRestore
+const pendingSnapshotRestore = ref<BatchSnapshot | null>(null)
 
 // ===== 批量录题工作台模式 =====
 // questionList 存放每道题的快照（plain object），activeIndex 指向当前编辑的题目
@@ -1966,7 +1981,20 @@ onMounted(() => {
 onMounted(async () => {
   const snapshot = await hasUnfinishedSnapshot()
   if (snapshot) {
-    aiDialogRef.value?.triggerSnapshotRestore(snapshot)
+    if (aiDialogRef.value) {
+      aiDialogRef.value.triggerSnapshotRestore(snapshot)
+    } else {
+      // 异步组件尚未挂载，缓存等待 watch 触发
+      pendingSnapshotRestore.value = snapshot
+    }
+  }
+})
+
+// AiRecognizeDialog 异步加载完成后补发快照恢复
+watch(aiDialogRef, (inst) => {
+  if (inst && pendingSnapshotRestore.value) {
+    inst.triggerSnapshotRestore(pendingSnapshotRestore.value)
+    pendingSnapshotRestore.value = null
   }
 })
 
@@ -2002,10 +2030,13 @@ const imageAdjustTarget = ref<HTMLElement | null>(null)
 const imageAdjustData = ref<{ url: string; mdId: string; config: ImageConfig } | null>(null)
 // 图片来源上下文：记录点击的图片属于哪个字段（stem/options[i]/solutions[i]）
 // 通过 DOM 反查 .paper-stem / .paper-opt / .paper-answer-block 确定，用于回写 Markdown
-type ImageSource =
-  | { field: 'stem' }
-  | { field: 'options'; index: number }
-  | { field: 'solutions' }  // 遍历所有 solutions（URL 唯一不会误替换）
+// inImgRow / rowAlign：通过 DOM 反查 .latex-img-row 确定，用于 ImageAdjustmentPanel 显示「图组对齐」「移出并排」
+type ImageSource = {
+  field: 'stem' | 'options' | 'solutions'
+  index?: number  // 仅 options 使用
+  inImgRow: boolean
+  rowAlign?: 'left' | 'center' | 'right'
+}
 const imageAdjustSource = ref<ImageSource | null>(null)
 const cropperDialogVisible = ref(false)
 const cropperImageUrl = ref('')
@@ -2014,32 +2045,122 @@ const cropperProcessing = ref(false)
 /** 处理 LivePreviewCard 转发的图片点击事件：打开调节面板 */
 function handleImageClick(payload: ImageClickPayload) {
   imageAdjustTarget.value = payload.target
-  imageAdjustData.value = {
-    url: payload.url,
-    mdId: payload.mdId,
-    config: payload.config,
-  }
-
-  // DOM 反查图片来源：通过 closest() 找到图片所属的预览容器，确定回写目标字段
-  // LivePreviewCard 的 DOM 结构：.paper-stem / .paper-opt / .paper-answer-block
   const el = payload.target as HTMLElement
+
+  // ⚠️ URL 归一化：LatexRender 渲染时通过 resolveImageUrl() 给 /uploads/... 加上
+  // VITE_API_BASE_URL 前缀（如 http://localhost:3000/uploads/x.png），而 Markdown
+  // 源码里是原始相对路径（/uploads/x.png）。若直接用 DOM src 与源码 URL 严格相等
+  // 比较，findImgRowFenceByImgUrl / updateImageConfigInMarkdown 全部失配，
+  // 表现为「点击图组对齐按钮毫无反应」。
+  // 这里剥离 base 前缀，还原为 Markdown 中的相对路径形式，确保后续回写匹配成功。
+  const normalizedUrl = normalizeImageUrl(payload.url)
+
+  // 1) DOM 反查图片来源字段：通过 closest() 找到图片所属的预览容器
+  //    LivePreviewCard 的 DOM 结构：.paper-stem / .paper-opt / .paper-answer-block
+  let field: 'stem' | 'options' | 'solutions' = 'stem'
+  let index: number | undefined
   if (el.closest('.paper-stem')) {
-    imageAdjustSource.value = { field: 'stem' }
+    field = 'stem'
   } else if (el.closest('.paper-opt')) {
     // 找选项索引：在兄弟 .paper-opt 中的位置
     const optEl = el.closest('.paper-opt') as Element
     const siblings = Array.from(optEl.parentElement?.querySelectorAll(':scope > .paper-opt') || [])
     const idx = siblings.indexOf(optEl)
-    imageAdjustSource.value = { field: 'options', index: idx >= 0 ? idx : 0 }
+    field = 'options'
+    index = idx >= 0 ? idx : 0
   } else if (el.closest('.paper-answer-block')) {
     // 解析区：遍历所有 solutions 做 URL 匹配替换（URL 唯一不会误替换）
-    imageAdjustSource.value = { field: 'solutions' }
-  } else {
-    // 兜底：默认回写到 stem
-    imageAdjustSource.value = { field: 'stem' }
+    field = 'solutions'
   }
 
+  // 2) 检测图片是否在 :::img-row 围栏渲染出的 .latex-img-row 容器内
+  const rowEl = el.closest('.latex-img-row') as HTMLElement | null
+  const inImgRow = !!rowEl
+
+  // 3) 数据读取：严格区分「容器级属性」vs「个体级属性」
+  //    图组内时，align 仅作用于 :::img-row {...} 容器，单图只能有 width/crop
+  let rowAlign: 'left' | 'center' | 'right' | undefined
+  let effectiveConfig: ImageConfig = { ...payload.config }
+
+  if (inImgRow) {
+    // 围栏对齐：优先从 Markdown 源码 :::img-row {...} 头部解析（源真）
+    rowAlign = findImgRowAlignForUrl(field, index, normalizedUrl)
+    // DOM justify-content 兜底（应对源码尚未持久化的临时态，如刚切换未保存）
+    if (!rowAlign && rowEl) {
+      rowAlign = justifyContentToAlign(rowEl.style.justifyContent)
+    }
+    // 强制忽略单图大括号内可能残留的 align 属性，杜绝数据流冲突
+    effectiveConfig.align = undefined
+  }
+
+  imageAdjustData.value = {
+    url: normalizedUrl,
+    mdId: payload.mdId,
+    config: effectiveConfig,
+  }
+  imageAdjustSource.value = { field, index, inImgRow, rowAlign }
   imageAdjustPanelVisible.value = true
+}
+
+/**
+ * 将图片 URL 归一化为 Markdown 源码中的原始形式。
+ *
+ * LatexRender 渲染时通过 resolveImageUrl() 给 /uploads/... 加上 VITE_API_BASE_URL
+ * 前缀（如 http://localhost:3000/uploads/x.png），而 Markdown 源码里是原始相对路径
+ * （/uploads/x.png）。回写匹配前必须剥离 base 前缀，否则严格相等比较会失配。
+ *
+ * 兼容：blob:/data:/绝对 https URL 不受影响（resolveImageUrl 未改动它们）。
+ */
+function normalizeImageUrl(url: string): string {
+  let u = url.trim()
+  const base = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
+  if (base && u.startsWith(base)) {
+    u = u.slice(base.length)
+    if (u && !u.startsWith('/')) u = '/' + u
+  }
+  return u
+}
+
+/**
+ * 从字段对应的 Markdown 源码中，查找 URL 所在 :::img-row 围栏的 align 配置。
+ * 用于 handleImageClick 读取容器级对齐（源真），未找到返回 undefined（由调用方默认）。
+ */
+function findImgRowAlignForUrl(
+  field: 'stem' | 'options' | 'solutions',
+  index: number | undefined,
+  url: string,
+): 'left' | 'center' | 'right' | undefined {
+  const mds: string[] = []
+  if (field === 'stem') {
+    mds.push(form.stem)
+  } else if (field === 'options' && index != null && form.options[index]) {
+    mds.push(form.options[index].content)
+  } else if (field === 'solutions') {
+    mds.push(...form.solutions)
+  }
+  for (const md of mds) {
+    const fence = findImgRowFenceByImgUrl(md, url)
+    if (fence) {
+      return parseAlignFromFenceConfig(fence.configStr)
+    }
+  }
+  return undefined
+}
+
+/** 从 :::img-row {...} 配置字符串中提取 align（未配置返回 undefined） */
+function parseAlignFromFenceConfig(configStr: string): 'left' | 'center' | 'right' | undefined {
+  if (!configStr) return undefined
+  const m = configStr.match(/align:\s*(left|center|right)/i)
+  return m ? m[1].toLowerCase() as 'left' | 'center' | 'right' : undefined
+}
+
+/** 将 CSS justify-content 值映射为围栏 {align} 配置值 */
+function justifyContentToAlign(j: string): 'left' | 'center' | 'right' | undefined {
+  if (!j) return undefined
+  if (j.includes('flex-start')) return 'left'
+  if (j.includes('flex-end')) return 'right'
+  if (j.includes('center')) return 'center'
+  return undefined
 }
 
 /**
@@ -2087,13 +2208,258 @@ function applyMarkdownUpdate(updater: (md: string) => string): boolean {
 function handleUpdateConfig({ configString }: { mdId: string; configString: string }) {
   if (!imageAdjustData.value) return
   const url = imageAdjustData.value.url
-  applyMarkdownUpdate(md => updateImageConfigInMarkdown(md, url, configString))
+  const src = imageAdjustSource.value
+  // 图组内：单图属性隔离 — 强制剔除 configString 中的 align 残留
+  // align 仅作用于 :::img-row 容器头部，由 handleUpdateRowAlign 单独管理
+  const cleanedConfigString = src?.inImgRow
+    ? stripAlignFromImgConfig(configString)
+    : configString
+  applyMarkdownUpdate(md => updateImageConfigInMarkdown(md, url, cleanedConfigString))
 }
 
 /** 调节面板触发裁剪：打开 CropperDialog */
 function handleCropRequest({ url }: { url: string; mdId: string }) {
   cropperImageUrl.value = url
   cropperDialogVisible.value = true
+}
+
+// ============================================================
+// :::img-row 围栏可视化操作（Phase 2）
+// ------------------------------------------------------------
+// 在 Markdown 文本中按 URL 定位围栏，执行「右侧添加并排图」「移出并排」
+// 「围栏整体对齐 {align} 设置」三类补丁操作。
+// 正则与 LatexRender.processImgRow 保持一致，避免两端漂移。
+// ============================================================
+
+interface ImgRowFenceMatch {
+  /** 围栏 :::img-row...::: 在 md 中的起始偏移（不含前导 \n） */
+  fenceStart: number
+  /** 围栏结束偏移（指向 ::: 后的下一个字符，含尾部 \n 若有） */
+  fenceEnd: number
+  /** 围栏的 {config} 内容（不含大括号），如 'align:left' 或 '' */
+  configStr: string
+  /** 围栏内部文本（不含 :::img-row 和 :::） */
+  inner: string
+  /** 图片行在 inner 中的起始偏移 */
+  imgLineOffset: number
+  /** 图片行长度（不含 \n） */
+  imgLineLength: number
+  /** 图片行完整文本（含 {} config） */
+  imgLineText: string
+}
+
+/**
+ * 在 :::img-row ... ::: 围栏中查找包含指定 URL 图片的位置。
+ * 匹配规则与 LatexRender.processImgRow 严格一致，避免两端漂移。
+ * 返回围栏匹配信息；若 URL 不在任何围栏内，返回 null。
+ */
+function findImgRowFenceByImgUrl(md: string, url: string): ImgRowFenceMatch | null {
+  // 正则与 LatexRender.processImgRow 保持一致：尾部用 \n? 宽容匹配，
+  // 兼容历史回写可能丢失的尾部 \n（::: 后直接接其他文本的损坏结构）。
+  // 此前用 (\n|$) 过于严格，一旦首次回写吞掉尾部 \n，二次匹配即静默失败。
+  const rowRegex = /(^|\n):::img-row(?:\s*\{([^}]*)\})?\s*\n([\s\S]*?)\n:::\n?/g
+  let m: RegExpExecArray | null
+  while ((m = rowRegex.exec(md)) !== null) {
+    const leadingNl = m[1]
+    const configStr = m[2] || ''
+    const inner = m[3]
+
+    const fenceStart = m.index + leadingNl.length
+    // fenceEnd 指向 ::: 末尾（不含尾部 \n）：
+    // buildImgRowFence 返回的字符串不带尾部 \n，若 fenceEnd 把原始 \n 算进替换范围，
+    // 替换后会吞掉 \n，导致 ":::\n后续" 变成 ":::后续"，下次正则 \n::: 匹配失败。
+    const matchBody = m[0].slice(leadingNl.length)
+    const trailingNlLen = matchBody.endsWith('\n') ? 1 : 0
+    const fenceEnd = fenceStart + matchBody.length - trailingNlLen
+
+    // 在 inner 中按行扫描，匹配 URL 严格相等的图片行
+    const lines = inner.split('\n')
+    let offset = 0
+    for (const line of lines) {
+      const trimmed = line.trim()
+      const imgMatch = trimmed.match(/^!\[([^\]]*)\]\(([^)]+)\)(?:\{([^}]*)\})?$/)
+      if (imgMatch && imgMatch[2].trim() === url.trim()) {
+        return {
+          fenceStart,
+          fenceEnd,
+          configStr,
+          inner,
+          imgLineOffset: offset,
+          imgLineLength: line.length,
+          imgLineText: line,
+        }
+      }
+      offset += line.length + 1 // +1 for \n
+    }
+  }
+  return null
+}
+
+/** 构造 :::img-row {config}\n<inner>\n::: 围栏字符串 */
+function buildImgRowFence(configStr: string, inner: string): string {
+  const cfg = configStr.trim() ? ` {${configStr.trim()}}` : ''
+  return `:::img-row${cfg}\n${inner}\n:::`
+}
+
+/**
+ * 在 URL 对应的图片右侧添加并排图：
+ *   - 若图片已在 :::img-row 围栏内：在图片行后插入新图片行
+ *   - 若图片是独立图片（含 {config}）：用 :::img-row 包裹原图 + 新图
+ *   - 若图片不存在：原样返回
+ */
+function addImgRowNeighbor(md: string, url: string, newImgMd: string): string {
+  const fence = findImgRowFenceByImgUrl(md, url)
+  if (fence) {
+    // 在 inner 的图片行后插入新行（保留原 inner 的换行结构）
+    const insertPos = fence.imgLineOffset + fence.imgLineLength
+    const newInner =
+      fence.inner.slice(0, insertPos) + '\n' + newImgMd + fence.inner.slice(insertPos)
+    const newFence = buildImgRowFence(fence.configStr, newInner)
+    return md.slice(0, fence.fenceStart) + newFence + md.slice(fence.fenceEnd)
+  }
+  // 独立图片：替换原图片 Markdown 为围栏（含原图 + 新图）
+  const imgRegex = /!\[([^\]]*)\]\(([^)]+)\)(?:\{[^}]*\})?/g
+  let imgMatch: RegExpExecArray | null
+  while ((imgMatch = imgRegex.exec(md)) !== null) {
+    if (imgMatch[2].trim() === url.trim()) {
+      const start = imgMatch.index
+      const end = start + imgMatch[0].length
+      const newFence = buildImgRowFence('', imgMatch[0] + '\n' + newImgMd)
+      return md.slice(0, start) + newFence + md.slice(end)
+    }
+  }
+  return md
+}
+
+/**
+ * 将 URL 对应的图片移出 :::img-row 围栏：
+ *   - 若图片在围栏内：从 inner 中删除该图片行，并将其作为独立图片放在围栏后
+ *   - 若围栏移除后仅剩 0 或 1 张图：拆掉围栏（保留剩余图片作为独立行）
+ *   - 若图片不在围栏内：原样返回
+ */
+function removeImgFromRow(md: string, url: string): string {
+  const fence = findImgRowFenceByImgUrl(md, url)
+  if (!fence) return md
+
+  const removedImgMd = fence.imgLineText.trim()
+  const lines = fence.inner.split('\n')
+  // 过滤掉 URL 匹配的图片行（保留图注等其他行）
+  const remainingLines = lines.filter(line => {
+    const trimmed = line.trim()
+    const imgMatch = trimmed.match(/^!\[([^\]]*)\]\(([^)]+)\)(?:\{([^}]*)\})?$/)
+    return !(imgMatch && imgMatch[2].trim() === url.trim())
+  })
+
+  // 剩余图片行数（仅统计 ![ 开头的行）
+  const remainingImgs = remainingLines.filter(line => /^!\[/.test(line.trim()))
+
+  let replacement: string
+  if (remainingImgs.length === 0) {
+    // 围栏空了：整个围栏替换为被移出的独立图片
+    replacement = removedImgMd
+  } else if (remainingImgs.length === 1) {
+    // 仅剩 1 张图：图组无意义，拆掉围栏，保留独立图片 + 被移出图片
+    const remainingImgLine = remainingImgs[0].trim()
+    replacement = remainingImgLine + '\n\n' + removedImgMd
+  } else {
+    // 重建围栏（剩余 ≥2 图），被移出图片放在围栏后
+    const newInner = remainingLines.join('\n')
+    const newFence = buildImgRowFence(fence.configStr, newInner)
+    replacement = newFence + '\n\n' + removedImgMd
+  }
+
+  return md.slice(0, fence.fenceStart) + replacement + md.slice(fence.fenceEnd)
+}
+
+/**
+ * 从图片配置字符串中剔除 align 属性，仅保留 width 等个体级属性。
+ * 例：'width:100, align:left' → 'width:100'
+ *     'align:center, width:200' → 'width:200'
+ *     'align:left' → ''（空字符串，调用方据此移除 {}）
+ */
+function stripAlignFromImgConfig(configStr: string): string {
+  if (!configStr) return ''
+  const parts = configStr.split(',').map(s => s.trim()).filter(Boolean)
+  const filtered = parts.filter(p => !/^align\s*:/i.test(p))
+  return filtered.join(', ')
+}
+
+/**
+ * 遍历 inner 中的所有 ![alt](url){config} 语法，剔除 config 中的 align 残留。
+ * 不匹配的行（无 {...} 或非图片行）原样返回。
+ */
+function stripAlignFromAllImagesInInner(inner: string): string {
+  return inner.replace(
+    /(!\[[^\]]*\]\([^)]+\))\{([^}]*)\}/g,
+    (match, imgPrefix: string, cfg: string) => {
+      const cleaned = stripAlignFromImgConfig(cfg)
+      return cleaned ? `${imgPrefix}{${cleaned}}` : imgPrefix
+    }
+  )
+}
+
+/**
+ * 更新 URL 所在 :::img-row 围栏的整体 align 配置，并深度清洗围栏内单图残留的 align。
+ *
+ * 不变量维护：align 仅存在于容器头部 :::img-row {align:xxx}，
+ * 围栏内所有单图 {...} 强制剔除 align，杜绝"容器有 align + 单图也有 align"的冲突。
+ *
+ * align=undefined 时清除 align 配置（恢复默认居中）。
+ */
+function updateImgRowAlign(md: string, url: string, align: 'left' | 'center' | 'right' | undefined): string {
+  const fence = findImgRowFenceByImgUrl(md, url)
+  if (!fence) return md
+
+  // 1) 重建容器 configStr（当前仅支持 align）
+  const newConfigStr = align ? `align:${align}` : ''
+  // 2) 深度清洗 inner：剔除所有单图 {...} 中的 align 残留
+  const cleanedInner = stripAlignFromAllImagesInInner(fence.inner)
+  const newFence = buildImgRowFence(newConfigStr, cleanedInner)
+  return md.slice(0, fence.fenceStart) + newFence + md.slice(fence.fenceEnd)
+}
+
+/** 调节面板「右侧添加并排」按钮：打开文件选择器，上传后插入新图行 */
+function handleAddRowRight() {
+  if (!imageAdjustData.value) return
+  const url = imageAdjustData.value.url
+  const input = document.createElement('input')
+  input.type = 'file'
+  input.accept = 'image/png,image/jpeg,image/gif,image/webp'
+  input.onchange = async () => {
+    const file = input.files?.[0]
+    if (!file) return
+    if (file.size > 5 * 1024 * 1024) {
+      toast.error('图片不能超过 5MB')
+      return
+    }
+    const newUrl = URL.createObjectURL(file)
+    const newImgMd = `![配图](${newUrl})`
+    applyMarkdownUpdate(md => addImgRowNeighbor(md, url, newImgMd))
+    // 关闭面板让用户看到结果（旧 DOM 已 detached，面板 target 失效）
+    imageAdjustPanelVisible.value = false
+    toast.success('已添加并排图片')
+  }
+  input.click()
+}
+
+/** 调节面板「移出并排」按钮：从围栏移除当前图片，独立放在围栏后 */
+function handleRemoveFromRow() {
+  if (!imageAdjustData.value) return
+  const url = imageAdjustData.value.url
+  applyMarkdownUpdate(md => removeImgFromRow(md, url))
+  imageAdjustPanelVisible.value = false
+  toast.success('已移出并排图组')
+}
+
+/** 调节面板「图组对齐」按钮：更新围栏 {align} 配置 */
+function handleUpdateRowAlign({ align }: { align: 'left' | 'center' | 'right' }) {
+  if (!imageAdjustData.value) return
+  const url = imageAdjustData.value.url
+  applyMarkdownUpdate(md => updateImgRowAlign(md, url, align))
+  // 同步本地 rowAlign 状态（围栏重新渲染前先更新面板高亮，避免视觉滞后）
+  if (imageAdjustSource.value) {
+    imageAdjustSource.value = { ...imageAdjustSource.value, rowAlign: align }
+  }
 }
 
 /**

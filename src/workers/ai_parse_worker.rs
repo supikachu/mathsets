@@ -191,8 +191,11 @@ async fn execute_text_task(state: &AppState, task: &AiParseTask) -> Result<Uuid,
         .map_err(map_ai_error)?;
 
     // 4. 清洗 & 反序列化
-    let parsed: ParsedQuestion = clean_and_parse(&raw_json)
+    let mut parsed: ParsedQuestion = clean_and_parse(&raw_json)
         .map_err(|e| format!("AI 返回 JSON 解析失败: {e}"))?;
+
+    // 4b. :::img-row 围栏闭合清洗：防 token 截断导致缺 ::: 闭合标记
+    parsed.sanitize_img_row_fences();
 
     // 5. 加载 display_name 与 space_id
     let display_name = load_display_name(state, task.creator_id).await?;

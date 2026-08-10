@@ -74,8 +74,8 @@
           </div>
         </div>
 
-        <!-- 对齐方式：苹果分段控件 -->
-        <div class="setting-row">
+        <!-- 对齐方式：苹果分段控件（仅独立图片显示；并排图组内时被「图组对齐」替代） -->
+        <div v-if="!inImgRow" class="setting-row">
           <label class="row-label">对齐</label>
           <div class="segmented">
             <button
@@ -88,6 +88,45 @@
               <svg v-else-if="opt.value === 'center'" width="14" height="14" viewBox="0 0 14 14"><rect x="1" y="2" width="12" height="2" rx="1" fill="currentColor"/><rect x="3" y="6" width="8" height="2" rx="1" fill="currentColor"/><rect x="2" y="10" width="10" height="2" rx="1" fill="currentColor"/></svg>
               <svg v-else width="14" height="14" viewBox="0 0 14 14"><rect x="1" y="2" width="12" height="2" rx="1" fill="currentColor"/><rect x="5" y="6" width="8" height="2" rx="1" fill="currentColor"/><rect x="3" y="10" width="10" height="2" rx="1" fill="currentColor"/></svg>
               <span class="seg-text">{{ opt.label }}</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- 图组对齐：仅当图片在 :::img-row 围栏内时显示，控制围栏整体 {align} -->
+        <div v-else class="setting-row">
+          <label class="row-label">图组</label>
+          <div class="segmented">
+            <button
+              v-for="opt in alignOptions"
+              :key="opt.value"
+              :class="['seg-item', { active: effectiveRowAlign === opt.value }]"
+              @click="emit('update-row-align', { align: opt.value })"
+            >
+              <svg v-if="opt.value === 'left'" width="14" height="14" viewBox="0 0 14 14"><rect x="1" y="2" width="12" height="2" rx="1" fill="currentColor"/><rect x="1" y="6" width="8" height="2" rx="1" fill="currentColor"/><rect x="1" y="10" width="10" height="2" rx="1" fill="currentColor"/></svg>
+              <svg v-else-if="opt.value === 'center'" width="14" height="14" viewBox="0 0 14 14"><rect x="1" y="2" width="12" height="2" rx="1" fill="currentColor"/><rect x="3" y="6" width="8" height="2" rx="1" fill="currentColor"/><rect x="2" y="10" width="10" height="2" rx="1" fill="currentColor"/></svg>
+              <svg v-else width="14" height="14" viewBox="0 0 14 14"><rect x="1" y="2" width="12" height="2" rx="1" fill="currentColor"/><rect x="5" y="6" width="8" height="2" rx="1" fill="currentColor"/><rect x="3" y="10" width="10" height="2" rx="1" fill="currentColor"/></svg>
+              <span class="seg-text">{{ opt.label }}</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- 并排图组操作：右侧添加 / 移出并排 -->
+        <div class="setting-row img-row-actions">
+          <label class="row-label">并排</label>
+          <div class="control-group">
+            <button class="row-action-btn primary" @click="emit('add-row-right')">
+              <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+                <rect x="0.5" y="2" width="5" height="9" rx="1" stroke="currentColor" stroke-width="1.2" fill="none"/>
+                <rect x="7.5" y="2" width="5" height="9" rx="1" stroke="currentColor" stroke-width="1.2" fill="none" stroke-dasharray="1.5 1.2"/>
+              </svg>
+              <span>右侧添加并排</span>
+            </button>
+            <button v-if="inImgRow" class="row-action-btn ghost" @click="emit('remove-from-row')">
+              <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+                <rect x="0.5" y="2" width="5" height="9" rx="1" stroke="currentColor" stroke-width="1.2" fill="none"/>
+                <path d="M9 2L13 11" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+              </svg>
+              <span>移出并排</span>
             </button>
           </div>
         </div>
@@ -116,6 +155,10 @@ interface Props {
     mdId: string
     config: ImageConfig
   } | null
+  /** 当前图片是否位于 :::img-row 围栏内 */
+  inImgRow?: boolean
+  /** 围栏整体对齐方式（仅 inImgRow=true 时有意义） */
+  rowAlign?: 'left' | 'center' | 'right'
 }
 
 const props = defineProps<Props>()
@@ -123,6 +166,9 @@ const props = defineProps<Props>()
 const emit = defineEmits<{
   (e: 'update-config', payload: { mdId: string; configString: string }): void
   (e: 'crop-request', payload: { url: string; mdId: string }): void
+  (e: 'add-row-right'): void
+  (e: 'remove-from-row'): void
+  (e: 'update-row-align', payload: { align: 'left' | 'center' | 'right' }): void
   (e: 'close'): void
 }>()
 
@@ -177,6 +223,12 @@ const alignOptions = [
   { value: 'center' as const, label: '居中' },
   { value: 'right' as const, label: '居右' },
 ]
+
+/**
+ * 图组对齐的展示值：rowAlign 未配置时默认 center（与 LatexRender 渲染默认一致）。
+ * 用于模板「图组对齐」分段控件的高亮反馈，区分「容器对齐」vs「单图对齐」控制权。
+ */
+const effectiveRowAlign = computed(() => props.rowAlign || 'center')
 
 // ============================================================
 // 滚动感知定位
@@ -295,7 +347,9 @@ watch(
   (data) => {
     if (data) {
       localConfig.width = data.config.width
-      localConfig.align = data.config.align
+      // 图组内时，align 由围栏 {align} 控制（rowAlign prop），单图 align 强制忽略
+      // 防御兜底：即便上游已清洗，这里仍兜底强制 undefined，杜绝残留 align 写回单图
+      localConfig.align = props.inImgRow ? undefined : data.config.align
     }
   },
   { immediate: true },
@@ -318,7 +372,8 @@ function handleKeydown(e: KeyboardEvent) {
 function buildConfigString(config: ImageConfig): string {
   const parts: string[] = []
   if (config.width) parts.push(`width:${config.width}`)
-  if (config.align) parts.push(`align:${config.align}`)
+  // 图组内时，align 由围栏 {align} 控制（rowAlign），单图 {...} 不写入 align
+  if (config.align && !props.inImgRow) parts.push(`align:${config.align}`)
   return parts.length > 0 ? `{${parts.join(', ')}}` : ''
 }
 
@@ -777,6 +832,75 @@ function emitUpdate() {
 .crop-action:active {
   transform: scale(0.98);
   box-shadow: 0 2px 6px rgba(0, 122, 255, 0.3);
+}
+
+/* ============ 并排图组操作 ============ */
+.img-row-actions .control-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.row-action-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0.5px solid rgba(0, 0, 0, 0.1);
+  background: rgba(0, 0, 0, 0.04);
+  color: #1d1d1f;
+  border-radius: 9px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  font-family: inherit;
+}
+
+.row-action-btn.primary {
+  background: rgba(0, 122, 255, 0.08);
+  border-color: rgba(0, 122, 255, 0.2);
+  color: #007aff;
+}
+
+.row-action-btn.primary:hover {
+  background: rgba(0, 122, 255, 0.14);
+  border-color: rgba(0, 122, 255, 0.32);
+  transform: translateY(-0.5px);
+}
+
+.row-action-btn.ghost:hover {
+  background: rgba(0, 0, 0, 0.08);
+  color: #1d1d1f;
+}
+
+.row-action-btn:active {
+  transform: scale(0.98);
+}
+
+/* 深色模式 */
+[data-theme='dark'] .row-action-btn {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.1);
+  color: #f5f5f7;
+}
+
+[data-theme='dark'] .row-action-btn.primary {
+  background: rgba(10, 132, 255, 0.16);
+  border-color: rgba(10, 132, 255, 0.32);
+  color: #0a84ff;
+}
+
+[data-theme='dark'] .row-action-btn.primary:hover {
+  background: rgba(10, 132, 255, 0.24);
+  border-color: rgba(10, 132, 255, 0.4);
+}
+
+[data-theme='dark'] .row-action-btn.ghost:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: #ffffff;
 }
 
 /* ============================================================

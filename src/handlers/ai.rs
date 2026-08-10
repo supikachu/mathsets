@@ -208,6 +208,9 @@ async fn post_process_single(
     // 第二道防线：剥离选择题题干末尾的选项残留（防 LLM 不听 Prompt 把选项塞进 stem）
     strip_options_residue_from_stem(&mut parsed);
 
+    // :::img-row 围栏闭合清洗：防 token 截断导致缺 ::: 闭合标记
+    parsed.sanitize_img_row_fences();
+
     // 校验 analysis 至少 1 项（空则补默认项 + warning）
     if parsed.analysis.is_empty() {
         parsed.analysis = vec![AnalysisMethod {
@@ -326,6 +329,8 @@ pub(crate) async fn post_process_batch(
                 }
                 // 第二道防线：剥离选择题题干末尾的选项残留
                 strip_options_residue_from_stem(&mut q);
+                // :::img-row 围栏闭合清洗：防 token 截断导致缺 ::: 闭合标记
+                q.sanitize_img_row_fences();
                 // 校验 analysis
                 if q.analysis.is_empty() {
                     q.analysis = vec![AnalysisMethod {

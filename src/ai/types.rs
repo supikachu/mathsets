@@ -99,6 +99,20 @@ pub struct ParsedQuestion {
     pub kp_matches: Vec<KpMatch>,
 }
 
+impl ParsedQuestion {
+    /// 对 stem 与 analysis[i].content 调用 `close_unclosed_img_row_fences`
+    ///
+    /// 在 clean_and_parse 之后、知识点匹配之前调用，防止 AI 输出因 token
+    /// 截断而缺少 `:::img-row ... :::` 围栏的闭合 `:::` 标记，避免前端
+    /// 渲染崩溃或 `:::img-row` 开标记泄漏到题干文本中。
+    pub fn sanitize_img_row_fences(&mut self) {
+        self.stem = crate::ai::cleaner::close_unclosed_img_row_fences(&self.stem);
+        for a in &mut self.analysis {
+            a.content = crate::ai::cleaner::close_unclosed_img_row_fences(&a.content);
+        }
+    }
+}
+
 /// 批量解析响应 — LLM 批量输出用 {"questions": [...]} 包裹
 /// 注意：实际批量解析走 serde_json::Value 逐题隔离（补丁十防连坐），
 /// 此结构仅用于类型参考和文档。
