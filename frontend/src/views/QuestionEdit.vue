@@ -1907,11 +1907,13 @@ function parsedQuestionToSnapshot(q: ParsedQuestion): any {
     internal_note: '',
     status: '',
     version: 1,
+    // 初始 UI 状态：未主动保存 → 浅灰色标签，离开触发拦截（与图片模式一致）
+    // savedQid 携带 worker 落库的 UUID，保存时走 update 而非 create，避免重复落库
     hasUnsaved: true,
     estimated_time: 5,
     // 批量模式元信息（显式声明占位，确保 Vue 3 Proxy 追踪）
     saved: false,
-    savedQid: undefined as string | undefined,
+    savedQid: q.id as string | undefined,
   }
 }
 

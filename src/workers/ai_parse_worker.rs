@@ -553,37 +553,30 @@ async fn save_parsed_question(
 
     sqlx::query(
         r#"
-        INSERT INTO questions (id, stem, stem_text, images,
-            question_type, options, correct_answer, analysis, grading_criteria,
-            difficulty, difficulty_score, default_score, estimated_minutes, cognitive_level,
-            grade_level, semester, source, exam_type, metadata,
-            parent_id, sub_order,
-            status, space_id, origin_question_id,
-            creator_id, created_at, updated_by, updated_at, version)
-        VALUES ($1, $2, NULL, NULL,
-            $3, $4, $5, $6, NULL,
-            $7, NULL, $8, NULL, NULL,
-            NULL, NULL, NULL, NULL, COALESCE($9, '{}'::jsonb),
-            NULL, NULL,
-            $10, $11, NULL,
-            $12, $13, NULL, $14, $15)
+        INSERT INTO questions (id, stem, question_type, difficulty, status,
+            options, correct_answer, analysis, metadata,
+            images, parent_id, sub_order,
+            creator_id, created_at, updated_at, version, space_id)
+        VALUES ($1, $2, $3, $4, $5,
+            $6, $7, $8, COALESCE($9, '{}'::jsonb),
+            NULL, NULL, NULL,
+            $10, $11, $12, $13, $14)
         "#,
     )
     .bind(id)
     .bind(&stem)
     .bind(question_type)
+    .bind(difficulty)
+    .bind(QuestionStatus::Draft)
     .bind(&options_json)
     .bind(correct_answer_opt.as_ref().unwrap_or(&serde_json::Value::Null))
     .bind(&analysis_str)
-    .bind(difficulty)
-    .bind(5)
     .bind(&metadata)
-    .bind(QuestionStatus::Draft)
-    .bind(space_id)
     .bind(creator_id)
     .bind(now)
     .bind(now)
     .bind(version)
+    .bind(space_id)
     .execute(&mut *tx)
     .await
     .map_err(|e| format!("插入题目失败: {e}"))?;

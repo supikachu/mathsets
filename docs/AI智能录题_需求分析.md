@@ -141,7 +141,7 @@ resolve_ocr_config(user):
 # ===== OCR 引擎平台默认配置 =====
 OCR_DEFAULT_PROVIDER=auto              # auto | doc2x | mineru_local | mineru_api | qwen_vl
 DOC2X_API_KEY=                          # 平台默认 Doc2X Key（用户未配时兜底）
-DOC2X_BASE_URL=https://api.doc2x.noedgex.com/v1
+DOC2X_BASE_URL=https://v2.doc2x.noedgeai.com  # v2 官方端点（裸域名，路径需含 /api/v2 前缀）
 MINERU_DEFAULT_ENDPOINT=               # 平台默认私有 MinerU 地址
 MINERU_API_KEY=                         # 平台默认 MinerU Cloud Key
 ```

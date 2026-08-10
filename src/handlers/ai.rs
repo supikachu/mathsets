@@ -842,6 +842,10 @@ pub async fn parse_image_v2(
             tracing::warn!(
                 "OCR 引擎 {primary_id} 失败（{brief}），自动切换 Qwen-VL 兜底重试"
             );
+            // 详细错误诊断（Debug 表示包含完整 message 与变体类型）
+            tracing::error!(
+                "OCR 引擎 {primary_id} 失败详情: brief={brief}, error_debug={e:?}"
+            );
 
             // 解析 Qwen-VL 所需的 Vision 配置（用户 Key 优先，否则平台默认）
             let (fb_api_key, _fb_provider, fb_model, fb_base_url) =
@@ -1127,7 +1131,7 @@ pub struct TestOcrConnectionResponse {
 
 /// 测试 OCR 引擎连接 — 轻量探测，不消耗配额
 ///
-/// - `doc2x`：GET `/parse/status?uid=test-connection-probe`（伪造 uid），
+/// - `doc2x`：GET `/api/v2/parse/status?uid=test-connection-probe`（伪造 uid），
 ///   401/403 → Key 无效；其他 4xx/2xx → Key 有效（auth 通过即可）
 /// - `qwen_vl` / `auto`：GET `/v1/models`（OpenAI 兼容鉴权探测），
 ///   200 → ok；401/403 → Key 无效；其他 → 探测失败
@@ -1301,7 +1305,7 @@ pub async fn test_ocr_connection(
     }))
 }
 
-/// 探测 Doc2X 鉴权：GET /parse/status?uid=test-connection-probe
+/// 探测 Doc2X 鉴权：GET /api/v2/parse/status?uid=test-connection-probe
 ///
 /// - 401/403 → Key 无效
 /// - 2xx / 其他 4xx（如 400 业务参数错）→ auth 通过，Key 有效
@@ -1311,7 +1315,7 @@ async fn probe_doc2x(
     api_key: &str,
     base_url: &str,
 ) -> (bool, String) {
-    let url = format!("{}/parse/status?uid=test-connection-probe", base_url.trim_end_matches('/'));
+    let url = format!("{}/api/v2/parse/status?uid=test-connection-probe", base_url.trim_end_matches('/'));
     let resp = client
         .get(&url)
         .header("Authorization", format!("Bearer {api_key}"))

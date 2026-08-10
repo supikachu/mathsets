@@ -1,12 +1,11 @@
 <script setup lang="ts">
 import { ref, watch, nextTick } from 'vue'
-import { aiApi, type ParsedQuestion } from '@/api/client'
+import { aiApi, aiTaskApi, questionApi, type ParsedQuestion, type QuestionDetail, type AiParseTaskDetail } from '@/api/client'
 import { AppButton, AppModal, AppConfirm, AppIcon } from '@/components/ui'
 import { useToast } from '@/composables/useToast'
 import { parseMarkdownToQuestion, RECOMMENDED_PROMPT } from '@/utils/parseMarkdown'
 import { compressImage, blobToFile } from '@/utils/imageCompressor'
-import { runWithConcurrency, withBackoffRetry, type PoolResult } from '@/utils/concurrency'
-import { pdfToImages, type PdfPageImage } from '@/utils/pdfToImages'
+import { withBackoffRetry } from '@/utils/concurrency'
 import { clearBatchSnapshot, hasUnfinishedSnapshot, type BatchSnapshot } from '@/utils/batchSnapshot'
 
 const show = defineModel<boolean>({ required: true })
@@ -274,60 +273,135 @@ async function doImageParse(file: File) {
 
 async function doPdfParse(file: File) {
   aiParsing.value = true
-  aiBatchProgress.value = { current: 0, total: 0, text: '正在渲染 PDF…' }
+  aiBatchProgress.value = { current: 0, total: 1, text: '正在上传 PDF…' }
 
-  const pages: PdfPageImage[] = []
-  for await (const pageImg of pdfToImages(file, {
-    onProgress: (cur, total) => {
-      aiBatchProgress.value = { current: cur, total, text: `正在渲染 PDF 第 ${cur}/${total} 页…` }
-    },
-    onTruncated: (orig, actual) => {
-      toast.warning(`PDF 文件过大（${orig} 页），为保证性能仅处理前 ${actual} 页`)
-    },
-  })) {
-    pages.push(pageImg)
-  }
+  try {
+    // 1. 提交异步任务（后端通过 magic bytes 自动判定 source_type=pdf）
+    const submitRes = await aiTaskApi.submitParseTaskMedia(file, ocrProviderParam())
+    const taskId = submitRes.data.task_id
 
-  aiBatchProgress.value = { current: 0, total: pages.length, text: `开始 OCR 识别（${pages.length} 页）…` }
+    // 2. 轮询任务状态（OCR ≤120s + Stage2 LLM ≤180s，整体上限 360s）
+    aiBatchProgress.value = { current: 0, total: 240_000, text: '正在 OCR 识别 PDF…（约 1-5 分钟）' }
+    const task = await pollPdfTaskStatus(taskId, (elapsed) => {
+      const sec = Math.round(elapsed / 1000)
+      aiBatchProgress.value = {
+        current: Math.min(elapsed, 240_000),
+        total: 240_000,
+        text: `正在解析 PDF（OCR + AI 结构化）… 已耗时 ${sec}s`,
+      }
+    })
 
-  const results = await runWithConcurrency(
-    pages,
-    async (pageImg) => {
-      const blob = await (await fetch(pageImg.dataUrl)).blob()
-      const compressed = await compressImage(blob)
-      const imageFile = blobToFile(compressed, `page-${pageImg.page}.webp`)
-      const res = await withBackoffRetry(() => aiApi.parseImage(imageFile, ocrProviderParam()))
-      return res.data.data
-    },
-    (cur, total) => {
-      aiBatchProgress.value = { current: cur, total, text: `OCR 识别中… ${cur}/${total} 页完成` }
-    },
-  )
-
-  // 收集所有成功识别的题目，失败的页面只记录日志
-  const allQuestions: ParsedQuestion[] = []
-  let failedPages = 0
-  for (let i = 0; i < results.length; i++) {
-    const r = results[i] as PoolResult<ParsedQuestion[]>
-    if (r.status === 'success' && r.data) {
-      allQuestions.push(...r.data)
-    } else {
-      failedPages++
-      console.warn(`[doPdfParse] 第 ${pages[i].page} 页解析失败:`, r.error)
+    // 3. 拉取所有题目详情（worker 已落库为 Draft 状态）
+    const ids = task.question_ids || (task.question_id ? [task.question_id] : [])
+    if (ids.length === 0) {
+      throw new Error('PDF 任务完成但未生成任何题目')
     }
-  }
 
-  if (failedPages > 0) {
-    // 全部失败时（如额度耗尽）「跳过」措辞会误导，改用更明确的提示；
-    // 额度耗尽的具体原因已由 axios 拦截器集中弹窗，这里不再重复。
-    if (failedPages === results.length) {
-      toast.error(`全部 ${failedPages} 页解析失败，请检查配置或额度后重试`)
-    } else {
-      toast.warning(`${failedPages} 页解析失败已跳过，成功识别 ${allQuestions.length} 题`)
+    aiBatchProgress.value = { current: 0, total: ids.length, text: `正在加载 ${ids.length} 道题目…` }
+    const details = await Promise.all(
+      ids.map((id, i) =>
+        questionApi.get(id).then(r => {
+          aiBatchProgress.value = {
+            current: i + 1,
+            total: ids.length,
+            text: `正在加载题目 ${i + 1}/${ids.length}…`,
+          }
+          return r.data
+        }),
+      ),
+    )
+
+    // 4. 转换为 ParsedQuestion[]（携带 id 字段，避免父组件重复 create 落库）
+    const questions = details.map(questionDetailToParsedQuestion)
+    await handleBatchResults(questions)
+  } catch (e: any) {
+    // 额度耗尽已由 axios 拦截器集中弹窗，跳过重复 toast
+    if (e?.__quotaHandled) {
+      await clearBatchSnapshot()
+      return
     }
+    // PDF 任务失败时错误直接透传（worker 不允许降级 Qwen-VL）
+    console.error('[doPdfParse] 失败:', e?.message || e)
+    toast.error(e?.response?.data?.error || e?.message || 'PDF 识别失败')
+    await clearBatchSnapshot()
+  }
+}
+
+// 轮询 PDF 异步任务状态直至 completed / failed / 超时
+async function pollPdfTaskStatus(
+  taskId: string,
+  onProgress?: (elapsed: number) => void,
+): Promise<AiParseTaskDetail> {
+  const MAX_WAIT_MS = 360_000  // 6 分钟上限（PDF OCR ≤120s + Stage2 LLM ≤180s + 缓冲）
+  const POLL_INTERVAL = 1500
+  const start = Date.now()
+
+  while (true) {
+    const elapsed = Date.now() - start
+    if (elapsed > MAX_WAIT_MS) {
+      throw new Error(`PDF 解析任务超时（${Math.round(elapsed / 1000)}s）`)
+    }
+    onProgress?.(elapsed)
+
+    const res = await aiTaskApi.getTaskStatus(taskId)
+    const task = res.data
+
+    if (task.status === 'completed') return task
+    if (task.status === 'failed') {
+      throw new Error(task.error_message || 'PDF 解析失败')
+    }
+    // pending / processing 继续轮询
+    await new Promise(r => setTimeout(r, POLL_INTERVAL))
+  }
+}
+
+// 将已落库的 QuestionDetail 转换为 ParsedQuestion
+// 关键：携带 id 字段，让父组件的 parsedQuestionToSnapshot 据此设置 savedQid/saved=true，
+//       后续保存走 update 而非 create，避免重复落库
+function questionDetailToParsedQuestion(d: QuestionDetail): ParsedQuestion {
+  // 难度数字反向映射为字符串（worker 落库时 'easy'→2, 'medium'→3, 'hard'→4）
+  const diffMap: Record<number, string> = { 1: 'easy', 2: 'easy', 3: 'medium', 4: 'hard', 5: 'hard' }
+
+  // 解析多解法（worker 落库时用 \n\n---\n\n 分隔）
+  const analysisStr = d.analysis || ''
+  const analysis = analysisStr
+    .split('\n\n---\n\n')
+    .map((content, i) => ({
+      title: `解法 ${i + 1}`,
+      content: content.trim(),
+    }))
+    .filter(m => m.content)
+
+  // correct_answer 落库时即为 ParsedAnswer 序列化的 JSON
+  const correct_answer = (d.correct_answer as ParsedQuestion['correct_answer']) || {
+    kind: 'solution' as const,
+    value: {},
   }
 
-  await handleBatchResults(allQuestions)
+  // 知识点：已落库题目通过 knowledge_nodes 关联表携带
+  const knowledge_points = (d.knowledge_nodes || []).map(n => n.name)
+  const kp_matches = (d.knowledge_nodes || []).map(n => ({
+    ai_name: n.name,
+    matched_id: n.id,
+    matched_name: n.name,
+    score: n.ai_confidence ?? 1.0,
+  }))
+
+  return {
+    id: d.id,  // 关键：携带已落库 UUID
+    question_type: d.question_type,
+    stem: d.stem,
+    options: d.options || undefined,
+    correct_answer,
+    analysis,
+    difficulty: diffMap[d.difficulty] || 'medium',
+    knowledge_points,
+    confidence: 1.0,
+    warnings: [],
+    image_placeholders: [],
+    image_urls: [],
+    kp_matches,
+  }
 }
 
 // ============================================================

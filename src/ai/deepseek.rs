@@ -15,7 +15,9 @@ pub struct DeepSeekProvider {
 impl DeepSeekProvider {
     pub fn new(api_key: String, base_url: String) -> Self {
         let client = Client::builder()
-            .timeout(Duration::from_secs(120))
+            // Stage2 多题批量结构化（max_tokens=8192）单次响应可能 60-150s，
+            // 120s 边界过紧会触发 body 读取 TimedOut；放宽至 180s 与前端轮询上限对齐
+            .timeout(Duration::from_secs(180))
             .no_proxy() // 临时强制直连，绕过系统代理（排查 2s 超时）
             .build()
             .expect("无法创建 reqwest Client");

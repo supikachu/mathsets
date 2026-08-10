@@ -50,6 +50,10 @@ async-trait = "0.1"
 # Multipart 文件类型嗅探（零信任安全防护 — Magic Number 校验）
 infer = "0.16"
 
+# 图像格式转码（Doc2X 仅支持 JPEG/PNG，前端上传的 WebP 需转码为 PNG）
+# 仅启用 webp 解码 + png 编码，最小化编译体积
+image = { version = "0.25", default-features = false, features = ["webp", "png"] }
+
 # 并发限流中间件（parse-image 路由全局并发控制）
 tower = { version = "0.5", features = ["limit"] }
 

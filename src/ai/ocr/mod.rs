@@ -180,10 +180,11 @@ mod tests {
     #[test]
     fn test_create_ocr_provider_doc2x() {
         // M2：doc2x 现已实现，工厂应直接装配 Doc2XProvider
+        // v2 迁移：base_url 改为官方 v2 裸域名
         let cfg = OcrConfig {
             provider: "doc2x".into(),
             api_key: "sk-test".into(),
-            base_url: "https://api.doc2x.noedgex.com/v1".into(),
+            base_url: "https://v2.doc2x.noedgeai.com".into(),
             model: None,
             upload_dir: None,
         };

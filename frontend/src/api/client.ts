@@ -865,6 +865,9 @@ export interface ParsedQuestion {
   sub_type?: string
   /// AI 返回 "easy"/"medium"/"hard"，后端转换为 1-5
   difficulty?: string
+  /// 异步任务路径专用：题目已落库时携带 UUID，前端据此走 update 而非 create 避免重复落库
+  /// 同步路径（parseImage / parseText）不带此字段，保持 undefined
+  id?: string
   stem: string
   options?: ParsedOption[]
   correct_answer: ParsedAnswer
