@@ -1,4 +1,5 @@
 import axios from 'axios'
+import { useToast } from '@/composables/useToast'
 
 // ===========================================================================
 // Axios 实例 & 拦截器（保持不变）
@@ -9,6 +10,22 @@ const client = axios.create({
   timeout: 10000,
   paramsSerializer: { indexes: null },
 })
+
+// ===========================================================================
+// AI 额度耗尽错误识别（与后端 consume_ai_quota 的 ERR_QUOTA_EXCEEDED 对齐）
+// ===========================================================================
+
+/// 后端额度耗尽错误码 — 见 src/handlers/ai.rs::consume_ai_quota
+export const AI_QUOTA_EXCEEDED_CODE = 'ERR_QUOTA_EXCEEDED'
+
+/// 判断一个 axios 错误是否为「今日 AI 额度已耗尽」
+export function isQuotaExceededError(e: unknown): boolean {
+  const err = e as { response?: { status?: number; data?: { code?: string } } }
+  return (
+    err?.response?.status === 403 &&
+    err?.response?.data?.code === AI_QUOTA_EXCEEDED_CODE
+  )
+}
 
 // 请求拦截器：自动注入 Bearer token（login/register 不带）
 client.interceptors.request.use((config) => {
@@ -22,7 +39,11 @@ client.interceptors.request.use((config) => {
   return config
 })
 
-// 响应拦截器：401 → 跳转登录
+// 额度耗尽 toast 去重窗口（毫秒）— 多页 PDF 并发 3 路同时 403 时只弹一次
+const QUOTA_TOAST_DEDUP_MS = 5000
+let lastQuotaToastAt = 0
+
+// 响应拦截器：401 → 跳转登录；AI 额度耗尽 → 集中友好提示
 client.interceptors.response.use(
   (resp) => resp,
   (error) => {
@@ -31,6 +52,15 @@ client.interceptors.response.use(
       localStorage.removeItem('user')
       // 使用 window.location 跳转，避免引入 router/store 造成循环依赖（HMR 问题）
       window.location.href = '/login'
+    } else if (isQuotaExceededError(error)) {
+      // 集中弹一次友好提示，避免每个调用方都自行识别；
+      // 标记 __quotaHandled 让调用方跳过重复 toast（仍 reject 以保留流程控制）。
+      const now = Date.now()
+      if (now - lastQuotaToastAt > QUOTA_TOAST_DEDUP_MS) {
+        lastQuotaToastAt = now
+        useToast().error('今日 AI 识别额度已用尽，请明天再试')
+      }
+      ;(error as Error & { __quotaHandled?: boolean }).__quotaHandled = true
     }
     return Promise.reject(error)
   },
@@ -256,6 +286,9 @@ export interface QuestionQuery {
   /// 学科过滤（math / physics）
   subject?: string
   reviewable_by_me?: boolean
+  /// 异步补全机制：按系统标记过滤（命中 GIN 索引）
+  /// 'incomplete' = pending_answer OR missing_analysis 并集（与 incomplete_count 的 total 一致）
+  system_flag?: 'pending_answer' | 'missing_analysis' | 'incomplete'
 }
 
 /// 自建标签输入（B2：category 改为 enum，新增 parent_id）
@@ -382,6 +415,26 @@ export const questionApi = {
   },
   stats(params?: { space_id?: string }) {
     return client.get<QuestionStats>('/questions/stats', { params })
+  },
+  /// 异步补全机制：待补全题目计数（pending_answer / missing_analysis / total）
+  incompleteCount() {
+    return client.get<{ pending_answer: number; missing_analysis: number; total: number }>(
+      '/questions/incomplete-count',
+    ).then((r) => r.data)
+  },
+  /// 异步补全机制：批量提交审核
+  batchSubmit(questionIds: string[]) {
+    return client.post<{
+      total: number
+      succeeded: number
+      failed: number
+      results: Array<{
+        id: string
+        status: 'success' | 'failed'
+        code?: string
+        missing?: string[]
+      }>
+    }>('/questions/batch-submit', { question_ids: questionIds }).then((r) => r.data)
   },
 }
 
@@ -812,6 +865,9 @@ export interface ParsedQuestion {
   sub_type?: string
   /// AI 返回 "easy"/"medium"/"hard"，后端转换为 1-5
   difficulty?: string
+  /// 异步任务路径专用：题目已落库时携带 UUID，前端据此走 update 而非 create 避免重复落库
+  /// 同步路径（parseImage / parseText）不带此字段，保持 undefined
+  id?: string
   stem: string
   options?: ParsedOption[]
   correct_answer: ParsedAnswer
@@ -820,6 +876,7 @@ export interface ParsedQuestion {
   confidence: number
   warnings: string[]
   image_placeholders: string[]
+  image_urls: string[]
   kp_matches: KpMatch[]
 }
 
@@ -828,17 +885,25 @@ export interface AiSettings {
   has_api_key: boolean
   model_text: string | null
   model_vision: string | null
+  // M3：OCR 引擎配置（脱敏）
+  ocr_provider: string
+  has_doc2x_key: boolean
+  mineru_endpoint: string | null
+  has_mineru_key: boolean
 }
 
 export const aiApi = {
   parseText(text: string) {
     return client.post<{ data: ParsedQuestion }>('/ai/parse-text', { text })
   },
-  parseImage(file: File) {
+  parseImage(file: File, ocr_provider?: string) {
     const formData = new FormData()
     formData.append('image', file)
+    if (ocr_provider) {
+      formData.append('ocr_provider', ocr_provider)
+    }
     // 不要手动设置 Content-Type — axios + FormData 需要自动生成 boundary
-    return client.post<{ data: ParsedQuestion[] }>('/ai/parse-image', formData, {
+    return client.post<{ data: ParsedQuestion[] }>('/ai/parse-image-v2', formData, {
       timeout: 120000,
     })
   },
@@ -850,8 +915,20 @@ export const aiApi = {
     api_key?: string
     model_text?: string
     model_vision?: string
+    ocr_provider?: string
+    doc2x_api_key?: string
+    mineru_endpoint?: string
+    mineru_api_key?: string
   }) {
     return client.put<AiSettings>('/ai/settings', data)
+  },
+  /// OCR 引擎连接测试（M3 新增）
+  testOcrConnection(data: { provider: string; api_key?: string; endpoint?: string }) {
+    return client.post<{ ok: boolean; latency_ms: number; message: string }>(
+      '/ai/ocr/test-connection',
+      data,
+      { timeout: 15000 },
+    )
   },
 }
 
@@ -935,6 +1012,7 @@ export const aiTaggingApi = {
 // ===========================================================================
 
 export type AiTaskStatus = 'pending' | 'processing' | 'completed' | 'failed'
+export type AiTaskSourceType = 'text' | 'image' | 'pdf'
 
 export interface SubmitParseTaskResponse {
   task_id: string
@@ -944,16 +1022,34 @@ export interface SubmitParseTaskResponse {
 
 export interface AiParseTaskDetail {
   id: string
+  source_type: AiTaskSourceType
   status: AiTaskStatus
   question_id: string | null
+  /** M4：多题批处理场景下所有生成题目的 UUID 数组（image/pdf 任务优先读取此字段） */
+  question_ids?: string[]
   error_message: string | null
   created_at: string
   updated_at: string
 }
 
 export const aiTaskApi = {
+  /// 文本类异步解析（JSON）
   submitParseTask(raw_text: string) {
     return client.post<SubmitParseTaskResponse>('/ai/parse', { raw_text })
+  },
+  /// 图片 / PDF 异步解析（Multipart，自动判定 source_type）
+  ///
+  /// - 大图或多页 PDF 走异步队列，避免同步接口超时
+  /// - `ocrProvider` 可选引擎覆盖（doc2x / mineru_local / qwen_vl）
+  submitParseTaskMedia(file: File | Blob, ocrProvider?: string) {
+    const form = new FormData()
+    form.append('file', file)
+    if (ocrProvider) {
+      form.append('ocr_provider', ocrProvider)
+    }
+    return client.post<SubmitParseTaskResponse>('/ai/parse-task', form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
   },
   getTaskStatus(task_id: string) {
     return client.get<AiParseTaskDetail>(`/ai/parse/${task_id}`)
@@ -1001,6 +1097,23 @@ export const userApi = {
     formData.append('avatar', file)
     return client.post<{ avatar_url: string }>('/users/avatar', formData, {
       timeout: 30000,
+    })
+  },
+}
+
+// ── 通用图片上传 API（题目配图等） ──────────────────────────────
+
+export const uploadsApi = {
+  /**
+   * 上传题目配图等通用图片
+   * @param file 浏览器 File 对象
+   * @returns 持久化后的 URL（如 /uploads/questions/xxx.png）
+   */
+  uploadImage(file: File) {
+    const formData = new FormData()
+    formData.append('image', file)
+    return client.post<{ url: string }>('/uploads/images', formData, {
+      timeout: 60000, // 大图可能较慢，给 60s
     })
   },
 }

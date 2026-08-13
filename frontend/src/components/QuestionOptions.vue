@@ -9,10 +9,12 @@
       :key="opt.label"
       class="q-option w-fit flex items-center gap-2 whitespace-nowrap"
     >
-      <span class="q-option-label">{{ opt.label }}</span>
-      <span class="q-option-content flex items-center whitespace-nowrap">
+      <!-- 选项标号独立成元素，与内容分离，由父级 flex align-items:center 实现垂直居中 -->
+      <!-- 标号用 LatexRender 渲染 $\mathrm{A.}$ 保持数学罗马体字体样式 -->
+      <span class="q-option-label"><LatexRender :text="`$\\mathrm{${opt.label}.}$`" :inline="true" /></span>
+      <div class="q-option-content">
         <LatexRender :text="opt.content" :inline="true" />
-      </span>
+      </div>
     </div>
   </div>
 </template>
@@ -53,8 +55,8 @@ defineExpose({
   align-items: center;
   gap: 8px;
   padding: 6px 12px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-input);
+  border-radius: 4px; /* 微积木小圆角，区别于卡片大圆角 */
+  background: #f7f8fa; /* 淡灰底，让选项成为独立“微积木” */
   border: 1px solid transparent;
   font-size: 13.5px;
   line-height: 1.6;
@@ -68,6 +70,11 @@ defineExpose({
   background: var(--bg-hover);
 }
 
+/* 暗色模式：选项微积木改用主题输入态底色，避免 #f7f8fa 过亮 */
+[data-theme='dark'] .q-option {
+  background: var(--bg-input);
+}
+
 .q-option-label {
   font-weight: 600;
   color: var(--text-secondary);
@@ -78,5 +85,19 @@ defineExpose({
   display: inline-flex;
   align-items: center;
   white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+/* 穿透清除 LatexRender 最后元素 margin-bottom，避免 flex 居中视觉偏移 */
+.q-option-content :deep(.latex-render > p:last-child),
+.q-option-content :deep(.latex-render p) {
+  margin-bottom: 0 !important;
+  margin-top: 0 !important;
+}
+
+.q-option-content :deep(.latex-render img) {
+  margin-bottom: 0 !important;
+  vertical-align: middle;
 }
 </style>

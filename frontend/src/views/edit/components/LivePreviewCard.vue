@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { AppIcon } from '@/components/ui'
-import LatexRender from '@/components/LatexRender.vue'
+import LatexRender, { type ImageClickPayload } from '@/components/LatexRender.vue'
 import { useOptionsLayout } from '@/composables/useOptionsLayout'
 
 const props = defineProps<{
@@ -16,6 +16,11 @@ const props = defineProps<{
     difficulty: string
     difficulty_coefficient: number
   }
+  imageEditable?: boolean
+}>()
+
+const emit = defineEmits<{
+  (e: 'image-click', payload: ImageClickPayload): void
 }>()
 
 // Writable options layout tracking
@@ -65,9 +70,14 @@ const hasCorrectAnswer = computed(() => {
   return !!props.form.correctAnswer
 })
 
+// 答案预览：统一包裹在单个 $\mathrm{...}$ 中渲染
+// 单选 B → $\mathrm{B}$，多选 A+C → $\mathrm{AC}$
 const displayCorrectAnswer = computed(() => {
-  if (Array.isArray(props.form.correctAnswer)) return props.form.correctAnswer.join('、')
-  return props.form.correctAnswer || ''
+  if (Array.isArray(props.form.correctAnswer)) {
+    if (props.form.correctAnswer.length === 0) return ''
+    return `$\\mathrm{${props.form.correctAnswer.join('')}}$`
+  }
+  return props.form.correctAnswer ? `$\\mathrm{${props.form.correctAnswer}}$` : ''
 })
 
 const cnNums = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十']
@@ -124,7 +134,11 @@ function splitSolution(text: string): { body: string; conclusion: string } {
 
         <!-- 题干 -->
         <div class="paper-stem">
-          <LatexRender :text="form.stem || ''" />
+          <LatexRender
+            :text="form.stem || ''"
+            :mode="imageEditable ? 'editable' : 'readonly'"
+            @image-click="emit('image-click', $event)"
+          />
         </div>
 
         <!-- 选择题选项 -->
@@ -135,8 +149,18 @@ function splitSolution(text: string): { body: string; conclusion: string } {
             class="paper-opt"
             :class="{ correct: isOptionCorrect(opt.label) }"
           >
-            <span class="paper-opt-letter">{{ opt.label }}.</span>
-            <LatexRender :text="opt.content" :inline="true" />
+            <!-- 选项标号独立成元素，与内容分离，由父级 flex align-items:center 实现垂直居中 -->
+            <!-- 标号用 LatexRender 渲染 $\mathrm{A.}$ 保持数学罗马体字体样式 -->
+            <span class="paper-opt-letter"><LatexRender :text="`$\\mathrm{${opt.label}.}$`" :inline="true" /></span>
+            <!-- 选项内容（图片/公式/文本）单独渲染，便于 flex 居中与图片尺寸控制 -->
+            <div class="paper-opt-content">
+              <LatexRender
+                :text="opt.content"
+                :inline="true"
+                :mode="imageEditable ? 'editable' : 'readonly'"
+                @image-click="emit('image-click', $event)"
+              />
+            </div>
           </div>
         </div>
 
@@ -145,7 +169,8 @@ function splitSolution(text: string): { body: string; conclusion: string } {
           <div class="paper-answer-label">答案</div>
           <div class="paper-answer-content">
             <template v-if="form.question_type === 'choice' && hasCorrectAnswer">
-              <span class="paper-correct-answer">{{ displayCorrectAnswer }}</span>
+              <!-- 答案统一用 $\mathrm{...}$ 格式，通过 LatexRender 渲染 -->
+              <LatexRender :text="displayCorrectAnswer" :inline="true" />
             </template>
             <template v-else-if="form.question_type === 'fill' && form.blanks.some(b => b.answer)">
               <span v-for="(blank, i) in form.blanks.filter(b => b.answer)" :key="i">
@@ -311,14 +336,41 @@ function splitSolution(text: string): { body: string; conclusion: string } {
 .paper-opt-letter {
   font-weight: 600;
   flex-shrink: 0;
+  margin-right: 8px;
+  font-family: var(--font-cn-isolated);
 }
 
-/* 选项内图片样式 */
-.paper-opt img.latex-img {
-  max-height: 80px;
-  width: auto;
-  display: inline-block;
+/* 选项内容容器：flex: 1 占满剩余宽度，min-width:0 防止内容溢出 */
+.paper-opt-content {
+  flex: 1;
+  min-width: 0;
+  /* 自身也用 flex 居中，确保内部 LatexRender 的图片垂直居中 */
+  display: flex;
+  align-items: center;
+}
+
+/* 穿透清除 LatexRender 最后元素 margin-bottom，避免 flex 居中视觉偏移 */
+.paper-opt-content :deep(.latex-render > p:last-child),
+.paper-opt-content :deep(.latex-render p) {
+  margin-bottom: 0 !important;
+  margin-top: 0 !important;
+}
+
+.paper-opt-content :deep(.latex-render img) {
+  margin-bottom: 0 !important;
   vertical-align: middle;
+}
+
+/* 选项内图片样式
+ * 特异性必须高于 .latex-render img.latex-img.img-inline (0,3,1) 才能覆盖 max-height: 1.5em
+ * 用 .paper-opt .latex-render 前缀提升到 (0,4,1) */
+.paper-opt .latex-render img.latex-img,
+.paper-opt .latex-render img.latex-img.img-inline {
+  max-height: none;          /* 覆盖 img-inline 的 1.5em 和旧规则的 80px */
+  max-width: 100%;            /* 容器宽度兜底，大图等比缩放 */
+  height: auto;
+  width: auto;
+  display: block;            /* 块级独占一行，避免被压成行内 */
   margin: 4px 0;
   border-radius: 4px;
 }

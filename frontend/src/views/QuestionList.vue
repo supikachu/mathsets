@@ -79,6 +79,9 @@
                   <template v-if="tab.value === 'pending' && pendingReviewCount > 0">
                     <span class="text-xs text-gray-400 dark:text-gray-500 font-normal">({{ pendingReviewCount > 99 ? '99+' : pendingReviewCount }})</span>
                   </template>
+                  <template v-if="tab.value === 'incomplete' && incompleteCount > 0">
+                    <span class="text-xs text-amber-500 dark:text-amber-400 font-normal">({{ incompleteCount > 99 ? '99+' : incompleteCount }})</span>
+                  </template>
                 </button>
               </div>
             </Transition>
@@ -103,6 +106,19 @@
 
         <!-- ── 3. 右侧操作组 (Right Group: 统一 rounded-full 胶囊圆角风格) ── -->
         <div class="ql-header-actions flex items-center gap-3 shrink-0">
+          <!-- 批量提交审核按钮（多选时显示） -->
+          <button
+            v-if="selectedIds.size > 0"
+            class="ql-batch-btn flex items-center gap-1.5 px-4 h-9 bg-emerald-500 hover:bg-emerald-600 active:bg-emerald-700 text-white rounded-full text-sm font-medium shadow-sm transition-colors cursor-pointer shrink-0"
+            :disabled="batchSubmitting"
+            :class="{ 'opacity-60 cursor-not-allowed': batchSubmitting }"
+            @click="handleBatchSubmit"
+          >
+            <AppIcon name="send" :size="14" />
+            <span>批量提交审核</span>
+            <span class="ql-batch-count">{{ selectedIds.size }}</span>
+          </button>
+
           <!-- 筛选按钮 (Outline 胶囊按钮) -->
           <button
             class="ql-filter-btn flex items-center gap-2 px-4 h-9 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 text-gray-700 dark:text-gray-200 hover:border-blue-500 hover:text-blue-500 rounded-full text-sm font-medium transition-colors cursor-pointer shadow-sm shrink-0"
@@ -390,14 +406,30 @@
           </button>
         </div>
 
-        <!-- ===== 题目卡片列表 ===== -->
-        <div v-else class="q-card-list">
-          <div
-            v-for="card in cardList"
-            :key="card.id"
-            class="q-card"
-            :class="{ 'is-expanded': expandedIds.has(card.id) }"
-          >
+        <!-- ===== 题目卡片列表（虚拟滚动） =====
+             使用 DynamicScroller 支持题卡动态高度（题干长短/有无配图/有无解析均不同）。
+             page-mode 复用 window 滚动，最小侵入既有布局；
+             DynamicScrollerItem 内置 ResizeObserver，图片加载完成或解析展开时自动重测高度。 -->
+        <DynamicScroller
+          v-else
+          :items="cardList"
+          :min-item-size="200"
+          key-field="id"
+          page-mode
+          :buffer="200"
+          class="q-card-list"
+        >
+          <template #default="{ item: card, active }">
+            <DynamicScrollerItem
+              :item="card"
+              :active="active"
+              :data-index="card.id"
+              class="q-card-slot"
+            >
+              <div
+                class="q-card"
+                :class="{ 'is-expanded': expandedIds.has(card.id) }"
+              >
             <!-- 来源角标：绝对定位，贴左上角边缘 -->
             <span v-if="sourceMeta(card)" class="q-source-badge" :title="sourceMeta(card)">
               {{ sourceMeta(card) }}
@@ -415,14 +447,31 @@
                 <AppBadge :color="typeBadgeColor(card.question_type)" class="flex-shrink-0">
                   {{ typeLabel(card.question_type) }}
                 </AppBadge>
-                <AppBadge :color="diffBadgeColor(card.difficulty)" class="flex-shrink-0">
+                <span class="q-ghost-tag flex-shrink-0">
+                  <span class="q-dot" :class="`q-dot--${diffBadgeColor(card.difficulty)}`"></span>
                   {{ diffLabel(card.difficulty) }}
-                </AppBadge>
-                <AppBadge :color="statusBadgeColor(card.status)" class="flex items-center gap-1 flex-shrink-0">
-                  <AppIcon :name="statusIcon(card.status)" :size="11" :stroke="2" />
+                </span>
+                <span class="q-ghost-tag flex-shrink-0">
+                  <span class="q-dot" :class="`q-dot--${statusBadgeColor(card.status)}`"></span>
                   {{ statusLabel(card.status) }}
-                </AppBadge>
+                </span>
+                <span v-if="card.systemFlags?.pending_answer" class="q-flag-tag q-flag--answer flex-shrink-0">
+                  <AppIcon name="alert-circle" :size="11" :stroke="2" />
+                  答案待补全
+                </span>
+                <span v-if="card.systemFlags?.missing_analysis" class="q-flag-tag q-flag--analysis flex-shrink-0">
+                  <AppIcon name="alert-circle" :size="11" :stroke="2" />
+                  解析待补全
+                </span>
               </div>
+              <!-- 多选 Checkbox（批量提交审核） -->
+              <label class="q-select-check flex-shrink-0" @click.stop>
+                <input
+                  type="checkbox"
+                  :checked="selectedIds.has(card.id)"
+                  @change="toggleSelect(card.id)"
+                />
+              </label>
             </div>
 
             <!-- Row 2: Body — 题干 + 选项 -->
@@ -451,33 +500,46 @@
                     <span>答案解析</span>
                   </div>
 
-                  <!-- 正确答案高亮卡片（选择题 / 填空题） -->
-                  <div
-                    v-if="card.correctAnswer && (card.question_type === 'choice' || card.question_type === 'fill')"
-                    class="q-answer-card"
-                    :class="`q-answer-card--${card.question_type}`"
-                  >
-                    <span class="q-answer-card-label">正确答案</span>
-                    <span class="q-answer-card-value"><LatexRender :text="card.correctAnswer" :inline="true" /></span>
-                    <AppIcon
-                      name="check-circle"
-                      :size="16"
-                      :stroke="2.2"
-                      class="q-answer-card-icon"
-                    />
-                  </div>
+                  <!-- 答案与解析材质化卡片（镜像 QuestionDetail.vue 结构）-->
+                  <div v-if="card.correctAnswer || card.analysis" class="q-ans-sol-block">
+                    <!-- 参考答案卡片 — 莫兰迪极淡蓝底 -->
+                    <div v-if="card.correctAnswer" class="q-ans-card">
+                      <div class="q-ans-card-title">参考答案</div>
+                      <div class="q-ans-card-content">
+                        <LatexRender :text="card.correctAnswer" :inline="true" />
+                      </div>
+                    </div>
 
-                  <!-- 解答题正确答案 -->
-                  <div
-                    v-if="card.correctAnswer && card.question_type === 'solution'"
-                    class="q-answer-inline"
-                  >
-                    <span class="q-answer-inline-label">参考答案</span>
-                    <span class="q-answer-inline-value"><LatexRender :text="card.correctAnswer" :inline="true" /></span>
-                  </div>
-
-                  <div v-if="card.analysis" class="q-analysis-body">
-                    <LatexRender :text="card.analysis" />
+                    <!-- 解析卡片 — 苹果系统柔和灰底 + 多解法切换 -->
+                    <div v-if="card.analysis" class="q-ana-card">
+                      <div class="q-ana-card-title-row">
+                        <span class="q-ana-card-title">解析</span>
+                        <div v-if="cardSolutions(card).length > 1" class="q-sol-seg">
+                          <button
+                            v-for="(_, i) in cardSolutions(card)"
+                            :key="i"
+                            class="q-sol-seg-btn"
+                            :class="{ active: activeSolutionIndex(card.id) === i }"
+                            @click="setActiveSolution(card.id, i)"
+                          >解法{{ cnNum(i + 1) }}</button>
+                        </div>
+                      </div>
+                      <div class="q-ana-card-body">
+                        <Transition name="q-sol-fade" mode="out-in">
+                          <LatexRender
+                            :key="activeSolutionIndex(card.id)"
+                            :text="splitSolution(cardSolutions(card)[activeSolutionIndex(card.id)]).body"
+                            :sub-question-badge="true"
+                          />
+                        </Transition>
+                      </div>
+                      <div
+                        v-if="splitSolution(cardSolutions(card)[activeSolutionIndex(card.id)]).conclusion"
+                        class="q-ana-conclusion"
+                      >
+                        <LatexRender :text="splitSolution(cardSolutions(card)[activeSolutionIndex(card.id)]).conclusion" />
+                      </div>
+                    </div>
                   </div>
                   <div v-else class="q-analysis-empty">暂无解析内容</div>
                 </div>
@@ -555,7 +617,9 @@
               </div>
             </div>
           </div>
-        </div>
+            </DynamicScrollerItem>
+          </template>
+        </DynamicScroller>
 
         <AppPagination
           v-if="cardList.length > 0"
@@ -569,18 +633,92 @@
     </div>
   </div>
 
+  <!-- 批量提交审核结果 Modal -->
+  <AppModal v-model="showBatchResult" title="批量提交审核结果" size="lg">
+    <div v-if="batchResult" class="batch-result-body">
+      <!-- 汇总统计 -->
+      <div class="batch-summary-row">
+        <div class="batch-summary-item">
+          <span class="batch-summary-label">总数</span>
+          <span class="batch-summary-value">{{ batchResult.total }}</span>
+        </div>
+        <div class="batch-summary-item batch-summary--success">
+          <span class="batch-summary-label">成功</span>
+          <span class="batch-summary-value">{{ batchResult.succeeded }}</span>
+        </div>
+        <div class="batch-summary-item batch-summary--failed">
+          <span class="batch-summary-label">失败</span>
+          <span class="batch-summary-value">{{ batchResult.failed }}</span>
+        </div>
+      </div>
+
+      <!-- 逐题结果列表 -->
+      <div class="batch-result-list">
+        <div
+          v-for="r in batchResult.results"
+          :key="r.id"
+          class="batch-result-item"
+          :class="{ 'is-failed': r.status === 'failed' }"
+        >
+          <div class="batch-result-icon">
+            <AppIcon
+              v-if="r.status === 'success'"
+              name="check"
+              :size="16"
+              :stroke="2.5"
+              class="text-emerald-500"
+            />
+            <AppIcon
+              v-else
+              name="x"
+              :size="16"
+              :stroke="2.5"
+              class="text-red-500"
+            />
+          </div>
+          <div class="batch-result-info">
+            <span class="batch-result-id">{{ r.id }}</span>
+            <template v-if="r.status === 'failed'">
+              <span class="batch-result-error">{{ batchErrorCodeLabel(r.code) }}</span>
+              <span v-if="r.missing && r.missing.length > 0" class="batch-result-missing">
+                缺失字段：{{ r.missing.join('、') }}
+              </span>
+            </template>
+          </div>
+        </div>
+      </div>
+
+      <!-- 操作按钮 -->
+      <div class="batch-result-actions">
+        <button
+          v-if="batchResult.failed > 0"
+          type="button"
+          class="batch-action-btn batch-action--primary"
+          @click="goToFirstFailed"
+        >
+          查看失败题目
+        </button>
+        <button type="button" class="batch-action-btn batch-action--ghost" @click="closeBatchResult">
+          关闭
+        </button>
+      </div>
+    </div>
+  </AppModal>
+
 
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount, onActivated, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { questionApi, type QuestionSummary, type QuestionDetail, type QuestionQuery, type GradeLevel, type SemesterType, type ExamType, type KnowledgeNodeSummary } from '@/api/client'
 import LatexRender from '@/components/LatexRender.vue'
 import QuestionOptions from '@/components/QuestionOptions.vue'
+import { DynamicScroller, DynamicScrollerItem } from 'vue-virtual-scroller'
+import 'vue-virtual-scroller/dist/vue-virtual-scroller.css'
 import KnowledgeTreeNav from '@/components/KnowledgeTreeNav.vue'
 import SpaceSwitcher from '@/components/SpaceSwitcher.vue'
-import { AppButton, AppSelect, AppPagination, AppIcon, AppBadge } from '@/components/ui'
+import { AppButton, AppSelect, AppPagination, AppIcon, AppBadge, AppModal } from '@/components/ui'
 import { useQuestionBasket } from '@/composables/useQuestionBasket'
 import { useToast } from '@/composables/useToast'
 import { useSpaceStore } from '@/stores/space'
@@ -589,7 +727,6 @@ import {
   typeBadgeColor,
   diffLabel,
   diffBadgeColor,
-  statusIcon,
   statusBadgeColor,
 } from '@/utils/questionDisplay'
 
@@ -622,10 +759,12 @@ const statusTabs = [
   { label: '已发布', value: 'published', icon: 'check' },
   { label: '草稿', value: 'draft', icon: 'pencil' },
   { label: '待审核', value: 'pending', icon: 'clock' },
+  { label: '待补全', value: 'incomplete', icon: 'alert-circle' },
 ] as const
 
 const currentStatus = ref<string>('ALL')
 const pendingReviewCount = ref(0)
+const incompleteCount = ref(0)
 const totalCount = ref(0)
 
 // 搜索框聚焦态：驱动窄屏下搜索框的弹性伸缩（聚焦或有内容时展开）
@@ -639,8 +778,12 @@ const currentStatusLabel = computed(() => {
 
 function switchStatus(value: string) {
   currentStatus.value = value
-  // 同步到 query.status（ALL → undefined 表示不过滤）
-  query.status = value === 'ALL' ? undefined : (value as any)
+  // 同步到 query.status（ALL → undefined 表示不过滤；incomplete 保留原值，由 fetchList 拦截转换）
+  if (value === 'ALL') {
+    query.status = undefined
+  } else {
+    query.status = value as any
+  }
   // 同步到矩阵筛选面板的 UI 状态
   filters.status = value === 'ALL' ? '__all' : value
   page.value = 1
@@ -666,6 +809,16 @@ async function fetchPendingCount() {
     }
   } catch {
     pendingReviewCount.value = 0
+  }
+}
+
+// 获取待补全题目数量（独立轻量请求）
+async function fetchIncompleteCount() {
+  try {
+    const data = await questionApi.incompleteCount()
+    incompleteCount.value = data.total ?? 0
+  } catch {
+    incompleteCount.value = 0
   }
 }
 
@@ -714,6 +867,7 @@ function clearAllFilters() {
   query.question_type = undefined
   query.difficulty = undefined
   query.status = undefined
+  query.system_flag = undefined
   query.knowledge_node_ids = undefined
   query.include_descendants = undefined
   navNodeId.value = ''
@@ -787,6 +941,7 @@ interface QuestionCard {
   correctAnswer: string
   analysis: string | null
   knowledgeNodes: KnowledgeNodeSummary[]
+  systemFlags: { pending_answer?: boolean; missing_analysis?: boolean; no_analysis_needed?: boolean }
 }
 
 const cardList = ref<QuestionCard[]>([])
@@ -816,6 +971,55 @@ function kpTagClass(kind: string): string {
   if (kind === 'chapter') return 'kp-kind-chapter'
   if (kind === 'ability') return 'kp-kind-method'
   return 'kp-kind-knowledge'
+}
+
+// ===== 多解法切换（镜像 QuestionDetail.vue 逻辑）=====
+const cnNums = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十']
+function cnNum(n: number): string {
+  return cnNums[n - 1] || String(n)
+}
+
+// 每张卡片独立的当前解法索引：cardId → index（默认 0）
+const activeSolutionMap = ref<Map<string, number>>(new Map())
+
+// 拆分多解法：支持 `\n\n---\n\n` 显式分隔 或 `\n解法二/三/...` 隐式分隔
+function cardSolutions(card: QuestionCard): string[] {
+  const analysis = card.analysis
+  if (!analysis) return []
+  if (analysis.includes('\n\n---\n\n')) return analysis.split(/\n\n---\n\n/)
+  if (/\n解法[二三四五六七八九十]/.test(analysis)) {
+    return analysis.split(/\n(?=解法[二三四五六七八九十])/).map(s => s.trim())
+  }
+  return [analysis]
+}
+
+function activeSolutionIndex(cardId: string): number {
+  return activeSolutionMap.value.get(cardId) ?? 0
+}
+
+function setActiveSolution(cardId: string, idx: number) {
+  const next = new Map(activeSolutionMap.value)
+  next.set(cardId, idx)
+  activeSolutionMap.value = next
+}
+
+// 拆分解法正文与结论（故/因此/所以/综上 收尾句）
+function splitSolution(text: string): { body: string; conclusion: string } {
+  if (!text) return { body: '', conclusion: '' }
+  const patterns = [
+    /(?:故|因此|所以|综上)[选答]\s*[A-Z](?:[、,，]\s*[A-Z])*\s*。?\s*$/,
+    /(?:故|因此|所以|综上)[^。\n]*答案[^。\n]*[。]?\s*$/,
+    /(?:故|因此|所以|综上)[^。\n]*[。]?\s*$/,
+    /故选\s*[A-Z](?:[、,，]\s*[A-Z])*\s*。?\s*$/,
+  ]
+  for (const p of patterns) {
+    const m = text.match(p)
+    if (m) {
+      const idx = text.lastIndexOf(m[0])
+      return { body: text.substring(0, idx).trim(), conclusion: m[0].trim() }
+    }
+  }
+  return { body: text.trim(), conclusion: '' }
 }
 
 const query = reactive<QuestionQuery>({
@@ -1003,7 +1207,7 @@ function applyFilters() {
   query.question_type = filters.type === '__all' ? undefined : (filters.type as any)
   // 难度
   query.difficulty = filters.difficulty === '__all' ? undefined : (filters.difficulty as any)
-  // 状态：同步到 segmented tab
+  // 状态：同步到 segmented tab（incomplete 保留原值，由 fetchList 拦截转换）
   query.status = filters.status === '__all' ? undefined : (filters.status as any)
   currentStatus.value = filters.status === '__all' ? 'ALL' : filters.status
   // TODO: source / subSource / year / grade / semester / region 待后端支持后映射
@@ -1068,20 +1272,39 @@ function extractAnswerItem(item: any): string {
   return String(item)
 }
 
+// 判断是否为选择题答案（单个大写字母 A-Z 数组）
+function isChoiceLabels(arr: string[]): boolean {
+  return arr.length > 0 && arr.every(s => /^[A-Za-z]$/.test(s.trim()))
+}
+
 function parseAnswer(raw: any): string {
   if (raw == null) return ''
   if (typeof raw === 'string') {
     try {
       const parsed = JSON.parse(raw)
       if (typeof parsed === 'string') return parsed
-      if (Array.isArray(parsed)) return parsed.map(extractAnswerItem).join(', ')
+      if (Array.isArray(parsed)) {
+        const items = parsed.map(extractAnswerItem)
+        // 选择题答案：["A", "B"] → $\mathrm{AB}$
+        if (isChoiceLabels(items)) {
+          return `$\\mathrm{${items.map(s => s.trim().toUpperCase()).join('')}}$`
+        }
+        return items.join(', ')
+      }
       if (typeof parsed === 'object') return extractAnswerItem(parsed)
       return String(parsed)
     } catch {
       return raw
     }
   }
-  if (Array.isArray(raw)) return raw.map(extractAnswerItem).join(', ')
+  if (Array.isArray(raw)) {
+    const items = raw.map(extractAnswerItem)
+    // 选择题答案：["A", "B"] → $\mathrm{AB}$
+    if (isChoiceLabels(items)) {
+      return `$\\mathrm{${items.map(s => s.trim().toUpperCase()).join('')}}$`
+    }
+    return items.join(', ')
+  }
   if (typeof raw === 'object') return extractAnswerItem(raw)
   return String(raw)
 }
@@ -1089,6 +1312,12 @@ function parseAnswer(raw: any): string {
 function isCorrectOption(card: QuestionCard, label: string): boolean {
   const ans = card.correctAnswer
   if (!ans) return false
+  // 兼容 $\mathrm{AB}$ 格式：提取字母后逐个匹配
+  const match = ans.match(/\\mathrm\{([A-Za-z]+)\}/)
+  if (match) {
+    return match[1].toUpperCase().includes(label.toUpperCase())
+  }
+  // 兜底：旧的逗号分割格式
   return ans.split(/[,，、\s]+/).includes(label)
 }
 
@@ -1100,9 +1329,19 @@ const detailCache = new Map<string, QuestionDetail>()
 async function fetchList() {
   loading.value = true
   try {
-    query.page = page.value
-    query.page_size = pageSize
-    const res = await questionApi.list(query)
+    // 拦截 incomplete 虚拟状态：深拷贝 query，在 apiParams 上替换，绝不污染响应式 state
+    // incomplete → system_flag=incomplete（pending_answer OR missing_analysis 并集），与 incomplete_count 的 total 逻辑一致
+    // 不限制 status，因为"待补全"本质是 system_flag 维度的筛选，不是 status 维度
+    const apiParams = { ...query } as QuestionQuery & { system_flag?: string }
+    if ((apiParams.status as string | undefined) === 'incomplete') {
+      delete (apiParams as any).status
+      apiParams.system_flag = 'incomplete'
+    } else {
+      delete apiParams.system_flag
+    }
+    apiParams.page = page.value
+    apiParams.page_size = pageSize
+    const res = await questionApi.list(apiParams)
     const summaries: QuestionSummary[] = res.data
     // 捕获总数：优先取后端 PageResult.total，否则回退到当前已加载条数
     totalCount.value = (res as any).total ?? summaries.length
@@ -1123,6 +1362,7 @@ async function fetchList() {
       const meta = (detail?.metadata ?? {}) as Record<string, unknown>
       const province = String(meta.region_province ?? '').trim()
       const city = String(meta.region_city ?? '').trim()
+      const rawFlags = (meta.system_flags ?? {}) as Record<string, unknown>
       return {
         id: s.id,
         stem: s.stem,
@@ -1145,6 +1385,11 @@ async function fetchList() {
         correctAnswer: parseAnswer(detail?.correct_answer),
         analysis: detail?.analysis ?? null,
         knowledgeNodes: detail?.knowledge_nodes ?? [],
+        systemFlags: {
+          pending_answer: !!rawFlags.pending_answer,
+          missing_analysis: !!rawFlags.missing_analysis,
+          no_analysis_needed: !!rawFlags.no_analysis_needed,
+        },
       }
     })
   } catch (e: any) {
@@ -1179,6 +1424,72 @@ function toggleBasket(id: string) {
   }
 }
 
+// ===== 批量提交审核（T3-7）=====
+// 多选：卡片头部 Checkbox，选中 ID 集合
+const selectedIds = ref<Set<string>>(new Set())
+const batchSubmitting = ref(false)
+const showBatchResult = ref(false)
+const batchResult = ref<{
+  total: number
+  succeeded: number
+  failed: number
+  results: Array<{ id: string; status: 'success' | 'failed'; code?: string; missing?: string[] }>
+} | null>(null)
+
+function toggleSelect(id: string) {
+  const next = new Set(selectedIds.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  selectedIds.value = next
+}
+
+function clearSelection() {
+  selectedIds.value = new Set()
+}
+
+// 批量提交审核：调用后端 batch-submit 接口，展示结构化结果 Modal
+async function handleBatchSubmit() {
+  if (selectedIds.value.size === 0 || batchSubmitting.value) return
+  batchSubmitting.value = true
+  try {
+    const res = await questionApi.batchSubmit(Array.from(selectedIds.value))
+    batchResult.value = res
+    showBatchResult.value = true
+  } catch (e: any) {
+    toast.error(e.response?.data?.error || e.response?.data?.message || e.message || '批量提交失败')
+  } finally {
+    batchSubmitting.value = false
+  }
+}
+
+// 错误代码 → 中文描述
+function batchErrorCodeLabel(code?: string): string {
+  if (!code) return '未知错误'
+  if (code === 'ERR_ANSWER_INCOMPLETE') return '答案不完整'
+  if (code === 'ERR_OPTIONS_INCOMPLETE') return '选项不完整'
+  if (code === 'ERR_ANALYSIS_INCOMPLETE') return '解析不完整'
+  return code
+}
+
+// 跳转到第一个失败题目的编辑页
+function goToFirstFailed() {
+  const failed = batchResult.value?.results.find(r => r.status === 'failed')
+  if (failed) {
+    showBatchResult.value = false
+    router.push(`/questions/${failed.id}/edit`)
+  }
+}
+
+// 关闭结果弹窗：刷新列表 + 计数 + 清空选择
+function closeBatchResult() {
+  showBatchResult.value = false
+  batchResult.value = null
+  clearSelection()
+  fetchList()
+  fetchIncompleteCount()
+  fetchPendingCount()
+}
+
 // 左侧导航节点变化已由 handleKnowledgeNodeSelect 处理，无需 watch
 
 watch(() => space.currentSpaceId, (newId) => {
@@ -1190,7 +1501,19 @@ watch(() => space.currentSpaceId, (newId) => {
 onMounted(() => {
   fetchList()
   fetchPendingCount()
+  fetchIncompleteCount()
 })
+
+// keep-alive 缓存组件从详情页返回时触发 —— onMounted 不会再次执行
+// 确保删除/编辑后列表数据为最新
+onActivated(() => {
+  // 清除模块级详情缓存，避免 fetchList 命中旧数据跳过 API 请求
+  detailCache.clear()
+  fetchList()
+  fetchPendingCount()
+  fetchIncompleteCount()
+})
+
 onBeforeUnmount(() => {
   if (searchTimer) clearTimeout(searchTimer)
 })
@@ -1804,7 +2127,7 @@ onBeforeUnmount(() => {
   overflow-y: auto;
   overscroll-behavior: contain; /* 切断滚动链：防止列表触底触发外层滚动/橡皮筋 */
   padding: 16px 20px;
-  background: var(--bg-card);
+  background: var(--bg-primary); /* 画布涂灰：与白色卡片拉开对比，卡片瞬间“跳”出 */
 }
 
 /* ===== Header Actions ===== */
@@ -1946,45 +2269,63 @@ onBeforeUnmount(() => {
 
 /* ===== Card List ===== */
 .q-card-list {
-  display: flex;
-  flex-direction: column;
-  gap: 16px; /* gap-4 */
+  /* DynamicScroller 使用绝对定位摆放 DynamicScrollerItem，flex/gap 已不适用。
+     保留 class 用于 descendant selector 上下文与暗色主题覆盖。 */
+  position: relative;
+}
+
+/* 单个题卡 slot：DynamicScrollerItem 的根元素。
+   上下平分安全边距（各 8px，总间距 16px 不变）——
+   关键 1：padding 计入 box-sizing:border-box 高度，ResizeObserver
+            测得的尺寸即包含此间距，下一项的 translateY 不会重叠；
+   关键 2：padding-top 8px 让 .q-card 不贴死在插槽 y:0 边缘，
+            hover 上浮 translateY(-2px) + 弥散阴影 + 蓝色边框有安全渲染区，
+            避免首卡顶部被外层 overflow 裁切（外层 padding 方案对虚拟列表无效：
+            绝对定位的 item 仍贴在插槽 top:0，溢出照样被外层裁）。 */
+.q-card-slot {
+  padding-top: 8px;
+  padding-bottom: 8px;
+  box-sizing: border-box;
 }
 
 /* ===== Question Card ===== */
+/* 悬浮卡片方案：纯白本体 + 实体边框 + 弥散阴影，浮于灰色画布之上 */
 .q-card {
   position: relative; /* 来源角标 & hover-expand 面板绝对定位基础 */
   background: var(--bg-card);
-  border-radius: 16px; /* rounded-2xl */
-  border: 1px solid transparent;
-  box-shadow: var(--shadow-sm);
+  border-radius: 12px; /* 现代感圆角 */
+  border: 1px solid var(--border-color); /* 清晰实体边框，强化卡片边界 */
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04); /* 常态轻微弥散阴影，赋予物理厚度 */
   /* 仅过渡 transform（hover 上浮动效所需）
      严禁过渡 all：会导致主题切换时 50-200 张卡片同时
      动画 background/box-shadow/border-color，引发卡顿闪烁 */
   transition: transform 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
 }
 
+/* 强化悬浮交互反馈：上浮 + 阴影加重 + 边框泛起主题色 */
 .q-card:hover {
-  transform: translateY(-4px); /* hover:-translate-y-1 */
-  box-shadow: var(--shadow-md);
+  transform: translateY(-2px); /* 视觉上浮起 */
+  box-shadow: 0 8px 24px rgba(149, 157, 165, 0.15); /* Hover 阴影加重 */
+  border-color: rgba(0, 113, 227, 0.3); /* 边框微微泛起主题色 */
 }
 
 .q-card.is-expanded {
-  box-shadow: var(--shadow-md);
+  box-shadow: 0 8px 24px rgba(149, 157, 165, 0.15);
 }
 
+/* 暗色模式：卡片恢复阴影 + 微亮边框，避免“平铺文本”扁平感 */
 [data-theme='dark'] .q-card {
-  border-color: #3a3a3c;
-  box-shadow: none;
+  border-color: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
 }
 
 [data-theme='dark'] .q-card:hover {
-  border-color: #3a3a3c;
-  box-shadow: none;
+  border-color: rgba(10, 132, 255, 0.4);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
 }
 
 [data-theme='dark'] .q-card.is-expanded {
-  box-shadow: none;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
 }
 
 /* ---- 来源角标：贴左上角边缘，绝对定位（与学校角标镜像统一） ---- */
@@ -2029,6 +2370,69 @@ onBeforeUnmount(() => {
   min-width: 0;
   overflow: hidden;
 }
+
+/* ---- Ghost Tag（难度/状态）：文字 + 彩色小圆点，降噪头部彩色块 ----
+   题型保留 AppBadge 彩色胶囊作为核心标识；
+   难度/状态降级为“纯文字 + 小圆点”幽灵样式，文字用 text-secondary，
+   仅靠 6px 圆点承载语义色，头部彩色块从 3 个降到 1 个。 */
+.q-ghost-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 4px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+/* 系统标记徽标：答案/解析待补全（淡底色 + 深色文字，极简风格） */
+.q-flag-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 7px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  font-weight: 550;
+  line-height: 1.5;
+}
+
+.q-flag--answer {
+  background: rgba(249, 115, 22, 0.1); /* orange-500/10 */
+  color: #c2410c; /* orange-700 */
+}
+
+.q-flag--analysis {
+  background: rgba(234, 179, 8, 0.12); /* yellow-500/12 */
+  color: #a16207; /* yellow-700 */
+}
+
+[data-theme='dark'] .q-flag--answer {
+  background: rgba(251, 146, 60, 0.16);
+  color: #fdba74;
+}
+
+[data-theme='dark'] .q-flag--analysis {
+  background: rgba(250, 204, 21, 0.16);
+  color: #fde047;
+}
+
+.q-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* 圆点配色与 AppBadge 文字色对齐（复用同一套语义色变量） */
+.q-dot--green { background: var(--success); }
+.q-dot--yellow { background: var(--warning); }
+.q-dot--red { background: var(--danger); }
+.q-dot--blue { background: var(--accent); }
+.q-dot--purple { background: var(--purple); }
+.q-dot--gray { background: var(--text-secondary); }
 
 /* ---- 学校角标：贴右上角边缘，绝对定位（与来源角标镜像统一） ---- */
 .q-school-tag {
@@ -2270,99 +2674,156 @@ onBeforeUnmount(() => {
   letter-spacing: 0.06em;
 }
 
-/* ---- Correct answer highlight card (choice & fill) ---- */
-.q-answer-card {
+/* ---- 答案与解析材质化卡片（镜像 QuestionDetail.vue .answer-card / .analysis-card）---- */
+.q-ans-sol-block {
+  margin-top: 4px;
+}
+
+/* 参考答案卡片 — 莫兰迪极淡蓝底 */
+.q-ans-card {
+  background: #f4f8fc;
+  border-radius: 12px;
+  padding: 14px 16px;
+  margin-bottom: 10px;
+  border: none;
+  transition: background 0.3s ease;
+}
+
+.q-ans-card:hover {
+  background: #edf3f9;
+}
+
+[data-theme='dark'] .q-ans-card {
+  background: rgba(100, 160, 220, 0.08);
+}
+
+[data-theme='dark'] .q-ans-card:hover {
+  background: rgba(100, 160, 220, 0.12);
+}
+
+/* 解析卡片 — 苹果系统柔和灰底 */
+.q-ana-card {
+  background: #f5f5f7;
+  border-radius: 12px;
+  padding: 14px 16px;
+  border: none;
+  transition: background 0.3s ease;
+}
+
+.q-ana-card:hover {
+  background: #ebebef;
+}
+
+[data-theme='dark'] .q-ana-card {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+[data-theme='dark'] .q-ana-card:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* 卡片小标题 */
+.q-ans-card-title,
+.q-ana-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+  letter-spacing: -0.01em;
+  display: block;
+}
+
+[data-theme='dark'] .q-ans-card-title,
+[data-theme='dark'] .q-ana-card-title {
+  color: var(--text-primary);
+}
+
+.q-ana-card-title-row {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px 14px;
-  border-radius: var(--radius-sm);
-  margin-bottom: 12px;
-  background: var(--bg-card);
-  border: 1px solid var(--border-color);
-  border-left: 2.5px solid var(--text-muted);
-}
-
-.q-answer-card--choice {
-  border-left-color: var(--accent);
-}
-
-.q-answer-card--fill {
-  border-left-color: var(--success);
-}
-
-.q-answer-card-label {
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-muted);
-  letter-spacing: 0.02em;
-  flex-shrink: 0;
-}
-
-.q-answer-card-value {
-  font-size: 16px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-  flex: 1;
-  color: var(--text-primary);
-}
-
-.q-answer-card--choice .q-answer-card-value {
-  color: var(--accent);
-}
-
-.q-answer-card--fill .q-answer-card-value {
-  color: var(--success);
-}
-
-.q-answer-card-icon {
-  flex-shrink: 0;
-  opacity: 0.5;
-}
-
-.q-answer-card--choice .q-answer-card-icon {
-  color: var(--accent);
-}
-
-.q-answer-card--fill .q-answer-card-icon {
-  color: var(--success);
-}
-
-/* ---- Solution answer inline ---- */
-.q-answer-inline {
-  display: flex;
-  align-items: baseline;
+  justify-content: space-between;
   gap: 8px;
-  padding: 8px 0 10px;
+  margin-bottom: 8px;
 }
 
-.q-answer-inline-label {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-muted);
-  flex-shrink: 0;
+.q-ana-card-title-row .q-ana-card-title {
+  margin-bottom: 0;
 }
 
-.q-answer-inline-value {
-  font-size: 14px;
-  font-weight: 600;
+.q-ans-card-content,
+.q-ana-card-body {
+  font-size: 13.5px;
+  line-height: 1.8;
   color: var(--text-primary);
 }
 
-/* ---- Analysis body ---- */
-.q-analysis-body {
-  padding: 4px 0 16px;
-  font-size: 13.5px;
-  line-height: 1.85;
-  color: var(--text-secondary);
+.q-ana-card-body :deep(p) {
+  margin: 0 0 8px;
 }
 
-.q-analysis-body :deep(.katex) {
+.q-ana-card-body :deep(.katex) {
   font-size: 1em;
 }
 
-.q-analysis-body :deep(.katex-display) {
+.q-ana-card-body :deep(.katex-display) {
   margin: 6px 0;
+}
+
+/* 多解法分段切换（镜像 QuestionDetail.vue .sol-seg）*/
+.q-sol-seg {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius-full);
+  background: var(--bg-input);
+  flex-shrink: 0;
+}
+
+.q-sol-seg-btn {
+  padding: 3px 10px;
+  border: none;
+  border-radius: var(--radius-full);
+  background: transparent;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.q-sol-seg-btn:hover {
+  color: var(--text-secondary);
+}
+
+.q-sol-seg-btn.active {
+  background: var(--bg-card);
+  color: var(--accent);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+[data-theme='dark'] .q-sol-seg-btn.active {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+/* 结论收尾段 — 融入卡片底色，纯文本强化 */
+.q-ana-conclusion {
+  margin-top: 16px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.8;
+}
+
+/* 解法淡入淡出过渡 */
+.q-sol-fade-enter-active,
+.q-sol-fade-leave-active {
+  transition: opacity 0.2s ease;
+}
+
+.q-sol-fade-enter-from,
+.q-sol-fade-leave-to {
+  opacity: 0;
 }
 
 .q-analysis-empty {
@@ -2371,14 +2832,23 @@ onBeforeUnmount(() => {
   color: var(--text-muted);
 }
 
-/* ---- Row 3: Footer ---- */
+/* ---- Row 3: Footer ----
+   底部栏涂灰：与题干区用细线隔开，增加视觉稳定感
+   下圆角匹配卡片半径（不靠 overflow:hidden，避免裁剪知识点 hover 展开面板） */
 .q-card-footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 20px;
-  border-top: 1px solid var(--divider);
+  padding: 12px 20px;
+  background-color: #fafbfc; /* 底部栏微涂灰 */
+  border-top: 1px solid #f0f0f2; /* 与题干区用细线隔开 */
+  border-radius: 0 0 12px 12px; /* 匹配卡片下圆角，让涂灰底贴合圆角 */
   gap: 12px;
+}
+
+[data-theme='dark'] .q-card-footer {
+  background-color: rgba(0, 0, 0, 0.15);
+  border-top-color: var(--divider);
 }
 
 /* 左侧知识点区：样式已移至 .q-kp-expand-panel 附近（hover-expand 重构） */
@@ -2456,6 +2926,193 @@ onBeforeUnmount(() => {
 .q-analysis-clip {
   min-height: 0;
   overflow: hidden;
+}
+
+/* ===== 批量提交审核按钮 ===== */
+.ql-batch-btn {
+  border: none;
+}
+
+.ql-batch-btn:active {
+  transform: scale(0.97);
+}
+
+.ql-batch-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.25);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+/* ===== 卡片多选 Checkbox ===== */
+.q-select-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 2px;
+}
+
+.q-select-check input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  accent-color: var(--accent, #007aff);
+  border-radius: 4px;
+}
+
+/* ===== 批量提交结果 Modal 内容 ===== */
+.batch-result-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 4px 0;
+}
+
+.batch-summary-row {
+  display: flex;
+  gap: 12px;
+}
+
+.batch-summary-item {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 14px 12px;
+  border-radius: 10px;
+  background: var(--bg-input);
+}
+
+.batch-summary-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.batch-summary-value {
+  font-size: 24px;
+  font-weight: 800;
+  color: var(--text-primary);
+  letter-spacing: -0.02em;
+}
+
+.batch-summary--success {
+  background: rgba(16, 185, 129, 0.08);
+}
+
+.batch-summary--success .batch-summary-value {
+  color: #10b981;
+}
+
+.batch-summary--failed {
+  background: rgba(239, 68, 68, 0.08);
+}
+
+.batch-summary--failed .batch-summary-value {
+  color: #ef4444;
+}
+
+.batch-result-list {
+  max-height: 320px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 2px;
+}
+
+.batch-result-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--bg-input);
+}
+
+.batch-result-item.is-failed {
+  background: rgba(239, 68, 68, 0.05);
+}
+
+.batch-result-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.batch-result-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+
+.batch-result-id {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-family: monospace;
+  word-break: break-all;
+}
+
+.batch-result-error {
+  font-size: 12px;
+  font-weight: 550;
+  color: #ef4444;
+}
+
+.batch-result-missing {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.batch-result-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.batch-action-btn {
+  padding: 8px 18px;
+  border-radius: 9999px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  border: none;
+}
+
+.batch-action--primary {
+  background: var(--accent, #007aff);
+  color: #fff;
+}
+
+.batch-action--primary:hover {
+  opacity: 0.9;
+}
+
+.batch-action--ghost {
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+}
+
+.batch-action--ghost:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
 }
 
 /* ===== Responsive ===== */

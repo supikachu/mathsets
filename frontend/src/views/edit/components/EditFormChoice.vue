@@ -11,23 +11,72 @@ const toast = useToast()
 
 const isMultiChoice = computed(() => subType.value === 'multi')
 
-// Sync multiCorrectAnswers computed with correctAnswer model value
-const multiCorrectAnswers = computed({
-  get: () => Array.isArray(correctAnswer.value) ? correctAnswer.value : [],
-  set: (val: string[]) => { correctAnswer.value = [...val].sort() },
+// 当前选中的 label 集合（统一为数组处理）
+const selectedLabels = computed<string[]>({
+  get() {
+    if (Array.isArray(correctAnswer.value)) return [...correctAnswer.value]
+    return correctAnswer.value ? [correctAnswer.value] : []
+  },
+  set(val: string[]) {
+    const sorted = [...val].sort()
+    if (isMultiChoice.value) {
+      correctAnswer.value = sorted
+    } else {
+      correctAnswer.value = sorted[0] || ''
+    }
+  },
 })
 
-function isOptionCorrect(label: string): boolean {
-  if (Array.isArray(correctAnswer.value)) return correctAnswer.value.includes(label)
-  return correctAnswer.value === label
+function isAnswerSelected(label: string): boolean {
+  return selectedLabels.value.includes(label)
 }
 
+// 点击 A/B/C/D 快捷按钮切换答案
+function toggleAnswer(label: string) {
+  const arr = selectedLabels.value
+  if (isMultiChoice.value) {
+    if (arr.includes(label)) {
+      selectedLabels.value = arr.filter(l => l !== label)
+    } else {
+      selectedLabels.value = [...arr, label]
+    }
+  } else {
+    selectedLabels.value = [label]
+  }
+}
+
+// 答案文本框：统一包裹在单个 $\mathrm{...}$ 中
+// 单选 B → $\mathrm{B}$，多选 A+C → $\mathrm{AC}$
+const answerText = computed({
+  get() {
+    const labels = selectedLabels.value
+    if (labels.length === 0) return ''
+    return `$\\mathrm{${labels.join('')}}$`
+  },
+  set(val: string) {
+    // 解析用户手动输入：从 $\mathrm{XY}$ 中提取字母
+    const match = val.match(/\\mathrm\{([A-Za-z]+)\}/)
+    if (match) {
+      const letters = match[1].toUpperCase().split('')
+      selectedLabels.value = letters
+      return
+    }
+    // 兜底：直接按逗号/空格分割原始字母
+    const parts = val.trim().split(/[,，、\s]+/).filter(Boolean)
+    if (parts.length === 0) {
+      selectedLabels.value = []
+    } else {
+      selectedLabels.value = parts.map(p => p.trim().toUpperCase().charAt(0))
+    }
+  },
+})
+
 function addOption() {
-  const nextLabel = String.fromCharCode(65 + options.value.length) // A, B, C, D...
+  const nextLabel = String.fromCharCode(65 + options.value.length)
   options.value.push({ label: nextLabel, content: '' })
 }
 
-// Auto split and paste options text
+// 粘贴图片自动分割
 function onOptionPaste(e: ClipboardEvent, index: number) {
   const items = e.clipboardData?.items
   if (!items) return
@@ -57,7 +106,7 @@ function onOptionPaste(e: ClipboardEvent, index: number) {
   }
 }
 
-// Option image upload helper
+// 选项图片上传
 function handleOptionImageUpload(index: number) {
   const input = document.createElement('input')
   input.type = 'file'
@@ -91,62 +140,87 @@ function handleOptionImageUpload(index: number) {
 </script>
 
 <template>
-  <div class="choice-grid">
-    <div
-      v-for="(opt, i) in options"
-      :key="i"
-      class="opt-card"
-      :class="{ correct: isOptionCorrect(opt.label) }"
-    >
-      <label class="opt-prefix" :class="{ checked: isOptionCorrect(opt.label) }">
-        <input v-if="isMultiChoice" type="checkbox" :value="opt.label" v-model="multiCorrectAnswers" />
-        <input v-else type="radio" :value="opt.label" v-model="correctAnswer" />
-        <span class="opt-letter">{{ opt.label }}</span>
-      </label>
-      <input
-        v-model="opt.content"
-        :placeholder="`选项 ${opt.label}`"
-        class="opt-card-input"
-        @paste="onOptionPaste($event, i)"
-      />
-      <button type="button" class="opt-img-btn" @click="handleOptionImageUpload(i)" title="上传配图">
-        <AppIcon name="paperclip" :size="14" />
-      </button>
-      <button v-if="options.length > 2" type="button" class="opt-delete" @click="options.splice(i, 1)">
-        <AppIcon name="x" :size="15" />
-      </button>
+  <div class="choice-editor">
+    <!-- 1. 选项编辑网格 (2列) -->
+    <div class="options-grid">
+      <div
+        v-for="(opt, i) in options"
+        :key="i"
+        class="opt-card"
+        :class="{ correct: isAnswerSelected(opt.label) }"
+      >
+        <div class="opt-header">
+          <span class="opt-title">选项 {{ opt.label }}</span>
+          <div class="opt-actions">
+            <button type="button" class="opt-icon-btn" @click="handleOptionImageUpload(i)" title="上传配图">
+              <AppIcon name="paperclip" :size="13" />
+            </button>
+            <button v-if="options.length > 2" type="button" class="opt-icon-btn opt-delete-btn" @click="options.splice(i, 1)" title="删除选项">
+              <AppIcon name="x" :size="13" />
+            </button>
+          </div>
+        </div>
+        <input
+          v-model="opt.content"
+          :placeholder="`选项 ${opt.label} 内容...`"
+          class="opt-card-input"
+          @paste="onOptionPaste($event, i)"
+        />
+      </div>
     </div>
-    <button type="button" class="add-btn add-btn-sm" @click="addOption">
+
+    <button type="button" class="add-btn" @click="addOption">
       <AppIcon name="plus" :size="14" /> 添加选项
     </button>
+
+    <!-- 2. 答案（结果）模块 -->
+    <div class="answer-card">
+      <div class="answer-header">
+        <span class="answer-title">答案（结果）</span>
+        <div class="quick-answer-btns">
+          <button
+            v-for="(opt, i) in options"
+            :key="i"
+            type="button"
+            class="quick-btn"
+            :class="{ active: isAnswerSelected(opt.label) }"
+            @click="toggleAnswer(opt.label)"
+          >{{ opt.label }}</button>
+        </div>
+      </div>
+      <input
+        v-model="answerText"
+        :placeholder="isMultiChoice ? '$\\mathrm{AC}$' : '$\\mathrm{B}$'"
+        class="answer-input"
+      />
+      <p class="answer-hint">
+        <template v-if="isMultiChoice">多选题：点击字母多选，自动合并为 $\mathrm{AC}$ 格式</template>
+        <template v-else>单选题：点击字母选择，自动生成 $\mathrm{B}$ 格式</template>
+      </p>
+    </div>
   </div>
 </template>
 
 <style scoped>
-/* 选择题选项 Grid */
-.choice-grid {
+.choice-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* ============ 选项网格 ============ */
+.options-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 8px;
+  gap: 10px;
 }
 
-.choice-grid .add-btn-sm {
-  grid-column: 1;
-  justify-self: start;
-  width: fit-content;
-  max-width: 200px;
-}
-
-/* 选项卡片（一体化胶囊） */
 .opt-card {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 8px 12px;
-  border-radius: 10px;
   background: var(--bg-input);
+  border-radius: 10px;
+  padding: 10px 12px;
   border: 1.5px solid transparent;
-  transition: border-color 0.2s ease, background-color 0.2s ease, box-shadow 0.2s ease;
+  transition: border-color 0.2s, box-shadow 0.2s;
 }
 
 [data-theme='dark'] .opt-card {
@@ -163,51 +237,72 @@ function handleOptionImageUpload(index: number) {
 }
 
 .opt-card.correct {
-  background: var(--accent-light);
   border-color: var(--accent);
+  background: var(--accent-light);
 }
 
 [data-theme='dark'] .opt-card.correct {
-  background: rgba(0, 122, 255, 0.12);
-  border-color: var(--accent);
+  background: rgba(0, 122, 255, 0.1);
 }
 
-/* 前缀（单选/多选 + 字母） */
-.opt-prefix {
+.opt-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+/* 选项标题：使用系统主题色变量 */
+.opt-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent, #007aff);
+}
+
+.opt-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.opt-icon-btn {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  flex-shrink: 0;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
   cursor: pointer;
-  user-select: none;
+  border-radius: 5px;
+  opacity: 0;
+  transition: opacity 0.2s, color 0.2s, background-color 0.2s;
 }
 
-.opt-prefix input {
-  margin: 0;
-  accent-color: var(--accent);
+.opt-card:hover .opt-icon-btn {
+  opacity: 0.5;
 }
 
-.opt-letter {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text-secondary);
-}
-
-.opt-prefix.checked .opt-letter {
+.opt-icon-btn:hover {
+  opacity: 1 !important;
   color: var(--accent);
+  background: var(--accent-light);
 }
 
-/* 隐形输入框 */
+.opt-delete-btn:hover {
+  color: var(--danger);
+  background: var(--danger-light);
+}
+
 .opt-card-input {
-  flex: 1;
-  min-width: 0;
+  width: 100%;
   border: none;
   background: transparent;
   box-shadow: none;
   outline: none;
   color: var(--text-primary);
   font-size: 13px;
-  line-height: 1.4;
+  line-height: 1.5;
   font-family: inherit;
   padding: 2px 0;
 }
@@ -216,67 +311,11 @@ function handleOptionImageUpload(index: number) {
   color: var(--text-muted);
 }
 
-/* 删除按钮（hover 淡入） */
-.opt-delete {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  width: 24px;
-  height: 24px;
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  border-radius: 6px;
-  opacity: 0;
-  transition: opacity 0.2s ease, color 0.2s ease, background-color 0.2s ease;
-}
-
-.opt-card:hover .opt-delete {
-  opacity: 0.6;
-}
-
-.opt-delete:hover {
-  opacity: 1 !important;
-  color: var(--danger);
-  background: var(--danger-light);
-}
-
-/* 选项配图按钮（hover/focus 淡入） */
-.opt-img-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  width: 24px;
-  height: 24px;
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  border-radius: 6px;
-  opacity: 0;
-  transition: opacity 0.2s ease, color 0.2s ease, background-color 0.2s ease;
-}
-
-.opt-card:hover .opt-img-btn,
-.opt-card:focus-within .opt-img-btn {
-  opacity: 0.6;
-}
-
-.opt-img-btn:hover {
-  opacity: 1 !important;
-  color: var(--accent);
-  background: var(--accent-light);
-}
-
 .add-btn {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  margin-top: 4px;
-  padding: 7px 14px;
+  padding: 6px 14px;
   border: 1px dashed var(--border-strong);
   background: transparent;
   color: var(--text-secondary);
@@ -286,6 +325,7 @@ function handleOptionImageUpload(index: number) {
   cursor: pointer;
   transition: var(--transition-fast);
   font-family: inherit;
+  align-self: flex-start;
 }
 
 .add-btn:hover {
@@ -295,9 +335,99 @@ function handleOptionImageUpload(index: number) {
   background: var(--accent-light);
 }
 
-.add-btn-sm {
-  padding: 4px 10px;
-  font-size: 12px;
-  gap: 4px;
+/* ============ 答案（结果）卡片 ============ */
+.answer-card {
+  background: var(--bg-input);
+  border-radius: 12px;
+  padding: 12px 16px;
+  border: 1px solid var(--border-color);
+}
+
+[data-theme='dark'] .answer-card {
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+.answer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+/* 答案标题：使用系统主题色变量 */
+.answer-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent, #007aff);
+}
+
+/* A/B/C/D 快捷按钮组：使用系统主题色 */
+.quick-answer-btns {
+  display: flex;
+  gap: 6px;
+}
+
+.quick-btn {
+  width: 30px;
+  height: 28px;
+  border-radius: 6px;
+  background: var(--accent-light, #ecf5ff);
+  border: 1px solid var(--border-color);
+  color: var(--accent, #007aff);
+  font-weight: 700;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+[data-theme='dark'] .quick-btn {
+  background: rgba(0, 122, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.1);
+  color: var(--accent, #0a84ff);
+}
+
+.quick-btn:hover {
+  opacity: 0.85;
+}
+
+/* 选中态：主题色背景 + 白字 */
+.quick-btn.active {
+  background: var(--accent, #007aff) !important;
+  color: #ffffff !important;
+  border-color: var(--accent, #007aff) !important;
+  box-shadow: 0 2px 6px var(--accent-light);
+}
+
+/* 答案文本输入框 */
+.answer-input {
+  width: 100%;
+  border: 1px solid var(--border-color);
+  background: #ffffff;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 14px;
+  color: var(--text-primary);
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+  font-family: inherit;
+}
+
+[data-theme='dark'] .answer-input {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.answer-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-light);
+}
+
+.answer-input::placeholder {
+  color: var(--text-muted);
+}
+
+.answer-hint {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: var(--text-muted);
 }
 </style>

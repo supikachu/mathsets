@@ -46,6 +46,21 @@ pub enum ParsedAnswer {
     Solution { subs: Vec<SubAnswer> },
 }
 
+impl ParsedAnswer {
+    /// 按题型生成空答案默认值（当 LLM 输出 `null` 或缺失答案时使用）
+    ///
+    /// - `choice` / `multiple` → `Choice { options: [] }`
+    /// - `fill` → `Fill { blanks: [] }`
+    /// - 其他 → `Solution { subs: [] }`
+    pub fn empty_for_type(question_type: &str) -> Self {
+        match question_type {
+            "choice" | "multiple" => ParsedAnswer::Choice { options: vec![] },
+            "fill" => ParsedAnswer::Fill { blanks: vec![] },
+            _ => ParsedAnswer::Solution { subs: vec![] },
+        }
+    }
+}
+
 /// AI 解析结果（强制数组化）
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ParsedQuestion {
@@ -59,8 +74,9 @@ pub struct ParsedQuestion {
     pub stem: String,
     /// 选择题选项
     pub options: Option<Vec<ParsedOption>>,
-    /// 按题型分支
-    pub correct_answer: ParsedAnswer,
+    /// 按题型分支（`Option` 容错：LLM 可能输出 `null` 表示无答案，后端补默认空结构）
+    #[serde(default)]
+    pub correct_answer: Option<ParsedAnswer>,
     /// 多解法数组（至少 1 个）
     pub analysis: Vec<AnalysisMethod>,
     /// 名称列表，后端做模糊匹配
@@ -71,9 +87,30 @@ pub struct ParsedQuestion {
     pub warnings: Vec<String>,
     /// ["IMAGE_PLACEHOLDER_0", ...] 便于前端批量替换
     pub image_placeholders: Vec<String>,
+    /// v1.1：从 Markdown 中提取的所有图片 URL（去重）
+    ///
+    /// 当 Stage 1（Doc2X / MinerU）输出含 `![...](url)` 真实链接时，
+    /// Stage 2 收集去重后填入此数组，前端据内联标记绑定原图，避免几何题丢图。
+    /// Qwen-VL 路径仅有 IMAGE_PLACEHOLDER_N，此数组为空（向后兼容）。
+    #[serde(default)]
+    pub image_urls: Vec<String>,
     /// 后端知识点模糊匹配结果（非 AI 输出，后端填充）
     #[serde(default)]
     pub kp_matches: Vec<KpMatch>,
+}
+
+impl ParsedQuestion {
+    /// 对 stem 与 analysis[i].content 调用 `close_unclosed_img_row_fences`
+    ///
+    /// 在 clean_and_parse 之后、知识点匹配之前调用，防止 AI 输出因 token
+    /// 截断而缺少 `:::img-row ... :::` 围栏的闭合 `:::` 标记，避免前端
+    /// 渲染崩溃或 `:::img-row` 开标记泄漏到题干文本中。
+    pub fn sanitize_img_row_fences(&mut self) {
+        self.stem = crate::ai::cleaner::close_unclosed_img_row_fences(&self.stem);
+        for a in &mut self.analysis {
+            a.content = crate::ai::cleaner::close_unclosed_img_row_fences(&a.content);
+        }
+    }
 }
 
 /// 批量解析响应 — LLM 批量输出用 {"questions": [...]} 包裹
@@ -82,4 +119,83 @@ pub struct ParsedQuestion {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct BatchParseResponse {
     pub questions: Vec<ParsedQuestion>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_correct_answer_null_deserializes_to_none() {
+        // LLM 输出 "correct_answer": null 时不应崩溃，应反序列化为 None
+        let raw = serde_json::json!({
+            "question_type": "solution",
+            "stem": "求 x",
+            "correct_answer": null,
+            "analysis": [],
+            "knowledge_points": [],
+            "confidence": 0.6,
+            "warnings": [],
+            "image_placeholders": []
+        });
+        let q: ParsedQuestion = serde_json::from_value(raw).unwrap();
+        assert!(q.correct_answer.is_none());
+    }
+
+    #[test]
+    fn test_correct_answer_missing_defaults_to_none() {
+        // correct_answer 字段缺失时也应反序列化为 None（#[serde(default)]）
+        let raw = serde_json::json!({
+            "question_type": "choice",
+            "stem": "1+1=?",
+            "analysis": [],
+            "knowledge_points": [],
+            "confidence": 0.5,
+            "warnings": [],
+            "image_placeholders": []
+        });
+        let q: ParsedQuestion = serde_json::from_value(raw).unwrap();
+        assert!(q.correct_answer.is_none());
+    }
+
+    #[test]
+    fn test_correct_answer_present_deserializes_to_some() {
+        let raw = serde_json::json!({
+            "question_type": "choice",
+            "stem": "1+1=?",
+            "correct_answer": {"kind": "choice", "value": {"options": ["B"]}},
+            "analysis": [],
+            "knowledge_points": [],
+            "confidence": 0.9,
+            "warnings": [],
+            "image_placeholders": []
+        });
+        let q: ParsedQuestion = serde_json::from_value(raw).unwrap();
+        let ans = q.correct_answer.unwrap();
+        assert!(matches!(ans, ParsedAnswer::Choice { options } if options == vec!["B".to_string()]));
+    }
+
+    #[test]
+    fn test_empty_for_type_choice() {
+        let a = ParsedAnswer::empty_for_type("choice");
+        assert!(matches!(a, ParsedAnswer::Choice { options } if options.is_empty()));
+    }
+
+    #[test]
+    fn test_empty_for_type_multiple() {
+        let a = ParsedAnswer::empty_for_type("multiple");
+        assert!(matches!(a, ParsedAnswer::Choice { options } if options.is_empty()));
+    }
+
+    #[test]
+    fn test_empty_for_type_fill() {
+        let a = ParsedAnswer::empty_for_type("fill");
+        assert!(matches!(a, ParsedAnswer::Fill { blanks } if blanks.is_empty()));
+    }
+
+    #[test]
+    fn test_empty_for_type_solution() {
+        let a = ParsedAnswer::empty_for_type("solution");
+        assert!(matches!(a, ParsedAnswer::Solution { subs } if subs.is_empty()));
+    }
 }

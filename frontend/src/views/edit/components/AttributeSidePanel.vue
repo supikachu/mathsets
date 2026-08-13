@@ -1456,6 +1456,11 @@ onBeforeUnmount(() => {
   flex-shrink: 0;
   height: 100%;
   width: clamp(260px, 25vw, 320px);
+  /* !important 覆盖父组件 .interactive-column 的 overflow:hidden 和 opacity:0.7。
+     opacity<1 会创建独立 stacking context，导致 z-index 跨列失效，把手被预览列遮挡。
+     折叠后必须 overflow:visible 让 left:-24px 的把手不被裁切。 */
+  overflow: visible !important;
+  opacity: 1 !important;
   transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
@@ -1505,7 +1510,8 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   padding: 0;
-  z-index: 20;
+  /* z-index 提升至 9999，确保折叠后浮在预览列上方 */
+  z-index: 9999;
   transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   outline: none;
 }
@@ -2045,7 +2051,7 @@ onBeforeUnmount(() => {
 
 .asp-section.ai-highlight,
 .asp-meta-cell.ai-highlight {
-  animation: asp-ai-breathe 2s ease-in-out infinite;
+  animation: asp-ai-breathe 2s ease-in-out 3;
   border-radius: var(--radius-sm);
 }
 

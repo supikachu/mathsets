@@ -35,6 +35,15 @@
           <AppIcon name="check-circle" :size="24" />
         </div>
       </div>
+      <div class="metric-card metric-incomplete" @click="goToIncomplete" role="button" tabindex="0">
+        <div class="metric-content">
+          <span class="metric-title">待补全</span>
+          <span class="metric-value">{{ incompleteCount }}</span>
+        </div>
+        <div class="metric-icon-wrap">
+          <AppIcon name="alert-circle" :size="24" />
+        </div>
+      </div>
     </div>
 
     <!-- ===== Bento Grid ===== -->
@@ -211,6 +220,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { useSpaceStore } from '@/stores/space'
 import { questionApi, type QuestionSummary, type QuestionQuery } from '@/api/client'
@@ -218,6 +228,7 @@ import client from '@/api/client'
 
 const auth = useAuthStore()
 const space = useSpaceStore()
+const router = useRouter()
 
 const uid = Math.random().toString(36).slice(2, 8)
 
@@ -229,6 +240,14 @@ const stats = ref({
   published: 0,
   disabled: 0,
 })
+
+// 异步补全机制：待补全题目数（pending_answer + missing_analysis）
+const incompleteCount = ref(0)
+
+// 点击待补全卡片 → 跳转题目列表（草稿 + pending_answer 筛选）
+function goToIncomplete() {
+  router.push({ path: '/questions', query: { status: 'draft', system_flag: 'pending_answer' } })
+}
 
 const daysSince = computed(() => 1)
 
@@ -394,6 +413,12 @@ async function fetchDashboardData() {
     }
   } catch { /* silent */ }
 
+  // 异步补全机制：获取待补全题目数
+  try {
+    const data = await questionApi.incompleteCount()
+    incompleteCount.value = data.total ?? 0
+  } catch { /* silent */ }
+
   try {
     const query: QuestionQuery = { space_id: spaceId, page: 1, page_size: 200 }
     const res = await questionApi.list(query)
@@ -474,8 +499,14 @@ async function fetchDashboardData() {
 /* ===== Metric Grid & Cards ===== */
 .metric-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 20px;
+}
+
+@media (max-width: 1100px) {
+  .metric-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
 }
 
 @media (max-width: 768px) {
@@ -562,6 +593,16 @@ async function fetchDashboardData() {
   color: #34c759;
 }
 
+.metric-incomplete {
+  background: linear-gradient(135deg, rgba(255, 159, 10, 0.12), rgba(255, 159, 10, 0.03));
+  border: 1px solid rgba(255, 159, 10, 0.15);
+  cursor: pointer;
+}
+.metric-incomplete .metric-icon-wrap {
+  background: rgba(255, 159, 10, 0.12);
+  color: #ff9f0a;
+}
+
 [data-theme='dark'] .metric-card {
   box-shadow: none;
 }
@@ -576,6 +617,10 @@ async function fetchDashboardData() {
 [data-theme='dark'] .metric-published {
   background: linear-gradient(135deg, rgba(48, 209, 88, 0.18), rgba(48, 209, 88, 0.05));
   border-color: rgba(48, 209, 88, 0.25);
+}
+[data-theme='dark'] .metric-incomplete {
+  background: linear-gradient(135deg, rgba(255, 159, 10, 0.18), rgba(255, 159, 10, 0.05));
+  border-color: rgba(255, 159, 10, 0.25);
 }
 
 /* ===== Welcome ===== */
