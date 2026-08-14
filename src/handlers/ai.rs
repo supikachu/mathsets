@@ -1094,6 +1094,11 @@ mod tests {
             image_placeholders: vec![],
             image_urls: vec![],
             kp_matches: vec![],
+            question_no: None,
+            display_order: None,
+            score: None,
+            chapter_path: vec![],
+            solution_methods: vec![],
         }
     }
 

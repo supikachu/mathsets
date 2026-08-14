@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { ref, watch, nextTick } from 'vue'
-<<<<<<< HEAD
 import {
   documentApi,
   collectionApi,
@@ -11,19 +10,13 @@ import {
   type QuestionDetail,
   type QuestionCollectionSummary,
 } from '@/api/client'
-=======
-import { aiApi, aiTaskApi, questionApi, type ParsedQuestion, type QuestionDetail, type AiParseTaskDetail } from '@/api/client'
->>>>>>> main
 import { AppButton, AppModal, AppConfirm, AppIcon } from '@/components/ui'
 import { useToast } from '@/composables/useToast'
 import { useAiParsePolling } from '@/composables/useAiParsePolling'
 import { parseMarkdownToQuestion, RECOMMENDED_PROMPT } from '@/utils/parseMarkdown'
 import { compressImage, blobToFile } from '@/utils/imageCompressor'
 import { withBackoffRetry } from '@/utils/concurrency'
-<<<<<<< HEAD
 import { pdfToImages, type PdfPageImage } from '@/utils/pdfToImages'
-=======
->>>>>>> main
 import { clearBatchSnapshot, hasUnfinishedSnapshot, type BatchSnapshot } from '@/utils/batchSnapshot'
 import DocumentTypeConfirmStep from './DocumentTypeConfirmStep.vue'
 import TaskProgressPanel from './TaskProgressPanel.vue'
@@ -72,14 +65,6 @@ const toast = useToast()
 
 // AI Mode tab: 'markdown' | 'image'
 const aiMode = ref<'markdown' | 'image'>('markdown')
-
-// OCR 引擎本次覆盖（'default' = 跟随系统设置）
-const ocrEngineOverride = ref<'default' | 'doc2x' | 'mineru_local' | 'qwen_vl'>('default')
-
-// 把本次覆盖转换为传给后端的 ocr_provider 参数（default 时返回 undefined 走用户偏好）
-function ocrProviderParam(): string | undefined {
-  return ocrEngineOverride.value === 'default' ? undefined : ocrEngineOverride.value
-}
 const aiText = ref('')
 const aiError = ref('')
 const aiParsing = ref(false)
@@ -285,7 +270,6 @@ async function doStartImageParse(file: File) {
   }
 }
 
-<<<<<<< HEAD
 /** PDF → 页面图片（TD-1 默认方案 A：前端 pdfjs 渲染），上限 30 页 */
 async function renderPdfPages(file: File): Promise<File[]> {
   const MAX_DOC_PAGES = 30
@@ -404,6 +388,7 @@ function detailToParsed(d: QuestionDetail): ParsedQuestion {
     confidence: 0.9,
     warnings: [],
     image_placeholders: [],
+    image_urls: [],
     kp_matches: (d.knowledge_nodes ?? []).map(kn => ({
       ai_name: kn.name,
       matched_id: kn.id,
@@ -422,148 +407,11 @@ async function loadParsedQuestions(ids: string[]): Promise<ParsedQuestion[]> {
       out.push(detailToParsed(data))
     } catch (e: any) {
       console.warn('[AiRecognizeDialog] 加载题目详情失败:', id, e?.message)
-=======
-async function doImageParse(file: File) {
-  aiParsing.value = true
-  aiBatchProgress.value = { current: 0, total: 1, text: '正在压缩图片…' }
-  try {
-    const compressed = await compressImage(file)
-    // 强制规范化 MIME 类型 — blob.type 在某些降级路径下可能为空，
-    // 直接传给 FormData 会导致 multipart part 缺少 Content-Type，
-    // 后端解析失败。这里根据压缩结果推断 MIME 并构造一致的 File。
-    const mimeType = compressed.type || 'image/webp'
-    const ext = mimeType === 'image/png' ? 'png'
-      : mimeType === 'image/jpeg' ? 'jpg'
-      : 'webp'
-    const imageFile = new File([compressed], `upload.${ext}`, { type: mimeType })
-
-    aiBatchProgress.value = { current: 0, total: 1, text: '正在上传并识别图片（约 10-30 秒）…' }
-    const res = await withBackoffRetry(() => aiApi.parseImage(imageFile, ocrProviderParam()))
-    const questions = res.data.data
-    await handleBatchResults(questions)
-  } catch (e: any) {
-    // 额度耗尽已由 axios 拦截器集中弹窗，这里跳过重复 toast
-    if (e?.__quotaHandled) {
-      await clearBatchSnapshot()
-      return
     }
-    console.error('[doImageParse] 失败:', e?.message || e)
-    toast.error(e?.response?.data?.error || e?.message || '图片识别失败')
-    await clearBatchSnapshot()
-  }
-}
-
-async function doPdfParse(file: File) {
-  aiParsing.value = true
-  aiBatchProgress.value = { current: 0, total: 1, text: '正在上传 PDF…' }
-
-  try {
-    // 1. 提交异步任务（后端通过 magic bytes 自动判定 source_type=pdf）
-    const submitRes = await aiTaskApi.submitParseTaskMedia(file, ocrProviderParam())
-    const taskId = submitRes.data.task_id
-
-    // 2. 轮询任务状态（OCR ≤120s + Stage2 LLM ≤180s，整体上限 360s）
-    aiBatchProgress.value = { current: 0, total: 240_000, text: '正在 OCR 识别 PDF…（约 1-5 分钟）' }
-    const task = await pollPdfTaskStatus(taskId, (elapsed) => {
-      const sec = Math.round(elapsed / 1000)
-      aiBatchProgress.value = {
-        current: Math.min(elapsed, 240_000),
-        total: 240_000,
-        text: `正在解析 PDF（OCR + AI 结构化）… 已耗时 ${sec}s`,
-      }
-    })
-
-    // 3. 拉取所有题目详情（worker 已落库为 Draft 状态）
-    const ids = task.question_ids || (task.question_id ? [task.question_id] : [])
-    if (ids.length === 0) {
-      throw new Error('PDF 任务完成但未生成任何题目')
->>>>>>> main
-    }
-
-    aiBatchProgress.value = { current: 0, total: ids.length, text: `正在加载 ${ids.length} 道题目…` }
-    const details = await Promise.all(
-      ids.map((id, i) =>
-        questionApi.get(id).then(r => {
-          aiBatchProgress.value = {
-            current: i + 1,
-            total: ids.length,
-            text: `正在加载题目 ${i + 1}/${ids.length}…`,
-          }
-          return r.data
-        }),
-      ),
-    )
-
-    // 4. 转换为 ParsedQuestion[]（携带 id 字段，避免父组件重复 create 落库）
-    const questions = details.map(questionDetailToParsedQuestion)
-    await handleBatchResults(questions)
-  } catch (e: any) {
-    // 额度耗尽已由 axios 拦截器集中弹窗，跳过重复 toast
-    if (e?.__quotaHandled) {
-      await clearBatchSnapshot()
-      return
-    }
-    // PDF 任务失败时错误直接透传（worker 不允许降级 Qwen-VL）
-    console.error('[doPdfParse] 失败:', e?.message || e)
-    toast.error(e?.response?.data?.error || e?.message || 'PDF 识别失败')
-    await clearBatchSnapshot()
-  }
-}
-
-// 轮询 PDF 异步任务状态直至 completed / failed / 超时
-async function pollPdfTaskStatus(
-  taskId: string,
-  onProgress?: (elapsed: number) => void,
-): Promise<AiParseTaskDetail> {
-  const MAX_WAIT_MS = 360_000  // 6 分钟上限（PDF OCR ≤120s + Stage2 LLM ≤180s + 缓冲）
-  const POLL_INTERVAL = 1500
-  const start = Date.now()
-
-  while (true) {
-    const elapsed = Date.now() - start
-    if (elapsed > MAX_WAIT_MS) {
-      throw new Error(`PDF 解析任务超时（${Math.round(elapsed / 1000)}s）`)
-    }
-    onProgress?.(elapsed)
-
-    const res = await aiTaskApi.getTaskStatus(taskId)
-    const task = res.data
-
-    if (task.status === 'completed') return task
-    if (task.status === 'failed') {
-      throw new Error(task.error_message || 'PDF 解析失败')
-    }
-    // pending / processing 继续轮询
-    await new Promise(r => setTimeout(r, POLL_INTERVAL))
-  }
-}
-
-// 将已落库的 QuestionDetail 转换为 ParsedQuestion
-// 关键：携带 id 字段，让父组件的 parsedQuestionToSnapshot 据此设置 savedQid/saved=true，
-//       后续保存走 update 而非 create，避免重复落库
-function questionDetailToParsedQuestion(d: QuestionDetail): ParsedQuestion {
-  // 难度数字反向映射为字符串（worker 落库时 'easy'→2, 'medium'→3, 'hard'→4）
-  const diffMap: Record<number, string> = { 1: 'easy', 2: 'easy', 3: 'medium', 4: 'hard', 5: 'hard' }
-
-  // 解析多解法（worker 落库时用 \n\n---\n\n 分隔）
-  const analysisStr = d.analysis || ''
-  const analysis = analysisStr
-    .split('\n\n---\n\n')
-    .map((content, i) => ({
-      title: `解法 ${i + 1}`,
-      content: content.trim(),
-    }))
-    .filter(m => m.content)
-
-  // correct_answer 落库时即为 ParsedAnswer 序列化的 JSON
-  const correct_answer = (d.correct_answer as ParsedQuestion['correct_answer']) || {
-    kind: 'solution' as const,
-    value: {},
   }
   return out
 }
 
-<<<<<<< HEAD
 /// 监听任务终态：成功 → 工作台（非 Mixed）/ 分组（Mixed）
 watch(pollTask, async (t) => {
   if (!t) return
@@ -651,31 +499,6 @@ async function reclassifyDoc() {
     docFlowState.value = 'confirm'
   } finally {
     aiBatchProgress.value = { current: 0, total: 0, text: '' }
-=======
-  // 知识点：已落库题目通过 knowledge_nodes 关联表携带
-  const knowledge_points = (d.knowledge_nodes || []).map(n => n.name)
-  const kp_matches = (d.knowledge_nodes || []).map(n => ({
-    ai_name: n.name,
-    matched_id: n.id,
-    matched_name: n.name,
-    score: n.ai_confidence ?? 1.0,
-  }))
-
-  return {
-    id: d.id,  // 关键：携带已落库 UUID
-    question_type: d.question_type,
-    stem: d.stem,
-    options: d.options || undefined,
-    correct_answer,
-    analysis,
-    difficulty: diffMap[d.difficulty] || 'medium',
-    knowledge_points,
-    confidence: 1.0,
-    warnings: [],
-    image_placeholders: [],
-    image_urls: [],
-    kp_matches,
->>>>>>> main
   }
 }
 
@@ -781,7 +604,6 @@ defineExpose({
 
           <!-- 图片/PDF 上传区（V2.1.1：上传 → 分类 → 确认类型） -->
           <div v-if="aiMode === 'image'" class="ai-upload-section">
-<<<<<<< HEAD
             <!-- ① 选文件 -->
             <template v-if="docFlowState === 'idle'">
               <div
@@ -802,43 +624,6 @@ defineExpose({
                   style="display:none"
                   @change="handleFileSelect"
                 />
-=======
-            <!-- OCR 引擎本次覆盖（M3 新增） -->
-            <div class="ocr-engine-selector">
-              <label class="ocr-engine-label">
-                <AppIcon name="sparkles" :size="14" />
-                <span>识别引擎</span>
-              </label>
-              <select v-model="ocrEngineOverride" class="ocr-engine-select">
-                <option value="default">默认（跟随系统设置）</option>
-                <option value="doc2x">Doc2X（高精度公式）</option>
-                <option value="mineru_local">MinerU（私有部署）</option>
-                <option value="qwen_vl">Qwen-VL（通用兜底）</option>
-              </select>
-            </div>
-            <div
-              class="ai-upload-area"
-              :class="{ dragover: aiUploadAreaHover }"
-              @dragover.prevent="aiUploadAreaHover = true"
-              @dragleave.prevent="aiUploadAreaHover = false"
-              @drop.prevent="handleFileDrop"
-              @click="fileInputRef?.click()"
-            >
-              <AppIcon name="upload" :size="48" />
-              <p class="ai-upload-hint">点击或拖拽上传图片/PDF 文件</p>
-              <p class="ai-upload-sub">支持 JPEG / PNG / WebP / PDF（最多 30 页）</p>
-              <input
-                ref="fileInputRef"
-                type="file"
-                accept="image/*,application/pdf"
-                style="display:none"
-                @change="handleFileSelect"
-              />
-            </div>
-            <div v-if="aiBatchProgress.total > 0" class="ai-batch-progress">
-              <div class="ai-progress-bar">
-                <div class="ai-progress-fill" :style="{ width: (aiBatchProgress.current / aiBatchProgress.total * 100) + '%' }"></div>
->>>>>>> main
               </div>
               <div class="ai-actions">
                 <AppButton variant="ghost" @click="show = false">取消</AppButton>
@@ -1253,36 +1038,4 @@ defineExpose({
 .ai-progress-bar { flex: 1; height: 8px; background: var(--bg-input); border-radius: 4px; overflow: hidden; }
 .ai-progress-fill { height: 100%; background: var(--accent); transition: width 0.3s; border-radius: 4px; }
 .ai-batch-progress span { font-size: 13px; color: var(--text-secondary); white-space: nowrap; }
-
-/* ===== OCR 引擎本次覆盖选择器（M3 新增） ===== */
-.ocr-engine-selector {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 12px;
-  background: var(--bg-input, #f9fafb);
-  border: 1px solid var(--border, #e5e7eb);
-  border-radius: 8px;
-}
-.ocr-engine-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-secondary, #6b7280);
-  white-space: nowrap;
-}
-.ocr-engine-select {
-  flex: 1;
-  border: none;
-  background: transparent;
-  font-size: 13px;
-  color: var(--text-primary, #111827);
-  cursor: pointer;
-  outline: none;
-}
-.ocr-engine-select:focus {
-  color: var(--purple, #7c3aed);
-}
 </style>

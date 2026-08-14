@@ -1214,11 +1214,7 @@ watch(() => filters.region, () => {
 })
 
 // 底部下拉面板展开状态（同时只展开一个）
-<<<<<<< HEAD
-const openDropdown = ref<null | 'year' | 'grade' | 'semester' | 'region' | 'city' | 'status' | 'docType'>(null)
-=======
-const openDropdown = ref<null | 'year' | 'grade' | 'semester' | 'region' | 'city' | 'status' | 'header-status'>(null)
->>>>>>> main
+const openDropdown = ref<null | 'year' | 'grade' | 'semester' | 'region' | 'city' | 'status' | 'docType' | 'header-status'>(null)
 function toggleDropdown(key: typeof openDropdown.value) {
   openDropdown.value = openDropdown.value === key ? null : key
 }

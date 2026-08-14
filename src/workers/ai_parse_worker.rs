@@ -28,7 +28,7 @@ use crate::handlers::ai::{post_process_batch, resolve_ai_config, ModelKind};
 use crate::handlers::ai_tagging::{match_knowledge_nodes, KnowledgeNodeMatch};
 use crate::handlers::collections::{get_or_create_collection, link_question_to_collection};
 use crate::handlers::questions::{save_version, upsert_ai_knowledge_nodes};
-use crate::models::ai_task::{AiParseTask, AiTaskStatus};
+use crate::models::ai_task::{AiParseTask, AiTaskSourceType, AiTaskStatus};
 use crate::models::document::is_paper_type;
 use crate::models::question::{Difficulty, QuestionStatus, QuestionType};
 use crate::util::normalize::{compute_content_hash, compute_normalized_content_hash};
@@ -1208,9 +1208,14 @@ mod tests {
         AiParseTask {
             id: Uuid::new_v4(),
             creator_id: user_id,
-            raw_text: String::new(),
+            raw_text: Some(String::new()),
+            source_type: AiTaskSourceType::Text,
+            image_b64: None,
+            pdf_bytes: None,
+            ocr_provider_override: None,
             status: AiTaskStatus::Pending,
             question_id: None,
+            question_ids: None,
             error_message: None,
             created_at: now,
             updated_at: now,
@@ -1242,12 +1247,12 @@ mod tests {
             difficulty: Some("medium".into()),
             stem: stem.into(),
             options: None,
-            correct_answer: ParsedAnswer::Solution {
+            correct_answer: Some(ParsedAnswer::Solution {
                 subs: vec![crate::ai::types::SubAnswer {
                     sub_id: 1,
                     content: "解：x=2".into(),
                 }],
-            },
+            }),
             analysis: vec![AnalysisMethod {
                 title: "解法一".into(),
                 content: "求导。".into(),
@@ -1256,6 +1261,7 @@ mod tests {
             confidence: 0.9,
             warnings: vec![],
             image_placeholders: vec![],
+            image_urls: vec![],
             kp_matches: vec![],
             question_no: question_no.map(|s| s.to_string()),
             display_order: Some(1),
