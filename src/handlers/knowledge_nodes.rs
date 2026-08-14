@@ -86,6 +86,7 @@ const NODE_SELECT_FIELDS: &str = r#"
     path::text AS path,
     depth, name, aliases, description,
     sort_order, question_count, is_active,
+    canonical_id, status, source,
     created_at, updated_at
 "#;
 

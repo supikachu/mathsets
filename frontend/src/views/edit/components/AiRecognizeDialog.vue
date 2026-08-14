@@ -1,13 +1,26 @@
 <script setup lang="ts">
 import { ref, watch, nextTick } from 'vue'
-import { aiApi, type ParsedQuestion } from '@/api/client'
+import {
+  documentApi,
+  collectionApi,
+  questionApi,
+  type ParsedQuestion,
+  type DocumentMeta,
+  type ConfirmDocumentRequest,
+  type QuestionDetail,
+  type QuestionCollectionSummary,
+} from '@/api/client'
 import { AppButton, AppModal, AppConfirm, AppIcon } from '@/components/ui'
 import { useToast } from '@/composables/useToast'
+import { useAiParsePolling } from '@/composables/useAiParsePolling'
 import { parseMarkdownToQuestion, RECOMMENDED_PROMPT } from '@/utils/parseMarkdown'
 import { compressImage, blobToFile } from '@/utils/imageCompressor'
-import { runWithConcurrency, withBackoffRetry, type PoolResult } from '@/utils/concurrency'
+import { withBackoffRetry } from '@/utils/concurrency'
 import { pdfToImages, type PdfPageImage } from '@/utils/pdfToImages'
 import { clearBatchSnapshot, hasUnfinishedSnapshot, type BatchSnapshot } from '@/utils/batchSnapshot'
+import DocumentTypeConfirmStep from './DocumentTypeConfirmStep.vue'
+import TaskProgressPanel from './TaskProgressPanel.vue'
+import QuestionGroupingStep, { type GroupQuestion } from './QuestionGroupingStep.vue'
 
 const show = defineModel<boolean>({ required: true })
 const applyingAiResult = defineModel<boolean>('applyingAiResult', { default: false })
@@ -57,6 +70,28 @@ const aiError = ref('')
 const aiParsing = ref(false)
 const aiResult = ref<ParsedQuestion | null>(null)
 const promptCopied = ref(false)
+
+// V2.1.1 资料流程状态：idle（选文件）→ uploading（上传+分类中）→ confirm（确认类型）
+// → progress（解析中）→ grouping（Mixed 分组）
+const docFlowState = ref<'idle' | 'uploading' | 'confirm' | 'progress' | 'grouping'>('idle')
+const currentDoc = ref<DocumentMeta | null>(null)
+const docConfirming = ref(false)
+const cancelling = ref(false)
+
+// 解析任务轮询
+const {
+  isPolling,
+  statusText: taskStatusText,
+  error: taskError,
+  task: pollTask,
+  startPolling,
+  cancel: cancelTask,
+  reset: resetPolling,
+} = useAiParsePolling()
+
+// Mixed 分组状态
+const groupingQuestions = ref<GroupQuestion[]>([])
+const groupingCollections = ref<QuestionCollectionSummary[]>([])
 
 // Batch processing state（仅用于进度展示，不再有"批量审阅面板"）
 const aiBatchProgress = ref({ current: 0, total: 0, text: '' })
@@ -221,48 +256,23 @@ async function doStartImageParse(file: File) {
   aiImageFile.value = file
   const isPdf = file.type === 'application/pdf'
   try {
-    if (isPdf) {
-      await doPdfParse(file)
-    } else {
-      await doImageParse(file)
+    // 1. 生成页面图片（PDF 前端渲染；图片压缩）
+    const pages = isPdf ? await renderPdfPages(file) : await compressToPage(file)
+    if (pages.length === 0) {
+      toast.error('未能生成页面图片')
+      return
     }
+    // 2. 上传 → 3. AI 分类 → 4. 类型确认页
+    await uploadAndClassify(pages, isPdf)
   } catch (e: any) {
     toast.error(e?.message || '文件解析失败')
-  } finally {
-    aiParsing.value = false
-    aiBatchProgress.value = { current: 0, total: 0, text: '' }
+    resetDocFlow()
   }
 }
 
-async function doImageParse(file: File) {
-  aiParsing.value = true
-  aiBatchProgress.value = { current: 0, total: 1, text: '正在压缩图片…' }
-  try {
-    const compressed = await compressImage(file)
-    // 强制规范化 MIME 类型 — blob.type 在某些降级路径下可能为空，
-    // 直接传给 FormData 会导致 multipart part 缺少 Content-Type，
-    // 后端解析失败。这里根据压缩结果推断 MIME 并构造一致的 File。
-    const mimeType = compressed.type || 'image/webp'
-    const ext = mimeType === 'image/png' ? 'png'
-      : mimeType === 'image/jpeg' ? 'jpg'
-      : 'webp'
-    const imageFile = new File([compressed], `upload.${ext}`, { type: mimeType })
-
-    aiBatchProgress.value = { current: 0, total: 1, text: '正在上传并识别图片（约 10-30 秒）…' }
-    const res = await withBackoffRetry(() => aiApi.parseImage(imageFile))
-    const questions = res.data.data
-    await handleBatchResults(questions)
-  } catch (e: any) {
-    console.error('[doImageParse] 失败:', e?.message || e)
-    toast.error(e?.response?.data?.error || e?.message || '图片识别失败')
-    await clearBatchSnapshot()
-  }
-}
-
-async function doPdfParse(file: File) {
-  aiParsing.value = true
-  aiBatchProgress.value = { current: 0, total: 0, text: '正在渲染 PDF…' }
-
+/** PDF → 页面图片（TD-1 默认方案 A：前端 pdfjs 渲染），上限 30 页 */
+async function renderPdfPages(file: File): Promise<File[]> {
+  const MAX_DOC_PAGES = 30
   const pages: PdfPageImage[] = []
   for await (const pageImg of pdfToImages(file, {
     onProgress: (cur, total) => {
@@ -275,40 +285,220 @@ async function doPdfParse(file: File) {
     pages.push(pageImg)
   }
 
-  aiBatchProgress.value = { current: 0, total: pages.length, text: `开始 OCR 识别（${pages.length} 页）…` }
+  if (pages.length > MAX_DOC_PAGES) {
+    toast.warning(`文档页数超过 ${MAX_DOC_PAGES} 页，仅处理前 ${MAX_DOC_PAGES} 页`)
+    pages.length = MAX_DOC_PAGES
+  }
 
-  const results = await runWithConcurrency(
-    pages,
-    async (pageImg) => {
-      const blob = await (await fetch(pageImg.dataUrl)).blob()
-      const compressed = await compressImage(blob)
-      const imageFile = blobToFile(compressed, `page-${pageImg.page}.webp`)
-      const res = await withBackoffRetry(() => aiApi.parseImage(imageFile))
-      return res.data.data
-    },
-    (cur, total) => {
-      aiBatchProgress.value = { current: cur, total, text: `OCR 识别中… ${cur}/${total} 页完成` }
-    },
+  const out: File[] = []
+  for (let i = 0; i < pages.length; i++) {
+    aiBatchProgress.value = { current: i + 1, total: pages.length, text: `正在处理第 ${i + 1}/${pages.length} 页…` }
+    const blob = await (await fetch(pages[i].dataUrl)).blob()
+    const compressed = await compressImage(blob)
+    out.push(blobToFile(compressed, `page-${pages[i].page}.webp`))
+  }
+  return out
+}
+
+/** 单图 → 压缩页图 */
+async function compressToPage(file: File): Promise<File[]> {
+  aiBatchProgress.value = { current: 0, total: 1, text: '正在压缩图片…' }
+  const compressed = await compressImage(file)
+  // 强制规范化 MIME 类型 — blob.type 在某些降级路径下可能为空
+  const mimeType = compressed.type || 'image/webp'
+  const ext = mimeType === 'image/png' ? 'png'
+    : mimeType === 'image/jpeg' ? 'jpg'
+    : 'webp'
+  return [new File([compressed], `upload.${ext}`, { type: mimeType })]
+}
+
+/** 上传页图集 → 触发 AI 分类 → 进入类型确认步骤 */
+async function uploadAndClassify(pages: File[], isPdf: boolean) {
+  docFlowState.value = 'uploading'
+  aiBatchProgress.value = { current: 0, total: pages.length, text: '正在上传资料（最多 30 页）…' }
+  const res = await withBackoffRetry(() =>
+    documentApi.upload(pages, { file_type: isPdf ? 'pdf' : 'image' }),
   )
+  const doc = res.data.data
 
-  // 收集所有成功识别的题目，失败的页面只记录日志
-  const allQuestions: ParsedQuestion[] = []
-  let failedPages = 0
-  for (let i = 0; i < results.length; i++) {
-    const r = results[i] as PoolResult<ParsedQuestion[]>
-    if (r.status === 'success' && r.data) {
-      allQuestions.push(...r.data)
-    } else {
-      failedPages++
-      console.warn(`[doPdfParse] 第 ${pages[i].page} 页解析失败:`, r.error)
+  aiBatchProgress.value = { current: 1, total: 1, text: 'AI 正在识别资料类型…' }
+  const cls = await withBackoffRetry(() => documentApi.classify(doc.id))
+  currentDoc.value = cls.data.data
+  docFlowState.value = 'confirm'
+  aiBatchProgress.value = { current: 0, total: 0, text: '' }
+}
+
+function resetDocFlow() {
+  docFlowState.value = 'idle'
+  currentDoc.value = null
+  aiBatchProgress.value = { current: 0, total: 0, text: '' }
+  resetPolling()
+  groupingQuestions.value = []
+  groupingCollections.value = []
+}
+
+/** 用户确认资料类型 → 创建解析任务（P0-C） */
+async function onConfirmDoc(body: ConfirmDocumentRequest) {
+  const doc = currentDoc.value
+  if (!doc) return
+  docConfirming.value = true
+  try {
+    const res = await documentApi.confirm(doc.id, body)
+    currentDoc.value = res.data.data
+    toast.success('资料类型已确认，开始解析')
+    await startTask(doc.id)
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error || e?.message || '确认失败')
+  } finally {
+    docConfirming.value = false
+  }
+}
+
+/** 创建解析任务并进入进度页 */
+async function startTask(documentId: string) {
+  docFlowState.value = 'progress'
+  await startPolling(documentId)
+}
+
+/** 取消解析（已识别的题目保留在库中） */
+async function onCancelTask() {
+  cancelling.value = true
+  try {
+    await cancelTask()
+  } finally {
+    cancelling.value = false
+  }
+}
+
+/// QuestionDetail → ParsedQuestion（供工作台 snapshot 转换）
+function detailToParsed(d: QuestionDetail): ParsedQuestion {
+  const analysis = d.analysis
+    ? d.analysis.split('\n\n---\n\n').map((c, i) => ({ title: `解法${i + 1}`, content: c }))
+    : []
+  const diffMap: Record<number, string> = { 1: 'easy', 2: 'easy', 3: 'medium', 4: 'hard', 5: 'hard' }
+  return {
+    question_type: d.question_type,
+    sub_type: undefined,
+    difficulty: diffMap[d.difficulty] ?? 'medium',
+    stem: d.stem,
+    options: d.options ?? undefined,
+    correct_answer: (d.correct_answer ?? { kind: 'solution', value: { subs: [] } }) as any,
+    analysis,
+    knowledge_points: [],
+    confidence: 0.9,
+    warnings: [],
+    image_placeholders: [],
+    kp_matches: (d.knowledge_nodes ?? []).map(kn => ({
+      ai_name: kn.name,
+      matched_id: kn.id,
+      matched_name: kn.name,
+      score: kn.ai_confidence ?? 0,
+    })),
+  }
+}
+
+/// 按任务产出的题目 ID 列表加载题目详情
+async function loadParsedQuestions(ids: string[]): Promise<ParsedQuestion[]> {
+  const out: ParsedQuestion[] = []
+  for (const id of ids) {
+    try {
+      const { data } = await questionApi.get(id)
+      out.push(detailToParsed(data))
+    } catch (e: any) {
+      console.warn('[AiRecognizeDialog] 加载题目详情失败:', id, e?.message)
     }
   }
+  return out
+}
 
-  if (failedPages > 0) {
-    toast.warning(`${failedPages} 页解析失败已跳过，成功识别 ${allQuestions.length} 题`)
+/// 监听任务终态：成功 → 工作台（非 Mixed）/ 分组（Mixed）
+watch(pollTask, async (t) => {
+  if (!t) return
+  if (t.status === 'success' || t.status === 'partial_success') {
+    if (t.question_ids.length === 0) {
+      toast.warning('未识别到有效题目')
+      docFlowState.value = 'confirm'
+      return
+    }
+    const questions = await loadParsedQuestions(t.question_ids)
+    if (questions.length === 0) {
+      toast.error('题目加载失败，请重试')
+      docFlowState.value = 'confirm'
+      return
+    }
+    const doc = currentDoc.value
+    if (doc?.document_type === 'mixed') {
+      // Mixed：进入人工分组步骤
+      try {
+        const { data } = await collectionApi.list({ document_id: doc.id, page_size: 100 })
+        groupingCollections.value = data.items
+      } catch {
+        groupingCollections.value = []
+      }
+      groupingQuestions.value = t.question_ids.map((id, i) => ({
+        question_id: id,
+        question_no: null,
+        stem: questions[i]?.stem ?? '',
+        collection_id: null,
+      }))
+      docFlowState.value = 'grouping'
+      toast.success(`成功识别 ${questions.length} 道题，请把题目归入对应集合`)
+    } else {
+      emit('batch-parsed', questions)
+      resetDocFlow()
+      show.value = false
+      toast.success(
+        t.status === 'partial_success'
+          ? `部分成功：${t.success_count} 题已录入（${t.failed_count} 题失败）`
+          : `成功识别 ${questions.length} 道题，已进入批量录入工作台`,
+      )
+    }
+  } else if (t.status === 'failed') {
+    toast.error(taskError.value || t.error_message || '解析失败')
+    docFlowState.value = 'confirm'
+  } else if (t.status === 'cancelled') {
+    toast.warning('解析已取消，已识别的题目已保留在题库中')
+    docFlowState.value = 'confirm'
   }
+})
 
-  await handleBatchResults(allQuestions)
+/** Mixed 分组完成 → 进入批量录入工作台 */
+function onGroupingComplete() {
+  const questions = groupingQuestions.value.map(q => q.stem).filter(Boolean)
+  if (questions.length === 0) {
+    toast.warning('没有可录入的题目')
+    return
+  }
+  // 重新加载已分组题目的完整详情
+  const ids = groupingQuestions.value.map(q => q.question_id)
+  loadParsedQuestions(ids).then((parsed) => {
+    if (parsed.length === 0) {
+      toast.error('题目加载失败')
+      return
+    }
+    emit('batch-parsed', parsed)
+    resetDocFlow()
+    show.value = false
+    toast.success(`已完成分组，${parsed.length} 道题进入批量录入工作台`)
+  })
+}
+
+/** 重新触发 AI 分类（用户对推荐结果不满意时） */
+async function reclassifyDoc() {
+  const doc = currentDoc.value
+  if (!doc) return
+  docFlowState.value = 'uploading'
+  aiBatchProgress.value = { current: 1, total: 1, text: 'AI 正在重新识别资料类型…' }
+  try {
+    const cls = await withBackoffRetry(() => documentApi.classify(doc.id))
+    currentDoc.value = cls.data.data
+    docFlowState.value = 'confirm'
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error || e?.message || '重新识别失败')
+    docFlowState.value = 'confirm'
+  } finally {
+    aiBatchProgress.value = { current: 0, total: 0, text: '' }
+  }
 }
 
 // ============================================================
@@ -411,36 +601,82 @@ defineExpose({
             </AppButton>
           </div>
 
-          <!-- 图片/PDF 上传区 -->
+          <!-- 图片/PDF 上传区（V2.1.1：上传 → 分类 → 确认类型） -->
           <div v-if="aiMode === 'image'" class="ai-upload-section">
-            <div
-              class="ai-upload-area"
-              :class="{ dragover: aiUploadAreaHover }"
-              @dragover.prevent="aiUploadAreaHover = true"
-              @dragleave.prevent="aiUploadAreaHover = false"
-              @drop.prevent="handleFileDrop"
-              @click="fileInputRef?.click()"
-            >
-              <AppIcon name="upload" :size="48" />
-              <p class="ai-upload-hint">点击或拖拽上传图片/PDF 文件</p>
-              <p class="ai-upload-sub">支持 JPEG / PNG / WebP / PDF（最多 30 页）</p>
-              <input
-                ref="fileInputRef"
-                type="file"
-                accept="image/*,application/pdf"
-                style="display:none"
-                @change="handleFileSelect"
-              />
-            </div>
-            <div v-if="aiBatchProgress.total > 0" class="ai-batch-progress">
-              <div class="ai-progress-bar">
-                <div class="ai-progress-fill" :style="{ width: (aiBatchProgress.current / aiBatchProgress.total * 100) + '%' }"></div>
+            <!-- ① 选文件 -->
+            <template v-if="docFlowState === 'idle'">
+              <div
+                class="ai-upload-area"
+                :class="{ dragover: aiUploadAreaHover }"
+                @dragover.prevent="aiUploadAreaHover = true"
+                @dragleave.prevent="aiUploadAreaHover = false"
+                @drop.prevent="handleFileDrop"
+                @click="fileInputRef?.click()"
+              >
+                <AppIcon name="upload" :size="48" />
+                <p class="ai-upload-hint">点击或拖拽上传图片/PDF 文件</p>
+                <p class="ai-upload-sub">支持 JPEG / PNG / WebP / PDF（最多 30 页）</p>
+                <input
+                  ref="fileInputRef"
+                  type="file"
+                  accept="image/*,application/pdf"
+                  style="display:none"
+                  @change="handleFileSelect"
+                />
               </div>
-              <span>{{ aiBatchProgress.text }}</span>
-            </div>
-            <div class="ai-actions">
-              <AppButton variant="ghost" @click="show = false">取消</AppButton>
-            </div>
+              <div class="ai-actions">
+                <AppButton variant="ghost" @click="show = false">取消</AppButton>
+              </div>
+            </template>
+
+            <!-- ② 上传 + 分类中 -->
+            <template v-else-if="docFlowState === 'uploading'">
+              <div v-if="aiBatchProgress.total > 0" class="ai-batch-progress">
+                <div class="ai-progress-bar">
+                  <div class="ai-progress-fill" :style="{ width: (aiBatchProgress.current / aiBatchProgress.total * 100) + '%' }"></div>
+                </div>
+                <span>{{ aiBatchProgress.text }}</span>
+              </div>
+              <div class="ai-actions">
+                <AppButton variant="ghost" @click="resetDocFlow">取消</AppButton>
+              </div>
+            </template>
+
+            <!-- ③ 资料类型确认 -->
+            <template v-else-if="docFlowState === 'confirm' && currentDoc">
+              <DocumentTypeConfirmStep
+                :doc="currentDoc"
+                :loading="docConfirming"
+                @confirm="onConfirmDoc"
+                @back="resetDocFlow"
+                @reclassify="reclassifyDoc"
+              />
+            </template>
+
+            <!-- ④ 解析进度 -->
+            <template v-else-if="docFlowState === 'progress'">
+              <TaskProgressPanel
+                :task="pollTask"
+                :status-text="taskStatusText"
+                :cancelling="cancelling"
+                @cancel="onCancelTask"
+              />
+              <div v-if="!isPolling && !pollTask" class="ai-batch-progress">
+                <div class="ai-progress-bar">
+                  <div class="ai-progress-fill" :style="{ width: '100%' }"></div>
+                </div>
+                <span>{{ taskStatusText || '提交中…' }}</span>
+              </div>
+            </template>
+
+            <!-- ⑤ Mixed 题目分组 -->
+            <template v-else-if="docFlowState === 'grouping'">
+              <QuestionGroupingStep
+                :questions="groupingQuestions"
+                :collections="groupingCollections"
+                @complete="onGroupingComplete"
+              />
+            </template>
           </div>
 
           <!-- Markdown 模式：文本输入区 -->

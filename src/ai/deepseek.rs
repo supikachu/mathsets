@@ -199,4 +199,75 @@ impl AiProvider for DeepSeekProvider {
             .map(|c| c.message.content)
             .ok_or_else(|| AiError::Upstream(status, "响应中无 choices".to_string()))
     }
+
+    /// 多图片调用：user content 数组携带 N 张 image_url（OpenAI 兼容格式）
+    async fn parse_images_with_prompt(
+        &self,
+        images_base64: &[String],
+        prompt: &str,
+        model: Option<&str>,
+    ) -> Result<String, AiError> {
+        let model_name = model.unwrap_or("qwen-vl-plus").to_string();
+
+        let image_parts: Vec<serde_json::Value> = images_base64
+            .iter()
+            .map(|b64| {
+                serde_json::json!({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": format!("data:image/png;base64,{}", b64)
+                    }
+                })
+            })
+            .collect();
+
+        let req = serde_json::json!({
+            "model": model_name,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": prompt
+                },
+                {
+                    "role": "user",
+                    "content": image_parts
+                }
+            ],
+            "temperature": 0.1,
+            "max_tokens": 4096
+        });
+
+        let url = format!("{}/v1/chat/completions", self.base_url);
+        let resp = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .json(&req)
+            .send()
+            .await;
+
+        let resp = match resp {
+            Ok(r) => r,
+            Err(e) if e.is_timeout() => return Err(AiError::Timeout),
+            Err(e) => return Err(AiError::Upstream(0, format!("{:?}", e))),
+        };
+
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(AiError::Upstream(status, body));
+        }
+
+        let chat_resp: ChatResponse = resp
+            .json()
+            .await
+            .map_err(|e| AiError::Upstream(status, format!("{:?}", e)))?;
+
+        chat_resp
+            .choices
+            .into_iter()
+            .next()
+            .map(|c| c.message.content)
+            .ok_or_else(|| AiError::Upstream(status, "响应中无 choices".to_string()))
+    }
 }

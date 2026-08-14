@@ -57,7 +57,12 @@ pub const CORE_PARSE_RULES: &str = r#"
   "knowledge_points": ["一次函数"],
   "confidence": 0.0-1.0,
   "warnings": [],
-  "image_placeholders": []
+  "image_placeholders": [],
+  "question_no": "题号，如 17(2) / 1 / 一、1（无法判断可省略）",
+  "display_order": 整数展示顺序（可省略，按出现顺序）,
+  "score": 分值整数（原图标注的分值，没有可省略）,
+  "chapter_path": ["章节", "子章节"]（原图/原文有章节信息才填，否则空数组）,
+  "solution_methods": [{"name":"解题方法名","confidence":0.0-1.0}]（原文有才填，否则空数组）
 }
 
 # 题型识别规则
@@ -176,6 +181,60 @@ pub const BATCH_IMAGE_OCR_SYSTEM_PROMPT: &str = r#"你是一个数学题图片�
 "#;
 
 // ============================================================
+// V2.1.1 资料类型分类 Prompt（classify_document 多级 fallback）
+// ------------------------------------------------------------
+// Level 1：文本模型，输入=文件名
+// Level 2/3：视觉模型，输入=文件名 + 页面图（前 1 / 前 3 页）
+// 输出统一 JSON：{document_type, title, confidence, reason}
+// ============================================================
+
+/// 分类输出 JSON Schema 说明（两种 prompt 共用）
+const CLASSIFY_OUTPUT_SCHEMA: &str = r#"**输出格式（严格 JSON，不要 markdown 代码块，不要任何解释文字）**：
+{
+  "document_type": "<枚举值>",
+  "title": "<资料标题，简洁中文>",
+  "confidence": 0.0 到 1.0 的小数,
+  "reason": "<一句话判断理由>"
+}
+
+**document_type 枚举（只能输出下列值之一）**：
+exam 正式试卷（含期中/期末/月考/联考等正式考试卷）
+mock_exam 模拟试卷（一模/二模/模拟卷等）
+class_exercise 课堂练习
+class_example 课堂例题
+homework 课后作业
+preview_exercise 课前预习
+textbook_example 教材例题
+teaching_material 教学讲义/教学资料
+exercise_book 教辅练习
+chapter_exercise 章节练习
+unit_exercise 单元练习
+special_training 专题训练
+wrong_question 错题整理
+mixed 混合资料（同一文件含多类资料）
+unknown 无法判断
+
+**关键规则**：
+1. 仅凭现有信息无法判断类型时，document_type 必须输出 unknown，confidence 必须低于 0.6
+2. 只有当 confidence >= 0.6 时才能输出 unknown 以外的具体类型
+3. title 无法确定时用文件名（去掉扩展名）
+4. 包含"姓名/班级/学号/得分栏"且题量大的 → exam；包含"例题"字样 → class_example
+5. 资料类型与知识点无关：不要因为内容涉及某个章节就输出 chapter_exercise，要看资料标题与用途"#;
+
+/// 资料类型分类 Prompt（Level 1，文本模式：输入=文件名，完整系统提示词）
+pub const AI_CLASSIFY_DOCUMENT_PROMPT_TEXT: &str = r#"你是一名教研资料分类助手。根据用户上传的文件名判断这份资料属于什么业务类型。
+
+"#;
+
+/// 资料类型分类 Prompt（Level 2/3，视觉模式：输入=文件名 + 页面图）
+/// 调用时需用 format! 追加文件名字段（视觉调用无法传文本 user 内容）：
+/// format!("{AI_CLASSIFY_DOCUMENT_PROMPT_VISION}\n文件名：{file_name}")
+pub const AI_CLASSIFY_DOCUMENT_PROMPT_VISION: &str = r#"你是一名教研资料分类助手。根据文件名与资料页面图片内容，判断这份资料属于什么业务类型。
+注意观察页面特征：试卷有得分栏/密封线/大题分值标注；课堂练习常有"练习"字样；例题常有"例1/例2"；作业常有"作业"字样与日期栏。
+
+"#;
+
+// ============================================================
 // 拼装后的最终 Prompt（运行时常量）
 // ------------------------------------------------------------
 // 在模块加载时通过 `std::sync::LazyLock` 拼装，
@@ -199,6 +258,16 @@ pub static IMAGE_OCR_FULL_PROMPT: LazyLock<String> = LazyLock::new(|| {
 /// 批量图片 OCR 模式 — 完整系统提示词（批量特有指令 + 核心规则）
 pub static BATCH_IMAGE_OCR_FULL_PROMPT: LazyLock<String> = LazyLock::new(|| {
     format!("{}{}", BATCH_IMAGE_OCR_SYSTEM_PROMPT, CORE_PARSE_RULES)
+});
+
+/// 资料类型分类 — 完整文本系统提示词（Level 1：输入=文件名）
+pub static AI_CLASSIFY_FULL_PROMPT_TEXT: LazyLock<String> = LazyLock::new(|| {
+    format!("{}{}", AI_CLASSIFY_DOCUMENT_PROMPT_TEXT, CLASSIFY_OUTPUT_SCHEMA)
+});
+
+/// 资料类型分类 — 完整视觉系统提示词（Level 2/3：调用时需再追加文件名字段）
+pub static AI_CLASSIFY_FULL_PROMPT_VISION: LazyLock<String> = LazyLock::new(|| {
+    format!("{}{}", AI_CLASSIFY_DOCUMENT_PROMPT_VISION, CLASSIFY_OUTPUT_SCHEMA)
 });
 
 #[cfg(test)]

@@ -30,6 +30,23 @@ pub trait AiProvider: Send + Sync {
         model: Option<&str>,
     ) -> Result<String, AiError>;
 
+    /// 多图片调用（一张图片的默认实现复用 parse_image_with_prompt；
+    /// 多图片时默认返回不支持错误，由具体 provider 覆盖）
+    async fn parse_images_with_prompt(
+        &self,
+        images_base64: &[String],
+        prompt: &str,
+        model: Option<&str>,
+    ) -> Result<String, AiError> {
+        match images_base64 {
+            [single] => self.parse_image_with_prompt(single, prompt, model).await,
+            _ => Err(AiError::Upstream(
+                0,
+                format!("provider 不支持一次传入 {} 张图片", images_base64.len()),
+            )),
+        }
+    }
+
     /// 文本解析（默认实现，使用默认 prompt）
     async fn parse_text(
         &self,

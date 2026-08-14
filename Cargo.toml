@@ -59,6 +59,9 @@ dashmap = "6"
 tokio-stream = "0.1"
 axum-extra = { version = "0.12.6", features = ["query"] }
 
+# V2.1.1 题目去重 hash（content_hash / normalized_content_hash，SHA-256）
+sha2 = "0.10"
+
 [dev-dependencies]
 # Axum 测试工具（oneshot 调用 Router）
 tower = { version = "0.5", features = ["util"] }

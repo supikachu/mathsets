@@ -768,6 +768,56 @@ fn apply_question_filters<'a>(
         builder.push(" AND q.stem ILIKE ");
         builder.push_bind(format!("%{}%", keyword));
     }
+    // ── V2.1.1 来源/试卷元数据过滤（P1 检索） ──
+    if let Some(year) = query.year {
+        builder.push(" AND EXISTS (SELECT 1 FROM paper_questions pq \
+                      JOIN papers p ON p.id = pq.paper_id \
+                      WHERE pq.question_id = q.id AND p.year = ");
+        builder.push_bind(year);
+        builder.push(")");
+    }
+    if let Some(ref semester) = query.semester {
+        builder.push(" AND EXISTS (SELECT 1 FROM paper_questions pq \
+                      JOIN papers p ON p.id = pq.paper_id \
+                      WHERE pq.question_id = q.id AND p.semester = ");
+        builder.push_bind(semester);
+        builder.push(")");
+    }
+    if let Some(ref region) = query.region {
+        builder.push(" AND EXISTS (SELECT 1 FROM paper_questions pq \
+                      JOIN papers p ON p.id = pq.paper_id \
+                      WHERE pq.question_id = q.id AND (p.region_province = ");
+        builder.push_bind(region);
+        builder.push(" OR p.region_city = ");
+        builder.push_bind(region);
+        builder.push("))");
+    }
+    if let Some(ref source_type) = query.source_type {
+        builder.push(" AND EXISTS (SELECT 1 FROM paper_questions pq \
+                      JOIN papers p ON p.id = pq.paper_id \
+                      WHERE pq.question_id = q.id AND p.source_type = ");
+        builder.push_bind(source_type);
+        builder.push(")");
+    }
+    if let Some(ref document_type) = query.document_type {
+        builder.push(" AND (EXISTS (SELECT 1 FROM paper_questions pq \
+                      JOIN papers p ON p.id = pq.paper_id \
+                      JOIN documents d ON d.id = p.document_id \
+                      WHERE pq.question_id = q.id AND d.document_type = ");
+        builder.push_bind(document_type);
+        builder.push(") OR EXISTS (SELECT 1 FROM collection_questions cq \
+                      JOIN question_collections c ON c.id = cq.collection_id \
+                      JOIN documents d ON d.id = c.document_id \
+                      WHERE cq.question_id = q.id AND d.document_type = ");
+        builder.push_bind(document_type);
+        builder.push("))");
+    }
+    if let Some(ref collection_id) = query.collection_id {
+        builder.push(" AND EXISTS (SELECT 1 FROM collection_questions cq \
+                      WHERE cq.question_id = q.id AND cq.collection_id = ");
+        builder.push_bind(collection_id);
+        builder.push(")");
+    }
 }
 
 /// POST /api/v1/questions — 创建草稿
@@ -858,15 +908,29 @@ pub async fn create_question(
         .map_err(|e| db_err(format!("更新 OCR 配额失败: {}", e)))?;
     }
 
+    // ── V2.1.1 去重 hash（创建接口即时计算，计划书 §八） ──
+    let content_hash = crate::util::normalize::compute_content_hash(
+        &req.stem,
+        req.options.as_ref(),
+        &req.correct_answer,
+        req.analysis.as_deref(),
+    );
+    let normalized_content_hash = crate::util::normalize::compute_normalized_content_hash(
+        &req.stem,
+        req.options.as_ref(),
+        &req.correct_answer,
+    );
+
     sqlx::query(
         r#"
         INSERT INTO questions (id, stem, question_type, difficulty, status,
             options, correct_answer, analysis, metadata,
             images, parent_id, sub_order,
-            creator_id, created_at, updated_at, version, space_id)
+            creator_id, created_at, updated_at, version, space_id,
+            content_hash, normalized_content_hash)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, '{}'::jsonb),
             $10, $11, $12,
-            $13, $14, $15, $16, $17)
+            $13, $14, $15, $16, $17, $18, $19)
         "#,
     )
     .bind(id)
@@ -886,6 +950,8 @@ pub async fn create_question(
     .bind(now)
     .bind(version)
     .bind(space_id)
+    .bind(&content_hash)
+    .bind(&normalized_content_hash)
     .execute(&mut *tx)
     .await
     .map_err(|e| db_err(format!("创建题目失败: {}", e)))?;
@@ -1892,13 +1958,15 @@ async fn copy_question(
             id, stem, stem_text, images, question_type, difficulty, status,
             options, correct_answer, analysis, metadata,
             parent_id, sub_order,
-            creator_id, created_at, updated_at, version, space_id, origin_question_id
+            creator_id, created_at, updated_at, version, space_id, origin_question_id,
+            content_hash, normalized_content_hash
         )
         VALUES (
             $1, $2, $3, $4, $5, $6, 'published'::question_status,
             $7, $8, $9, COALESCE($10, '{}'::jsonb),
             $11, $12,
-            $13, $14, $15, 1, $16, $17
+            $13, $14, $15, 1, $16, $17,
+            $18, $19
         )
         "#,
     )
@@ -1919,6 +1987,8 @@ async fn copy_question(
     .bind(now)
     .bind(target_space_id)
     .bind(origin_id)
+    .bind(&src.content_hash)
+    .bind(&src.normalized_content_hash)
     .execute(&mut *tx)
     .await?;
 

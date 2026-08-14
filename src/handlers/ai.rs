@@ -1,15 +1,13 @@
 use axum::{
-    extract::{Extension, Multipart, State},
+    extract::{Extension, State},
     http::StatusCode,
     Json,
 };
-use base64::Engine as _;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::ai::cleaner::clean_and_parse;
-use crate::ai::prompt::BATCH_IMAGE_OCR_FULL_PROMPT;
-use crate::ai::provider::{create_provider, AiError};
+use crate::ai::provider::AiError;
 use crate::ai::types::{AnalysisMethod, ParsedQuestion};
 use crate::auth::middleware::AuthUser;
 use crate::handlers::ai_tagging::match_knowledge_nodes;
@@ -22,22 +20,6 @@ use crate::AppState;
 // ---------------------------------------------------------------------------
 // 请求/响应类型
 // ---------------------------------------------------------------------------
-
-#[derive(Deserialize)]
-pub struct ParseTextRequest {
-    pub text: String,
-}
-
-#[derive(Serialize)]
-pub struct ParseResponse {
-    pub data: ParsedQuestion,
-}
-
-/// 批量图片解析响应
-#[derive(Serialize)]
-pub struct ParseImageResponse {
-    pub data: Vec<ParsedQuestion>,
-}
 
 /// AI 模型类型 — 决定 resolve_ai_config 返回 text 还是 vision 模型配置
 #[derive(Clone, Copy)]
@@ -78,70 +60,9 @@ pub(crate) fn map_ai_error(e: AiError) -> (StatusCode, Json<serde_json::Value>) 
     }
 }
 
-/// 单题后处理：清洗 → 校验 question_type → 补全 analysis → 知识点匹配
-async fn post_process_single(
-    raw_json: &str,
-    pool: &sqlx::PgPool,
-) -> Result<ParsedQuestion, (StatusCode, Json<serde_json::Value>)> {
-    let mut parsed: ParsedQuestion = clean_and_parse(raw_json).map_err(|e| {
-        tracing::warn!("clean_and_parse 失败: {e}");
-        (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({"error": format!("AI 返回格式损坏: {e}")})),
-        )
-    })?;
-
-    // 校验 question_type 合法
-    if !["choice", "fill", "solution", "multiple"].contains(&parsed.question_type.as_str()) {
-        return Err((
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({"error": format!("未知题型: {}", parsed.question_type)})),
-        ));
-    }
-
-    // 校验 analysis 至少 1 项（空则补默认项 + warning）
-    if parsed.analysis.is_empty() {
-        parsed.analysis = vec![AnalysisMethod {
-            title: "解法一".into(),
-            content: "".into(),
-        }];
-        parsed.warnings.push("AI 返回解析为空，请手动补充".into());
-    }
-
-    // 知识点模糊匹配（B3 重构：调用 ai_tagging 的 SQL 三级匹配）
-    if !parsed.knowledge_points.is_empty() {
-        match match_knowledge_nodes(pool, &parsed.knowledge_points, None).await {
-            Ok((matched, _unmatched)) => {
-                for m in &matched {
-                    if m.score < 0.95 {
-                        parsed.warnings.push(format!(
-                            "知识点「{}」模糊匹配到「{}」(相似度 {:.0}%)",
-                            m.ai_name, m.node_name, m.score * 100.0
-                        ));
-                    }
-                }
-                // 转换为简化的 KpMatch 视图
-                parsed.kp_matches = matched
-                    .iter()
-                    .map(|m| crate::ai::kp_matcher::KpMatch {
-                        ai_name: m.ai_name.clone(),
-                        matched_id: Some(m.node_id),
-                        matched_name: Some(m.node_name.clone()),
-                        score: m.score,
-                    })
-                    .collect();
-            }
-            Err(e) => {
-                tracing::warn!("知识点匹配失败（不影响解析结果）: {:?}", e.1);
-            }
-        }
-    }
-
-    Ok(parsed)
-}
 
 /// 批量后处理：清洗 → 截断检测(补丁七) → 逐题隔离解析(补丁十防连坐) → 知识点匹配
-async fn post_process_batch(
+pub(crate) async fn post_process_batch(
     raw_json: &str,
     pool: &sqlx::PgPool,
 ) -> Result<Vec<ParsedQuestion>, (StatusCode, Json<serde_json::Value>)> {
@@ -375,160 +296,6 @@ pub async fn update_settings(
     Ok(Json(resp))
 }
 
-/// 文本解析
-pub async fn parse_text(
-    Extension(auth): Extension<AuthUser>,
-    State(state): State<AppState>,
-    Json(req): Json<ParseTextRequest>,
-) -> Result<Json<ParseResponse>, (StatusCode, Json<serde_json::Value>)> {
-    if req.text.trim().is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "文本内容不能为空"})),
-        ));
-    }
-
-    // 获取 API Key（用户个人优先，否则平台默认）
-    let (api_key, provider_name, model, base_url) =
-        resolve_ai_config(&auth, &state, ModelKind::Text)
-            .await
-            .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({"error": e}))))?;
-
-    // 创建 provider 并调用
-    let provider = create_provider(&provider_name, &api_key, &base_url);
-    let raw_json = provider
-        .parse_text(&req.text, model.as_deref())
-        .await
-        .map_err(map_ai_error)?;
-
-    // 共享后处理管线
-    let parsed = post_process_single(&raw_json, &state.pool).await?;
-    Ok(Json(ParseResponse { data: parsed }))
-}
-
-/// 图片 OCR 解析（支持批量多题）
-///
-/// 防御性设计：
-/// - 补丁十一：原子级 INSERT...WHERE...RETURNING 资损熔断（防 TOCTOU 竞态超卖）
-/// - 纠偏模块 A：field.chunk() 流式分块读取，避免一次性 bytes() 导致大内存峰值
-/// - 补丁五：infer Magic Number 零信任校验，拒绝伪造 Content-Type 的非图片文件
-/// - drop(image_bytes) 显式释放原始二进制，防止 base64 + 原始 bytes 同时驻留
-pub async fn parse_image(
-    Extension(auth): Extension<AuthUser>,
-    State(state): State<AppState>,
-    mut multipart: Multipart,
-) -> Result<Json<ParseImageResponse>, (StatusCode, Json<serde_json::Value>)> {
-    // ⚠️ 补丁十一：原子级资损熔断 — INSERT...WHERE...RETURNING 防止 TOCTOU 竞态超卖
-    // 抢占额度在 Multipart 读取之前，确保额度检查与消耗是原子操作
-    let inserted = sqlx::query(
-        r#"
-        INSERT INTO ai_usage_log (user_id, endpoint, created_at)
-        SELECT $1, $2, NOW()
-        WHERE (SELECT COUNT(*) FROM ai_usage_log WHERE user_id = $1 AND created_at >= CURRENT_DATE) < 50
-        RETURNING id
-        "#,
-    )
-    .bind(auth.id)
-    .bind("parse_image")
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("额度校验失败: {e}")})),
-        )
-    })?;
-
-    if inserted.is_none() {
-        // 抢占失败 = 今日额度已耗尽
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(json!({
-                "error": "今日智能录题额度已耗尽",
-                "code": "ERR_QUOTA_EXCEEDED"
-            })),
-        ));
-    }
-
-    // 读取 Multipart 图片数据
-    let mut image_bytes: Vec<u8> = Vec::new();
-    let mut magic_checked = false;
-
-    while let Some(mut field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": format!("Multipart 解析失败: {e}")})),
-            )
-        })?
-    {
-        if field.name() == Some("image") {
-            // ⚠️ 纠偏模块 A：流式分块读取，避免一次性 bytes().await 导致大内存峰值
-            loop {
-                let chunk = field.chunk().await.map_err(|e| {
-                    (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({"error": format!("读取流失败: {e}")})),
-                    )
-                })?;
-                match chunk {
-                    Some(bytes) => {
-                        image_bytes.extend_from_slice(&bytes);
-
-                        // ⚠️ 补丁五：第一个块累计满 12 字节时进行 Magic Number 零信任校验
-                        // 生产环境永远不能信任前端传来的 Content-Type
-                        if !magic_checked && image_bytes.len() >= 12 {
-                            let kind = infer::get(&image_bytes[..12]);
-                            let is_valid = match kind {
-                                Some(t) => {
-                                    t.mime_type() == "image/jpeg"
-                                        || t.mime_type() == "image/png"
-                                        || t.mime_type() == "image/webp"
-                                }
-                                None => false,
-                            };
-                            if !is_valid {
-                                return Err((
-                                    StatusCode::BAD_REQUEST,
-                                    Json(json!({"error": "非法的文件格式，仅支持 JPEG/PNG/WebP 图片"})),
-                                ));
-                            }
-                            magic_checked = true;
-                        }
-                    }
-                    None => break,
-                }
-            }
-        }
-    }
-
-    if image_bytes.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "未接收到图片数据"})),
-        ));
-    }
-
-    // ⚠️ base64 编码后立即 drop 原始二进制，防止 base64 + 原始 bytes 同时驻留
-    let image_b64 = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
-    drop(image_bytes);
-
-    let (api_key, provider_name, model, base_url) =
-        resolve_ai_config(&auth, &state, ModelKind::Vision)
-            .await
-            .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({"error": e}))))?;
-
-    let provider = create_provider(&provider_name, &api_key, &base_url);
-    let raw_json = provider
-        .parse_image_with_prompt(&image_b64, &BATCH_IMAGE_OCR_FULL_PROMPT, model.as_deref())
-        .await
-        .map_err(map_ai_error)?;
-
-    let questions = post_process_batch(&raw_json, &state.pool).await?;
-    Ok(Json(ParseImageResponse { data: questions }))
-}
 
 // ---------------------------------------------------------------------------
 // 辅助函数

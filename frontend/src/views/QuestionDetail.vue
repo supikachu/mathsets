@@ -187,29 +187,36 @@
             </div>
           </div>
 
-          <!-- 被引用的试卷（溯源卡片） -->
+          <!-- V2.1.1 题目来源（溯源卡片：试卷 + 集合 + Document 链路） -->
           <div class="side-card">
             <div class="side-card-title">
               <AppIcon name="files" :size="15" />
-              被引用的试卷
-              <span v-if="questionPapers.length" class="side-card-count">{{ questionPapers.length }}</span>
+              题目来源
+              <span v-if="questionSources.length" class="side-card-count">{{ questionSources.length }}</span>
             </div>
-            <div v-if="questionPapers.length" class="qp-list">
+            <div v-if="questionSources.length" class="qp-list">
               <router-link
-                v-for="p in questionPapers"
-                :key="p.paper_id"
-                :to="`/papers/${p.paper_id}`"
-                class="qp-item"
+                v-for="s in questionSources"
+                :key="`${s.kind}-${s.id}`"
+                :to="s.kind === 'paper' ? `/papers/${s.id}` : ''"
+                :class="['qp-item', { 'qp-item-plain': s.kind !== 'paper' }]"
               >
-                <div class="qp-item-title">{{ p.title }}</div>
+                <div class="qp-item-head">
+                  <span class="qp-kind" :class="s.kind">
+                    {{ s.kind === 'paper' ? '试卷' : '集合' }}
+                  </span>
+                  <span class="qp-item-title">{{ s.title }}</span>
+                  <span v-if="s.type_label" class="qp-type-label">{{ s.type_label }}</span>
+                </div>
                 <div class="qp-item-meta">
-                  <span v-if="p.section">{{ p.section }}</span>
-                  <span>分值 {{ p.score }}</span>
-                  <span>序号 #{{ p.sort_order }}</span>
+                  <span v-if="s.question_no">题号 {{ s.question_no }}</span>
+                  <span v-if="s.section">{{ s.section }}</span>
+                  <span v-if="s.score != null">分值 {{ s.score }}</span>
+                  <span v-if="s.document_title">📄 {{ s.document_title }}</span>
                 </div>
               </router-link>
             </div>
-            <div v-else class="side-empty">该题目暂未被试卷引用</div>
+            <div v-else class="side-empty">该题目暂无来源引用</div>
           </div>
         </div>
       </div>
@@ -270,7 +277,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { questionApi, spaceApi, paperApi, type QuestionDetail, type GradeLevel, type SemesterType, type SpaceMemberInfo, type QuestionPaperItem, publicLibraryApi } from '@/api/client'
+import { questionApi, spaceApi, paperApi, type QuestionDetail, type GradeLevel, type SemesterType, type SpaceMemberInfo, type QuestionSourceItem, publicLibraryApi } from '@/api/client'
 import client from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
 import { useSpaceStore } from '@/stores/space'
@@ -436,21 +443,21 @@ async function fetchDetail() {
     if (q.value?.status === 'published') {
       await checkSubmissionStatus()
     }
-    // 加载被引用的试卷列表（溯源）
-    loadQuestionPapers()
+    // 加载统一来源（试卷 + 集合 + Document 链路）
+    loadQuestionSources()
   } catch { /* handled */ }
   finally { loading.value = false }
 }
 
-// ── 题目被引用的试卷列表（溯源卡片）──
-const questionPapers = ref<QuestionPaperItem[]>([])
+// ── V2.1.1 统一来源视图（溯源卡片）──
+const questionSources = ref<QuestionSourceItem[]>([])
 
-async function loadQuestionPapers() {
+async function loadQuestionSources() {
   try {
-    const res = await paperApi.getQuestionPapers(route.params.id as string)
-    questionPapers.value = res.data
+    const res = await questionApi.getSources(route.params.id as string)
+    questionSources.value = res.data
   } catch {
-    questionPapers.value = []
+    questionSources.value = []
   }
 }
 
@@ -1429,7 +1436,7 @@ onMounted(async () => {
   color: #86868b;
 }
 
-/* ===== 被引用的试卷溯源卡片 ===== */
+/* ===== V2.1.1 题目来源溯源卡片 ===== */
 .side-card-count {
   margin-left: auto;
   font-size: 11px;
@@ -1462,14 +1469,56 @@ onMounted(async () => {
   background: var(--accent-light);
 }
 
+/* 集合来源暂无可跳转页面（P1 提供 Collection 详情页） */
+.qp-item-plain {
+  cursor: default;
+}
+.qp-item-plain:hover {
+  border-color: var(--border-color);
+  background: var(--bg-input, #f5f5f7);
+}
+
+.qp-item-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+  overflow: hidden;
+}
+
+.qp-kind {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 6px;
+}
+.qp-kind.paper {
+  color: var(--accent);
+  background: var(--accent-light);
+}
+.qp-kind.collection {
+  color: var(--success);
+  background: var(--success-light, rgba(52, 199, 89, 0.12));
+}
+
+.qp-type-label {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 0 5px;
+}
+
 .qp-item-title {
   font-size: 13px;
   font-weight: 600;
   color: var(--accent);
-  margin-bottom: 4px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  margin-bottom: 0;
 }
 
 .qp-item-meta {

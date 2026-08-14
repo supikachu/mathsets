@@ -85,6 +85,24 @@ const router = createRouter({
           meta: { requiresAdmin: true },
         },
         {
+          // V2.1.1 P1：标签候选审核
+          path: 'admin/tag-candidates',
+          name: 'TagCandidateReview',
+          component: () => import('@/views/TagCandidateReview.vue'),
+          meta: { requiresAdmin: true },
+        },
+        {
+          // V2.1.1 P1：资料集合列表/详情
+          path: 'collections',
+          name: 'CollectionList',
+          component: () => import('@/views/CollectionList.vue'),
+        },
+        {
+          path: 'collections/:id',
+          name: 'CollectionDetail',
+          component: () => import('@/views/CollectionDetail.vue'),
+        },
+        {
           path: 'profile',
           name: 'Profile',
           component: () => import('@/views/Profile.vue'),

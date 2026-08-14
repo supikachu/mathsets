@@ -256,6 +256,13 @@ export interface QuestionQuery {
   /// 学科过滤（math / physics）
   subject?: string
   reviewable_by_me?: boolean
+
+  // ── V2.1.1 来源/试卷元数据过滤（P1 检索） ──
+  year?: number
+  region?: string
+  source_type?: string
+  document_type?: string
+  collection_id?: string
 }
 
 /// 自建标签输入（B2：category 改为 enum，新增 parent_id）
@@ -352,6 +359,10 @@ export const questionApi = {
   get(id: string) {
     return client.get<QuestionDetail>(`/questions/${id}`)
   },
+  /// V2.1.1 统一来源视图（试卷 + 集合 + Document 链路）
+  getSources(id: string) {
+    return client.get<QuestionSourceItem[]>(`/questions/${id}/sources`)
+  },
   create(data: CreateQuestionRequest) {
     return client.post<QuestionDetail>('/questions', data)
   },
@@ -403,14 +414,51 @@ export interface QuestionPaperItem {
   created_at: string
 }
 
+/// V2.1.1 统一来源视图（GET /questions/{id}/sources）
+export interface QuestionSourceItem {
+  kind: 'paper' | 'collection'
+  id: string
+  title: string
+  type_label: string | null
+  question_no: string | null
+  display_order: number
+  score: number | null
+  section: string | null
+  document_id: string | null
+  document_title: string | null
+  document_type: string | null
+}
+
 export const paperApi = {
   /// 试卷轻量列表（仅 id + title，供下拉选择）
   listBrief() {
     return client.get<PaperBrief[]>('/papers/brief')
   },
-  /// 反向查询：题目被引用的试卷列表
+  /// 反向查询：题目被引用的试卷列表（历史兼容；新链路用 questionApi.getSources）
   getQuestionPapers(questionId: string) {
     return client.get<QuestionPaperItem[]>(`/questions/${questionId}/papers`)
+  },
+}
+
+// ===========================================================================
+// 管理端（数据质量）
+// ===========================================================================
+
+export interface DataQualitySummary {
+  orphan_paper_questions: number
+  orphan_collection_questions: number
+  papers_without_questions: number
+  collections_without_questions: number
+  documents_without_sources: number
+  duplicate_paper_question_no_groups: number
+  duplicate_collection_question_no_groups: number
+  questions_without_sources: number
+  generated_at: string
+}
+
+export const adminApi = {
+  dataQualitySummary() {
+    return client.get<DataQualitySummary>('/admin/data-quality/summary')
   },
 }
 
@@ -674,6 +722,74 @@ export const knowledgeNodeApi = {
   move(id: string, newParentId: string | null) {
     return client.post(`/knowledge-nodes/${id}/move`, { new_parent_id: newParentId })
   },
+  /// V2.1.1 canonical 合并（环检测 + 审计，不物理删除）
+  merge(id: string, targetId: string, reason?: string) {
+    return client.post<{ message: string; migrated_relations: number }>(
+      `/knowledge-nodes/${id}/merge`,
+      { target_id: targetId, reason },
+    )
+  },
+}
+
+// ===========================================================================
+// V2.1.1 标签治理：候选审核队列
+// ===========================================================================
+
+export interface TagCandidate {
+  id: string
+  kind: 'chapter' | 'knowledge' | 'method'
+  raw_name: string
+  normalized_name: string
+  suggested_node_id: string | null
+  ai_confidence: string | null
+  match_score: string | null
+  source_task_id: string | null
+  source_question_id: string | null
+  status: 'pending' | 'approved' | 'rejected' | 'merged'
+  reviewed_by: string | null
+  reviewed_at: string | null
+  created_at: string
+}
+
+export interface TagCandidateDetail {
+  candidate: TagCandidate
+  source_stem: string | null
+  source_task_id: string | null
+}
+
+export interface TagCandidateListResponse {
+  items: TagCandidate[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export interface ApproveCandidateRequest {
+  /// new_node | alias | merge
+  action: 'new_node' | 'alias' | 'merge'
+  tree_id?: string
+  parent_id?: string
+  name?: string
+  target_node_id?: string
+  reason?: string
+}
+
+export const tagCandidateApi = {
+  list(params?: { status?: string; kind?: string; page?: number; page_size?: number }) {
+    return client.get<TagCandidateListResponse>('/admin/tag-candidates', { params })
+  },
+  get(id: string) {
+    return client.get<TagCandidateDetail>(`/admin/tag-candidates/${id}`)
+  },
+  approve(id: string, body: ApproveCandidateRequest) {
+    return client.post<{ message: string; action: string; target_node_id: string }>(
+      `/admin/tag-candidates/${id}/approve`,
+      body,
+    )
+  },
+  reject(id: string, reason?: string) {
+    return client.post<{ message: string }>(`/admin/tag-candidates/${id}/reject`, { reason })
+  },
 }
 
 // ===========================================================================
@@ -764,6 +880,12 @@ export const tagsApi = {
   merge(sourceId: string, targetId: string) {
     return client.post(`/tags/${sourceId}/merge`, { target_id: targetId })
   },
+  /// V2.1.1 标签使用情况
+  usage(id: string) {
+    return client.get<{ tag_id: string; name: string; category: string; use_count: number; question_count: number }>(
+      `/tags/${id}/usage`,
+    )
+  },
 }
 
 // ===========================================================================
@@ -831,17 +953,6 @@ export interface AiSettings {
 }
 
 export const aiApi = {
-  parseText(text: string) {
-    return client.post<{ data: ParsedQuestion }>('/ai/parse-text', { text })
-  },
-  parseImage(file: File) {
-    const formData = new FormData()
-    formData.append('image', file)
-    // 不要手动设置 Content-Type — axios + FormData 需要自动生成 boundary
-    return client.post<{ data: ParsedQuestion[] }>('/ai/parse-image', formData, {
-      timeout: 120000,
-    })
-  },
   getSettings() {
     return client.get<AiSettings>('/ai/settings')
   },
@@ -931,10 +1042,41 @@ export const aiTaggingApi = {
 }
 
 // ===========================================================================
-// AI 异步解析任务队列
+// V2.1.1 AI 异步解析任务（Document → Task → Worker）
 // ===========================================================================
 
-export type AiTaskStatus = 'pending' | 'processing' | 'completed' | 'failed'
+export type AiTaskStatus =
+  | 'pending'
+  | 'processing'
+  | 'retrying'
+  | 'success'
+  | 'partial_success'
+  | 'failed'
+  | 'cancelled'
+  | 'completed'
+
+export interface AiParseTaskDetail {
+  id: string
+  /// completed → success 映射后的视图状态
+  status: AiTaskStatus
+  error_message: string | null
+  created_at: string
+  updated_at: string
+  total_count: number
+  processed_count: number
+  success_count: number
+  failed_count: number
+  retry_count: number
+  current_page: number | null
+  total_pages: number | null
+  current_question_no: string | null
+  started_at: string | null
+  completed_at: string | null
+  /// 结果关联
+  paper_id: string | null
+  collection_ids: string[]
+  question_ids: string[]
+}
 
 export interface SubmitParseTaskResponse {
   task_id: string
@@ -942,21 +1084,232 @@ export interface SubmitParseTaskResponse {
   created_at: string
 }
 
-export interface AiParseTaskDetail {
+export const aiTaskApi = {
+  createParseTask(document_id: string) {
+    return client.post<SubmitParseTaskResponse>('/ai/parse-task', { document_id })
+  },
+  getParseTask(task_id: string) {
+    return client.get<AiParseTaskDetail>(`/ai/parse-task/${task_id}`)
+  },
+  cancelParseTask(task_id: string) {
+    return client.post<{ message: string }>(`/ai/parse-task/${task_id}/cancel`, {})
+  },
+}
+
+// ===========================================================================
+// V2.1.1 资料/Document（上传页图集 → AI 分类 → 用户确认）
+// ===========================================================================
+
+/// DocumentType：文件整体是什么（与后端白名单一致）
+export type DocumentType =
+  | 'exam'
+  | 'mock_exam'
+  | 'class_exercise'
+  | 'class_example'
+  | 'homework'
+  | 'preview_exercise'
+  | 'textbook_example'
+  | 'teaching_material'
+  | 'exercise_book'
+  | 'chapter_exercise'
+  | 'unit_exercise'
+  | 'special_training'
+  | 'wrong_question'
+  | 'mixed'
+  | 'unknown'
+  | 'other'
+
+/// CollectionType：这一组题是什么（不含 exam/mock_exam/mixed/unknown）
+export type CollectionType =
+  | 'class_exercise'
+  | 'class_example'
+  | 'homework'
+  | 'preview_exercise'
+  | 'textbook_example'
+  | 'teaching_material'
+  | 'exercise_book'
+  | 'chapter_exercise'
+  | 'unit_exercise'
+  | 'special_training'
+  | 'wrong_question'
+  | 'other'
+
+export type DocumentStatus =
+  | 'uploaded'
+  | 'classifying'
+  | 'classified'
+  | 'confirmed'
+  | 'parsing'
+  | 'done'
+  | 'failed'
+  | 'cancelled'
+
+export interface AiClassification {
+  document_type: DocumentType
+  title?: string
+  confidence: number
+  reason?: string
+  level: number
+  checked_pages: number
+}
+
+export interface DocumentMeta {
   id: string
-  status: AiTaskStatus
-  question_id: string | null
-  error_message: string | null
+  creator_id: string
+  file_name: string
+  file_size: number | null
+  mime: string | null
+  page_count: number
+  document_type: DocumentType | null
+  type_label: string | null
+  title: string | null
+  source_type: string | null
+  sub_source_type: string | null
+  status: DocumentStatus
+  ai_classification: AiClassification | null
+  metadata: Record<string, any>
+  conversion_engine: string | null
   created_at: string
   updated_at: string
 }
 
-export const aiTaskApi = {
-  submitParseTask(raw_text: string) {
-    return client.post<SubmitParseTaskResponse>('/ai/parse', { raw_text })
+export interface PaperMetaInput {
+  title: string
+  year?: number
+  stage?: string
+  grade?: string
+  subject?: string
+  semester?: string
+  region_province?: string
+  region_city?: string
+  school_name?: string
+  source_type?: string
+  sub_source_type?: string
+  paper_id?: string
+}
+
+export interface CollectionMetaInput {
+  title: string
+  collection_type: CollectionType
+  type_label?: string
+  source_type?: string
+  subject?: string
+  stage?: string
+  grade?: string
+  semester?: string
+  chapter_id?: string
+}
+
+export interface ConfirmDocumentRequest {
+  document_type: DocumentType
+  type_label?: string
+  title?: string
+  source_type?: string
+  sub_source_type?: string
+  paper_meta?: PaperMetaInput
+  collections?: CollectionMetaInput[]
+}
+
+export const documentApi = {
+  /// 上传页面图片集（PDF 前端渲染为页图后上传）
+  upload(pages: File[], meta: { file_name?: string; file_type?: string }) {
+    const formData = new FormData()
+    for (const page of pages) {
+      formData.append('pages', page)
+    }
+    if (meta.file_name) formData.append('file_name', meta.file_name)
+    if (meta.file_type) formData.append('file_type', meta.file_type)
+    return client.post<{ data: DocumentMeta }>('/ai/documents', formData, {
+      timeout: 120000,
+    })
   },
-  getTaskStatus(task_id: string) {
-    return client.get<AiParseTaskDetail>(`/ai/parse/${task_id}`)
+  classify(id: string) {
+    return client.post<{ data: DocumentMeta; ai_classification: AiClassification }>(
+      `/ai/documents/${id}/classify`,
+      {},
+      { timeout: 120000 },
+    )
+  },
+  confirm(id: string, body: ConfirmDocumentRequest) {
+    return client.post<{ data: DocumentMeta }>(`/ai/documents/${id}/confirm`, body)
+  },
+  list() {
+    return client.get<{ data: DocumentMeta[] }>('/ai/documents')
+  },
+  get(id: string) {
+    return client.get<{ data: DocumentMeta }>(`/ai/documents/${id}`)
+  },
+}
+
+// ===========================================================================
+// V2.1.1 题目集合（QuestionCollection / CollectionQuestion）
+// ===========================================================================
+
+export interface QuestionCollectionSummary {
+  id: string
+  document_id: string
+  creator_id: string
+  title: string
+  collection_type: CollectionType
+  type_label: string | null
+  source_type: string | null
+  subject: string | null
+  stage: string | null
+  grade: string | null
+  semester: string | null
+  chapter_id: string | null
+  metadata: Record<string, any>
+  created_at: string
+  updated_at: string
+}
+
+export interface CollectionQuestionItem {
+  id: string
+  question_id: string
+  question_no: string | null
+  display_order: number
+  score: number | null
+  stem: string
+  question_type: string
+  difficulty: string
+}
+
+export interface CollectionDetail extends QuestionCollectionSummary {
+  document_title: string | null
+  document_type: string | null
+  questions: CollectionQuestionItem[]
+}
+
+export interface CollectionListResponse {
+  items: QuestionCollectionSummary[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export interface BatchAddQuestionsInput {
+  question_id: string
+  question_no?: string
+  display_order?: number
+  score?: number
+  section?: string
+}
+
+export const collectionApi = {
+  list(params?: { document_id?: string; page?: number; page_size?: number }) {
+    return client.get<CollectionListResponse>('/collections', { params })
+  },
+  get(id: string) {
+    return client.get<CollectionDetail>(`/collections/${id}`)
+  },
+  batchAddQuestions(id: string, questions: BatchAddQuestionsInput[]) {
+    return client.post<{ inserted: number; skipped: number }>(
+      `/collections/${id}/questions/batch`,
+      { questions },
+    )
+  },
+  removeQuestion(id: string, questionId: string) {
+    return client.delete<{ message: string }>(`/collections/${id}/questions/${questionId}`)
   },
 }
 

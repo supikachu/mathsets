@@ -1,9 +1,12 @@
 pub mod ai_setting;
 pub mod ai_task;
+pub mod collection;
+pub mod document;
 pub mod notification;
 pub mod paper;
 pub mod question;
 pub mod space;
+pub mod tag_governance;
 pub mod user;
 
 use serde::Serialize;

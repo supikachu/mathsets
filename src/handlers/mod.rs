@@ -1,7 +1,10 @@
+pub mod admin;
 pub mod ai;
 pub mod ai_tagging;
 pub mod ai_tasks;
 pub mod auth;
+pub mod collections;
+pub mod documents;
 pub mod health;
 pub mod knowledge_nodes;
 pub mod knowledge_trees;
@@ -10,5 +13,6 @@ pub mod papers;
 pub mod public_library;
 pub mod questions;
 pub mod spaces;
+pub mod tag_governance;
 pub mod tags;
 pub mod users;

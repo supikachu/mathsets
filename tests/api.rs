@@ -17,7 +17,9 @@ use uuid::Uuid;
 async fn create_test_app() -> Option<axum::Router> {
     // 加载 .env 文件中的环境变量（如 AI_KEY_ENCRYPTION_KEY）
     let _ = dotenvy::dotenv();
-    let database_url = std::env::var("DATABASE_URL").ok()?;
+    let database_url = std::env::var("DATABASE_URL_TEST")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .ok()?;
     let pool = db::create_pool(&database_url, 5).await;
     db::run_migrations(&pool).await;
     let state = AppState::new(
@@ -190,7 +192,11 @@ async fn register_leader_and_login(app: &mut axum::Router) -> String {
     .unwrap();
 
     // 用独立连接池升级为 SuperAdmin（拥有审核一票通过权）
-    let pool = mathset::db::create_pool(&std::env::var("DATABASE_URL").unwrap(), 5).await;
+    // 必须与 create_test_app 使用同一测试库（DATABASE_URL_TEST 优先）
+    let database_url = std::env::var("DATABASE_URL_TEST")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .expect("DATABASE_URL 未设置");
+    let pool = mathset::db::create_pool(&database_url, 5).await;
     sqlx::query("UPDATE users SET global_role = 'super_admin' WHERE id = $1")
         .bind(claims.sub)
         .execute(&pool)
@@ -976,67 +982,33 @@ async fn test_ai_settings_save_and_get() {
 }
 
 #[tokio::test]
-async fn test_ai_parse_text_no_key() {
+async fn test_ai_parse_task_requires_confirmed_document() {
     let mut app = match create_test_app().await {
         Some(app) => app,
         None => return,
     };
     let token = register_and_login(&mut app).await;
 
-    // 调用 AI 解析 — 行为取决于环境是否配置了平台默认 API Key
-    let (status, body) = post_auth(
+    // 不存在的 Document → 404
+    let (status, _) = post_auth(
         &mut app,
-        "/api/v1/ai/parse-text",
-        json!({"text": "已知函数 f(x) = 2x + 1，求 f(3) 的值。"}),
+        "/api/v1/ai/parse-task",
+        json!({ "document_id": "00000000-0000-0000-0000-000000000000" }),
         &token,
     )
     .await;
-
-    if status == StatusCode::BAD_REQUEST {
-        // 无 Key 场景：返回 400 + "未配置" 错误信息
-        assert!(
-            body["error"].as_str().unwrap().contains("未配置"),
-            "无 Key 错误信息应包含'未配置': {:?}",
-            body
-        );
-    } else if status == StatusCode::OK {
-        // 已配置 Key 且上游可用：AI 解析成功，返回 200 + 解析结果数据
-        assert!(
-            body["question_type"].is_string() || body["questions"].is_array(),
-            "解析成功响应应包含题目数据: {:?}",
-            body
-        );
-        // 验证返回了题目数据（stem 字段应包含原始题干或 AI 解析结果）
-        assert!(
-            body.get("data").is_some() || body.get("stem").is_some(),
-            "应返回解析数据: {:?}",
-            body
-        );
-    } else {
-        // 上游异常（网络不可达 / Key 失效 / 返回格式损坏）：属于环境相关
-        // 行为，本测试只负责验证"未配置 Key"分支的错误信息，不判定失败
-        eprintln!(
-            "[warn] AI 上游不可用（status={:?} body={:?}），跳过严格断言",
-            status, body
-        );
-    }
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
-async fn test_ai_parse_text_empty() {
+async fn test_ai_parse_task_empty_body() {
     let mut app = match create_test_app().await {
         Some(app) => app,
         None => return,
     };
     let token = register_and_login(&mut app).await;
 
-    // 空文本 → 400
-    let (status, _) = post_auth(
-        &mut app,
-        "/api/v1/ai/parse-text",
-        json!({"text": "   "}),
-        &token,
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // 缺少 document_id → 422（serde 校验）
+    let (status, _) = post_auth(&mut app, "/api/v1/ai/parse-task", json!({}), &token).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 }

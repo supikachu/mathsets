@@ -249,6 +249,29 @@
                 </div>
               </div>
 
+              <!-- V2.1.1 资料类型（来源维度） -->
+              <div class="ql-matrix-dropdown" :class="{ 'is-open': openDropdown === 'docType' }">
+                <button v-if="!isFilterActive('docType')" class="ql-dd-plain" @click.stop="toggleDropdown('docType')">
+                  <span>资料类型</span>
+                  <AppIcon name="chevron-down" :size="11" class="ql-dd-caret" />
+                </button>
+                <span v-else class="ql-dd-chip">
+                  {{ docTypeLabel(filters.docType) }}
+                  <button class="ql-dd-chip-x" @click.stop="clearFilter('docType')">
+                    <AppIcon name="x" :size="10" />
+                  </button>
+                </span>
+                <div v-if="openDropdown === 'docType'" class="ql-dd-panel">
+                  <button
+                    v-for="opt in docTypeOptions"
+                    :key="opt.value"
+                    class="ql-dd-opt"
+                    :class="{ active: filters.docType === opt.value }"
+                    @click.stop="selectFilter('docType', opt.value); openDropdown = null"
+                  >{{ opt.label }}</button>
+                </div>
+              </div>
+
               <!-- 状态 -->
               <div class="ql-matrix-dropdown" :class="{ 'is-open': openDropdown === 'status' }">
                 <button v-if="!isFilterActive('status')" class="ql-dd-plain" @click.stop="toggleDropdown('status')">
@@ -827,7 +850,31 @@ const filters = reactive({
   semester: '全部',
   region: '全部',
   city: '全部',
+  // V2.1.1 资料类型筛选（来源维度）
+  docType: '全部',
 })
+
+/// V2.1.1 资料类型选项（与后端 document_type 白名单对齐）
+const docTypeOptions: { value: string; label: string }[] = [
+  { value: 'exam', label: '正式试卷' },
+  { value: 'mock_exam', label: '模拟试卷' },
+  { value: 'class_exercise', label: '课堂练习' },
+  { value: 'class_example', label: '课堂例题' },
+  { value: 'homework', label: '课后作业' },
+  { value: 'preview_exercise', label: '课前预习' },
+  { value: 'textbook_example', label: '教材例题' },
+  { value: 'teaching_material', label: '教学讲义/资料' },
+  { value: 'exercise_book', label: '教辅练习' },
+  { value: 'chapter_exercise', label: '章节练习' },
+  { value: 'unit_exercise', label: '单元练习' },
+  { value: 'special_training', label: '专题训练' },
+  { value: 'wrong_question', label: '错题整理' },
+  { value: 'mixed', label: '混合资料' },
+  { value: 'other', label: '其他' },
+]
+
+const docTypeLabel = (value: string): string =>
+  docTypeOptions.find(o => o.value === value)?.label ?? value
 
 // 级联逻辑：source 切换非"高考模拟"时，重置 subSource 并隐藏子行
 const showSubSource = computed(() => filters.source === '高考模拟')
@@ -846,7 +893,7 @@ watch(() => filters.region, () => {
 })
 
 // 底部下拉面板展开状态（同时只展开一个）
-const openDropdown = ref<null | 'year' | 'grade' | 'semester' | 'region' | 'city' | 'status'>(null)
+const openDropdown = ref<null | 'year' | 'grade' | 'semester' | 'region' | 'city' | 'status' | 'docType'>(null)
 function toggleDropdown(key: typeof openDropdown.value) {
   openDropdown.value = openDropdown.value === key ? null : key
 }
@@ -868,6 +915,7 @@ function clearFilter(field: keyof typeof filters) {
   const defaults: Record<string, string> = {
     source: '全部', subSource: '全部高考模拟', type: '__all', difficulty: '__all',
     status: '__all', year: '全部', grade: '全部', semester: '全部', region: '全部', city: '全部',
+    docType: '全部',
   }
   ;(filters as any)[field] = defaults[field] ?? '全部'
   // 地区清除时同步清空市级
@@ -889,7 +937,16 @@ function applyFilters() {
   // 状态：同步到 segmented tab
   query.status = filters.status === '__all' ? undefined : (filters.status as any)
   currentStatus.value = filters.status === '__all' ? 'ALL' : filters.status
-  // TODO: source / subSource / year / grade / semester / region 待后端支持后映射
+  // V2.1.1：试卷元数据 + 资料类型过滤（后端已支持）
+  query.year = filters.year === '全部' ? undefined : Number(filters.year)
+  const semesterMap: Record<string, string> = { 上学期: 'first', 下学期: 'second' }
+  query.semester = (semesterMap[filters.semester] ?? undefined) as any
+  query.region = filters.city !== '全部' ? filters.city : (filters.region === '全部' ? undefined : filters.region)
+  const sourceMap: Record<string, string> = {
+    高考真题: 'exam', 高考模拟: 'mock_exam', 期中: 'midterm', 期末: 'final', 月考: 'daily', 其他: 'other',
+  }
+  query.source_type = filters.source === '全部' ? undefined : sourceMap[filters.source]
+  query.document_type = filters.docType === '全部' ? undefined : filters.docType
   page.value = 1
   fetchList()
 }

@@ -190,6 +190,10 @@ pub struct Question {
     /// paper_page, textbook_version 等长尾字段统一存此 JSON）
     pub metadata: serde_json::Value,
 
+    // ── V2.1.1 去重 hash（SHA-256；历史数据由离线 Job 回填） ──────
+    pub content_hash: Option<String>,
+    pub normalized_content_hash: Option<String>,
+
     // ── 复合题结构 ────────────────────────────────
     pub parent_id: Option<Uuid>,
     pub sub_order: Option<i16>,
@@ -307,6 +311,20 @@ pub struct QuestionQuery {
     pub subject: Option<String>,
     /// 仅返回当前用户可审核的待审题
     pub reviewable_by_me: Option<bool>,
+
+    // ── V2.1.1 来源/试卷元数据过滤（P1 检索，计划书 §五十三） ──
+    /// 试卷年份（题目被某年份试卷引用）
+    pub year: Option<i32>,
+    /// 试卷学期（first/second/full_year）
+    pub semester: Option<String>,
+    /// 试卷地区（省或市匹配）
+    pub region: Option<String>,
+    /// 试卷来源类型
+    pub source_type: Option<String>,
+    /// 资料类型（题目来源 Document 的 document_type）
+    pub document_type: Option<String>,
+    /// 集合 ID（题目属于该集合）
+    pub collection_id: Option<Uuid>,
 }
 
 /// 题目列表响应项
@@ -546,6 +564,12 @@ pub struct KnowledgeNode {
     /// 反规范化缓存：关联题目数
     pub question_count: i32,
     pub is_active: bool,
+    /// V2.1.1：合并目标（status=merged 时指向最终 active 标签；不物理删除）
+    pub canonical_id: Option<Uuid>,
+    /// V2.1.1：生命周期 pending_review/active/merged/deprecated/rejected
+    pub status: String,
+    /// V2.1.1：来源 system/admin/ai/import
+    pub source: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -564,6 +588,10 @@ pub struct KnowledgeNodeTreeNode {
     pub description: Option<String>,
     pub sort_order: i32,
     pub question_count: i32,
+    /// V2.1.1
+    pub canonical_id: Option<Uuid>,
+    pub status: String,
+    pub source: String,
     pub children: Vec<KnowledgeNodeTreeNode>,
 }
 
@@ -581,6 +609,9 @@ impl From<KnowledgeNode> for KnowledgeNodeTreeNode {
             description: n.description,
             sort_order: n.sort_order,
             question_count: n.question_count,
+            canonical_id: n.canonical_id,
+            status: n.status,
+            source: n.source,
             children: vec![],
         }
     }

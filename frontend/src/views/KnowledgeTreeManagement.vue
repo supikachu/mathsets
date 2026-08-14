@@ -21,6 +21,7 @@ import {
 import { AppIcon, AppButton, AppModal, AppConfirm, AppEmpty } from '@/components/ui'
 import { useToast } from '@/composables/useToast'
 import { unwrapTreeResponse } from '@/composables/useKnowledgeTreeCache'
+import KnowledgeTreeCascader from '@/components/KnowledgeTreeCascader.vue'
 
 const toast = useToast()
 
@@ -355,6 +356,43 @@ async function deleteNode() {
   }
 }
 
+// ─── V2.1.1 合并节点（canonical，不物理删除） ─────────────────────────────
+const showMergeDialog = ref(false)
+const mergeTargetIds = ref<string[]>([])
+const mergeReason = ref('')
+const merging = ref(false)
+
+function openMergeDialog() {
+  if (!selectedNode.value) return
+  mergeTargetIds.value = []
+  mergeReason.value = ''
+  showMergeDialog.value = true
+}
+
+async function doMergeNode() {
+  if (!selectedNode.value) return
+  if (mergeTargetIds.value.length === 0) {
+    toast.warning('请选择目标标签')
+    return
+  }
+  merging.value = true
+  try {
+    const { data } = await knowledgeNodeApi.merge(
+      selectedNode.value.id,
+      mergeTargetIds.value[0],
+      mergeReason.value.trim() || undefined,
+    )
+    toast.success(`已合并，迁移 ${data.migrated_relations} 条题目关联`)
+    showMergeDialog.value = false
+    selectedNodeId.value = ''
+    await loadTreeData()
+  } catch (e: any) {
+    toast.error(e.response?.data?.error || '合并失败')
+  } finally {
+    merging.value = false
+  }
+}
+
 // ─── 新建知识树 ────────────────────────────────────────────────────────
 const showCreateTreeDialog = ref(false)
 const newTree = reactive({
@@ -524,6 +562,9 @@ onMounted(loadTrees)
             <div class="detail-actions">
               <button class="row-btn" @click="openAddChild">
                 <AppIcon name="plus" :size="13" /> 添加子节点
+              </button>
+              <button class="row-btn" @click="openMergeDialog">
+                <AppIcon name="git-merge" :size="13" /> 合并
               </button>
               <button class="row-btn danger" @click="confirmDelete">
                 <AppIcon name="trash" :size="13" /> 删除
@@ -706,6 +747,28 @@ onMounted(loadTrees)
       danger
       @confirm="deleteNode"
     />
+
+    <!-- V2.1.1 合并节点 -->
+    <AppModal v-model="showMergeDialog" title="合并节点（不物理删除）">
+      <div class="merge-dialog">
+        <p class="merge-hint">
+          将「{{ selectedNode?.name }}」合并到目标标签：源标签标记为 merged 并指向目标（canonical），
+          题目关联迁移到目标标签，操作写入审计记录。
+        </p>
+        <div class="form-group">
+          <label>目标标签（单选）</label>
+          <KnowledgeTreeCascader v-model="mergeTargetIds" :max="1" placeholder="选择目标标签…" />
+        </div>
+        <div class="form-group">
+          <label>合并原因（选填）</label>
+          <input v-model="mergeReason" class="form-input" placeholder="如：同义标签 / 名称规范" />
+        </div>
+        <div class="form-actions">
+          <AppButton variant="ghost" @click="showMergeDialog = false">取消</AppButton>
+          <AppButton variant="primary" :loading="merging" @click="doMergeNode">确认合并</AppButton>
+        </div>
+      </div>
+    </AppModal>
   </div>
 </template>
 
