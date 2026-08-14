@@ -1,101 +1,57 @@
 <template>
   <div class="layout-root" :class="{ 'is-immersive': isImmersive }">
     <div class="app-container">
-      <!-- 桌面侧边栏（导航卡片 + 用户卡片，两个独立卡片透出背景色） -->
-      <nav class="sidebar" :class="{ 'is-mini': isMini }">
-        <!-- 上方：导航卡片 -->
-        <div class="sidebar-nav-card">
-          <!-- Brand：mini 模式只保留 Logo 图标 -->
-          <div class="sidebar-brand">
-            <div class="brand-left">
-              <AppIcon name="logo" :size="24" class="brand-icon" />
-              <span v-if="!isMini">协同题库</span>
-            </div>
-            <!-- 通知铃只在完整模式显示 -->
-            <NotificationBell
-              v-if="!isMini"
-              :unread-count="unreadCount"
-              :open="showNotifDrawer"
-              @toggle="showNotifDrawer = !showNotifDrawer"
-            />
-          </div>
-
-          <!-- SpaceSwitcher：mini 模式彻底隐藏 -->
-          <SpaceSwitcher v-if="!isMini" />
-
-          <!-- 导航项 -->
+      <!-- 悬浮圆弧 64px 极简 Slim 胶囊侧边栏 (Icon-only 纯图标 + Tooltip + 底部 ThemeToggle) -->
+      <aside class="sidebar w-16 my-4 ml-4 rounded-2xl bg-white dark:bg-slate-900 shadow-sm border border-gray-100 dark:border-slate-800 flex flex-col items-center justify-between py-4 shrink-0 z-40 select-none">
+        <!-- 顶部：Logo + 纯图标核心导航 -->
+        <div class="flex flex-col items-center w-full gap-5">
+          <!-- 顶端 Logo -->
           <router-link
-            v-for="item in items"
-            :key="item.path"
-            :to="item.path"
-            class="nav-item"
-            :class="{ active: isActive(item.path) }"
+            to="/dashboard"
+            class="w-10 h-10 rounded-xl bg-blue-50 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400 flex items-center justify-center shrink-0 hover:scale-105 transition-transform"
+            title="协同题库"
           >
-            <!-- mini 模式：图标套正方形高亮包裹层 -->
-            <span v-if="isMini" class="nav-icon-wrap" :class="{ active: isActive(item.path) }">
-              <AppIcon :name="item.icon" :size="19" />
-            </span>
-            <AppIcon v-else :name="item.icon" :size="19" />
-            <span v-if="!isMini">{{ item.label }}</span>
+            <AppIcon name="logo" :size="22" />
           </router-link>
-        </div>
 
-        <!-- 下方：用户信息卡片 -->
-        <div class="sidebar-user-card" ref="userMenuRef">
-          <!-- 主题切换：仅完整模式显示 -->
-          <div v-if="!isMini" class="sidebar-theme-row">
-            <ThemeToggle />
-          </div>
-          <button
-            type="button"
-            class="sidebar-user-trigger"
-            @click="showUserMenu = !showUserMenu"
-          >
-            <span class="user-avatar-wrap">
-              <img
-                v-if="avatarSrc"
-                :src="avatarSrc"
-                class="user-avatar-img"
-                alt="头像"
-              />
-              <span v-else class="user-avatar-letter">{{ avatarLetter }}</span>
-            </span>
-            <!-- 用户名/角色/下箭头：mini 模式隐藏 -->
-            <div v-if="!isMini" class="sidebar-user-info">
-              <span class="sidebar-user-name">{{ auth.displayName }}</span>
-              <span class="sidebar-user-role">{{ roleLabel }}</span>
-            </div>
-            <AppIcon v-if="!isMini" name="chevron-down" :size="14" class="sidebar-user-chevron" :class="{ rotated: showUserMenu }" />
-          </button>
-        </div>
-
-        <!-- 头像下拉菜单：使用 Teleport 挂载到 body，完全突破 sidebar 的 overflow-y:auto 裁剪限制 -->
-        <Teleport to="body">
-          <Transition name="user-pop">
-            <div
-              v-if="showUserMenu"
-              ref="dropdownRef"
-              class="sidebar-user-dropdown"
-              :class="{ 'is-mini': isMini }"
-              :style="dropdownStyle"
+          <!-- 纯图标导航列表（无文本节点，右侧悬浮 Tooltip 气泡） -->
+          <nav class="flex flex-col items-center gap-2.5 w-full px-2">
+            <router-link
+              v-for="item in items"
+              :key="item.path"
+              :to="item.path"
+              class="group relative w-10 h-10 flex items-center justify-center rounded-xl text-gray-500 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-gray-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+              :class="{ '!bg-blue-500 !text-white shadow-sm shadow-blue-500/30': isActive(item.path) }"
             >
-              <button type="button" class="user-menu-item menu-item-profile" @click="goProfile">
-                <AppIcon name="user" :size="16" />
-                <span class="menu-item-text">个人中心</span>
-              </button>
-              <button type="button" class="user-menu-item menu-item-logout" @click="handleLogout">
-                <AppIcon name="logout" :size="16" />
-                <span class="menu-item-text">退出登录</span>
-              </button>
-            </div>
-          </Transition>
-        </Teleport>
-      </nav>
+              <AppIcon :name="item.icon" :size="20" />
+
+              <!-- 右侧悬浮提示框 (Tooltip) -->
+              <div class="absolute left-full ml-4 px-2.5 py-1 bg-gray-800 dark:bg-slate-700 text-white text-xs rounded-md shadow-md opacity-0 invisible group-hover:opacity-100 group-hover:visible whitespace-nowrap z-50 pointer-events-none transition-all duration-200">
+                {{ item.label }}
+              </div>
+            </router-link>
+          </nav>
+        </div>
+
+        <!-- 底部：替换为纯 Icon 主题切换按钮 (Theme Toggle) -->
+        <div class="group relative flex items-center justify-center shrink-0">
+          <ThemeToggle />
+          <div class="absolute left-full ml-4 px-2.5 py-1 bg-gray-800 dark:bg-slate-700 text-white text-xs rounded-md shadow-md opacity-0 invisible group-hover:opacity-100 group-hover:visible whitespace-nowrap z-50 pointer-events-none transition-all duration-200">
+            切换主题
+          </div>
+        </div>
+      </aside>
 
       <!-- 主内容区 -->
       <div class="main-content">
         <div class="view active">
-          <router-view />
+          <!-- keep-alive：仅缓存题库列表页，避免从详情页返回时整页重挂载+重请数据
+               其它页面（详情/编辑/设置）不缓存，保证进入时拿到最新数据 -->
+          <router-view v-slot="{ Component }">
+            <keep-alive :include="['QuestionList']">
+              <component :is="Component" />
+            </keep-alive>
+          </router-view>
         </div>
       </div>
     </div>
@@ -109,156 +65,38 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { useSpaceStore } from '@/stores/space'
 import { useNavItems } from '@/composables/useNavItems'
 import { AppIcon } from '@/components/ui'
 import BottomNav from '@/components/BottomNav.vue'
-import SpaceSwitcher from '@/components/SpaceSwitcher.vue'
 import ThemeToggle from '@/components/ThemeToggle.vue'
-import NotificationBell from '@/components/NotificationBell.vue'
 import NotificationDrawer from '@/components/NotificationDrawer.vue'
 import { useNotification } from '@/composables/useNotification'
 
 const route = useRoute()
-const router = useRouter()
 const auth = useAuthStore()
 const space = useSpaceStore()
 const { items } = useNavItems()
 
-const showUserMenu = ref(false)
-const userMenuRef = ref<HTMLElement | null>(null)
-const dropdownRef = ref<HTMLElement | null>(null)
-const dropdownStyle = ref<Record<string, string>>({})
-
-function updateDropdownStyle() {
-  if (!userMenuRef.value) return
-  const rect = userMenuRef.value.getBoundingClientRect()
-  if (isMini.value) {
-    // Mini 模式：弹出菜单完全跳出侧边栏，定位在头像右侧 8px 处，底边与头像对齐，锁定 136px 宽度
-    dropdownStyle.value = {
-      position: 'fixed',
-      left: `${rect.right + 8}px`,
-      bottom: `${Math.max(12, window.innerHeight - rect.bottom)}px`,
-      top: 'auto',
-      right: 'auto',
-      width: '136px',
-      zIndex: '9999',
-    }
-  } else {
-    // 全尺寸模式：弹出菜单在用户卡片正上方
-    dropdownStyle.value = {
-      position: 'fixed',
-      left: `${rect.left}px`,
-      width: `${rect.width}px`,
-      bottom: `${window.innerHeight - rect.top + 6}px`,
-      top: 'auto',
-      right: 'auto',
-      zIndex: '9999',
-    }
-  }
-}
-
-watch(showUserMenu, (val) => {
-  if (val) updateDropdownStyle()
-})
-
-function onLayoutResize() {
-  winWidth.value = window.innerWidth
-  if (showUserMenu.value) updateDropdownStyle()
-}
-
 const showNotifDrawer = ref(false)
-const { unreadCount, init: initNotifications } = useNotification()
+const { init: initNotifications } = useNotification()
 
 /** 沉浸式录题模式：路由 meta.immersive=true 时隐藏左侧系统导航，
  *  让 QuestionEdit 独享 100% 横向屏幕空间 */
 const isImmersive = computed(() => route.meta.immersive === true)
 
-/** Mini 模式：窗口宽度 < 1280px 时，侧边栏收缩为图标模式 */
-const winWidth = ref(window.innerWidth)
-const isMini = computed(() => winWidth.value < 1280)
-
-const avatarLetter = computed(() =>
-  (auth.displayName || '?').charAt(0).toUpperCase(),
-)
-
-/// 头像 URL — 来自 Pinia store，profile 页修改后自动热更新
-const avatarSrc = computed(() => auth.avatarUrl)
-
-const roleLabel = computed(() => {
-  const map: Record<string, string> = {
-    Admin: '系统管理员',
-    admin: '系统管理员',
-    User: '用户',
-    user: '用户',
-  }
-  return map[auth.role] || auth.role || '用户'
-})
-
-function spaceKindLabel(kind: string) {
-  if (kind === 'personal') return '个人'
-  if (kind === 'team') return '团队'
-  if (kind === 'public') return '公共'
-  return kind
-}
-
-function onSpaceChange(id: string) {
-  space.setCurrentSpace(id)
-  if (route.path.startsWith('/questions') || route.path === '/review') {
-    router.replace({ path: route.path, query: { ...route.query, _sp: id.slice(0, 8) } })
-  }
-}
-
 function isActive(path: string) {
   return route.path === path || route.path.startsWith(path + '/')
 }
 
-function handleLogout() {
-  showUserMenu.value = false
-  auth.logout()
-}
-
-function goProfile() {
-  showUserMenu.value = false
-  router.push('/profile')
-}
-
-function onDocumentClick(e: MouseEvent) {
-  if (!showUserMenu.value) return
-  const triggerEl = userMenuRef.value
-  const menuEl = dropdownRef.value
-  const target = e.target as Node
-  if (
-    triggerEl && !triggerEl.contains(target) &&
-    menuEl && !menuEl.contains(target)
-  ) {
-    showUserMenu.value = false
-  }
-}
-
 onMounted(() => {
-  window.addEventListener('resize', onLayoutResize, { passive: true })
-  document.addEventListener('click', onDocumentClick)
   if (auth.isLoggedIn) {
     space.fetchSpaces()
     initNotifications()
   }
-})
-watch(
-  () => auth.isLoggedIn,
-  (v) => {
-    if (v) {
-      space.fetchSpaces()
-      initNotifications()
-    }
-  },
-)
-onUnmounted(() => {
-  document.removeEventListener('click', onDocumentClick)
-  window.removeEventListener('resize', onLayoutResize)
 })
 </script>
 
@@ -456,8 +294,11 @@ onUnmounted(() => {
 @media (max-width: 768px) {
   .layout-root {
     width: 100%;
-    height: auto;
-    overflow: visible;
+    height: 100vh;
+    height: 100dvh; /* 动态视口高度，排除移动端地址栏 */
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
   }
 
   .sidebar {
@@ -465,11 +306,14 @@ onUnmounted(() => {
   }
 
   .app-container {
-    padding: 16px;
-    padding-bottom: calc(var(--nav-height) + 16px);
+    padding: 0; /* 移动端取消外层 padding，由各页面自行控制间距 */
+    padding-bottom: var(--nav-height);
     width: 100%;
-    height: auto;
-    overflow: visible;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
   }
 }
 
@@ -490,108 +334,4 @@ onUnmounted(() => {
   }
 }
 
-/* ===== Mini 侧边栏模式（窗口 < 1280px） ===== */
-.sidebar.is-mini {
-  width: var(--sidebar-mini-width, 64px);
-  padding: 12px 8px;
-  flex-shrink: 0;
-}
-
-/* Mini 模式：导航卡片居中排列 */
-.sidebar.is-mini .sidebar-nav-card {
-  padding: 8px 4px;
-  align-items: center;
-}
-
-/* Mini 模式：Brand 区只剩图标，居中 */
-.sidebar.is-mini .sidebar-brand {
-  justify-content: center;
-  padding: 4px 0 12px;
-}
-
-/* Mini 模式：导航项自身不显示任何背景，背景交给 nav-icon-wrap */
-.sidebar.is-mini .nav-item {
-  flex-direction: column;
-  justify-content: center;
-  align-items: center;
-  padding: 4px 0;
-  width: 100%;
-  background: transparent !important; /* 覆盖 .active 的条形背景 */
-  color: var(--text-secondary);
-}
-
-.sidebar.is-mini .nav-item.active {
-  background: transparent !important;
-  color: var(--accent);
-}
-
-/* 方形图标高亮包裹层：active 时显示圆角方块背景 */
-.nav-icon-wrap {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 38px;
-  height: 38px;
-  border-radius: 10px;
-  transition: background 0.18s ease, color 0.18s ease;
-  color: var(--text-secondary);
-}
-
-.nav-icon-wrap.active {
-  background: var(--accent-light);
-  color: var(--accent);
-}
-
-.sidebar.is-mini .nav-item:hover .nav-icon-wrap:not(.active) {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
-
-/* Mini 模式：用户卡片只显示头像，居中 */
-.sidebar.is-mini .sidebar-user-card {
-  padding: 8px 4px;
-  align-items: center;
-}
-
-.sidebar.is-mini .sidebar-user-trigger {
-  justify-content: center;
-  padding: 4px;
-  gap: 0;
-  width: 100%;
-}
-
-/* Teleport 到 body 的头像下拉菜单：豁免任何局部隐藏逻辑，文本100%强制可见 */
-.sidebar-user-dropdown {
-  background: var(--bg-card);
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-sm);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
-  padding: 6px;
-  z-index: 9999 !important;
-}
-
-.user-menu-item {
-  display: flex !important;
-  align-items: center !important;
-  gap: 8px !important;
-  width: 100% !important;
-  text-align: left !important;
-  padding: 9px 12px !important;
-  border-radius: var(--radius-xs) !important;
-  font-size: 13px !important;
-  color: var(--text-primary) !important;
-  transition: var(--transition-fast) !important;
-  white-space: nowrap !important;
-}
-
-/* 显式保障下拉菜单文本绝对可见，不被任何 span 通配规则误伤 */
-.user-menu-item .menu-item-text {
-  display: inline-block !important;
-  visibility: visible !important;
-  opacity: 1 !important;
-  font-size: 13px !important;
-  font-weight: 500 !important;
-  color: inherit !important;
-  white-space: nowrap !important;
-}
 </style>

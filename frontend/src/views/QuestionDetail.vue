@@ -26,7 +26,7 @@
             <AppButton variant="danger" size="sm" @click="handleReview('rejected')"><AppIcon name="x-circle" :size="15" /> 驳回</AppButton>
           </template>
           <template v-else-if="q?.status === 'published'">
-            <AppButton variant="outline" size="sm" @click="$router.push(`/questions/${q!.id}/edit`)"><AppIcon name="pencil" :size="15" /> 编辑</AppButton>
+            <AppButton variant="outline" size="sm" @click="$router.push(`/questions/${q!.id}/edit`)"><AppIcon name="pencil" :size="15" /> 纠错</AppButton>
             <!-- 推送到公共题库 / 撤回推库申请 -->
             <AppButton
               v-if="spaceStore.currentSpace?.kind !== 'public' && !hasPendingSubmission"
@@ -97,8 +97,12 @@
                 class="paper-opt"
                 :class="{ correct: isCorrect(opt.label) }"
               >
-                <span class="paper-opt-letter">{{ opt.label }}.</span>
-                <span class="paper-opt-content"><LatexRender :text="opt.content" :inline="true" /></span>
+                <!-- 选项标号独立成元素，与内容分离，由父级 flex align-items:center 实现垂直居中 -->
+                <!-- 标号用 LatexRender 渲染 $\mathrm{A.}$ 保持数学罗马体字体样式 -->
+                <span class="paper-opt-letter"><LatexRender :text="`$\\mathrm{${opt.label}.}$`" :inline="true" /></span>
+                <div class="paper-opt-content">
+                  <LatexRender :text="opt.content" :inline="true" />
+                </div>
               </div>
             </div>
 
@@ -107,9 +111,9 @@
               <!-- 参考答案卡片（莫兰迪极淡蓝底） -->
               <div v-if="hasAnswer" class="answer-card">
                 <div class="card-section-title">参考答案</div>
-                <!-- 选择题答案 -->
+                <!-- 选择题答案：统一 $\mathrm{...}$ 格式 KaTeX 渲染 -->
                 <div v-if="q?.question_type === 'choice' && correctLabels.length" class="card-answer-content">
-                  <span class="paper-correct-answer" v-for="a in correctLabels" :key="a">{{ a }}</span>
+                  <LatexRender :text="`$\\mathrm{${correctLabels.join('')}}$`" :inline="true" />
                 </div>
                 <!-- 填空题答案 -->
                 <div v-else-if="q?.question_type === 'fill'" class="card-answer-content as-fill-list">
@@ -275,7 +279,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
+import { ref, computed, onMounted, onActivated, onBeforeUnmount, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { questionApi, spaceApi, paperApi, type QuestionDetail, type GradeLevel, type SemesterType, type SpaceMemberInfo, type QuestionSourceItem, publicLibraryApi } from '@/api/client'
 import client from '@/api/client'
@@ -640,6 +644,18 @@ watch(() => spaceStore.currentSpaceId, () => {
 onMounted(async () => {
   await fetchDetail()
 })
+
+// keep-alive 缓存时从编辑页返回刷新（当前未缓存，但为安全起见保留）
+onActivated(() => {
+  fetchDetail()
+})
+
+// 同组件内不同 ID 跳转时刷新
+watch(() => route.params.id, (newId, oldId) => {
+  if (newId && newId !== oldId) {
+    fetchDetail()
+  }
+})
 </script>
 
 <style scoped>
@@ -995,7 +1011,22 @@ onMounted(async () => {
 }
 
 .paper-opt-content {
+  flex: 1;
   min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+/* 穿透清除 LatexRender 最后元素 margin-bottom，避免 flex 居中视觉偏移 */
+.paper-opt-content :deep(.latex-render > p:last-child),
+.paper-opt-content :deep(.latex-render p) {
+  margin-bottom: 0 !important;
+  margin-top: 0 !important;
+}
+
+.paper-opt-content :deep(.latex-render img) {
+  margin-bottom: 0 !important;
+  vertical-align: middle;
 }
 
 /* 填空题答案 */

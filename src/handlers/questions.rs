@@ -4,8 +4,10 @@ use axum::{
     Json,
 };
 use axum_extra::extract::Query;
-use serde::Serialize;
+use regex::Regex;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashSet;
 use uuid::Uuid;
 
 use crate::auth::middleware::AuthUser;
@@ -15,9 +17,10 @@ use crate::auth::permissions::{
     is_admin_user, list_reviewers, PermissionError,
 };
 use crate::models::question::{
-    CreateQuestionRequest, KnowledgeNodeSummary, Question, QuestionDetail,
-    QuestionQuery, QuestionStatus, QuestionSummary, RejectRequest, SubmitReviewRequest,
-    TagSummary, TransferQuestionRequest, UpdateQuestionRequest,
+    CreateQuestionRequest, KnowledgeNodeSummary, Question, QuestionDetail, QuestionQuery,
+    QuestionStatus, QuestionSummary, QuestionType, RejectRequest, SubmitReviewRequest,
+    TagSummary, TransferQuestionRequest, UpdateQuestionRequest, is_answer_empty,
+    refresh_system_flags,
 };
 use crate::models::space::SpaceKind;
 use crate::models::user::{GlobalRole, User};
@@ -498,6 +501,73 @@ pub(crate) fn db_err(msg: impl Into<String>) -> (StatusCode, Json<serde_json::Va
     )
 }
 
+/// 提交审核前的完整性校验（T2-1 ~ T2-4）
+///
+/// 三道校验门，任一失败返回 422 + 结构化错误：
+/// 1. 答案校验：`is_answer_empty` 覆盖 None/Null/空数组/纯空格
+/// 2. 选择题选项校验：question_type ∈ {Choice, Multiple} 时 options.options 非空
+/// 3. 解析校验：analysis 为空且 `no_analysis_needed != true` 时拒绝
+///
+/// 返回的 `missing` 数组用于前端逐项高亮未补全字段。
+fn validate_question_completeness(
+    question: &Question,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    // 1. 答案校验
+    if is_answer_empty(&question.correct_answer) {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "error": "题目尚未补全答案，无法提交审核",
+                "code": "ERR_ANSWER_INCOMPLETE",
+                "missing": ["correct_answer"]
+            })),
+        ));
+    }
+
+    // 2. 选择题选项校验
+    if matches!(question.question_type, QuestionType::Choice | QuestionType::Multiple) {
+        let options_empty = question.options.as_ref().map_or(true, |o| {
+            o.get("options")
+                .and_then(|arr| arr.as_array())
+                .map_or(true, |a| a.is_empty())
+        });
+        if options_empty {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "error": "选择题尚未填写选项内容",
+                    "code": "ERR_OPTIONS_INCOMPLETE",
+                    "missing": ["options"]
+                })),
+            ));
+        }
+    }
+
+    // 3. 解析校验（no_analysis_needed=true 时豁免）
+    let no_analysis_needed = question
+        .metadata
+        .get("system_flags")
+        .and_then(|f| f.get("no_analysis_needed"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let analysis_empty = question
+        .analysis
+        .as_ref()
+        .map_or(true, |s| s.trim().is_empty());
+    if analysis_empty && !no_analysis_needed {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "error": "题目尚未补全解析，无法提交审核",
+                "code": "ERR_ANALYSIS_INCOMPLETE",
+                "missing": ["analysis"]
+            })),
+        ));
+    }
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // 统计
 // ---------------------------------------------------------------------------
@@ -818,6 +888,25 @@ fn apply_question_filters<'a>(
         builder.push_bind(collection_id);
         builder.push(")");
     }
+    // 待补全筛选（T2-6）— 必须用 `@>` 包含操作符命中 GIN 索引
+    // `->>` 会将 JSONB 转为 text，绕过 GIN 索引退化为 Seq Scan
+    if let Some(ref flag) = query.system_flag {
+        match flag.as_str() {
+            "pending_answer" => {
+                builder.push(" AND q.metadata->'system_flags' @> '{\"pending_answer\": true}'::jsonb");
+            }
+            "missing_analysis" => {
+                builder.push(" AND q.metadata->'system_flags' @> '{\"missing_analysis\": true}'::jsonb");
+            }
+            "incomplete" => {
+                // pending_answer OR missing_analysis 并集
+                // 与 incomplete_count 接口的 total 逻辑保持一致
+                builder.push(" AND (q.metadata->'system_flags' @> '{\"pending_answer\": true}'::jsonb");
+                builder.push(" OR q.metadata->'system_flags' @> '{\"missing_analysis\": true}'::jsonb)");
+            }
+            _ => {} // 未知 flag 忽略，避免 SQL 注入
+        }
+    }
 }
 
 /// POST /api/v1/questions — 创建草稿
@@ -909,17 +998,23 @@ pub async fn create_question(
     }
 
     // ── V2.1.1 去重 hash（创建接口即时计算，计划书 §八） ──
+    // 空答案统一按 JSON null 参与 hash（与下方 INSERT 写入值一致）
+    let answer_for_hash = req.correct_answer.as_ref().unwrap_or(&serde_json::Value::Null);
     let content_hash = crate::util::normalize::compute_content_hash(
         &req.stem,
         req.options.as_ref(),
-        &req.correct_answer,
+        answer_for_hash,
         req.analysis.as_deref(),
     );
     let normalized_content_hash = crate::util::normalize::compute_normalized_content_hash(
         &req.stem,
         req.options.as_ref(),
-        &req.correct_answer,
+        answer_for_hash,
     );
+
+    // ── 异步补全：刷新 metadata.system_flags（pending_answer / missing_analysis） ──
+    let mut metadata = req.metadata.clone().unwrap_or_else(|| serde_json::json!({}));
+    refresh_system_flags(&mut metadata, &req.correct_answer, &req.analysis);
 
     sqlx::query(
         r#"
@@ -939,9 +1034,10 @@ pub async fn create_question(
     .bind(&req.difficulty)
     .bind(QuestionStatus::Draft)
     .bind(&req.options)
-    .bind(&req.correct_answer)
+    // 空答案统一写入 JSON null（非 SQL NULL，不违反 NOT NULL 约束）
+    .bind(req.correct_answer.as_ref().unwrap_or(&serde_json::Value::Null))
     .bind(&req.analysis)
-    .bind(&req.metadata)
+    .bind(&metadata)
     .bind(&req.images)
     .bind(&req.parent_id)
     .bind(req.sub_order)
@@ -1077,11 +1173,14 @@ pub async fn update_question(
         .map_err(|e| db_err(format!("查询空间失败: {}", e)))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "空间不存在"}))))?;
 
-    // 状态机保护：仅 Draft / Rejected 可编辑（已发布/Pending 需走审核流程）
-    if existing.status != QuestionStatus::Draft && existing.status != QuestionStatus::Rejected {
+    // 状态机保护：
+    //   - Draft / Rejected → 直接编辑保存
+    //   - Published → 允许纠错：保存后状态降级为 Pending，重新进入审核流程
+    //   - Pending → 禁止编辑（正在审核中）
+    if existing.status == QuestionStatus::Pending {
         return Err((
             StatusCode::CONFLICT,
-            Json(json!({"error": "当前状态不允许编辑"})),
+            Json(json!({"error": "题目正在审核中，无法编辑"})),
         ));
     }
 
@@ -1102,7 +1201,74 @@ pub async fn update_question(
     let old_version = existing.version;
     let new_version = old_version + 1;
 
+    // ── 图片差集计算：找出被用户删除/替换的旧图片 ──
+    // 正则匹配 /uploads/questions/xxx.png 格式的文件名
+    let re = Regex::new(r"/uploads/questions/([a-zA-Z0-9_\-\.]+\.(?:png|jpg|jpeg|gif|webp))")
+        .map_err(|e| db_err(format!("正则编译失败: {}", e)))?;
+
+    // 提取旧文本中的图片集合
+    let mut old_images: HashSet<String> = HashSet::new();
+    for cap in re.captures_iter(&existing.stem) {
+        if let Some(f) = cap.get(1) { old_images.insert(f.as_str().to_string()); }
+    }
+    if let Some(ref analysis) = existing.analysis {
+        for cap in re.captures_iter(analysis) {
+            if let Some(f) = cap.get(1) { old_images.insert(f.as_str().to_string()); }
+        }
+    }
+    if let Some(ref options) = existing.options {
+        for cap in re.captures_iter(&options.to_string()) {
+            if let Some(f) = cap.get(1) { old_images.insert(f.as_str().to_string()); }
+        }
+    }
+
+    // 提取新文本中的图片集合（COALESCE 语义：未提供的字段保留旧值）
+    let new_stem = req.stem.as_deref().unwrap_or(&existing.stem);
+    let mut new_images: HashSet<String> = HashSet::new();
+    for cap in re.captures_iter(new_stem) {
+        if let Some(f) = cap.get(1) { new_images.insert(f.as_str().to_string()); }
+    }
+    let new_analysis = req.analysis.as_deref().or(existing.analysis.as_deref());
+    if let Some(analysis) = new_analysis {
+        for cap in re.captures_iter(analysis) {
+            if let Some(f) = cap.get(1) { new_images.insert(f.as_str().to_string()); }
+        }
+    }
+    let new_options = req.options.as_ref().or(existing.options.as_ref());
+    if let Some(options) = new_options {
+        for cap in re.captures_iter(&options.to_string()) {
+            if let Some(f) = cap.get(1) { new_images.insert(f.as_str().to_string()); }
+        }
+    }
+
+    // 差集：存在于旧文本中但已不存在于新文本中的图片 = 被遗弃的旧图片
+    let orphaned_images: Vec<String> = old_images.difference(&new_images).cloned().collect();
+
     let mut tx = state.pool.begin().await.map_err(|e| db_err(format!("开启事务失败: {}", e)))?;
+
+    // 纠错降级：Published 题目修改后状态转为 Pending 重新审核；Draft/Rejected 保持 Draft
+    let new_status = if existing.status == QuestionStatus::Published {
+        QuestionStatus::Pending
+    } else {
+        QuestionStatus::Draft
+    };
+
+    // ── 异步补全：基于「更新后」的答案/解析刷新 system_flags ──
+    // COALESCE 语义：未提供的字段保留旧值，故基于 req.X.or(existing.X) 计算最终值
+    let mut effective_metadata = req
+        .metadata
+        .clone()
+        .unwrap_or_else(|| existing.metadata.clone());
+    let effective_answer = req
+        .correct_answer
+        .clone()
+        .or_else(|| existing.correct_answer.clone());
+    let effective_analysis = req.analysis.clone().or(existing.analysis.clone());
+    refresh_system_flags(
+        &mut effective_metadata,
+        &effective_answer,
+        &effective_analysis,
+    );
 
     let query_result = sqlx::query(
         r#"
@@ -1117,7 +1283,7 @@ pub async fn update_question(
             images = COALESCE($8, images),
             parent_id = COALESCE($9, parent_id),
             sub_order = COALESCE($10, sub_order),
-            status = 'draft'::question_status,
+            status = $16::question_status,
             updated_by = $11,
             updated_at = $12,
             version = $13
@@ -1130,7 +1296,7 @@ pub async fn update_question(
     .bind(&req.options)
     .bind(&req.correct_answer)
     .bind(&req.analysis)
-    .bind(&req.metadata)
+    .bind(&effective_metadata)
     .bind(&req.images)
     .bind(&req.parent_id)
     .bind(req.sub_order)
@@ -1139,6 +1305,7 @@ pub async fn update_question(
     .bind(new_version)
     .bind(id)
     .bind(old_version)
+    .bind(new_status)
     .execute(&mut *tx)
     .await
     .map_err(|e| db_err(format!("更新题目失败: {}", e)))?;
@@ -1209,6 +1376,12 @@ pub async fn update_question(
         .await
         .map_err(|e| db_err(format!("提交事务失败: {}", e)))?;
 
+    // ── 删后：异步清理被遗弃的旧图片文件 ──
+    //    DB 更新已成功提交，物理文件删除失败不应阻断 API 响应
+    if !orphaned_images.is_empty() {
+        cleanup_question_images(&state.upload_dir, &orphaned_images);
+    }
+
     let question = sqlx::query_as::<_, Question>("SELECT * FROM questions WHERE id = $1")
         .bind(id)
         .fetch_one(&state.pool)
@@ -1261,13 +1434,115 @@ pub async fn delete_question(
         return Err((StatusCode::FORBIDDEN, Json(json!({"error": "无权删除该题目，仅空间 Owner 或管理员可删除"}))));
     }
 
+    // ── 删前：提取所有图片文件名（含子题目） ──
+    //    必须在 DELETE 之前查询，否则数据已被删除无法获取
+    let image_filenames = extract_image_filenames(&state.pool, id).await?;
+
+    // 先删子题目（复合题结构），再删主题目
+    sqlx::query("DELETE FROM questions WHERE parent_id = $1")
+        .bind(id)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| db_err(format!("删除子题目失败: {}", e)))?;
+
     sqlx::query("DELETE FROM questions WHERE id = $1")
         .bind(id)
         .execute(&state.pool)
         .await
         .map_err(|e| db_err(format!("删除题目失败: {}", e)))?;
 
+    // ── 删后：异步清理物理图片文件（孤儿文件 GC） ──
+    //    DB 删除已成功提交，物理文件删除失败不应阻断 API 响应
+    cleanup_question_images(&state.upload_dir, &image_filenames);
+
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// 提取题目文本中所有引用 `/uploads/questions/` 的图片文件名。
+///
+/// 扫描字段：stem / analysis / options(JSON 序列化后扫描)
+/// 兼容复合题：同时扫描 parent_id = question_id 的所有子题目
+fn extract_image_filenames(
+    pool: &sqlx::PgPool,
+    question_id: Uuid,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<String>, (StatusCode, Json<serde_json::Value>)>> + Send + '_>> {
+    Box::pin(async move {
+        // 匹配 /uploads/questions/xxx.png 格式的图片文件名
+        // 安全：文件名字符集限制 [a-zA-Z0-9_\-\.]，防止路径穿越
+        let re = Regex::new(r"/uploads/questions/([a-zA-Z0-9_\-\.]+\.(?:png|jpg|jpeg|gif|webp))")
+            .map_err(|e| db_err(format!("正则编译失败: {}", e)))?;
+
+        let mut filenames: Vec<String> = Vec::new();
+
+        // 收集主题目 + 所有子题目
+        let rows = sqlx::query_as::<_, Question>(
+            "SELECT * FROM questions WHERE id = $1 OR parent_id = $1 ORDER BY sub_order NULLS FIRST",
+        )
+        .bind(question_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| db_err(format!("查询题目及子题目失败: {}", e)))?;
+
+        for q in &rows {
+            // stem
+            for cap in re.captures_iter(&q.stem) {
+                if let Some(f) = cap.get(1) {
+                    filenames.push(f.as_str().to_string());
+                }
+            }
+            // analysis
+            if let Some(ref analysis) = q.analysis {
+                for cap in re.captures_iter(analysis) {
+                    if let Some(f) = cap.get(1) {
+                        filenames.push(f.as_str().to_string());
+                    }
+                }
+            }
+            // options (JSONB → 序列化后扫描)
+            if let Some(ref options) = q.options {
+                let options_str = options.to_string();
+                for cap in re.captures_iter(&options_str) {
+                    if let Some(f) = cap.get(1) {
+                        filenames.push(f.as_str().to_string());
+                    }
+                }
+            }
+        }
+
+        // 去重（同一张图可能被多次引用）
+        filenames.sort();
+        filenames.dedup();
+
+        Ok(filenames)
+    })
+}
+
+/// 异步清理题目图片文件 —— spawn 隔离，失败仅 log，不阻断 API 响应。
+///
+/// 路径拼接：`{upload_dir}/questions/{filename}`
+/// 容错：文件不存在 → 静默忽略；其他 IO 错误 → warn 日志
+fn cleanup_question_images(upload_dir: &str, filenames: &[String]) {
+    if filenames.is_empty() {
+        return;
+    }
+    let dir = std::path::PathBuf::from(upload_dir).join("questions");
+    let to_delete: Vec<String> = filenames.to_vec();
+    tokio::spawn(async move {
+        for filename in &to_delete {
+            let file_path = dir.join(filename);
+            match tokio::fs::remove_file(&file_path).await {
+                Ok(()) => {
+                    tracing::info!("已清理题目图片: {}", filename);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // 文件已不存在 — 静默忽略
+                }
+                Err(e) => {
+                    tracing::warn!("清理题目图片失败 {}: {}", filename, e);
+                }
+            }
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -1278,20 +1553,73 @@ pub async fn delete_question(
 ///
 /// 状态校验：仅 draft 可提交（rejected 不可直接重提，需先回到 draft）
 /// 权限：题目创建者，或空间 owner/editor/reviewer
+/// 完整性校验（T2-1~T2-4）：答案 / 选项 / 解析 三道校验门
 pub async fn submit_for_review(
     State(state): State<AppState>,
     Extension(auth_user): Extension<AuthUser>,
     Path(id): Path<Uuid>,
     Json(req): Json<SubmitReviewRequest>,
 ) -> Result<Json<QuestionDetail>, (StatusCode, Json<serde_json::Value>)> {
+    // 预检：NotFound + Pending 幂等短路（保留 creator_name 优化）
+    let pre_existing =
+        sqlx::query_as::<_, Question>("SELECT * FROM questions WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(|e| db_err(format!("查询题目失败: {}", e)))?
+            .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "题目不存在"}))))?;
+
+    if pre_existing.status == QuestionStatus::Pending {
+        let creator_name =
+            sqlx::query_scalar::<_, String>("SELECT display_name FROM users WHERE id = $1")
+                .bind(pre_existing.creator_id)
+                .fetch_optional(&state.pool)
+                .await
+                .ok()
+                .flatten();
+        let detail = build_detail(&state.pool, &auth_user, pre_existing, creator_name)
+            .await
+            .map_err(|e| db_err(format!("构建详情失败: {}", e)))?;
+        return Ok(Json(detail));
+    }
+
+    let question = submit_question_for_review(&state, &auth_user, id, req.reviewer_id).await?;
+    let detail = build_detail(&state.pool, &auth_user, question, None)
+        .await
+        .map_err(|e| db_err(format!("构建详情失败: {}", e)))?;
+    Ok(Json(detail))
+}
+
+/// 提交审核核心逻辑（被 `submit_for_review` 与 `batch_submit_questions` 复用）
+///
+/// 流程：加载题目 → Pending 幂等短路 → Draft 校验 → 完整性校验 → 权限校验
+///      → 审题人校验 → 事务内 FOR UPDATE + 状态流转 → 通知审题人 → 重新加载
+///
+/// 失败时返回结构化错误（含 `code` 字段），便于批量接口逐题记录失败原因。
+async fn submit_question_for_review(
+    state: &AppState,
+    auth: &AuthUser,
+    id: Uuid,
+    reviewer_id_opt: Option<Uuid>,
+) -> Result<Question, (StatusCode, Json<serde_json::Value>)> {
     let existing = sqlx::query_as::<_, Question>("SELECT * FROM questions WHERE id = $1")
         .bind(id)
         .fetch_optional(&state.pool)
         .await
         .map_err(|e| db_err(format!("查询题目失败: {}", e)))?
-        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "题目不存在"}))))?;
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "题目不存在", "code": "ERR_NOT_FOUND"})),
+            )
+        })?;
 
-    // ── 状态校验：仅 draft 可提交 ──
+    // Pending 视为幂等：已提交过，直接返回当前题目，不重复流转
+    if existing.status == QuestionStatus::Pending {
+        return Ok(existing);
+    }
+
+    // 仅 Draft 可提交审核
     if existing.status != QuestionStatus::Draft {
         return Err((
             StatusCode::CONFLICT,
@@ -1304,16 +1632,19 @@ pub async fn submit_for_review(
         ));
     }
 
+    // ── 完整性校验（T2-1 ~ T2-4）──
+    validate_question_completeness(&existing)?;
+
     // ── 权限校验：creator / admin / 空间 owner/member ──
     let space = get_space(&state.pool, existing.space_id)
         .await
         .map_err(|e| db_err(format!("查询空间失败: {}", e)))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "空间不存在"}))))?;
 
-    let can_submit = if existing.creator_id == auth_user.id || is_admin_user(&auth_user) {
+    let can_submit = if existing.creator_id == auth.id || is_admin_user(auth) {
         true
     } else {
-        match get_member_meta(&state.pool, space.id, auth_user.id)
+        match get_member_meta(&state.pool, space.id, auth.id)
             .await
             .map_err(|e| db_err(format!("查询成员角色失败: {}", e)))?
         {
@@ -1340,16 +1671,22 @@ pub async fn submit_for_review(
         }
         SpaceKind::Team => {
             // 团队空间：强制交叉审核，reviewer_id 必须由前端传入且 != creator_id
-            let rid = req.reviewer_id.ok_or_else(|| {
+            let rid = reviewer_id_opt.ok_or_else(|| {
                 (
                     StatusCode::BAD_REQUEST,
-                    Json(json!({"error": "团队空间提交审核必须指定审题人"})),
+                    Json(json!({
+                        "error": "团队空间提交审核必须指定审题人",
+                        "code": "ERR_REVIEWER_REQUIRED"
+                    })),
                 )
             })?;
             if rid == existing.creator_id {
                 return Err((
                     StatusCode::FORBIDDEN,
-                    Json(json!({"error": "团队空间不允许自审，请选择其他成员作为审题人"})),
+                    Json(json!({
+                        "error": "团队空间不允许自审，请选择其他成员作为审题人",
+                        "code": "ERR_SELF_REVIEW_FORBIDDEN"
+                    })),
                 ));
             }
             // 校验审题人是否为该空间成员且有权审题（owner/member）
@@ -1361,7 +1698,10 @@ pub async fn submit_for_review(
                 _ => {
                     return Err((
                         StatusCode::BAD_REQUEST,
-                        Json(json!({"error": "指定的审题人不存在或无审核权限"})),
+                        Json(json!({
+                            "error": "指定的审题人不存在或无审核权限",
+                            "code": "ERR_INVALID_REVIEWER"
+                        })),
                     ));
                 }
             }
@@ -1369,7 +1709,10 @@ pub async fn submit_for_review(
         SpaceKind::Public => {
             return Err((
                 StatusCode::FORBIDDEN,
-                Json(json!({"error": "公共空间题目无需提交审核"})),
+                Json(json!({
+                    "error": "公共空间题目无需提交审核",
+                    "code": "ERR_PUBLIC_NOT_SUBMITTABLE"
+                })),
             ));
         }
     };
@@ -1458,11 +1801,149 @@ pub async fn submit_for_review(
         .await
         .map_err(|e| db_err(format!("查询题目失败: {}", e)))?;
 
-    let detail = build_detail(&state.pool, &auth_user, question, None)
-        .await
-        .map_err(|e| db_err(format!("构建详情失败: {}", e)))?;
+    Ok(question)
+}
 
-    Ok(Json(detail))
+/// POST /api/v1/questions/batch-submit — 批量提交审核（T2-5）
+///
+/// 每题独立调用 `submit_question_for_review`，单题失败不影响其他题。
+/// 返回逐题明细：成功 `{"status":"success"}`，失败 `{"status":"failed", code, missing}`。
+///
+/// 注意：批量接口不支持指定 reviewer_id，因此 Team 空间题目会因
+/// `ERR_REVIEWER_REQUIRED` 失败（设计取舍：批量场景多用于个人空间草稿）。
+#[derive(Debug, Deserialize)]
+pub struct BatchSubmitRequest {
+    pub question_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BatchSubmitResultItem {
+    id: Uuid,
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    missing: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BatchSubmitResponse {
+    total: usize,
+    succeeded: usize,
+    failed: usize,
+    results: Vec<BatchSubmitResultItem>,
+}
+
+pub async fn batch_submit_questions(
+    State(state): State<AppState>,
+    Extension(auth_user): Extension<AuthUser>,
+    Json(req): Json<BatchSubmitRequest>,
+) -> Result<Json<BatchSubmitResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let total = req.question_ids.len();
+    let mut results = Vec::with_capacity(total);
+    let mut succeeded = 0usize;
+    let mut failed = 0usize;
+
+    for id in req.question_ids {
+        match submit_question_for_review(&state, &auth_user, id, None).await {
+            Ok(_) => {
+                results.push(BatchSubmitResultItem {
+                    id,
+                    status: "success",
+                    code: None,
+                    missing: None,
+                });
+                succeeded += 1;
+            }
+            Err((_, body)) => {
+                let value = body.0; // 提取 serde_json::Value
+                let code = value
+                    .get("code")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let missing = value
+                    .get("missing")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect::<Vec<_>>()
+                    });
+                results.push(BatchSubmitResultItem {
+                    id,
+                    status: "failed",
+                    code,
+                    missing,
+                });
+                failed += 1;
+            }
+        }
+    }
+
+    Ok(Json(BatchSubmitResponse {
+        total,
+        succeeded,
+        failed,
+        results,
+    }))
+}
+
+/// GET /api/v1/questions/incomplete-count — 待补全计数（T2-8）
+///
+/// 返回当前用户可见范围内的待补全统计：
+/// - `pending_answer`：system_flags.pending_answer=true 的题目数
+/// - `missing_analysis`：system_flags.missing_analysis=true 的题目数
+/// - `total`：上述两者的并集（待补全总数）
+///
+/// SQL 使用 `@>` 包含操作符命中 GIN 索引（避免 `->>` 退化为 Seq Scan）。
+#[derive(Debug, Serialize)]
+pub struct IncompleteCountResponse {
+    pending_answer: i64,
+    missing_analysis: i64,
+    total: i64,
+}
+
+pub async fn incomplete_count(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthUser>,
+    Query(query): Query<QuestionQuery>,
+) -> Result<Json<IncompleteCountResponse>, (StatusCode, Json<serde_json::Value>)> {
+    // pending_answer 计数
+    let mut b1 = sqlx::QueryBuilder::new("SELECT COUNT(*) FROM questions q WHERE 1=1");
+    apply_access_filters(&mut b1, &auth, &query);
+    b1.push(" AND q.metadata->'system_flags' @> '{\"pending_answer\": true}'::jsonb");
+    let pending_answer: i64 = b1
+        .build_query_scalar::<i64>()
+        .fetch_one(&state.pool)
+        .await
+        .map_err(|e| db_err(format!("查询待补全答案数失败: {}", e)))?;
+
+    // missing_analysis 计数
+    let mut b2 = sqlx::QueryBuilder::new("SELECT COUNT(*) FROM questions q WHERE 1=1");
+    apply_access_filters(&mut b2, &auth, &query);
+    b2.push(" AND q.metadata->'system_flags' @> '{\"missing_analysis\": true}'::jsonb");
+    let missing_analysis: i64 = b2
+        .build_query_scalar::<i64>()
+        .fetch_one(&state.pool)
+        .await
+        .map_err(|e| db_err(format!("查询缺失解析数失败: {}", e)))?;
+
+    // 总待补全（OR 并集）
+    let mut b3 = sqlx::QueryBuilder::new("SELECT COUNT(*) FROM questions q WHERE 1=1");
+    apply_access_filters(&mut b3, &auth, &query);
+    b3.push(" AND (q.metadata->'system_flags' @> '{\"pending_answer\": true}'::jsonb");
+    b3.push(" OR q.metadata->'system_flags' @> '{\"missing_analysis\": true}'::jsonb)");
+    let total: i64 = b3
+        .build_query_scalar::<i64>()
+        .fetch_one(&state.pool)
+        .await
+        .map_err(|e| db_err(format!("查询总待补全数失败: {}", e)))?;
+
+    Ok(Json(IncompleteCountResponse {
+        pending_answer,
+        missing_analysis,
+        total,
+    }))
 }
 
 /// POST /api/v1/questions/:id/approve — 审核通过（pending → published）

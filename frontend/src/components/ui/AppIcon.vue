@@ -145,6 +145,10 @@ withDefaults(
     <template v-else-if="name === 'list'">
       <path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" />
     </template>
+    <template v-else-if="name === 'panel-left'">
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M9 4v16" />
+    </template>
     <template v-else-if="name === 'lightbulb'">
       <path d="M9 18h6M10 22h4" />
       <path d="M15.09 14c.18-.58.27-1.23.27-1.9a5.36 5.36 0 1 0-10.72 0c0 .67.09 1.32.27 1.9.31 1.05 1.12 1.85 1.78 2.65.66.8 1.31 1.96 1.31 3.35h4c0-1.39.65-2.55 1.31-3.35.66-.8 1.47-1.6 1.78-2.65z" />
@@ -228,6 +232,14 @@ withDefaults(
     </template>
     <template v-else-if="name === 'bookmark'">
       <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
+    </template>
+    <template v-else-if="name === 'landmark'">
+      <path d="M3 22h18" />
+      <path d="M6 18v-7" />
+      <path d="M10 18v-7" />
+      <path d="M14 18v-7" />
+      <path d="M18 18v-7" />
+      <path d="M3 10l9-7 9 7" />
     </template>
     <template v-else-if="name === 'shopping-cart'">
       <circle cx="8" cy="21" r="1" />

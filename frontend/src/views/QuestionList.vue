@@ -3,72 +3,163 @@
     <!-- ===== 主体：左侧知识树导航 + 右侧列表区 ===== -->
     <div class="ql-body">
       <!-- 左侧常驻知识树导航（替代旧的 KpTreePanel） -->
-      <KnowledgeTreeNav :selected-id="navNodeId" @select="handleKnowledgeNodeSelect" @context-change="handleContextChange" />
+      <KnowledgeTreeNav
+        :selected-id="navNodeId"
+        :open="isKnowledgeTreeOpen"
+        @select="handleKnowledgeNodeSelect"
+        @context-change="handleContextChange"
+      />
 
       <!-- 右侧：工具栏 + 列表区 -->
       <div class="ql-main">
     <!-- ===== Apple风格吸顶工具栏 ===== -->
-    <div class="ql-sticky-bar">
-      <!-- ===== 单行一体化响应式 Header 工具栏 ===== -->
-      <div class="ql-header-bar">
-        <!-- 1. 左侧：状态切换 Segmented Tab -->
-        <div class="ql-seg-ctrl">
+    <div class="ql-sticky-bar relative z-[60]">
+      <!-- ===== 单行 Header 工具栏：左-中-右 结构化三段式 ===== -->
+      <div class="ql-header-bar flex items-center justify-between w-full gap-4 pb-4 border-b border-gray-100 dark:border-slate-800 flex-nowrap relative z-[60]">
+        <!-- ── 1. 左侧控制组 (Left Group: 侧栏切换 + 状态下拉) ── -->
+        <div class="ql-header-left flex items-center gap-2 shrink-0">
           <button
-            v-for="tab in statusTabs"
-            :key="tab.value"
-            class="ql-seg-item"
-            :class="{ active: currentStatus === tab.value }"
-            @click="switchStatus(tab.value)"
+            type="button"
+            class="ql-nav-toggle flex items-center justify-center w-9 h-9 rounded-lg text-gray-500 hover:bg-gray-100 dark:hover:bg-slate-800 transition-colors"
+            :class="{ active: isKnowledgeTreeOpen }"
+            :title="isKnowledgeTreeOpen ? '收起知识树导航' : '展开知识树导航'"
+            :aria-label="isKnowledgeTreeOpen ? '收起知识树导航' : '展开知识树导航'"
+            @click="isKnowledgeTreeOpen = !isKnowledgeTreeOpen"
           >
-            <AppIcon :name="tab.icon" :size="14" class="ql-seg-icon" />
-            <span class="ql-seg-label">{{ tab.label }}</span>
+            <AppIcon name="panel-left" :size="16" />
+          </button>
+
+          <div class="ql-status-dropdown relative inline-block">
+            <!-- 1. 触发器：点击触发 toggleDropdown('header-status') -->
+            <button
+              v-if="currentStatus === 'ALL'"
+              type="button"
+              class="ql-status-trigger flex items-center gap-1.5 h-9 px-3 bg-gray-100/70 dark:bg-slate-800/70 hover:bg-gray-200/50 dark:hover:bg-slate-700/50 rounded-lg text-sm text-gray-700 dark:text-gray-200 cursor-pointer transition-colors"
+              @click.stop="toggleDropdown('header-status')"
+            >
+              <span>{{ currentStatusLabel }}</span>
+              <AppIcon
+                name="chevron-down"
+                :size="11"
+                class="text-gray-400 transition-transform duration-200"
+                :class="{ 'rotate-180': openDropdown === 'header-status' }"
+              />
+            </button>
             <span
-              v-if="tab.value === 'pending' && pendingReviewCount > 0"
-              class="ql-seg-badge"
-            >{{ pendingReviewCount > 99 ? '99+' : pendingReviewCount }}</span>
+              v-else
+              class="ql-status-trigger flex items-center gap-1.5 h-9 px-3 bg-blue-50 dark:bg-blue-950/40 text-blue-600 dark:text-blue-400 rounded-lg text-sm font-medium border border-blue-200 dark:border-blue-800 cursor-pointer"
+              @click.stop="toggleDropdown('header-status')"
+            >
+              {{ currentStatusLabel }}
+              <button
+                type="button"
+                class="text-blue-400 hover:text-blue-600 cursor-pointer p-0.5 rounded-full hover:bg-blue-100 dark:hover:bg-blue-900/60 transition-colors"
+                @click.stop="switchStatus('ALL'); openDropdown = null"
+                title="清除筛选，恢复全部"
+              >
+                <AppIcon name="x" :size="10" />
+              </button>
+            </span>
+
+            <!-- 2. JS 点击驱动 + Vue Transition 过渡动画的下拉面板 (加固 z-[100] 层级) -->
+            <Transition name="ql-pop">
+              <div
+                v-if="openDropdown === 'header-status'"
+                class="absolute left-0 top-full mt-1.5 w-36 z-[100] bg-white dark:bg-slate-900 rounded-xl shadow-xl border border-gray-100 dark:border-slate-800 overflow-hidden p-1 flex flex-col gap-0.5"
+              >
+                <button
+                  v-for="tab in statusTabs"
+                  :key="tab.value"
+                  type="button"
+                  class="flex items-center justify-between w-full px-3 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-slate-800/60 transition-colors rounded-lg cursor-pointer text-left"
+                  :class="{ 'font-semibold text-blue-600 dark:text-blue-400 bg-blue-50/60 dark:bg-blue-950/40': currentStatus === tab.value }"
+                  @click.stop="switchStatus(tab.value); openDropdown = null"
+                >
+                  <span>{{ tab.label }}</span>
+                  <template v-if="tab.value === 'pending' && pendingReviewCount > 0">
+                    <span class="text-xs text-gray-400 dark:text-gray-500 font-normal">({{ pendingReviewCount > 99 ? '99+' : pendingReviewCount }})</span>
+                  </template>
+                  <template v-if="tab.value === 'incomplete' && incompleteCount > 0">
+                    <span class="text-xs text-amber-500 dark:text-amber-400 font-normal">({{ incompleteCount > 99 ? '99+' : incompleteCount }})</span>
+                  </template>
+                </button>
+              </div>
+            </Transition>
+          </div>
+        </div>
+
+        <!-- ── 2. 中间搜索组 (Center Group: 柔和融合搜索框) ── -->
+        <div class="ql-header-center flex-1 max-w-[500px] w-full shrink mx-auto">
+          <div class="ql-search-wrap relative flex items-center w-full">
+            <AppIcon name="search" :size="14" class="ql-search-icon absolute left-3 text-gray-400 pointer-events-none" />
+            <input
+              v-model="query.keyword"
+              class="ql-search-input w-full bg-gray-100/70 dark:bg-slate-800/70 border border-transparent text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 pl-9 pr-4 h-9 rounded-lg transition-colors outline-none focus:outline-none focus-visible:outline-none focus:bg-white dark:focus:bg-slate-900 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+              placeholder="搜索题目（输入即搜）"
+              @input="onSearchInput"
+              @keydown.enter="onSearchSubmit"
+              @focus="isSearchFocused = true"
+              @blur="isSearchFocused = false"
+            />
+          </div>
+        </div>
+
+        <!-- ── 3. 右侧操作组 (Right Group: 统一 rounded-full 胶囊圆角风格) ── -->
+        <div class="ql-header-actions flex items-center gap-3 shrink-0">
+          <!-- 批量提交审核按钮（多选时显示） -->
+          <button
+            v-if="selectedIds.size > 0"
+            class="ql-batch-btn flex items-center gap-1.5 px-4 h-9 bg-emerald-500 hover:bg-emerald-600 active:bg-emerald-700 text-white rounded-full text-sm font-medium shadow-sm transition-colors cursor-pointer shrink-0"
+            :disabled="batchSubmitting"
+            :class="{ 'opacity-60 cursor-not-allowed': batchSubmitting }"
+            @click="handleBatchSubmit"
+          >
+            <AppIcon name="send" :size="14" />
+            <span>批量提交审核</span>
+            <span class="ql-batch-count">{{ selectedIds.size }}</span>
           </button>
-        </div>
 
-        <!-- 2. 中间：弹性伸缩搜索框 -->
-        <div class="ql-search-wrap">
-          <AppIcon name="search" :size="14" class="ql-search-icon" />
-          <input
-            v-model="query.keyword"
-            class="ql-search-input"
-            placeholder="搜索题目（输入即搜）"
-            @input="onSearchInput"
-            @keydown.enter="onSearchSubmit"
-          />
-        </div>
-
-        <!-- 3. 右侧：操作区（筛选 + 试题篮 + 新建题目 + 统计） -->
-        <div class="ql-header-actions">
-          <button class="ql-filter-btn" :class="{ active: showFilter || hasAnyFilter }" @click="toggleFilter">
+          <!-- 筛选按钮 (Outline 胶囊按钮) -->
+          <button
+            class="ql-filter-btn flex items-center gap-2 px-4 h-9 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 text-gray-700 dark:text-gray-200 hover:border-blue-500 hover:text-blue-500 rounded-full text-sm font-medium transition-colors cursor-pointer shadow-sm shrink-0"
+            :class="{ '!border-blue-500 !text-blue-600 !bg-blue-50/50 dark:!bg-blue-950/30': showFilter || hasAnyFilter }"
+            @click="toggleFilter"
+          >
             <AppIcon name="filter" :size="14" />
-            <span>筛选</span>
-            <span v-if="hasAnyFilter" class="ql-filter-dot"></span>
+            <span class="ql-filter-label">筛选</span>
+            <span v-if="hasAnyFilter" class="ql-filter-dot w-1.5 h-1.5 rounded-full bg-blue-500"></span>
           </button>
 
+          <!-- 试题篮按钮 (胶囊按钮) -->
           <button
             v-if="basket.count.value > 0"
-            class="ql-basket-btn"
+            class="ql-basket-btn relative flex items-center h-9 px-3 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-full text-sm text-gray-700 dark:text-gray-200 hover:border-blue-500 hover:text-blue-500 transition-colors shrink-0 shadow-sm"
             @click="toast.info(`试题篮中有 ${basket.count.value} 道题目`)"
           >
             <AppIcon name="shopping-cart" :size="15" />
             <span class="ql-basket-count">{{ basket.count.value }}</span>
           </button>
 
-          <button class="ql-new-btn" @click="$router.push('/questions/new')">
+          <!-- 新建题目按钮 (Primary CTA: bg-blue-500 hover:bg-blue-600 rounded-full) -->
+          <button
+            class="ql-new-btn flex items-center gap-1.5 px-4 h-9 bg-blue-500 hover:bg-blue-600 active:bg-blue-700 text-white rounded-full text-sm font-medium shadow-sm transition-colors cursor-pointer shrink-0"
+            @click="$router.push('/questions/new')"
+          >
             <AppIcon name="plus" :size="15" />
-            <span>新建题目</span>
+            <span class="ql-new-label">新建题目</span>
           </button>
 
-          <span class="ql-status-text">共 <strong>{{ totalCount }}</strong> 道</span>
+          <!-- 空间切换器 (胶囊按钮) -->
+          <SpaceSwitcher />
         </div>
       </div>
 
-      <!-- ===== 多维属性矩阵筛选面板 ===== -->
-      <div class="ql-filter-collapse" :class="{ 'is-open': showFilter }">
+      <!-- ===== 多维属性矩阵筛选面板：CSS Grid 0fr→1fr 高度过渡 =====
+           外层 grid 切换 grid-template-rows，内层 .ql-filter-clip 裁剪
+           overflow 延迟切换：展开后 0.3s 切到 visible（让下拉菜单溢出），
+           收起时立即切回 hidden（裁剪内容） -->
+      <div class="ql-filter-grid" :class="{ 'is-open': showFilter }">
+        <div class="ql-filter-clip">
         <div class="ql-matrix-panel">
 
           <!-- ── 顶层平铺标签组 ── -->
@@ -309,6 +400,7 @@
           </div>
 
         </div>
+        </div>
       </div>
     </div>
 
@@ -337,22 +429,38 @@
           </button>
         </div>
 
-        <!-- ===== 题目卡片列表 ===== -->
-        <div v-else class="q-card-list">
-          <div
-            v-for="card in cardList"
-            :key="card.id"
-            class="q-card"
-            :class="{ 'is-expanded': expandedIds.has(card.id) }"
-          >
+        <!-- ===== 题目卡片列表（虚拟滚动） =====
+             使用 DynamicScroller 支持题卡动态高度（题干长短/有无配图/有无解析均不同）。
+             page-mode 复用 window 滚动，最小侵入既有布局；
+             DynamicScrollerItem 内置 ResizeObserver，图片加载完成或解析展开时自动重测高度。 -->
+        <DynamicScroller
+          v-else
+          :items="cardList"
+          :min-item-size="200"
+          key-field="id"
+          page-mode
+          :buffer="200"
+          class="q-card-list"
+        >
+          <template #default="{ item: card, active }">
+            <DynamicScrollerItem
+              :item="card"
+              :active="active"
+              :data-index="card.id"
+              class="q-card-slot"
+            >
+              <div
+                class="q-card"
+                :class="{ 'is-expanded': expandedIds.has(card.id) }"
+              >
             <!-- 来源角标：绝对定位，贴左上角边缘 -->
             <span v-if="sourceMeta(card)" class="q-source-badge" :title="sourceMeta(card)">
               {{ sourceMeta(card) }}
             </span>
 
-            <!-- 学校角标：绝对定位，贴右上角边缘（与来源角标镜像） -->
+            <!-- 学校角标：绝对定位，贴右上角边缘（窄屏隐藏） -->
             <span v-if="schoolName(card)" class="q-school-tag" :title="schoolName(card)">
-              <AppIcon name="bookmark" :size="11" :stroke="2" />
+              <AppIcon name="landmark" :size="11" :stroke="1.6" />
               <span class="q-school-name">{{ schoolName(card) }}</span>
             </span>
 
@@ -362,76 +470,108 @@
                 <AppBadge :color="typeBadgeColor(card.question_type)" class="flex-shrink-0">
                   {{ typeLabel(card.question_type) }}
                 </AppBadge>
-                <AppBadge :color="diffBadgeColor(card.difficulty)" class="flex-shrink-0">
+                <span class="q-ghost-tag flex-shrink-0">
+                  <span class="q-dot" :class="`q-dot--${diffBadgeColor(card.difficulty)}`"></span>
                   {{ diffLabel(card.difficulty) }}
-                </AppBadge>
-                <AppBadge :color="statusBadgeColor(card.status)" class="flex items-center gap-1 flex-shrink-0">
-                  <AppIcon :name="statusIcon(card.status)" :size="11" :stroke="2" />
+                </span>
+                <span class="q-ghost-tag flex-shrink-0">
+                  <span class="q-dot" :class="`q-dot--${statusBadgeColor(card.status)}`"></span>
                   {{ statusLabel(card.status) }}
-                </AppBadge>
+                </span>
+                <span v-if="card.systemFlags?.pending_answer" class="q-flag-tag q-flag--answer flex-shrink-0">
+                  <AppIcon name="alert-circle" :size="11" :stroke="2" />
+                  答案待补全
+                </span>
+                <span v-if="card.systemFlags?.missing_analysis" class="q-flag-tag q-flag--analysis flex-shrink-0">
+                  <AppIcon name="alert-circle" :size="11" :stroke="2" />
+                  解析待补全
+                </span>
               </div>
+              <!-- 多选 Checkbox（批量提交审核） -->
+              <label class="q-select-check flex-shrink-0" @click.stop>
+                <input
+                  type="checkbox"
+                  :checked="selectedIds.has(card.id)"
+                  @change="toggleSelect(card.id)"
+                />
+              </label>
             </div>
 
             <!-- Row 2: Body — 题干 + 选项 -->
-            <div class="q-card-body" :ref="setCardBodyRef(card.id)" @click="goDetail(card)">
+            <div class="q-card-body" @click="goDetail(card)">
               <div class="q-stem">
                 <LatexRender :text="card.stem" />
               </div>
-              <!-- 选择题选项（列表页不标注正确答案） -->
-              <div v-if="card.question_type === 'choice' && card.parsedOptions.length > 0" class="q-options" :class="optionLayoutClass(card.id)">
-                <div
-                  v-for="opt in card.parsedOptions"
-                  :key="opt.label"
-                  class="q-option"
-                >
-                  <span class="q-option-label">{{ opt.label }}</span>
-                  <LatexRender :text="opt.content" :inline="true" />
+              <!-- 选择题选项（列表页不标注正确答案）— 紧凑型 4/2/1 动态列数控制 -->
+              <QuestionOptions
+                v-if="card.question_type === 'choice' && card.parsedOptions.length > 0"
+                :options="card.parsedOptions"
+              />
+            </div>
+
+            <!-- 展开解析区域：CSS Grid 0fr→1fr 高度过渡
+                 方案：外层 grid 切换 grid-template-rows，内层 overflow:hidden 裁剪
+                 优势：DOM 常驻（LaTeX 仅渲染一次），完美过渡到内容实际高度 -->
+            <div
+              class="q-analysis-grid"
+              :class="{ 'is-expanded': expandedIds.has(card.id) }"
+            >
+              <div class="q-analysis-clip">
+                <div class="q-analysis-section">
+                  <div class="q-analysis-title">
+                    <AppIcon name="lightbulb" :size="14" :stroke="2" />
+                    <span>答案解析</span>
+                  </div>
+
+                  <!-- 答案与解析材质化卡片（镜像 QuestionDetail.vue 结构）-->
+                  <div v-if="card.correctAnswer || card.analysis" class="q-ans-sol-block">
+                    <!-- 参考答案卡片 — 莫兰迪极淡蓝底 -->
+                    <div v-if="card.correctAnswer" class="q-ans-card">
+                      <div class="q-ans-card-title">参考答案</div>
+                      <div class="q-ans-card-content">
+                        <LatexRender :text="card.correctAnswer" :inline="true" />
+                      </div>
+                    </div>
+
+                    <!-- 解析卡片 — 苹果系统柔和灰底 + 多解法切换 -->
+                    <div v-if="card.analysis" class="q-ana-card">
+                      <div class="q-ana-card-title-row">
+                        <span class="q-ana-card-title">解析</span>
+                        <div v-if="cardSolutions(card).length > 1" class="q-sol-seg">
+                          <button
+                            v-for="(_, i) in cardSolutions(card)"
+                            :key="i"
+                            class="q-sol-seg-btn"
+                            :class="{ active: activeSolutionIndex(card.id) === i }"
+                            @click="setActiveSolution(card.id, i)"
+                          >解法{{ cnNum(i + 1) }}</button>
+                        </div>
+                      </div>
+                      <div class="q-ana-card-body">
+                        <Transition name="q-sol-fade" mode="out-in">
+                          <LatexRender
+                            :key="activeSolutionIndex(card.id)"
+                            :text="splitSolution(cardSolutions(card)[activeSolutionIndex(card.id)]).body"
+                            :sub-question-badge="true"
+                          />
+                        </Transition>
+                      </div>
+                      <div
+                        v-if="splitSolution(cardSolutions(card)[activeSolutionIndex(card.id)]).conclusion"
+                        class="q-ana-conclusion"
+                      >
+                        <LatexRender :text="splitSolution(cardSolutions(card)[activeSolutionIndex(card.id)]).conclusion" />
+                      </div>
+                    </div>
+                  </div>
+                  <div v-else class="q-analysis-empty">暂无解析内容</div>
                 </div>
               </div>
             </div>
 
-            <!-- 展开解析区域 -->
-            <Transition name="q-analysis">
-              <div v-if="expandedIds.has(card.id)" class="q-analysis-section">
-                <div class="q-analysis-title">
-                  <AppIcon name="lightbulb" :size="14" :stroke="2" />
-                  <span>答案解析</span>
-                </div>
-
-                <!-- 正确答案高亮卡片（选择题 / 填空题） -->
-                <div
-                  v-if="card.correctAnswer && (card.question_type === 'choice' || card.question_type === 'fill')"
-                  class="q-answer-card"
-                  :class="`q-answer-card--${card.question_type}`"
-                >
-                  <span class="q-answer-card-label">正确答案</span>
-                  <span class="q-answer-card-value"><LatexRender :text="card.correctAnswer" :inline="true" /></span>
-                  <AppIcon
-                    name="check-circle"
-                    :size="16"
-                    :stroke="2.2"
-                    class="q-answer-card-icon"
-                  />
-                </div>
-
-                <!-- 解答题正确答案 -->
-                <div
-                  v-if="card.correctAnswer && card.question_type === 'solution'"
-                  class="q-answer-inline"
-                >
-                  <span class="q-answer-inline-label">参考答案</span>
-                  <span class="q-answer-inline-value"><LatexRender :text="card.correctAnswer" :inline="true" /></span>
-                </div>
-
-                <div v-if="card.analysis" class="q-analysis-body">
-                  <LatexRender :text="card.analysis" />
-                </div>
-                <div v-else class="q-analysis-empty">暂无解析内容</div>
-              </div>
-            </Transition>
-
-            <!-- Row 3: Footer — 知识点（流式自适应 + hover-expand 多行展开） + 操作按钮 -->
-            <div class="q-card-footer">
+            <!-- Row 3: Footer — 知识点（窄屏隐藏） + 移动端元信息（窄屏独占） + 操作按钮（图标化） -->
+            <div class="q-card-footer flex items-center justify-between w-full gap-2">
+              <!-- 知识点标签组：窄屏隐藏 -->
               <div
                 class="q-footer-kp"
                 :class="{ 'has-more': kpExpandIds.has(card.id) }"
@@ -461,18 +601,33 @@
                   >{{ kn.name }}</span>
                 </div>
               </div>
-              <div class="q-actions">
-                <button class="q-action-btn q-action--ghost" @click="toggleAnalysis(card.id)">
+
+              <!-- 移动端元信息：窄屏独占（w-fit 紧凑包裹，消除贪婪拉伸） -->
+              <span
+                v-if="card && sourceMeta(card)"
+                class="q-mobile-meta inline-flex items-center gap-1.5 w-fit max-w-full min-w-0 shrink"
+                :title="sourceMeta(card)"
+              >
+                <AppIcon name="book-open" :size="11" :stroke="1.6" class="shrink-0" />
+                <span class="truncate min-w-0">{{ sourceMeta(card) }}</span>
+              </span>
+
+              <!-- 右侧操作按钮组：窄屏纯圆形图标/宽屏胶囊按钮 rounded-full -->
+              <div class="q-actions flex items-center gap-2 shrink-0">
+                <button
+                  class="q-action-btn q-action--ghost w-8 h-8 md:w-auto md:h-auto md:px-3 md:py-1.5 flex items-center justify-center gap-1.5 rounded-full shrink-0 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 text-gray-600 dark:text-gray-300 hover:text-blue-500 hover:border-blue-200 dark:hover:border-blue-800 transition-colors cursor-pointer"
+                  @click="toggleAnalysis(card.id)"
+                >
                   <AppIcon
                     :name="expandedIds.has(card.id) ? 'chevron-up' : 'lightbulb'"
                     :size="14"
                     :stroke="2"
                   />
-                  {{ expandedIds.has(card.id) ? '收起解析' : '答案解析' }}
+                  <span class="q-action-label hidden md:inline">{{ expandedIds.has(card.id) ? '收起解析' : '答案解析' }}</span>
                 </button>
                 <button
-                  class="q-action-btn"
-                  :class="{ 'q-action--active': basket.isInBasket(card.id) }"
+                  class="q-action-btn w-8 h-8 md:w-auto md:h-auto md:px-3 md:py-1.5 flex items-center justify-center gap-1.5 rounded-full shrink-0 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 text-gray-600 dark:text-gray-300 hover:text-blue-500 hover:border-blue-200 dark:hover:border-blue-800 transition-colors cursor-pointer"
+                  :class="{ '!bg-blue-50 dark:!bg-blue-950/40 !border-blue-500 !text-blue-600 dark:!text-blue-400': basket.isInBasket(card.id) }"
                   @click="toggleBasket(card.id)"
                 >
                   <AppIcon
@@ -480,12 +635,14 @@
                     :size="14"
                     :stroke="2.5"
                   />
-                  {{ basket.isInBasket(card.id) ? '已加入' : '加入试题篮' }}
+                  <span class="q-action-label hidden md:inline">{{ basket.isInBasket(card.id) ? '已加入' : '加入试题篮' }}</span>
                 </button>
               </div>
             </div>
           </div>
-        </div>
+            </DynamicScrollerItem>
+          </template>
+        </DynamicScroller>
 
         <AppPagination
           v-if="cardList.length > 0"
@@ -499,16 +656,92 @@
     </div>
   </div>
 
+  <!-- 批量提交审核结果 Modal -->
+  <AppModal v-model="showBatchResult" title="批量提交审核结果" size="lg">
+    <div v-if="batchResult" class="batch-result-body">
+      <!-- 汇总统计 -->
+      <div class="batch-summary-row">
+        <div class="batch-summary-item">
+          <span class="batch-summary-label">总数</span>
+          <span class="batch-summary-value">{{ batchResult.total }}</span>
+        </div>
+        <div class="batch-summary-item batch-summary--success">
+          <span class="batch-summary-label">成功</span>
+          <span class="batch-summary-value">{{ batchResult.succeeded }}</span>
+        </div>
+        <div class="batch-summary-item batch-summary--failed">
+          <span class="batch-summary-label">失败</span>
+          <span class="batch-summary-value">{{ batchResult.failed }}</span>
+        </div>
+      </div>
+
+      <!-- 逐题结果列表 -->
+      <div class="batch-result-list">
+        <div
+          v-for="r in batchResult.results"
+          :key="r.id"
+          class="batch-result-item"
+          :class="{ 'is-failed': r.status === 'failed' }"
+        >
+          <div class="batch-result-icon">
+            <AppIcon
+              v-if="r.status === 'success'"
+              name="check"
+              :size="16"
+              :stroke="2.5"
+              class="text-emerald-500"
+            />
+            <AppIcon
+              v-else
+              name="x"
+              :size="16"
+              :stroke="2.5"
+              class="text-red-500"
+            />
+          </div>
+          <div class="batch-result-info">
+            <span class="batch-result-id">{{ r.id }}</span>
+            <template v-if="r.status === 'failed'">
+              <span class="batch-result-error">{{ batchErrorCodeLabel(r.code) }}</span>
+              <span v-if="r.missing && r.missing.length > 0" class="batch-result-missing">
+                缺失字段：{{ r.missing.join('、') }}
+              </span>
+            </template>
+          </div>
+        </div>
+      </div>
+
+      <!-- 操作按钮 -->
+      <div class="batch-result-actions">
+        <button
+          v-if="batchResult.failed > 0"
+          type="button"
+          class="batch-action-btn batch-action--primary"
+          @click="goToFirstFailed"
+        >
+          查看失败题目
+        </button>
+        <button type="button" class="batch-action-btn batch-action--ghost" @click="closeBatchResult">
+          关闭
+        </button>
+      </div>
+    </div>
+  </AppModal>
+
 
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick, type ComponentPublicInstance } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount, onActivated, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { questionApi, type QuestionSummary, type QuestionDetail, type QuestionQuery, type GradeLevel, type SemesterType, type ExamType, type KnowledgeNodeSummary } from '@/api/client'
 import LatexRender from '@/components/LatexRender.vue'
+import QuestionOptions from '@/components/QuestionOptions.vue'
+import { DynamicScroller, DynamicScrollerItem } from 'vue-virtual-scroller'
+import 'vue-virtual-scroller/dist/vue-virtual-scroller.css'
 import KnowledgeTreeNav from '@/components/KnowledgeTreeNav.vue'
-import { AppButton, AppSelect, AppPagination, AppIcon, AppBadge } from '@/components/ui'
+import SpaceSwitcher from '@/components/SpaceSwitcher.vue'
+import { AppButton, AppSelect, AppPagination, AppIcon, AppBadge, AppModal } from '@/components/ui'
 import { useQuestionBasket } from '@/composables/useQuestionBasket'
 import { useToast } from '@/composables/useToast'
 import { useSpaceStore } from '@/stores/space'
@@ -517,9 +750,11 @@ import {
   typeBadgeColor,
   diffLabel,
   diffBadgeColor,
-  statusIcon,
   statusBadgeColor,
 } from '@/utils/questionDisplay'
+
+// keep-alive 缓存匹配名：AppLayout 中 <keep-alive :include="['QuestionList']"> 据此识别
+defineOptions({ name: 'QuestionList' })
 
 const router = useRouter()
 const toast = useToast()
@@ -529,22 +764,49 @@ const basket = useQuestionBasket()
 // 左侧知识树导航选中的节点 ID（空字符串 = 全部题目）
 const navNodeId = ref('')
 
+// 本地存储键：持久化知识树侧边栏折叠/展开偏好（跨路由跳转与重新加载保持）
+const STORAGE_KEY_KT_OPEN = 'mathset_kt_nav_open'
+
+// 知识树面板全局开关（Notion/Linear 风格 Header Toggle 控制）
+const isKnowledgeTreeOpen = ref<boolean>(
+  localStorage.getItem(STORAGE_KEY_KT_OPEN) !== 'false'
+)
+
+watch(isKnowledgeTreeOpen, (val) => {
+  localStorage.setItem(STORAGE_KEY_KT_OPEN, String(val))
+})
+
 // ===== 状态切换 Segmented Tab =====
 const statusTabs = [
   { label: '全部', value: 'ALL', icon: 'list' },
   { label: '已发布', value: 'published', icon: 'check' },
   { label: '草稿', value: 'draft', icon: 'pencil' },
   { label: '待审核', value: 'pending', icon: 'clock' },
+  { label: '待补全', value: 'incomplete', icon: 'alert-circle' },
 ] as const
 
 const currentStatus = ref<string>('ALL')
 const pendingReviewCount = ref(0)
+const incompleteCount = ref(0)
 const totalCount = ref(0)
+
+// 搜索框聚焦态：驱动窄屏下搜索框的弹性伸缩（聚焦或有内容时展开）
+const isSearchFocused = ref(false)
+
+// 当前状态的中文标签（用于窄屏下拉触发按钮显示）
+const currentStatusLabel = computed(() => {
+  const tab = statusTabs.find((t) => t.value === currentStatus.value)
+  return tab?.label ?? '全部'
+})
 
 function switchStatus(value: string) {
   currentStatus.value = value
-  // 同步到 query.status（ALL → undefined 表示不过滤）
-  query.status = value === 'ALL' ? undefined : (value as any)
+  // 同步到 query.status（ALL → undefined 表示不过滤；incomplete 保留原值，由 fetchList 拦截转换）
+  if (value === 'ALL') {
+    query.status = undefined
+  } else {
+    query.status = value as any
+  }
   // 同步到矩阵筛选面板的 UI 状态
   filters.status = value === 'ALL' ? '__all' : value
   page.value = 1
@@ -573,6 +835,16 @@ async function fetchPendingCount() {
   }
 }
 
+// 获取待补全题目数量（独立轻量请求）
+async function fetchIncompleteCount() {
+  try {
+    const data = await questionApi.incompleteCount()
+    incompleteCount.value = data.total ?? 0
+  } catch {
+    incompleteCount.value = 0
+  }
+}
+
 // 左侧树节点点击 → 同步到 query 并触发表格刷新（默认包含子孙节点）
 function handleKnowledgeNodeSelect(nodeId: string) {
   navNodeId.value = nodeId
@@ -597,12 +869,9 @@ function handleContextChange(payload: { stage: string; subject: string }) {
 const showFilter = ref(false)
 
 function toggleFilter() {
+  // 纯 UI 显隐切换：仅反转布尔值，绝不触发数据重载。
+  // 筛选条件由 selectFilter → applyFilters 即时应用，收起面板无需再次请求。
   showFilter.value = !showFilter.value
-  if (!showFilter.value) {
-    // 收起时执行搜索
-    page.value = 1
-    fetchList()
-  }
 }
 
 // 是否有任何筛选条件被激活（用于显示"清空筛选"按钮）
@@ -621,6 +890,7 @@ function clearAllFilters() {
   query.question_type = undefined
   query.difficulty = undefined
   query.status = undefined
+  query.system_flag = undefined
   query.knowledge_node_ids = undefined
   query.include_descendants = undefined
   navNodeId.value = ''
@@ -641,10 +911,10 @@ function clearAllFilters() {
   fetchList()
 }
 
-// 下拉面板点击外部关闭
+// 下拉面板点击外部关闭（同时处理筛选面板下拉和 Header 状态下拉）
 function onDropdownClickOutside(e: MouseEvent) {
-  const target = e.target as Node
-  if (!(e.target as HTMLElement).closest('.ql-matrix-dropdown')) {
+  const el = e.target as HTMLElement
+  if (!el.closest('.ql-matrix-dropdown') && !el.closest('.ql-status-dropdown')) {
     openDropdown.value = null
   }
 }
@@ -694,10 +964,12 @@ interface QuestionCard {
   correctAnswer: string
   analysis: string | null
   knowledgeNodes: KnowledgeNodeSummary[]
+  systemFlags: { pending_answer?: boolean; missing_analysis?: boolean; no_analysis_needed?: boolean }
 }
 
 const cardList = ref<QuestionCard[]>([])
-const loading = ref(false)
+// 初始即为 true：避免组件首次挂载、onMounted 尚未执行的那一帧闪现"没有找到匹配的题目"空状态
+const loading = ref(true)
 const page = ref(1)
 const pageSize = 20
 const hasMore = ref(false)
@@ -722,6 +994,55 @@ function kpTagClass(kind: string): string {
   if (kind === 'chapter') return 'kp-kind-chapter'
   if (kind === 'ability') return 'kp-kind-method'
   return 'kp-kind-knowledge'
+}
+
+// ===== 多解法切换（镜像 QuestionDetail.vue 逻辑）=====
+const cnNums = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十']
+function cnNum(n: number): string {
+  return cnNums[n - 1] || String(n)
+}
+
+// 每张卡片独立的当前解法索引：cardId → index（默认 0）
+const activeSolutionMap = ref<Map<string, number>>(new Map())
+
+// 拆分多解法：支持 `\n\n---\n\n` 显式分隔 或 `\n解法二/三/...` 隐式分隔
+function cardSolutions(card: QuestionCard): string[] {
+  const analysis = card.analysis
+  if (!analysis) return []
+  if (analysis.includes('\n\n---\n\n')) return analysis.split(/\n\n---\n\n/)
+  if (/\n解法[二三四五六七八九十]/.test(analysis)) {
+    return analysis.split(/\n(?=解法[二三四五六七八九十])/).map(s => s.trim())
+  }
+  return [analysis]
+}
+
+function activeSolutionIndex(cardId: string): number {
+  return activeSolutionMap.value.get(cardId) ?? 0
+}
+
+function setActiveSolution(cardId: string, idx: number) {
+  const next = new Map(activeSolutionMap.value)
+  next.set(cardId, idx)
+  activeSolutionMap.value = next
+}
+
+// 拆分解法正文与结论（故/因此/所以/综上 收尾句）
+function splitSolution(text: string): { body: string; conclusion: string } {
+  if (!text) return { body: '', conclusion: '' }
+  const patterns = [
+    /(?:故|因此|所以|综上)[选答]\s*[A-Z](?:[、,，]\s*[A-Z])*\s*。?\s*$/,
+    /(?:故|因此|所以|综上)[^。\n]*答案[^。\n]*[。]?\s*$/,
+    /(?:故|因此|所以|综上)[^。\n]*[。]?\s*$/,
+    /故选\s*[A-Z](?:[、,，]\s*[A-Z])*\s*。?\s*$/,
+  ]
+  for (const p of patterns) {
+    const m = text.match(p)
+    if (m) {
+      const idx = text.lastIndexOf(m[0])
+      return { body: text.substring(0, idx).trim(), conclusion: m[0].trim() }
+    }
+  }
+  return { body: text.trim(), conclusion: '' }
 }
 
 const query = reactive<QuestionQuery>({
@@ -893,7 +1214,11 @@ watch(() => filters.region, () => {
 })
 
 // 底部下拉面板展开状态（同时只展开一个）
+<<<<<<< HEAD
 const openDropdown = ref<null | 'year' | 'grade' | 'semester' | 'region' | 'city' | 'status' | 'docType'>(null)
+=======
+const openDropdown = ref<null | 'year' | 'grade' | 'semester' | 'region' | 'city' | 'status' | 'header-status'>(null)
+>>>>>>> main
 function toggleDropdown(key: typeof openDropdown.value) {
   openDropdown.value = openDropdown.value === key ? null : key
 }
@@ -934,7 +1259,7 @@ function applyFilters() {
   query.question_type = filters.type === '__all' ? undefined : (filters.type as any)
   // 难度
   query.difficulty = filters.difficulty === '__all' ? undefined : (filters.difficulty as any)
-  // 状态：同步到 segmented tab
+  // 状态：同步到 segmented tab（incomplete 保留原值，由 fetchList 拦截转换）
   query.status = filters.status === '__all' ? undefined : (filters.status as any)
   currentStatus.value = filters.status === '__all' ? 'ALL' : filters.status
   // V2.1.1：试卷元数据 + 资料类型过滤（后端已支持）
@@ -997,108 +1322,6 @@ function parseOptions(raw: any): { label: string; content: string }[] {
   })
 }
 
-// ---- 选项自适应布局：基于 KaTeX 渲染后真实宽度测量 ----
-const OPTION_GAP = 16 // 选项间距 (px)
-const OPTION_PADDING = 44 // 选项内 label 圆 + padding 估算 (px)
-const optionLayoutMap = reactive<Record<string, 'grid-4' | 'grid-2' | 'grid-1'>>({})
-const cardBodyRefs = reactive<Record<string, HTMLElement | null>>({})
-const resizeObservers: ResizeObserver[] = []
-let layoutDebounce: ReturnType<typeof setTimeout> | null = null
-
-/** 为某张卡片计算选项布局 */
-function computeOptionLayout(cardId: string) {
-  const container = cardBodyRefs[cardId]
-  if (!container) return
-  const containerWidth = container.clientWidth
-  if (containerWidth === 0) return
-
-  // 获取该卡片内选项容器
-  const optionsEl = container.querySelector<HTMLElement>('.q-options')
-  if (!optionsEl) return
-
-  const optionEls = optionsEl.querySelectorAll<HTMLElement>('.q-option')
-  if (optionEls.length === 0) return
-
-  // 临时切换为非Grid布局以测量选项内容真实宽度
-  const prevDisplay = optionsEl.style.display
-  const prevCols = optionsEl.style.gridTemplateColumns
-  optionsEl.style.display = 'block'
-  optionsEl.style.gridTemplateColumns = ''
-
-  let maxWidth = 0
-  const prevStyles: { el: HTMLElement; display: string; width: string }[] = []
-  optionEls.forEach(el => {
-    prevStyles.push({ el, display: el.style.display, width: el.style.width })
-    el.style.display = 'inline-flex'
-    el.style.width = 'auto'
-    el.style.whiteSpace = 'nowrap'
-    const w = el.scrollWidth
-    if (w > maxWidth) maxWidth = w
-    el.style.whiteSpace = ''
-  })
-
-  // 恢复选项元素样式
-  prevStyles.forEach(({ el, display, width }) => {
-    el.style.display = display
-    el.style.width = width
-  })
-
-  // 恢复选项容器布局
-  optionsEl.style.display = prevDisplay
-  optionsEl.style.gridTemplateColumns = prevCols
-
-  if (maxWidth === 0) return
-
-  // 布局判定
-  const slot = maxWidth + OPTION_GAP
-  let layout: 'grid-4' | 'grid-2' | 'grid-1'
-  if (slot * 4 <= containerWidth) {
-    layout = 'grid-4'
-  } else if (slot * 2 <= containerWidth) {
-    layout = 'grid-2'
-  } else {
-    layout = 'grid-1'
-  }
-  optionLayoutMap[cardId] = layout
-}
-
-/** 对所有卡片重新计算布局（防抖） */
-function recomputeAllLayouts() {
-  if (layoutDebounce) clearTimeout(layoutDebounce)
-  layoutDebounce = setTimeout(() => {
-    Object.keys(cardBodyRefs).forEach(id => computeOptionLayout(id))
-  }, 150)
-}
-
-/** 设置卡片 body 的 ref，并注册 ResizeObserver */
-function setCardBodyRef(cardId: string) {
-  return (el: Element | ComponentPublicInstance | null) => {
-    if (el instanceof HTMLElement) {
-      cardBodyRefs[cardId] = el
-      // 注册 ResizeObserver 监听容器宽度变化
-      const ro = new ResizeObserver(() => recomputeAllLayouts())
-      ro.observe(el)
-      resizeObservers.push(ro)
-    } else {
-      delete cardBodyRefs[cardId]
-    }
-  }
-}
-
-/** 获取某张卡片的选项布局类名 */
-function optionLayoutClass(cardId: string): string {
-  return optionLayoutMap[cardId] || 'grid-2'
-}
-
-// 监听 cardList 变化，在 DOM 更新后触发首次布局计算
-watch(cardList, () => {
-  nextTick(() => {
-    setTimeout(() => {
-      Object.keys(cardBodyRefs).forEach(id => computeOptionLayout(id))
-    }, 100)
-  })
-})
-
 // ---- 工具函数：解析正确答案 ----
 function extractAnswerItem(item: any): string {
   if (typeof item === 'string') return item
@@ -1110,20 +1333,39 @@ function extractAnswerItem(item: any): string {
   return String(item)
 }
 
+// 判断是否为选择题答案（单个大写字母 A-Z 数组）
+function isChoiceLabels(arr: string[]): boolean {
+  return arr.length > 0 && arr.every(s => /^[A-Za-z]$/.test(s.trim()))
+}
+
 function parseAnswer(raw: any): string {
   if (raw == null) return ''
   if (typeof raw === 'string') {
     try {
       const parsed = JSON.parse(raw)
       if (typeof parsed === 'string') return parsed
-      if (Array.isArray(parsed)) return parsed.map(extractAnswerItem).join(', ')
+      if (Array.isArray(parsed)) {
+        const items = parsed.map(extractAnswerItem)
+        // 选择题答案：["A", "B"] → $\mathrm{AB}$
+        if (isChoiceLabels(items)) {
+          return `$\\mathrm{${items.map(s => s.trim().toUpperCase()).join('')}}$`
+        }
+        return items.join(', ')
+      }
       if (typeof parsed === 'object') return extractAnswerItem(parsed)
       return String(parsed)
     } catch {
       return raw
     }
   }
-  if (Array.isArray(raw)) return raw.map(extractAnswerItem).join(', ')
+  if (Array.isArray(raw)) {
+    const items = raw.map(extractAnswerItem)
+    // 选择题答案：["A", "B"] → $\mathrm{AB}$
+    if (isChoiceLabels(items)) {
+      return `$\\mathrm{${items.map(s => s.trim().toUpperCase()).join('')}}$`
+    }
+    return items.join(', ')
+  }
   if (typeof raw === 'object') return extractAnswerItem(raw)
   return String(raw)
 }
@@ -1131,31 +1373,57 @@ function parseAnswer(raw: any): string {
 function isCorrectOption(card: QuestionCard, label: string): boolean {
   const ans = card.correctAnswer
   if (!ans) return false
+  // 兼容 $\mathrm{AB}$ 格式：提取字母后逐个匹配
+  const match = ans.match(/\\mathrm\{([A-Za-z]+)\}/)
+  if (match) {
+    return match[1].toUpperCase().includes(label.toUpperCase())
+  }
+  // 兜底：旧的逗号分割格式
   return ans.split(/[,，、\s]+/).includes(label)
 }
 
 // ---- 获取列表 + 批量获取详情 ----
+// 模块级详情缓存：按 questionId 缓存 QuestionDetail，避免换页/切筛选时重复请求已见过的题目。
+// 根治 N+1 需后端扩展 list 接口返回完整字段，此缓存作为前端缓解：命中缓存的题目零请求。
+const detailCache = new Map<string, QuestionDetail>()
+
 async function fetchList() {
   loading.value = true
   try {
-    query.page = page.value
-    query.page_size = pageSize
-    const res = await questionApi.list(query)
+    // 拦截 incomplete 虚拟状态：深拷贝 query，在 apiParams 上替换，绝不污染响应式 state
+    // incomplete → system_flag=incomplete（pending_answer OR missing_analysis 并集），与 incomplete_count 的 total 逻辑一致
+    // 不限制 status，因为"待补全"本质是 system_flag 维度的筛选，不是 status 维度
+    const apiParams = { ...query } as QuestionQuery & { system_flag?: string }
+    if ((apiParams.status as string | undefined) === 'incomplete') {
+      delete (apiParams as any).status
+      apiParams.system_flag = 'incomplete'
+    } else {
+      delete apiParams.system_flag
+    }
+    apiParams.page = page.value
+    apiParams.page_size = pageSize
+    const res = await questionApi.list(apiParams)
     const summaries: QuestionSummary[] = res.data
     // 捕获总数：优先取后端 PageResult.total，否则回退到当前已加载条数
     totalCount.value = (res as any).total ?? summaries.length
     hasMore.value = summaries.length >= pageSize
 
-    // 并发获取每道题的详情
-    const details = await Promise.all(
-      summaries.map((s) => questionApi.get(s.id).catch(() => null))
+    // 仅对缓存未命中的题目发请求（命中缓存的零请求），减少 N+1 实际请求数
+    const missIds = summaries.map((s) => s.id).filter((id) => !detailCache.has(id))
+    const fetchedDetails = await Promise.all(
+      missIds.map((id) => questionApi.get(id).catch(() => null))
     )
+    for (let i = 0; i < missIds.length; i++) {
+      const d = fetchedDetails[i]?.data
+      if (d) detailCache.set(missIds[i], d)
+    }
 
-    cardList.value = summaries.map((s, i) => {
-      const detail: QuestionDetail | null = details[i]?.data ?? null
+    cardList.value = summaries.map((s) => {
+      const detail: QuestionDetail | null = detailCache.get(s.id) ?? null
       const meta = (detail?.metadata ?? {}) as Record<string, unknown>
       const province = String(meta.region_province ?? '').trim()
       const city = String(meta.region_city ?? '').trim()
+      const rawFlags = (meta.system_flags ?? {}) as Record<string, unknown>
       return {
         id: s.id,
         stem: s.stem,
@@ -1178,6 +1446,11 @@ async function fetchList() {
         correctAnswer: parseAnswer(detail?.correct_answer),
         analysis: detail?.analysis ?? null,
         knowledgeNodes: detail?.knowledge_nodes ?? [],
+        systemFlags: {
+          pending_answer: !!rawFlags.pending_answer,
+          missing_analysis: !!rawFlags.missing_analysis,
+          no_analysis_needed: !!rawFlags.no_analysis_needed,
+        },
       }
     })
   } catch (e: any) {
@@ -1212,6 +1485,72 @@ function toggleBasket(id: string) {
   }
 }
 
+// ===== 批量提交审核（T3-7）=====
+// 多选：卡片头部 Checkbox，选中 ID 集合
+const selectedIds = ref<Set<string>>(new Set())
+const batchSubmitting = ref(false)
+const showBatchResult = ref(false)
+const batchResult = ref<{
+  total: number
+  succeeded: number
+  failed: number
+  results: Array<{ id: string; status: 'success' | 'failed'; code?: string; missing?: string[] }>
+} | null>(null)
+
+function toggleSelect(id: string) {
+  const next = new Set(selectedIds.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  selectedIds.value = next
+}
+
+function clearSelection() {
+  selectedIds.value = new Set()
+}
+
+// 批量提交审核：调用后端 batch-submit 接口，展示结构化结果 Modal
+async function handleBatchSubmit() {
+  if (selectedIds.value.size === 0 || batchSubmitting.value) return
+  batchSubmitting.value = true
+  try {
+    const res = await questionApi.batchSubmit(Array.from(selectedIds.value))
+    batchResult.value = res
+    showBatchResult.value = true
+  } catch (e: any) {
+    toast.error(e.response?.data?.error || e.response?.data?.message || e.message || '批量提交失败')
+  } finally {
+    batchSubmitting.value = false
+  }
+}
+
+// 错误代码 → 中文描述
+function batchErrorCodeLabel(code?: string): string {
+  if (!code) return '未知错误'
+  if (code === 'ERR_ANSWER_INCOMPLETE') return '答案不完整'
+  if (code === 'ERR_OPTIONS_INCOMPLETE') return '选项不完整'
+  if (code === 'ERR_ANALYSIS_INCOMPLETE') return '解析不完整'
+  return code
+}
+
+// 跳转到第一个失败题目的编辑页
+function goToFirstFailed() {
+  const failed = batchResult.value?.results.find(r => r.status === 'failed')
+  if (failed) {
+    showBatchResult.value = false
+    router.push(`/questions/${failed.id}/edit`)
+  }
+}
+
+// 关闭结果弹窗：刷新列表 + 计数 + 清空选择
+function closeBatchResult() {
+  showBatchResult.value = false
+  batchResult.value = null
+  clearSelection()
+  fetchList()
+  fetchIncompleteCount()
+  fetchPendingCount()
+}
+
 // 左侧导航节点变化已由 handleKnowledgeNodeSelect 处理，无需 watch
 
 watch(() => space.currentSpaceId, (newId) => {
@@ -1223,31 +1562,67 @@ watch(() => space.currentSpaceId, (newId) => {
 onMounted(() => {
   fetchList()
   fetchPendingCount()
+  fetchIncompleteCount()
 })
+
+// keep-alive 缓存组件从详情页返回时触发 —— onMounted 不会再次执行
+// 确保删除/编辑后列表数据为最新
+onActivated(() => {
+  // 清除模块级详情缓存，避免 fetchList 命中旧数据跳过 API 请求
+  detailCache.clear()
+  fetchList()
+  fetchPendingCount()
+  fetchIncompleteCount()
+})
+
 onBeforeUnmount(() => {
   if (searchTimer) clearTimeout(searchTimer)
-  if (layoutDebounce) clearTimeout(layoutDebounce)
-  resizeObservers.forEach(ro => ro.disconnect())
 })
 </script>
 
 <style scoped>
-/* ===== 融合单行工具栏 (Header Bar) ===== */
+/* ===== 融合单行工具栏 (Header Bar)：简化三段式 Flex 布局 ===== */
 .ql-header-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 8px 16px;
+  width: 100%;
+  height: 56px;
+  padding: 0 16px;
+  gap: 16px;
+  overflow: visible; /* 关键：允许下拉菜单溢出 header 区域，不被裁剪 */
   border-bottom: 1px solid var(--divider);
   background: var(--bg-primary);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+  position: relative;
+  z-index: 20; /* 高于下方 .ql-scroll-area (z-index:1)，低于 .ql-sticky-bar (z-index:100) */
 }
 
-/* 右侧操作聚合区 */
+/* 左侧容器：侧栏开关 + 状态下拉 — shrink-0 不可压缩 */
+.ql-header-left {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+/* 中间容器：搜索框 — flex-1 弹性伸缩，max-w-400px */
+.ql-header-center {
+  display: flex;
+  justify-content: center;
+  flex: 1;
+  min-width: 140px;
+  max-width: 400px;
+  flex-shrink: 1;
+}
+
+/* 右侧容器：筛选 + 新建 + 统计 — shrink-0 不可压缩 */
 .ql-header-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  justify-content: flex-end;
+  gap: 12px;
   flex-shrink: 0;
 }
 
@@ -1259,119 +1634,133 @@ onBeforeUnmount(() => {
   background: var(--accent);
 }
 
-/* 统计文本（与右侧操作并排） */
-.ql-status-text {
-  font-size: 12.5px;
-  color: var(--text-muted);
-  white-space: nowrap;
-  letter-spacing: -0.01em;
-  line-height: 1;
-  margin-left: 4px;
-}
-
-.ql-status-text strong {
-  color: var(--text-secondary);
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  margin: 0 2px;
-}
-
-/* Segmented Control — Apple 风格胶囊分段控制器 */
-.ql-seg-ctrl {
-  display: inline-flex;
-  align-items: center;
-  background: var(--bg-input);
-  border: 1px solid var(--border-color);
-  border-radius: 10px;
-  padding: 3px;
-  gap: 2px;
-}
-
-.ql-seg-item {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 14px;
-  border: none;
-  background: transparent;
-  border-radius: 7px;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-secondary);
-  cursor: pointer;
-  transition: all 0.28s cubic-bezier(0.4, 0, 0.2, 1);
-  white-space: nowrap;
-  user-select: none;
-}
-
-.ql-seg-icon {
-  flex-shrink: 0;
-  opacity: 0.7;
-  transition: opacity 0.28s ease;
-}
-
-.ql-seg-item:hover:not(.active) {
-  color: var(--text-primary);
-  background: var(--bg-hover);
-}
-
-.ql-seg-item:hover:not(.active) .ql-seg-icon {
-  opacity: 0.9;
-}
-
-.ql-seg-item.active {
-  background: var(--bg-canvas);
-  color: var(--text-primary);
-  font-weight: 600;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.06);
-}
-
-.ql-seg-item.active .ql-seg-icon {
-  opacity: 1;
-  color: var(--accent);
-}
-
-[data-theme='dark'] .ql-seg-item.active {
-  background: var(--bg-active);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
-}
-
-.ql-seg-label {
-  line-height: 1;
-}
-
-/* 待审核数字徽标 — 红色小圆角，与文字保持间距 */
-.ql-seg-badge {
+/* 知识树面板 Toggle 图标按钮（Notion/Linear 风格无边框 IconButton） */
+.ql-nav-toggle {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 18px;
-  height: 17px;
-  margin-left: 4px;
-  padding: 0 5px;
-  border-radius: 9999px;
-  background: var(--danger);
-  color: #fff;
-  font-size: 10.5px;
-  font-weight: 700;
-  line-height: 1;
-  letter-spacing: 0.02em;
-  box-shadow: 0 0 0 2px var(--bg-input);
-  animation: ql-badge-pop 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: transform 0.18s ease;
+  flex-shrink: 0;
 }
 
-.ql-seg-item.active .ql-seg-badge {
-  box-shadow: 0 0 0 2px var(--bg-canvas);
+.ql-nav-toggle:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
 }
 
-[data-theme='dark'] .ql-seg-item.active .ql-seg-badge {
-  box-shadow: 0 0 0 2px var(--bg-active);
+.ql-nav-toggle.active {
+  color: var(--text-secondary);
 }
 
-@keyframes ql-badge-pop {
-  0% { transform: scale(0); opacity: 0; }
-  100% { transform: scale(1); opacity: 1; }
+.ql-nav-toggle.active:hover {
+  color: var(--accent);
+}
+
+/* 状态下拉菜单：全局常驻，所有屏幕尺寸通用 */
+.ql-status-dropdown {
+  display: block;
+  position: relative;
+  flex-shrink: 0;
+}
+
+/* 触发按钮通用基础 */
+.ql-status-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  transition: transform 0.18s ease;
+  user-select: none;
+  white-space: nowrap;
+}
+
+/* 普通态（ALL）：低调纯文字，带下拉箭头 */
+.ql-status-plain {
+  padding: 4px 0;
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.ql-status-plain:hover {
+  color: var(--text-primary);
+}
+
+/* 标签态（非 ALL）：蓝色边框标签 + × 清除按钮，对齐 .ql-dd-chip */
+.ql-status-chip {
+  gap: 4px;
+  padding: 3px 4px 3px 10px;
+  border-radius: 6px;
+  background: #fff;
+  border: 1px solid #bfdbfe; /* blue-200 */
+  color: #3b82f6; /* blue-500 */
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  transition: transform 0.18s ease;
+}
+
+/* Hover：极浅蓝底 + 加深蓝字，禁止使用 --accent-hover（实为深蓝 #0077ed） */
+.ql-status-chip:hover {
+  background: #eff6ff; /* blue-50 */
+  color: #2563eb; /* blue-600 */
+  border-color: #93c5fd; /* blue-300 */
+}
+
+/* 标签内 × 清除按钮 */
+.ql-status-chip-x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border: none;
+  background: transparent;
+  color: #3b82f6; /* blue-500 */
+  cursor: pointer;
+  border-radius: 50%;
+  padding: 0;
+  flex-shrink: 0;
+  transition: transform 0.18s ease;
+}
+
+.ql-status-chip-x:hover {
+  background: #dbeafe; /* blue-100，柔和提示而非深蓝块 */
+  color: #2563eb; /* blue-600 */
+}
+
+/* 下拉箭头图标 */
+.ql-status-caret {
+  color: var(--text-muted);
+  transition: transform 0.2s, color 0.2s;
+}
+
+.ql-status-dropdown.is-open .ql-status-caret {
+  transform: rotate(180deg);
+  color: var(--accent);
+}
+
+/* 下拉面板扩展：确保 .ql-dd-panel 在 Header 下拉中正确定位 */
+.ql-status-panel {
+  min-width: 140px;
+  z-index: 300; /* 高于筛选面板的 200，确保 Header 下拉在筛选面板之上 */
+}
+
+/* 待审核数量内联徽标（下拉选项中显示） */
+.ql-status-badge-inline {
+  color: var(--text-muted);
+  font-weight: 400;
+  margin-left: 2px;
 }
 
 /* ===== Apple风格吸顶工具栏 ===== */
@@ -1384,30 +1773,36 @@ onBeforeUnmount(() => {
 }
 
 /* ===== 主体：左侧知识树 + 右侧列表区 ===== */
+/* 浅灰背景托起白色卡片，padding+gap 营造呼吸感 */
 .ql-body {
   flex: 1;
   min-height: 0;
   display: flex;
+  gap: 16px;
+  padding: 16px;
+  background: var(--bg-primary);
   overflow: hidden;
 }
 
-/* 右侧主区：工具栏 + 滚动列表 */
+/* 右侧主区：卡片化容器（与知识树卡片视觉对齐） */
 .ql-main {
   flex: 1;
   min-width: 600px; /* 防止 LaTeX 公式与题目选项被挤压变形 */
   display: flex;
   flex-direction: column;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
   overflow: hidden;
 }
 
 .ql-sticky-bar {
   position: sticky;
   top: 0;
-  z-index: 100;
+  z-index: 200;
   flex-shrink: 0;
-  background: var(--bg-primary);
-  backdrop-filter: saturate(180%) blur(20px);
-  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  background: var(--bg-card);
 }
 
 /* 题库空间切换 */
@@ -1456,93 +1851,21 @@ onBeforeUnmount(() => {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 
-/* 搜索框 — 弹性自适应宽度，在中间自然拉伸 */
+/* 搜索框与筛选按钮基础样式微调 */
 .ql-search-wrap {
-  flex: 1;
-  max-width: 320px;
-  min-width: 150px;
-  display: flex;
-  align-items: center;
-  gap: 0;
-  height: 34px;
-  background: var(--bg-input);
-  border: 1px solid var(--border-color);
-  border-radius: 9px;
-  transition: var(--transition-fast);
-  overflow: hidden;
-  flex-shrink: 1;
+  position: relative;
 }
 
-.ql-search-wrap:focus-within {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-light);
+.ql-search-input,
+.ql-search-input:focus,
+.ql-search-input:focus-visible {
+  outline: none !important;
+  outline-offset: 0 !important;
 }
 
-.ql-search-icon {
-  color: var(--text-muted);
-  flex-shrink: 0;
-  margin-left: 12px;
-}
-
-.ql-search-input {
-  flex: 1;
-  border: none;
-  outline: none;
-  background: transparent;
-  font-size: 14px;
-  color: var(--text-primary);
-  padding: 0 12px;
-  height: 100%;
-}
-
-.ql-search-input::placeholder {
-  color: var(--text-muted);
-}
-
-/* 独立筛选按钮（从搜索框分离） */
-.ql-filter-btn {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  height: 36px;
-  padding: 0 14px;
-  border-radius: 10px;
-  background: var(--bg-input);
-  border: 1px solid var(--border-color);
-  color: var(--text-secondary);
-  font-size: 13px;
-  font-weight: 500;
-  transition: var(--transition-fast);
-  white-space: nowrap;
-  flex-shrink: 0;
-  cursor: pointer;
-}
-
-.ql-filter-btn:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: var(--accent-light);
-}
-
-.ql-filter-btn:active {
-  transform: scale(0.96);
-}
-
-/* 新建题目按钮 */
-.ql-new-btn {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  height: 36px;
-  padding: 0 16px;
-  border-radius: 10px;
-  background: var(--text-primary);
-  color: var(--bg-primary);
-  font-size: 13px;
-  font-weight: 600;
-  transition: var(--transition-fast);
-  white-space: nowrap;
-  flex-shrink: 0;
+.ql-filter-btn:active,
+.ql-new-btn:active {
+  transform: scale(0.97);
 }
 
 .ql-new-btn:hover {
@@ -1590,35 +1913,41 @@ onBeforeUnmount(() => {
   padding: 0 4px;
 }
 
-/* ===== 筛选面板展开/折叠动画 (max-height 方案, 确保折叠时高度归零) ===== */
-.ql-filter-collapse {
-  max-height: 0;
+/* ===== 筛选面板展开/折叠动画：CSS Grid 0fr→1fr 高度过渡 =====
+   外层 grid 切换 grid-template-rows，内层 .ql-filter-clip 裁剪内容。
+   overflow 延迟切换技巧：
+   - 展开(is-open 加上)：overflow 延迟 0.3s 后切到 visible（等 grid 撑开后让下拉菜单溢出）
+   - 收起(is-open 移除)：overflow 立即切回 hidden（裁剪收缩中的内容）
+   transition-delay 随状态切换而切换，实现“开延迟/关立即”的非对称行为 */
+.ql-filter-grid {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.ql-filter-grid.is-open {
+  grid-template-rows: 1fr;
+}
+.ql-filter-clip {
+  min-height: 0; /* 关键：覆盖 grid item 默认 min-content，允许收缩至 0 */
   overflow: hidden;
-  opacity: 0;
-  transition: max-height 0.35s cubic-bezier(0.32, 0.72, 0, 1),
-    opacity 0.25s ease;
+  transition: overflow 0s linear 0s; /* 收起：立即切回 hidden */
 }
-
-.ql-filter-collapse.is-open {
-  max-height: 600px;
-  opacity: 1;
-}
-
-/* 展开态：解除裁剪，让底部下拉面板 .ql-dd-panel 能自由溢出父容器 */
-.ql-filter-collapse.is-open > .ql-matrix-panel {
-  overflow: visible;
+.ql-filter-grid.is-open > .ql-filter-clip {
+  overflow: visible; /* 展开：让 .ql-dd-panel 绝对定位下拉菜单溢出面板 */
+  transition: overflow 0s linear 0.3s; /* 延迟 0.3s 切到 visible（等 grid 撑开） */
 }
 
 /* ===== 多维属性矩阵筛选面板 ===== */
 .ql-matrix-panel {
-  position: relative; /* 建立堆叠上下文，凌驾于下方题目列表之上 */
-  z-index: 100;
+  position: relative; /* 建立堆叠上下文，凌驾于下方题目列表(z-1)之上，但低于顶部Header(z-200) */
+  z-index: 10;
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 16px 20px 14px;
-  background: var(--bg-card);
+  padding: 16px 20px 16px;
+  background: var(--bg-primary); /* 极淡灰背景，区别于下方纯白题目卡片 */
   border-top: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border-color); /* 底部清晰分割线，隔断与题目列表的联系 */
 }
 
 /* —— 平铺标签行 —— */
@@ -1852,12 +2181,14 @@ onBeforeUnmount(() => {
 
 /* ===== 可滚动列表区域（独立滚动域） ===== */
 .ql-scroll-area {
+  position: relative; /* 建立层叠上下文，确保 z-index 生效 */
+  z-index: 1; /* 双保险：永远低于顶部 .ql-sticky-bar (z-index:100) 及其内部下拉浮层 */
   flex: 1;
   min-height: 0; /* Flex 子项允许收缩，使 flex:1 + overflow-y:auto 生效 */
   overflow-y: auto;
   overscroll-behavior: contain; /* 切断滚动链：防止列表触底触发外层滚动/橡皮筋 */
   padding: 16px 20px;
-  background: var(--bg-primary);
+  background: var(--bg-primary); /* 画布涂灰：与白色卡片拉开对比，卡片瞬间“跳”出 */
 }
 
 /* ===== Header Actions ===== */
@@ -1999,42 +2330,63 @@ onBeforeUnmount(() => {
 
 /* ===== Card List ===== */
 .q-card-list {
-  display: flex;
-  flex-direction: column;
-  gap: 16px; /* gap-4 */
+  /* DynamicScroller 使用绝对定位摆放 DynamicScrollerItem，flex/gap 已不适用。
+     保留 class 用于 descendant selector 上下文与暗色主题覆盖。 */
+  position: relative;
+}
+
+/* 单个题卡 slot：DynamicScrollerItem 的根元素。
+   上下平分安全边距（各 8px，总间距 16px 不变）——
+   关键 1：padding 计入 box-sizing:border-box 高度，ResizeObserver
+            测得的尺寸即包含此间距，下一项的 translateY 不会重叠；
+   关键 2：padding-top 8px 让 .q-card 不贴死在插槽 y:0 边缘，
+            hover 上浮 translateY(-2px) + 弥散阴影 + 蓝色边框有安全渲染区，
+            避免首卡顶部被外层 overflow 裁切（外层 padding 方案对虚拟列表无效：
+            绝对定位的 item 仍贴在插槽 top:0，溢出照样被外层裁）。 */
+.q-card-slot {
+  padding-top: 8px;
+  padding-bottom: 8px;
+  box-sizing: border-box;
 }
 
 /* ===== Question Card ===== */
+/* 悬浮卡片方案：纯白本体 + 实体边框 + 弥散阴影，浮于灰色画布之上 */
 .q-card {
   position: relative; /* 来源角标 & hover-expand 面板绝对定位基础 */
   background: var(--bg-card);
-  border-radius: 16px; /* rounded-2xl */
-  border: 1px solid transparent;
-  box-shadow: var(--shadow-sm);
-  transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+  border-radius: 12px; /* 现代感圆角 */
+  border: 1px solid var(--border-color); /* 清晰实体边框，强化卡片边界 */
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04); /* 常态轻微弥散阴影，赋予物理厚度 */
+  /* 仅过渡 transform（hover 上浮动效所需）
+     严禁过渡 all：会导致主题切换时 50-200 张卡片同时
+     动画 background/box-shadow/border-color，引发卡顿闪烁 */
+  transition: transform 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
 }
 
+/* 强化悬浮交互反馈：上浮 + 阴影加重 + 边框泛起主题色 */
 .q-card:hover {
-  transform: translateY(-4px); /* hover:-translate-y-1 */
-  box-shadow: var(--shadow-md);
+  transform: translateY(-2px); /* 视觉上浮起 */
+  box-shadow: 0 8px 24px rgba(149, 157, 165, 0.15); /* Hover 阴影加重 */
+  border-color: rgba(0, 113, 227, 0.3); /* 边框微微泛起主题色 */
 }
 
 .q-card.is-expanded {
-  box-shadow: var(--shadow-md);
+  box-shadow: 0 8px 24px rgba(149, 157, 165, 0.15);
 }
 
+/* 暗色模式：卡片恢复阴影 + 微亮边框，避免“平铺文本”扁平感 */
 [data-theme='dark'] .q-card {
-  border-color: #3a3a3c;
-  box-shadow: none;
+  border-color: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
 }
 
 [data-theme='dark'] .q-card:hover {
-  border-color: #3a3a3c;
-  box-shadow: none;
+  border-color: rgba(10, 132, 255, 0.4);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
 }
 
 [data-theme='dark'] .q-card.is-expanded {
-  box-shadow: none;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
 }
 
 /* ---- 来源角标：贴左上角边缘，绝对定位（与学校角标镜像统一） ---- */
@@ -2079,6 +2431,69 @@ onBeforeUnmount(() => {
   min-width: 0;
   overflow: hidden;
 }
+
+/* ---- Ghost Tag（难度/状态）：文字 + 彩色小圆点，降噪头部彩色块 ----
+   题型保留 AppBadge 彩色胶囊作为核心标识；
+   难度/状态降级为“纯文字 + 小圆点”幽灵样式，文字用 text-secondary，
+   仅靠 6px 圆点承载语义色，头部彩色块从 3 个降到 1 个。 */
+.q-ghost-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 4px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+/* 系统标记徽标：答案/解析待补全（淡底色 + 深色文字，极简风格） */
+.q-flag-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 7px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  font-weight: 550;
+  line-height: 1.5;
+}
+
+.q-flag--answer {
+  background: rgba(249, 115, 22, 0.1); /* orange-500/10 */
+  color: #c2410c; /* orange-700 */
+}
+
+.q-flag--analysis {
+  background: rgba(234, 179, 8, 0.12); /* yellow-500/12 */
+  color: #a16207; /* yellow-700 */
+}
+
+[data-theme='dark'] .q-flag--answer {
+  background: rgba(251, 146, 60, 0.16);
+  color: #fdba74;
+}
+
+[data-theme='dark'] .q-flag--analysis {
+  background: rgba(250, 204, 21, 0.16);
+  color: #fde047;
+}
+
+.q-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* 圆点配色与 AppBadge 文字色对齐（复用同一套语义色变量） */
+.q-dot--green { background: var(--success); }
+.q-dot--yellow { background: var(--warning); }
+.q-dot--red { background: var(--danger); }
+.q-dot--blue { background: var(--accent); }
+.q-dot--purple { background: var(--purple); }
+.q-dot--gray { background: var(--text-secondary); }
 
 /* ---- 学校角标：贴右上角边缘，绝对定位（与来源角标镜像统一） ---- */
 .q-school-tag {
@@ -2255,44 +2670,23 @@ onBeforeUnmount(() => {
   margin: 8px 0;
 }
 
-/* ---- Options (choice question — no correct marking in list view) ---- */
-/* 选择题选项布局: 基于KaTeX真实宽度测量的自适应Grid */
+/* ---- Options (choice question — QuestionOptions component) ---- */
 .q-options {
-  display: grid;
-  gap: 16px;
   margin-top: 14px;
 }
 
-/* 一行四列 */
-.q-options.grid-4 {
-  grid-template-columns: repeat(4, 1fr);
+/* 选项内容容器：公式防挤压 + 局部横向滚动 + 隐藏滚动条 */
+.q-option-content {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  /* scrollbar-hide：Webkit + Firefox */
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* IE10+ */
 }
-
-/* 两行两列 */
-.q-options.grid-2 {
-  grid-template-columns: repeat(2, 1fr);
-}
-
-/* 四行一列 */
-.q-options.grid-1 {
-  grid-template-columns: 1fr;
-}
-
-.q-option {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 8px 12px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-input);
-  border: 1px solid transparent;
-  font-size: 13.5px;
-  line-height: 1.6;
-  transition: var(--transition-fast);
-}
-
-.q-option:hover {
-  background: var(--bg-hover);
+.q-option-content::-webkit-scrollbar {
+  display: none; /* Chrome/Safari/Edge */
 }
 
 .q-option-label {
@@ -2341,99 +2735,156 @@ onBeforeUnmount(() => {
   letter-spacing: 0.06em;
 }
 
-/* ---- Correct answer highlight card (choice & fill) ---- */
-.q-answer-card {
+/* ---- 答案与解析材质化卡片（镜像 QuestionDetail.vue .answer-card / .analysis-card）---- */
+.q-ans-sol-block {
+  margin-top: 4px;
+}
+
+/* 参考答案卡片 — 莫兰迪极淡蓝底 */
+.q-ans-card {
+  background: #f4f8fc;
+  border-radius: 12px;
+  padding: 14px 16px;
+  margin-bottom: 10px;
+  border: none;
+  transition: background 0.3s ease;
+}
+
+.q-ans-card:hover {
+  background: #edf3f9;
+}
+
+[data-theme='dark'] .q-ans-card {
+  background: rgba(100, 160, 220, 0.08);
+}
+
+[data-theme='dark'] .q-ans-card:hover {
+  background: rgba(100, 160, 220, 0.12);
+}
+
+/* 解析卡片 — 苹果系统柔和灰底 */
+.q-ana-card {
+  background: #f5f5f7;
+  border-radius: 12px;
+  padding: 14px 16px;
+  border: none;
+  transition: background 0.3s ease;
+}
+
+.q-ana-card:hover {
+  background: #ebebef;
+}
+
+[data-theme='dark'] .q-ana-card {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+[data-theme='dark'] .q-ana-card:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* 卡片小标题 */
+.q-ans-card-title,
+.q-ana-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+  letter-spacing: -0.01em;
+  display: block;
+}
+
+[data-theme='dark'] .q-ans-card-title,
+[data-theme='dark'] .q-ana-card-title {
+  color: var(--text-primary);
+}
+
+.q-ana-card-title-row {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px 14px;
-  border-radius: var(--radius-sm);
-  margin-bottom: 12px;
-  background: var(--bg-card);
-  border: 1px solid var(--border-color);
-  border-left: 2.5px solid var(--text-muted);
-}
-
-.q-answer-card--choice {
-  border-left-color: var(--accent);
-}
-
-.q-answer-card--fill {
-  border-left-color: var(--success);
-}
-
-.q-answer-card-label {
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-muted);
-  letter-spacing: 0.02em;
-  flex-shrink: 0;
-}
-
-.q-answer-card-value {
-  font-size: 16px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-  flex: 1;
-  color: var(--text-primary);
-}
-
-.q-answer-card--choice .q-answer-card-value {
-  color: var(--accent);
-}
-
-.q-answer-card--fill .q-answer-card-value {
-  color: var(--success);
-}
-
-.q-answer-card-icon {
-  flex-shrink: 0;
-  opacity: 0.5;
-}
-
-.q-answer-card--choice .q-answer-card-icon {
-  color: var(--accent);
-}
-
-.q-answer-card--fill .q-answer-card-icon {
-  color: var(--success);
-}
-
-/* ---- Solution answer inline ---- */
-.q-answer-inline {
-  display: flex;
-  align-items: baseline;
+  justify-content: space-between;
   gap: 8px;
-  padding: 8px 0 10px;
+  margin-bottom: 8px;
 }
 
-.q-answer-inline-label {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-muted);
-  flex-shrink: 0;
+.q-ana-card-title-row .q-ana-card-title {
+  margin-bottom: 0;
 }
 
-.q-answer-inline-value {
-  font-size: 14px;
-  font-weight: 600;
+.q-ans-card-content,
+.q-ana-card-body {
+  font-size: 13.5px;
+  line-height: 1.8;
   color: var(--text-primary);
 }
 
-/* ---- Analysis body ---- */
-.q-analysis-body {
-  padding: 4px 0 16px;
-  font-size: 13.5px;
-  line-height: 1.85;
-  color: var(--text-secondary);
+.q-ana-card-body :deep(p) {
+  margin: 0 0 8px;
 }
 
-.q-analysis-body :deep(.katex) {
+.q-ana-card-body :deep(.katex) {
   font-size: 1em;
 }
 
-.q-analysis-body :deep(.katex-display) {
+.q-ana-card-body :deep(.katex-display) {
   margin: 6px 0;
+}
+
+/* 多解法分段切换（镜像 QuestionDetail.vue .sol-seg）*/
+.q-sol-seg {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius-full);
+  background: var(--bg-input);
+  flex-shrink: 0;
+}
+
+.q-sol-seg-btn {
+  padding: 3px 10px;
+  border: none;
+  border-radius: var(--radius-full);
+  background: transparent;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.q-sol-seg-btn:hover {
+  color: var(--text-secondary);
+}
+
+.q-sol-seg-btn.active {
+  background: var(--bg-card);
+  color: var(--accent);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+[data-theme='dark'] .q-sol-seg-btn.active {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+/* 结论收尾段 — 融入卡片底色，纯文本强化 */
+.q-ana-conclusion {
+  margin-top: 16px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.8;
+}
+
+/* 解法淡入淡出过渡 */
+.q-sol-fade-enter-active,
+.q-sol-fade-leave-active {
+  transition: opacity 0.2s ease;
+}
+
+.q-sol-fade-enter-from,
+.q-sol-fade-leave-to {
+  opacity: 0;
 }
 
 .q-analysis-empty {
@@ -2442,14 +2893,23 @@ onBeforeUnmount(() => {
   color: var(--text-muted);
 }
 
-/* ---- Row 3: Footer ---- */
+/* ---- Row 3: Footer ----
+   底部栏涂灰：与题干区用细线隔开，增加视觉稳定感
+   下圆角匹配卡片半径（不靠 overflow:hidden，避免裁剪知识点 hover 展开面板） */
 .q-card-footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 20px;
-  border-top: 1px solid var(--divider);
+  padding: 12px 20px;
+  background-color: #fafbfc; /* 底部栏微涂灰 */
+  border-top: 1px solid #f0f0f2; /* 与题干区用细线隔开 */
+  border-radius: 0 0 12px 12px; /* 匹配卡片下圆角，让涂灰底贴合圆角 */
   gap: 12px;
+}
+
+[data-theme='dark'] .q-card-footer {
+  background-color: rgba(0, 0, 0, 0.15);
+  border-top-color: var(--divider);
 }
 
 /* 左侧知识点区：样式已移至 .q-kp-expand-panel 附近（hover-expand 重构） */
@@ -2501,53 +2961,326 @@ onBeforeUnmount(() => {
 }
 
 /* ===== Transitions ===== */
-.q-analysis-enter-active {
-  transition: max-height 0.4s cubic-bezier(0.4, 0, 0.2, 1),
-              opacity 0.3s ease,
-              padding 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+.ql-pop-enter-active {
+  transition: opacity 0.18s ease, transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
-
-.q-analysis-leave-active {
-  transition: max-height 0.3s cubic-bezier(0.4, 0, 0.2, 1),
-              opacity 0.2s ease,
-              padding 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+.ql-pop-leave-active {
+  transition: opacity 0.12s ease, transform 0.12s ease;
 }
-
-.q-analysis-enter-from,
-.q-analysis-leave-to {
-  max-height: 0;
+.ql-pop-enter-from,
+.ql-pop-leave-to {
   opacity: 0;
-  padding-top: 0;
-  padding-bottom: 0;
+  transform: translateY(-4px) scale(0.96);
+}
+/* ---- Analysis expand: CSS Grid 0fr→1fr 高度过渡
+   外层 grid 切换 grid-template-rows，内层 overflow:hidden + min-height:0 裁剪
+   关键：min-height:0 让 grid item 可收缩至 0（覆盖默认 min-content）
+   优势：无需 JS 计算高度，完美过渡到 auto；DOM 常驻避免 LaTeX 重渲染 */
+.q-analysis-grid {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.q-analysis-grid.is-expanded {
+  grid-template-rows: 1fr;
+}
+.q-analysis-clip {
+  min-height: 0;
+  overflow: hidden;
 }
 
-.q-analysis-enter-to,
-.q-analysis-leave-from {
-  max-height: 600px;
-  opacity: 1;
+/* ===== 批量提交审核按钮 ===== */
+.ql-batch-btn {
+  border: none;
+}
+
+.ql-batch-btn:active {
+  transform: scale(0.97);
+}
+
+.ql-batch-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.25);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+/* ===== 卡片多选 Checkbox ===== */
+.q-select-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 2px;
+}
+
+.q-select-check input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  accent-color: var(--accent, #007aff);
+  border-radius: 4px;
+}
+
+/* ===== 批量提交结果 Modal 内容 ===== */
+.batch-result-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 4px 0;
+}
+
+.batch-summary-row {
+  display: flex;
+  gap: 12px;
+}
+
+.batch-summary-item {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 14px 12px;
+  border-radius: 10px;
+  background: var(--bg-input);
+}
+
+.batch-summary-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.batch-summary-value {
+  font-size: 24px;
+  font-weight: 800;
+  color: var(--text-primary);
+  letter-spacing: -0.02em;
+}
+
+.batch-summary--success {
+  background: rgba(16, 185, 129, 0.08);
+}
+
+.batch-summary--success .batch-summary-value {
+  color: #10b981;
+}
+
+.batch-summary--failed {
+  background: rgba(239, 68, 68, 0.08);
+}
+
+.batch-summary--failed .batch-summary-value {
+  color: #ef4444;
+}
+
+.batch-result-list {
+  max-height: 320px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 2px;
+}
+
+.batch-result-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--bg-input);
+}
+
+.batch-result-item.is-failed {
+  background: rgba(239, 68, 68, 0.05);
+}
+
+.batch-result-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.batch-result-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+
+.batch-result-id {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-family: monospace;
+  word-break: break-all;
+}
+
+.batch-result-error {
+  font-size: 12px;
+  font-weight: 550;
+  color: #ef4444;
+}
+
+.batch-result-missing {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.batch-result-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.batch-action-btn {
+  padding: 8px 18px;
+  border-radius: 9999px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  border: none;
+}
+
+.batch-action--primary {
+  background: var(--accent, #007aff);
+  color: #fff;
+}
+
+.batch-action--primary:hover {
+  opacity: 0.9;
+}
+
+.batch-action--ghost {
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+}
+
+.batch-action--ghost:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
 }
 
 /* ===== Responsive ===== */
-@media (max-width: 960px) {
-  .ql-header-bar {
-    flex-wrap: wrap;
-    gap: 8px 12px;
-    padding: 8px 12px;
-  }
-  .ql-search-wrap {
-    order: 3;
-    flex: 1 0 100%;
-    max-width: 100%;
-  }
-  .ql-status-text {
+
+/* ── 中窄屏 (< 1280px)：极简图标化 + 动态收缩策略 ── */
+@media (max-width: 1279px) {
+  /* +新建题目 图标化：隐藏文字，缩为方形图标按钮 */
+  .ql-new-label {
     display: none;
+  }
+  .ql-new-btn {
+    padding: 0;
+    width: 36px;
+    justify-content: center;
+  }
+
+  /* 3. 筛选按钮图标化：隐藏文字 */
+  .ql-filter-label {
+    display: none;
+  }
+  .ql-filter-btn {
+    padding: 0;
+    width: 36px;
+    justify-content: center;
+  }
+
+
+}
+
+
+
+/* ── 移动端元信息：窄屏独占，替代左上角 source-badge 和左下角知识点 ── */
+.q-mobile-meta {
+  display: none; /* 默认隐藏（桌面端） */
+  align-items: center;
+  gap: 4px;
+  width: fit-content;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── 响应式：窄屏（<768px）修复布局高度链 + 隐藏次要信息 ── */
+@media (max-width: 767px) {
+  /* --- 高度链修复：absolute → flex 流式布局 --- */
+  .ql-page {
+    position: relative;
+    inset: auto;
+    flex: 1;
+    min-height: 0;
+  }
+
+  .ql-body {
+    padding: 0;
+    gap: 0;
+  }
+
+  .ql-main {
+    min-width: 0; /* 移除 600px 下限，允许自适应窄屏 */
+    border-radius: 0;
+    border-left: none;
+    border-right: none;
+  }
+
+  /* --- 移动端卡片紧凑化 + 隐藏次要信息，显示移动端元微标签 --- */
+  .q-card-header {
+    padding: 12px 14px 10px; /* 移除顶部 26px 源角标避让空白 */
+  }
+
+  .q-school-tag,
+  .q-source-badge,
+  .q-footer-kp {
+    display: none;
+  }
+
+  .q-mobile-meta {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 10px;
+    font-size: 11.5px;
+    font-weight: 500;
+    color: var(--text-muted);
+    background: var(--bg-input);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+    max-width: 100%;
+    width: fit-content;
+    flex-shrink: 1;
+  }
+
+  .q-action-label {
+    display: none;
+  }
+  .q-action-btn {
+    padding: 8px; /* 正方形点击热区 */
   }
 }
 
 @media (max-width: 640px) {
-  .q-card-header {
-    padding: 26px 14px 10px; /* 移动端同步顶部避让来源角标 */
-  }
   .q-card-body {
     padding: 12px 14px;
   }
@@ -2557,17 +3290,17 @@ onBeforeUnmount(() => {
   .q-analysis-section {
     padding: 0 14px;
   }
-  .q-actions {
-    width: 100%;
-    justify-content: flex-end;
-  }
 }
 </style>
 
-<!-- 非 scoped 样式：打通父级高度链，让 .ql-page 的 absolute/inset:0 能撑满 .view.active -->
+<!-- 非 scoped 样式：打通父级高度链，桌面端绝对定位 + 移动端 flex 流式 -->
 <style>
 .view.active {
+  flex: 1;
+  min-height: 0;
   height: 100%;
-  position: relative; /* 配合子元素 .ql-page 的 absolute inset:0 撑满 */
+  position: relative; /* 桌面端配合子元素 .ql-page 的 absolute inset:0 撑满 */
+  display: flex;
+  flex-direction: column;
 }
 </style>

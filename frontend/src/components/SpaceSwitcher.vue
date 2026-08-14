@@ -1,80 +1,76 @@
 <template>
-  <div class="space-switcher" ref="switcherRef">
+  <div class="space-switcher group relative inline-block shrink-0">
+    <!-- 极简 Avatar 纯圆形触发按钮（Hover 驱动，移除多余的 Tooltip） -->
     <button
       type="button"
-      class="ss-trigger"
-      :class="{ active: open }"
-      @click="open = !open"
+      class="ss-trigger w-9 h-9 rounded-full bg-gray-100 dark:bg-slate-800 hover:bg-gray-200 dark:hover:bg-slate-700 flex items-center justify-center shrink-0 cursor-pointer transition-colors border border-transparent"
     >
-      <span class="ss-icon" :class="`ss-icon--${currentKind}`">
-        <AppIcon :name="kindIcon(currentKind)" :size="15" />
+      <!-- 空间 Icon/头像 -->
+      <span class="ss-icon flex items-center justify-center shrink-0" :class="`ss-icon--${currentKind}`">
+        <AppIcon :name="kindIcon(currentKind)" :size="16" />
       </span>
-      <div class="ss-info">
-        <span class="ss-label">当前空间</span>
-        <span class="ss-name">{{ currentName }}</span>
-      </div>
-      <!-- 团队空间：显示设置入口 -->
-      <span
-        v-if="currentKind === 'team'"
-        class="ss-settings-btn"
-        title="空间设置"
-        @click.stop="goSettings"
-      >
-        <AppIcon name="settings" :size="14" />
-      </span>
-      <AppIcon
-        name="chevron-down"
-        :size="13"
-        class="ss-chevron"
-        :class="{ rotated: open }"
-      />
     </button>
 
-    <Transition name="ss-pop">
-      <div v-if="open" class="ss-dropdown">
+    <!-- 纯 CSS Hover 驱动的下拉面板 (pt-2 作为鼠标移动桥梁) -->
+    <div
+      class="absolute right-0 top-full pt-2 w-64 z-[100] opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 origin-top-right scale-95 group-hover:scale-100"
+    >
+      <div
+        class="bg-white dark:bg-slate-900 rounded-xl shadow-xl border border-gray-100 dark:border-slate-800 overflow-hidden py-1"
+      >
         <template v-for="group in groupedSpaces" :key="group.label">
           <div v-if="group.items.length > 0" class="ss-section">
-            <div class="ss-section-label">{{ group.label }}</div>
+            <!-- 分组标题：极简大写微型字体 -->
+            <div class="px-3 pt-2.5 pb-1 text-xs font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wider">
+              {{ group.label }}
+            </div>
             <button
               v-for="s in group.items"
               :key="s.id"
               type="button"
-              class="ss-item"
-              :class="{ active: s.id === currentId }"
+              class="ss-item group/item flex items-center justify-between w-full px-3 py-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer hover:bg-gray-50 dark:hover:bg-slate-800/60 transition-colors rounded-md"
+              :class="{ 'font-semibold text-blue-600 dark:text-blue-400': s.id === currentId }"
               @click="select(s.id)"
             >
-              <span class="ss-item-icon" :class="`ss-item-icon--${s.kind}`">
-                <AppIcon :name="kindIcon(s.kind)" :size="14" />
-              </span>
-              <span class="ss-item-name">{{ s.name }}</span>
-              <!-- 团队空间项：hover 显示设置图标 -->
-              <span
-                v-if="s.kind === 'team'"
-                class="ss-item-settings"
-                title="空间设置"
-                @click.stop="goSettingsById(s.id)"
-              >
-                <AppIcon name="settings" :size="12" />
-              </span>
-              <AppIcon
-                v-if="s.id === currentId"
-                name="check"
-                :size="13"
-                class="ss-item-check"
-              />
+              <div class="flex items-center gap-2.5 min-w-0 pr-2">
+                <span class="ss-item-icon flex-shrink-0" :class="`ss-item-icon--${s.kind}`">
+                  <AppIcon :name="kindIcon(s.kind)" :size="14" />
+                </span>
+                <span class="truncate">{{ s.name }}</span>
+              </div>
+              <div class="flex items-center gap-1.5 flex-shrink-0">
+                <span
+                  v-if="s.kind === 'team'"
+                  class="ss-item-settings opacity-0 group-hover/item:opacity-100 p-1 hover:text-blue-500 rounded transition-opacity"
+                  title="空间设置"
+                  @click.stop="goSettingsById(s.id)"
+                >
+                  <AppIcon name="settings" :size="13" />
+                </span>
+                <AppIcon
+                  v-if="s.id === currentId"
+                  name="check"
+                  :size="15"
+                  class="text-blue-500 dark:text-blue-400"
+                />
+              </div>
             </button>
           </div>
         </template>
 
-        <!-- 创建团队空间 -->
-        <div class="ss-create-section">
-          <button type="button" class="ss-create-btn" @click="showCreateModal = true">
+        <!-- 底部固定操作：创建团队空间 -->
+        <div class="border-t border-gray-100 dark:border-slate-800 bg-gray-50/60 dark:bg-slate-800/40 p-1 mt-1">
+          <button
+            type="button"
+            class="flex items-center gap-2 w-full px-3 py-2 text-sm text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white hover:bg-gray-200/50 dark:hover:bg-slate-700/50 rounded-lg transition-colors"
+            @click="showCreateModal = true"
+          >
             <AppIcon name="plus" :size="14" />
             创建团队空间
           </button>
         </div>
       </div>
-    </Transition>
+    </div>
 
     <!-- 创建团队空间弹窗 -->
     <Teleport to="body">
@@ -107,7 +103,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import { ref, computed, nextTick, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSpaceStore } from '@/stores/space'
 import { spaceApi } from '@/api/client'
@@ -118,12 +114,9 @@ import type { SpaceSummary } from '@/api/client'
 const router = useRouter()
 const space = useSpaceStore()
 const toast = useToast()
-const open = ref(false)
-const switcherRef = ref<HTMLElement | null>(null)
 
 const currentId = computed(() => space.currentSpaceId)
 const currentSpace = computed(() => space.currentSpace)
-const currentName = computed(() => currentSpace.value?.name || '未选择')
 const currentKind = computed(() => currentSpace.value?.kind || 'personal')
 
 function kindIcon(kind: string): string {
@@ -151,18 +144,9 @@ const groupedSpaces = computed<SpaceGroup[]>(() => {
 
 function select(id: string) {
   space.setCurrentSpace(id)
-  open.value = false
-}
-
-// ── 跳转空间设置 ──
-function goSettings() {
-  if (!currentId.value) return
-  open.value = false
-  router.push(`/spaces/${currentId.value}/settings`)
 }
 
 function goSettingsById(id: string) {
-  open.value = false
   router.push(`/spaces/${id}/settings`)
 }
 
@@ -189,175 +173,29 @@ async function createTeam() {
   }
 }
 
-// 弹窗打开时自动聚焦输入框
 watch(showCreateModal, (v) => {
   if (v) {
     nextTick(() => createInputRef.value?.focus())
   }
 })
-
-function onDocumentClick(e: MouseEvent) {
-  if (!open.value) return
-  const el = switcherRef.value
-  if (el && !el.contains(e.target as Node)) {
-    open.value = false
-  }
-}
-
-onMounted(() => document.addEventListener('click', onDocumentClick))
-onUnmounted(() => document.removeEventListener('click', onDocumentClick))
 </script>
 
 <style scoped>
-.space-switcher {
-  position: relative;
-  margin: 0 6px 14px;
-}
-
-/* ===== Trigger ===== */
-.ss-trigger {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  width: 100%;
-  padding: 8px 10px;
-  border-radius: var(--radius-xs);
-  background: var(--bg-hover);
-  border: 1px solid transparent;
-  cursor: pointer;
-  transition: var(--transition-fast);
-}
-
-.ss-trigger:hover {
-  background: var(--bg-secondary);
-}
-
-.ss-trigger.active {
-  background: var(--bg-secondary);
-  border-color: var(--border-color);
-}
-
 .ss-icon {
-  width: 28px;
-  height: 28px;
-  border-radius: 7px;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
   color: #fff;
-}
-
-.ss-icon--personal {
-  background: linear-gradient(135deg, #5b8def, #4178d6);
-}
-
-.ss-icon--team {
-  background: linear-gradient(135deg, #34c759, #2da44e);
-}
-
-.ss-icon--public {
-  background: linear-gradient(135deg, #ff9500, #e68600);
-}
-
-.ss-info {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 0;
-  overflow: hidden;
-  min-width: 0;
-}
-
-.ss-label {
-  font-size: 10px;
-  color: var(--text-muted);
-  letter-spacing: 0.02em;
-  line-height: 1.2;
-}
-
-.ss-name {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 100%;
-  line-height: 1.3;
-}
-
-.ss-chevron {
-  color: var(--text-muted);
-  flex-shrink: 0;
-  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.ss-chevron.rotated {
-  transform: rotate(180deg);
-}
-
-/* ===== Dropdown ===== */
-.ss-dropdown {
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 0;
-  right: 0;
-  background: var(--bg-card);
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-sm);
-  box-shadow: var(--shadow-md);
-  padding: 6px;
-  z-index: 150;
-  max-height: 360px;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-}
-
-.ss-section + .ss-section {
-  margin-top: 4px;
-  padding-top: 4px;
-  border-top: 1px solid var(--border-light);
-}
-
-.ss-section-label {
-  font-size: 10px;
-  font-weight: 600;
-  color: var(--text-muted);
-  padding: 4px 8px 3px;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.ss-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  text-align: left;
-  padding: 7px 8px;
-  border-radius: var(--radius-xs);
-  font-size: 13px;
-  color: var(--text-primary);
-  transition: var(--transition-fast);
-  cursor: pointer;
-}
-
-.ss-item:hover {
-  background: var(--bg-hover);
-}
-
-.ss-item.active {
-  background: var(--accent-light);
-  color: var(--accent);
-  font-weight: 600;
 }
 
 .ss-item-icon {
   width: 22px;
   height: 22px;
-  border-radius: 5px;
+  border-radius: 6px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -365,93 +203,19 @@ onUnmounted(() => document.removeEventListener('click', onDocumentClick))
   color: #fff;
 }
 
+.ss-icon--personal,
 .ss-item-icon--personal {
   background: linear-gradient(135deg, #5b8def, #4178d6);
 }
 
+.ss-icon--team,
 .ss-item-icon--team {
   background: linear-gradient(135deg, #34c759, #2da44e);
 }
 
+.ss-icon--public,
 .ss-item-icon--public {
   background: linear-gradient(135deg, #ff9500, #e68600);
-}
-
-.ss-item-name {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.ss-item-check {
-  color: var(--accent);
-  flex-shrink: 0;
-}
-
-/* ===== Settings gear in trigger ===== */
-.ss-settings-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  border-radius: var(--radius-xs);
-  color: var(--text-muted);
-  flex-shrink: 0;
-  transition: var(--transition-fast);
-}
-
-.ss-settings-btn:hover {
-  background: var(--bg-secondary);
-  color: var(--accent);
-}
-
-/* ===== Settings icon in dropdown items ===== */
-.ss-item-settings {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border-radius: 4px;
-  color: var(--text-muted);
-  opacity: 0;
-  transition: var(--transition-fast);
-  flex-shrink: 0;
-}
-
-.ss-item:hover .ss-item-settings {
-  opacity: 1;
-}
-
-.ss-item-settings:hover {
-  background: var(--accent-light);
-  color: var(--accent);
-}
-
-/* ===== Create team space ===== */
-.ss-create-section {
-  margin-top: 4px;
-  padding-top: 6px;
-  border-top: 1px solid var(--border-light);
-}
-
-.ss-create-btn {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 8px 8px;
-  border-radius: var(--radius-xs);
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--accent);
-  transition: var(--transition-fast);
-}
-
-.ss-create-btn:hover {
-  background: var(--accent-light);
 }
 
 /* ===== Create modal ===== */
@@ -547,18 +311,5 @@ onUnmounted(() => document.removeEventListener('click', onDocumentClick))
 .ss-modal-fade-enter-from,
 .ss-modal-fade-leave-to {
   opacity: 0;
-}
-
-/* ===== Transition ===== */
-.ss-pop-enter-active {
-  transition: opacity 0.18s ease, transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1);
-}
-.ss-pop-leave-active {
-  transition: opacity 0.12s ease, transform 0.12s ease;
-}
-.ss-pop-enter-from,
-.ss-pop-leave-to {
-  opacity: 0;
-  transform: translateY(-4px) scale(0.97);
 }
 </style>

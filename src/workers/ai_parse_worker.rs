@@ -45,7 +45,8 @@ const MAX_RETRIES: i32 = 2;
 /// 跨页组装默认开启（环境变量 AI_TASK_ASSEMBLE=0 可关闭）
 const ASSEMBLE_ENABLED_BY_DEFAULT: bool = true;
 
-const TASK_COLUMNS: &str = "id, creator_id, raw_text, status, question_id, error_message, \
+const TASK_COLUMNS: &str = "id, creator_id, raw_text, source_type, image_b64, pdf_bytes, \
+     ocr_provider_override, status, question_id, question_ids, error_message, \
      created_at, updated_at, document_id, paper_meta, total_count, processed_count, \
      success_count, failed_count, retry_count, current_page, total_pages, \
      current_question_no, started_at, completed_at, last_error, progress, \

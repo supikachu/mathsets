@@ -41,7 +41,8 @@ fn db_err(msg: impl Into<String>) -> (StatusCode, Json<serde_json::Value>) {
     )
 }
 
-const TASK_COLUMNS: &str = "id, creator_id, raw_text, status, question_id, error_message, \
+const TASK_COLUMNS: &str = "id, creator_id, raw_text, source_type, image_b64, pdf_bytes, \
+     ocr_provider_override, status, question_id, question_ids, error_message, \
      created_at, updated_at, document_id, paper_meta, total_count, processed_count, \
      success_count, failed_count, retry_count, current_page, total_pages, \
      current_question_no, started_at, completed_at, last_error, progress, \
@@ -340,3 +341,4 @@ pub async fn cancel_task(
 
     Ok(Json(json!({ "message": "已请求取消，正在停止解析" })))
 }
+

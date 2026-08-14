@@ -36,7 +36,7 @@ async fn main() {
         tracing::warn!("初始化公共空间失败: {}", e);
     }
 
-    
+
     // 确保上传目录存在（头像文件落盘位置）
     let upload_avatars_dir = std::path::Path::new(&config.upload_dir).join("avatars");
     if let Err(e) = std::fs::create_dir_all(&upload_avatars_dir) {
@@ -47,6 +47,18 @@ async fn main() {
         );
     } else {
         tracing::info!("📁 上传目录就绪: {:?}", upload_avatars_dir);
+    }
+
+    // 确保题目配图目录存在（题目图片落盘位置）
+    let upload_questions_dir = std::path::Path::new(&config.upload_dir).join("questions");
+    if let Err(e) = std::fs::create_dir_all(&upload_questions_dir) {
+        tracing::warn!(
+            "创建题目配图目录失败 {:?}: {}",
+            upload_questions_dir,
+            e
+        );
+    } else {
+        tracing::info!("📁 题目配图目录就绪: {:?}", upload_questions_dir);
     }
 
     // 构建共享状态

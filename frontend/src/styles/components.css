@@ -79,37 +79,21 @@
     overflow: hidden;
   }
 
-  /* 侧边栏容器：透明背景，内部两张独立卡片用 space-between 撑开 */
+  /* 悬浮圆弧 Slim 胶囊边栏 (Floating Pill Sidebar) */
   .sidebar {
     display: flex;
     flex-direction: column;
     justify-content: space-between;
+    align-items: center;
     width: var(--sidebar-width);
-    flex-shrink: 0;
-    height: 100%;
-    overflow-y: auto;
-    background: var(--bg-primary);
-    border: none;
-    box-shadow: none;
-    padding: 16px 12px;
-  }
-
-  /* 上方导航卡片 */
-  .sidebar-nav-card {
+    margin: 16px 0 16px 16px;
+    height: calc(100% - 32px);
+    border-radius: var(--radius-xl, 20px);
     background: var(--bg-card);
-    border-radius: var(--radius-lg);
-    padding: 14px;
-    box-shadow: var(--shadow-sm);
     border: 1px solid var(--border-color);
-  }
-
-  /* 下方用户信息卡片 */
-  .sidebar-user-card {
-    background: var(--bg-card);
-    border-radius: var(--radius-lg);
-    padding: 10px;
     box-shadow: var(--shadow-sm);
-    border: 1px solid var(--border-color);
+    padding: 16px 0;
+    z-index: 40;
     flex-shrink: 0;
   }
 
@@ -838,6 +822,15 @@
 }
 
 @media (max-width: 768px) {
+  /* 移动端 .main-content 补位：桌面端样式在 (min-width:769px) 内，此处确保高度链不断裂 */
+  .main-content {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
   .kp-tree-panel {
     position: fixed;
     inset: 0 30% 0 0;

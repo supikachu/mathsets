@@ -15,7 +15,9 @@ pub struct DeepSeekProvider {
 impl DeepSeekProvider {
     pub fn new(api_key: String, base_url: String) -> Self {
         let client = Client::builder()
-            .timeout(Duration::from_secs(120))
+            // Stage2 多题批量结构化（max_tokens=8192）单次响应可能 60-150s，
+            // 120s 边界过紧会触发 body 读取 TimedOut；放宽至 180s 与前端轮询上限对齐
+            .timeout(Duration::from_secs(180))
             .no_proxy() // 临时强制直连，绕过系统代理（排查 2s 超时）
             .build()
             .expect("无法创建 reqwest Client");
@@ -95,7 +97,10 @@ impl AiProvider for DeepSeekProvider {
                 },
             ],
             temperature: 0.1,
-            max_tokens: 4096,
+            // v1.1（T1.12）：Stage 2 批量多题结构化需要更大输出空间，
+            // 避免整卷多题被 max_tokens 截断导致 JSON 残缺。
+            // 单题 parse_text 同样受益，DeepSeek-V3 上限内安全。
+            max_tokens: 8192,
         };
 
         let url = format!("{}/v1/chat/completions", self.base_url);

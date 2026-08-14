@@ -40,7 +40,8 @@ thiserror = "1"
 dotenvy = "0.15"
 
 # AI 录入功能（reqwest 用 rustls-tls 避免 windows-sys/dlltool 原生依赖）
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# M4：启用 multipart 特性以支持 MinerU 引擎的 multipart/form-data 文件上传
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
 aes-gcm = "0.10"
 base64 = "0.22"
 regex = "1"
@@ -48,6 +49,10 @@ async-trait = "0.1"
 
 # Multipart 文件类型嗅探（零信任安全防护 — Magic Number 校验）
 infer = "0.16"
+
+# 图像格式转码（Doc2X 仅支持 JPEG/PNG，前端上传的 WebP 需转码为 PNG）
+# 仅启用 webp 解码 + png 编码，最小化编译体积
+image = { version = "0.25", default-features = false, features = ["webp", "png"] }
 
 # 并发限流中间件（parse-image 路由全局并发控制）
 tower = { version = "0.5", features = ["limit"] }
@@ -61,6 +66,8 @@ axum-extra = { version = "0.12.6", features = ["query"] }
 
 # V2.1.1 题目去重 hash（content_hash / normalized_content_hash，SHA-256）
 sha2 = "0.10"
+# ZIP 解压（MinerU 云端 Precision API 返回 zip 包，内含 full.md）
+zip = "2"
 
 [dev-dependencies]
 # Axum 测试工具（oneshot 调用 Router）

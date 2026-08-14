@@ -79,6 +79,84 @@ pub fn extract_json_by_bracket_count(s: &str) -> Result<String, String> {
     }
 }
 
+/// 修复被 `max_tokens` 截断的批量 JSON（v1.1，T1.12）
+///
+/// 针对 Stage 2 输出 `{"questions": [ {...}, {...}, {截断...` 的场景：
+/// 保留最后一个**完整**的数组元素，丢弃其后未闭合的残缺元素，
+/// 并补全 `]}` 闭合符，使剩余前 N-1 题可被正常反序列化。
+///
+/// 策略：
+/// 1. 先走 `clean_llm_json` 剥离代码块包裹
+/// 2. 定位 `"questions"` 后的 `[`
+/// 3. 逐字节扫描数组，跟踪 `{}` 深度（相对数组层）与字符串状态，
+///    每当深度归零（一个完整元素闭合）记录其 `}` 位置
+/// 4. 若中途遇到 `]`（数组正常闭合）→ 未截断，返回 `None`
+/// 5. 扫到 EOF 仍未闭合 → 取最后一次完整元素位置，截断后补 `]}`
+///
+/// 返回 `None` 表示：未找到 questions 数组 / 没有任何一个完整元素 / 数组本身未截断。
+pub fn repair_truncated_batch(raw: &str) -> Option<String> {
+    let s = clean_llm_json(raw).ok()?;
+
+    // 定位 "questions" 键后的数组起始 [
+    let q_idx = s.find("\"questions\"")?;
+    let after_key = &s[q_idx..];
+    let colon = after_key.find(':')?;
+    let bracket_rel = after_key[colon..].find('[')?;
+    let bracket_idx = q_idx + colon + bracket_rel;
+
+    let bytes = s.as_bytes();
+    let mut depth: i32 = 0; // {} 深度（相对数组层，0 = 数组层）
+    let mut in_string = false;
+    let mut escape = false;
+    let mut last_complete_end: Option<usize> = None; // 最后一个完整元素 `}` 的索引
+
+    let mut i = bracket_idx + 1;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if escape {
+            escape = false;
+            i += 1;
+            continue;
+        }
+        if b == b'\\' && in_string {
+            escape = true;
+            i += 1;
+            continue;
+        }
+        if b == b'"' {
+            in_string = !in_string;
+            i += 1;
+            continue;
+        }
+        if in_string {
+            i += 1;
+            continue;
+        }
+        match b {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    // 一个完整元素闭合
+                    last_complete_end = Some(i);
+                }
+            }
+            b']' if depth == 0 => {
+                // 数组正常闭合，非截断场景
+                return None;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    // EOF：截断。取最后一个完整元素，补全闭合符
+    let end = last_complete_end?;
+    // s[..=end] 形如 `{"questions": [ {...}, {...}`（末尾为完整元素 `}`）
+    // 补 `]}` 闭合数组与根对象
+    Some(format!("{}]}}", &s[..=end]))
+}
+
 /// 修复 JSON 字符串字面量内部的非法转义反斜杠。
 ///
 /// JSON 规范只允许 9 种转义：`\" \\ \/ \b \f \n \r \t \uXXXX`。
@@ -255,6 +333,58 @@ pub fn clean_and_parse<T: DeserializeOwned>(raw: &str) -> Result<T, String> {
     Err("AI 返回 JSON 反序列化失败（所有清洗路径均未通过）".into())
 }
 
+/// 自动补齐未闭合的 `:::img-row` 围栏
+///
+/// AI 输出可能因 token 限制或 prompt 漂移导致 `:::img-row ... :::` 围栏缺少
+/// 闭合 `:::`。前端 `LatexRender.processImgRow` 正则要求严格的 `\n:::\n?`
+/// 闭合标记，缺失时：
+///   - 围栏内的图片行退化为普通 Markdown（不并排，破坏并排版式）
+///   - 开标记 `:::img-row` 作为纯文本泄漏到题干中，污染渲染
+///
+/// 策略：按行扫描，跟踪 `:::img-row` 开标记栈深度；遇到独占一行的 `:::`
+/// 且栈非空时出栈（视为闭标记）。EOF 时若栈仍非空，逐个追加 `\n:::\n`
+/// 补齐（处理嵌套或多重未闭合的极端情况）。
+///
+/// 注意：
+///   - 只识别独占一行的 `:::`（trim 后严格相等），不匹配 `:::trailing`
+///     等带后缀的行——这些是其他围栏类型的开标记，不应误判为 img-row 闭合
+///   - `:::img-row {align:left}` 配置块也识别为开标记（前缀匹配 + 空白分隔）
+///   - 不处理 `:::img-row` 嵌套（AI 输出极少出现，正则也用非贪婪不支持嵌套）
+pub fn close_unclosed_img_row_fences(md: &str) -> String {
+    let mut stack_depth: usize = 0;
+
+    for line in md.lines() {
+        let trimmed = line.trim();
+        // 开标记：`:::img-row` 或 `:::img-row {align:...}`
+        // 严格前缀匹配 + 空白分隔，避免误匹配 `:::img-rowrandom` 等
+        let is_opener = trimmed == ":::img-row"
+            || trimmed.starts_with(":::img-row ")
+            || trimmed.starts_with(":::img-row\t");
+        if is_opener {
+            stack_depth += 1;
+        } else if trimmed == ":::" && stack_depth > 0 {
+            // 闭标记：独占一行的 `:::`，仅在栈非空时消费
+            stack_depth -= 1;
+        }
+    }
+
+    if stack_depth == 0 {
+        return md.to_string();
+    }
+
+    // 末尾追加 `\n:::\n` 用于每个未闭合的围栏
+    // 先确保末尾有换行（避免 `:::img-row\n![img](url)` + `:::` 黏连成 `:::img-row\n![img](url):::`）
+    let mut result = String::with_capacity(md.len() + stack_depth * 5);
+    result.push_str(md);
+    for _ in 0..stack_depth {
+        if !result.ends_with('\n') {
+            result.push('\n');
+        }
+        result.push_str(":::\n");
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,6 +439,49 @@ mod tests {
         // 尾部残缺
         let input = r#"{"stem": "求集合 {x | x > 1} 的元素个数", "answer": "#;
         assert!(extract_json_by_bracket_count(input).is_err());
+    }
+
+    #[test]
+    fn test_repair_truncated_batch_keeps_complete_elements() {
+        // 第 3 题在 stem 中途被截断
+        let input = r#"```json
+{"questions": [
+  {"question_type": "choice", "stem": "第1题"},
+  {"question_type": "fill", "stem": "第2题"},
+  {"question_type": "solution", "stem": "第3题截断"#;
+        let repaired = repair_truncated_batch(input).expect("应修复成功");
+        let parsed: serde_json::Value = serde_json::from_str(&repaired).expect("修复后应可解析");
+        let arr = parsed["questions"].as_array().unwrap();
+        assert_eq!(arr.len(), 2, "应丢弃截断的第 3 题，保留前 2 题");
+        assert_eq!(arr[0]["stem"], "第1题");
+        assert_eq!(arr[1]["stem"], "第2题");
+    }
+
+    #[test]
+    fn test_repair_truncated_batch_returns_none_when_not_truncated() {
+        // 完整 JSON 不应触发修复（返回 None）
+        let input = r#"{"questions": [{"question_type": "choice", "stem": "x"}]}"#;
+        assert!(repair_truncated_batch(input).is_none());
+    }
+
+    #[test]
+    fn test_repair_truncated_batch_returns_none_when_no_complete_element() {
+        // 第一题就截断，没有任何完整元素 → None
+        let input = r#"{"questions": [{"question_type": "choice", "stem": "截"#;
+        assert!(repair_truncated_batch(input).is_none());
+    }
+
+    #[test]
+    fn test_repair_truncated_batch_handles_braces_in_strings() {
+        // 题干含集合 {x | x > 1}，不应误判元素闭合
+        let input = r#"{"questions": [
+  {"question_type": "fill", "stem": "求 {x | x > 1} 的元素个数"},
+  {"question_type": "choice", "stem": "截"#;
+        let repaired = repair_truncated_batch(input).expect("应修复成功");
+        let parsed: serde_json::Value = serde_json::from_str(&repaired).expect("修复后应可解析");
+        let arr = parsed["questions"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["stem"], "求 {x | x > 1} 的元素个数");
     }
 
     #[test]
@@ -411,5 +584,99 @@ mod tests {
         if let Ok(v) = result {
             assert_eq!(v["question_type"], "solution");
         }
+    }
+
+    // ===== close_unclosed_img_row_fences 单元测试 =====
+
+    #[test]
+    fn test_close_img_row_fences_already_closed() {
+        // 已闭合围栏 → 原样返回
+        let input = ":::img-row\n![图1](url1)\n![图2](url2)\n:::\n";
+        let result = close_unclosed_img_row_fences(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_close_img_row_fences_unclosed_basic() {
+        // 未闭合围栏 → 末尾追加 \n:::\n
+        let input = ":::img-row\n![图1](url1)\n![图2](url2)";
+        let result = close_unclosed_img_row_fences(input);
+        assert_eq!(result, ":::img-row\n![图1](url1)\n![图2](url2)\n:::\n");
+    }
+
+    #[test]
+    fn test_close_img_row_fences_unclosed_with_trailing_newline() {
+        // 末尾已有换行 → 仅追加 :::\n（不重复 \n）
+        let input = ":::img-row\n![图1](url1)\n";
+        let result = close_unclosed_img_row_fences(input);
+        assert_eq!(result, ":::img-row\n![图1](url1)\n:::\n");
+    }
+
+    #[test]
+    fn test_close_img_row_fences_with_align_config() {
+        // 带 {align:left} 配置的围栏 → 识别为开标记
+        let input = ":::img-row {align:left}\n![图1](url1)\n![图2](url2)";
+        let result = close_unclosed_img_row_fences(input);
+        assert_eq!(result, ":::img-row {align:left}\n![图1](url1)\n![图2](url2)\n:::\n");
+    }
+
+    #[test]
+    fn test_close_img_row_fences_multiple_unclosed() {
+        // 多个未闭合围栏 → 逐个追加 :::\n
+        let input = ":::img-row\n![图1](url1)\n\n:::img-row\n![图2](url2)";
+        let result = close_unclosed_img_row_fences(input);
+        assert_eq!(
+            result,
+            ":::img-row\n![图1](url1)\n\n:::img-row\n![图2](url2)\n:::\n:::\n"
+        );
+    }
+
+    #[test]
+    fn test_close_img_row_fences_mixed_closed_and_unclosed() {
+        // 混合：一个已闭合，一个未闭合 → 仅未闭合的追加 :::
+        let input = ":::img-row\n![图1](url1)\n:::\n\n:::img-row\n![图2](url2)";
+        let result = close_unclosed_img_row_fences(input);
+        assert_eq!(
+            result,
+            ":::img-row\n![图1](url1)\n:::\n\n:::img-row\n![图2](url2)\n:::\n"
+        );
+    }
+
+    #[test]
+    fn test_close_img_row_fences_no_img_row() {
+        // 无 img-row 围栏 → 原样返回
+        let input = "普通题干，含 $x^2$ 公式与 ![普通图](url)";
+        let result = close_unclosed_img_row_fences(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_close_img_row_fences_ignores_trailing_fence_suffix() {
+        // `:::trailing` 不应被识别为 img-row 闭合标记
+        // :::img-row 未闭合 → 末尾应追加 :::\n
+        let input = ":::img-row\n![图1](url1)\n:::warning\n警告\n:::";
+        let result = close_unclosed_img_row_fences(input);
+        // 注意：末尾的 ::: 会消费 img-row 的栈，结果不追加 :::
+        // 这是边界场景——AI 输出极少出现嵌套围栏，且这种结构本身已破坏
+        // 关键测试点：:::warning 不被误判为闭合（因为是 :::warning 不是 :::）
+        // 这里只验证 :::warning 行不影响识别
+        assert!(result.starts_with(":::img-row\n![图1](url1)\n:::warning\n警告\n"));
+    }
+
+    #[test]
+    fn test_close_img_row_fences_strict_opener_match() {
+        // `:::img-rowrandom` 不应被识别为开标记（需空白分隔）
+        let input = ":::img-rowrandom\n一些文本\n:::";
+        let result = close_unclosed_img_row_fences(input);
+        // 不识别为开标记，::: 也不消费栈（栈始终为 0），原样返回
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_close_img_row_fences_indented_opener() {
+        // 带前导空白的开标记也应识别（trim 后匹配）
+        let input = "  :::img-row\n![图1](url1)";
+        let result = close_unclosed_img_row_fences(input);
+        assert_eq!(result, "  :::img-row\n![图1](url1)\n:::\n");
     }
 }

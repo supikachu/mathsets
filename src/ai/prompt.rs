@@ -35,7 +35,7 @@ pub const CORE_PARSE_RULES: &str = r#"
 - 绝对禁止自行推导公式（如把题目条件推导为结论）
 - 绝对禁止自行生成解答过程（如自己写一段解析）
 - 绝对禁止补全缺失的答案（如题目没给答案，绝不自行编造）
-如果原图/原文中没有答案，`correct_answer` 必须为 null，`analysis` 必须为 []。
+如果原图/原文中没有答案，`correct_answer` 必须为对应题型的空结构（choice→`{"kind":"choice","value":{"options":[]}}`，fill→`{"kind":"fill","value":{"blanks":[]}}`，solution→`{"kind":"solution","value":{"subs":[]}}`），**绝不允许输出 `null`**。`analysis` 必须为 []。
 
 # 输出 JSON Schema（必须严格遵守）
 {
@@ -50,7 +50,10 @@ pub const CORE_PARSE_RULES: &str = r#"
     "kind": "fill", "value": {"blanks": [{"position":1,"answer":"x"}]}
   } | {
     "kind": "solution", "value": {"subs": [{"sub_id":1,"content":"第(1)题解答"}]}
-  } | null,
+  } | {
+    "kind": "choice", "value": {"options": []}
+  },
+  【禁止】correct_answer 绝不允许为 null；无答案时必须输出对应题型的空结构,
   "analysis": [
     {"title":"解法一","content":"推导过程"}
   ],
@@ -58,6 +61,7 @@ pub const CORE_PARSE_RULES: &str = r#"
   "confidence": 0.0-1.0,
   "warnings": [],
   "image_placeholders": [],
+  "image_urls": [],
   "question_no": "题号，如 17(2) / 1 / 一、1（无法判断可省略）",
   "display_order": 整数展示顺序（可省略，按出现顺序）,
   "score": 分值整数（原图标注的分值，没有可省略）,
@@ -71,6 +75,14 @@ pub const CORE_PARSE_RULES: &str = r#"
 - 有「(1)(2)」「求...的值」→ solution
 - 多选：题干明确写「多选」或答案不止一个 → sub_type="multi"
 
+# 选项与题干分离（极重要，违反则整体识别失败）
+【严禁数据冗余】`stem`（题干）字段中**绝对不能**包含选项内容。
+- 选择题（choice / multiple）：提取 `stem` 时必须在遇到 'A.'、'A、'、'A)'、'(A)' 等选项前缀时**立即截断**，选项前缀及其后所有选项文本一律不得进入 `stem`
+- 所有选项内容只能存放在 `options` 数组中，绝不允许在 `stem` 中重复出现（否则前端会题干区与选项区重复渲染两次）
+- 示例：原文 "下列结论正确的是\nA. $x>0$\nB. $x<0$\nC. $x=0$\nD. $x\ne0$" →
+  `stem` 只保留 "下列结论正确的是"；A/B/C/D 四项全部进 `options` 数组
+- 填空题/解答题不涉及选项，不受此规则约束
+
 # 多小问结构认知（极重要，违反则整体识别失败）
 - 一道题目通常由「大背景」+「多个小问」组成，例如：
   大背景："在直角坐标系中，抛物线 y = ax² + bx + c..."
@@ -83,7 +95,8 @@ pub const CORE_PARSE_RULES: &str = r#"
 
 # 答案留空规则（极重要）
 - 如果输入只包含题目本身（如试卷截图、题目描述），没有给出标准答案或解答过程
-- 必须将 `correct_answer` 设为 null，`analysis` 设为空数组 []
+- 必须将 `correct_answer` 设为对应题型的空结构（choice→`{"kind":"choice","value":{"options":[]}}`，fill→`{"kind":"fill","value":{"blanks":[]}}`，solution→`{"kind":"solution","value":{"subs":[]}}`），**绝不允许输出 `null`**
+- `analysis` 设为空数组 []
 - 绝对不要自行编造答案、不要自行推导解题过程
 - 置信度 confidence 应相应降低（如 0.6-0.8），并在 warnings 中标注 "未提供答案"
 
@@ -102,12 +115,20 @@ pub const CORE_PARSE_RULES: &str = r#"
 # 多小题答案识别（解答题）
 - 题干含 (1)(2)(3) → correct_answer.subs 数组多项，sub_id 从 1 开始
 - 单问 → subs 数组 1 项
-- 如果原文/原图没有给出答案，correct_answer 设为 null
+- 如果原文/原图没有给出答案，correct_answer 必须为对应题型的空结构，绝不允许为 null
 
 # LaTeX 规范
 - 行内公式：$x^2 + y^2 = r^2$
 - 块级公式：$$\int_0^1 x \, dx$$
 - 不要把公式转义为 Unicode（如 x² 应写 $x^2$）
+
+# 配图链接提取（v1.1，解决几何题丢图）
+- 若输入 Markdown 含 `![...](url)` 真实图片链接（url 以 http/https 开头）：
+  - 必须在 stem / analysis / options 的对应内联位置保留该 Markdown 图片标记，不得丢弃或改写为纯文本
+  - 将所有图片 URL 提取并去重，存入该题 `image_urls` 数组
+- 若仅为 `![配图](IMAGE_PLACEHOLDER_N)` 占位符（非真实 URL）：
+  - 仍按既有规则计入 `image_placeholders`，不计入 `image_urls`
+- 即：`image_urls` 只收集真实可访问的图片 URL，占位符走 `image_placeholders`
 
 # 严格约束
 - 只输出 JSON，不要任何 Markdown 代码块标记
@@ -178,6 +199,50 @@ pub const BATCH_IMAGE_OCR_SYSTEM_PROMPT: &str = r#"你是一个数学题图片�
 # 批量模式额外约束
 - 图片中有几道题就输出几道题到 questions 数组
 - 即使某道题识别困难，也要尽量输出，不要省略
+"#;
+
+/// Stage 1 — Qwen-VL OCR Prompt（输出纯 Markdown，非 JSON）
+///
+/// 用于 `QwenVlOcrProvider::ocr_image`：调用视觉模型把图片识别为含 LaTeX 与
+/// 图片占位符的纯 Markdown 文本，供 Stage 2 文本 LLM 结构化。
+/// 不输出 JSON、不输出代码块标记；图片中能转 LaTeX 的转 LaTeX，不能的用占位符。
+pub const QWEN_VL_OCR_PROMPT: &str = r#"你是一个数学题图片 OCR 引擎。识别图片中的全部数学内容，输出纯 Markdown 文本。
+
+# 输出格式（极重要）
+- 只输出 Markdown 文本，绝对不要输出 JSON、不要输出任何 ``` 代码块标记
+- 行内公式用 $...$，块级公式用 $$...$$
+- 多道题用题号或序号分隔，保留原文题号（如「1.」「(1)」「①」）与选项标号（A. B. C. D.）
+- 表格用 Markdown 表格语法
+
+# 图文混排
+- 若含几何图形、函数图象、坐标系、表格等无法用文本和 LaTeX 表达的内容：
+  在对应位置插入占位符 ![配图](IMAGE_PLACEHOLDER_N)，N 从 0 递增
+- 能用 LaTeX 表达的（如 △ABC、∠AOB、坐标系符号）转为 LaTeX，不要用占位符
+
+# OCR 注意事项
+- 公式必须转为 LaTeX，不要保留图片中的像素字符或 Unicode 上下标（如 x² 写 $x^2$）
+- 手写体优先识别为印刷体
+- 只做 OCR 提取，绝对不做题、不计算、不补全答案、不省略任何题目内容
+"#;
+
+/// Stage 2 — 文本结构化 Prompt（接收 Stage 1 输出的 Markdown，输出 JSON 数组）
+///
+/// 用于两阶段流水线的第二步：把 OCR Markdown 解析为 `{"questions":[...]}`。
+/// 仅含 Stage 2 特有指令（批量数组输出 + 配图提取提示），通用规则通过
+/// `CORE_PARSE_RULES` 在 `STAGE2_PARSE_FULL_PROMPT` 中注入。
+pub const STAGE2_PARSE_SYSTEM_PROMPT: &str = r#"你是一个数学题结构化解析器。输入是 OCR 引擎输出的 Markdown 文本（可能含多道题、$...$ LaTeX 公式、![配图](url) 或 ![配图](IMAGE_PLACEHOLDER_N) 标记），将其解析为严格 JSON。
+
+# 输出结构（批量模式）
+输出顶层是一个 JSON 对象，包含 `questions` 数组：
+{
+  "questions": [
+    { ... 单题结构同核心规则中的 Schema ... }
+  ]
+}
+
+# 配图处理
+- 含 `![配图](IMAGE_PLACEHOLDER_N)` 占位符：计入该题 `image_placeholders`
+- 含 `![...](http...)` 真实图片链接：在内联位置保留标记，并把 URL 收集去重到该题 `image_urls`
 "#;
 
 // ============================================================
@@ -270,6 +335,13 @@ pub static AI_CLASSIFY_FULL_PROMPT_VISION: LazyLock<String> = LazyLock::new(|| {
     format!("{}{}", AI_CLASSIFY_DOCUMENT_PROMPT_VISION, CLASSIFY_OUTPUT_SCHEMA)
 });
 
+/// Stage 2 模式 — 完整系统提示词（Stage 2 特有指令 + 核心规则）
+///
+/// 用于两阶段流水线第二步：把 OCR Markdown 解析为 `{"questions":[...]}`。
+pub static STAGE2_PARSE_FULL_PROMPT: LazyLock<String> = LazyLock::new(|| {
+    format!("{}{}", STAGE2_PARSE_SYSTEM_PROMPT, CORE_PARSE_RULES)
+});
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,9 +364,9 @@ mod tests {
         assert!(CORE_PARSE_RULES.contains("必须全部放在 `stem` 字段中"));
         assert!(CORE_PARSE_RULES.contains("绝对不允许把 (1)(2) 等子问题拆分"));
 
-        // 验证答案留空规则
+        // 验证答案留空规则（v1.2：禁止 null，要求空结构）
         assert!(CORE_PARSE_RULES.contains("答案留空规则"));
-        assert!(CORE_PARSE_RULES.contains("correct_answer` 必须为 null"));
+        assert!(CORE_PARSE_RULES.contains("绝不允许输出 `null`"));
         assert!(CORE_PARSE_RULES.contains("analysis` 必须为 []"));
     }
 
@@ -304,6 +376,8 @@ mod tests {
         assert!(TEXT_PARSE_FULL_PROMPT.contains("【最高指令：禁止做题】"));
         assert!(IMAGE_OCR_FULL_PROMPT.contains("【最高指令：禁止做题】"));
         assert!(BATCH_IMAGE_OCR_FULL_PROMPT.contains("【最高指令：禁止做题】"));
+        // Stage 2 也注入核心规则
+        assert!(STAGE2_PARSE_FULL_PROMPT.contains("【最高指令：禁止做题】"));
 
         // 验证文本模式包含特有指令
         assert!(TEXT_PARSE_FULL_PROMPT.contains("将用户粘贴的题目文本解析为严格 JSON"));
@@ -323,5 +397,23 @@ mod tests {
         assert_ne!(TEXT_PARSE_SYSTEM_PROMPT, IMAGE_OCR_SYSTEM_PROMPT);
         assert_ne!(IMAGE_OCR_SYSTEM_PROMPT, BATCH_IMAGE_OCR_SYSTEM_PROMPT);
         assert_ne!(TEXT_PARSE_SYSTEM_PROMPT, BATCH_IMAGE_OCR_SYSTEM_PROMPT);
+    }
+
+    #[test]
+    fn test_core_parse_rules_contains_image_urls_rule() {
+        // v1.1：配图链接提取规则与 image_urls 字段
+        assert!(CORE_PARSE_RULES.contains("配图链接提取"));
+        assert!(CORE_PARSE_RULES.contains("image_urls"));
+    }
+
+    #[test]
+    fn test_stage2_and_qwen_vl_ocr_prompts() {
+        // Stage 2 输出批量数组 + 含核心规则
+        assert!(STAGE2_PARSE_FULL_PROMPT.contains("`questions` 数组"));
+        assert!(STAGE2_PARSE_FULL_PROMPT.contains("image_urls"));
+        // Stage 1 Qwen-VL OCR 输出纯 Markdown（非 JSON）
+        assert!(QWEN_VL_OCR_PROMPT.contains("只输出 Markdown 文本"));
+        assert!(QWEN_VL_OCR_PROMPT.contains("IMAGE_PLACEHOLDER_N"));
+        assert!(!QWEN_VL_OCR_PROMPT.contains("JSON Schema"));
     }
 }

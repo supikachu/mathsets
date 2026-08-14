@@ -151,6 +151,12 @@ pub fn build_app(state: AppState) -> Router {
                 .route("/users/avatar", post(handlers::users::upload_avatar))
                 .layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
         )
+        // 题目配图上传单独套 10MB 限制（几何大图/坐标系需更高上限）
+        .merge(
+            Router::new()
+                .route("/uploads/images", post(handlers::uploads::upload_image))
+                .layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
+        )
         // 管理员用户管理
         .route("/admin/users", get(handlers::auth::list_users).post(handlers::auth::create_user))
         .route("/admin/users/{id}", get(handlers::auth::get_user).delete(handlers::auth::delete_user))
@@ -158,6 +164,16 @@ pub fn build_app(state: AppState) -> Router {
         .route("/admin/users/{id}/status", put(handlers::auth::update_user_status))
         // 题目统计（必须在 {id} 之前注册）
         .route("/questions/stats", get(handlers::questions::question_stats))
+        // 待补全计数（必须在 {id} 之前注册）
+        .route(
+            "/questions/incomplete-count",
+            get(handlers::questions::incomplete_count),
+        )
+        // 批量提交审核（必须在 {id} 之前注册）
+        .route(
+            "/questions/batch-submit",
+            post(handlers::questions::batch_submit_questions),
+        )
         // 题目 CRUD
         .route("/questions", get(handlers::questions::list_questions))
         .route("/questions", post(handlers::questions::create_question))
@@ -254,6 +270,8 @@ pub fn build_app(state: AppState) -> Router {
         // AI 智能录入（设置）
         .route("/ai/settings", get(handlers::ai::get_settings))
         .route("/ai/settings", put(handlers::ai::update_settings))
+        // OCR 引擎连接测试（轻量探测，不消耗配额）
+        .route("/ai/ocr/test-connection", post(handlers::ai::test_ocr_connection))
         // V2.1.1 异步解析任务（POST 创建 + GET 进度 + 取消）
         .route("/ai/parse-task", post(handlers::ai_tasks::submit_parse_task))
         .route(
