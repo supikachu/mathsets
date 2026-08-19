@@ -43,6 +43,21 @@ pub(crate) fn map_ai_to_ocr_error(e: crate::ai::provider::AiError) -> OcrError {
     }
 }
 
+/// PDF 直传进度回调：参数为 0~100 百分比
+///
+/// 引擎轮询期间周期性触发（如 Doc2X 每 3s 一次）；
+/// 无数值进度的引擎（MinerU 云端）不触发，调用方依赖心跳保活。
+pub type PdfProgressCallback = std::sync::Arc<dyn Fn(u8) + Send + Sync>;
+
+/// 从 JSON Value 解析百分比（0~100）：支持数字与数字字符串，其余 → None
+pub(crate) fn parse_percent_value(v: &serde_json::Value) -> Option<f64> {
+    match v {
+        serde_json::Value::Number(n) => n.as_f64(),
+        serde_json::Value::String(s) => s.trim().parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
 /// OCR 引擎 trait
 ///
 /// 每个引擎实现本 trait 即可被 `create_ocr_provider` 工厂装配到两阶段流水线。
@@ -69,6 +84,18 @@ pub trait OcrProvider: Send + Sync {
     /// 默认实现返回 `UnsupportedPdf`，Qwen-VL 走前端逐页图片兜底。
     async fn ocr_pdf_async(&self, _pdf_bytes: &[u8]) -> Result<String, OcrError> {
         Err(OcrError::UnsupportedPdf)
+    }
+
+    /// PDF 直传（带进度回调）→ 全文 Markdown
+    ///
+    /// 默认委托 `ocr_pdf_async`（不触发回调）；有数值进度的引擎（Doc2X）
+    /// 覆盖本方法在轮询循环中上报 0~100 百分比。
+    async fn ocr_pdf_async_with_progress(
+        &self,
+        pdf_bytes: &[u8],
+        _on_progress: &PdfProgressCallback,
+    ) -> Result<String, OcrError> {
+        self.ocr_pdf_async(pdf_bytes).await
     }
 }
 

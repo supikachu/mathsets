@@ -1510,8 +1510,9 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   padding: 0;
-  /* z-index 提升至 9999，确保折叠后浮在预览列上方 */
-  z-index: 9999;
+  /* 局部层级：仅浮过预览列（与 KnowledgeTreeNav 把手一致）。
+     不可用高 z-index（如 9999）— 会穿透全局弹窗遮罩(.modal-overlay: 2000) */
+  z-index: 10;
   transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   outline: none;
 }

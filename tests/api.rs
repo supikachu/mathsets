@@ -533,18 +533,21 @@ async fn test_question_full_lifecycle() {
     assert_eq!(status, StatusCode::OK, "审核通过失败: {:?}", body);
     assert_eq!(body["status"], "published");
 
-    // 6. 已发布题目不可编辑
-    let (status, _) = put_auth(
+    // 6. 已发布题目允许纠错编辑：保存后降级为 Pending 重新进入审核
+    //    version 轨迹：create=1 → 编辑=2 → approve=3 → 纠错编辑=4
+    let (status, body) = put_auth(
         &mut app,
         &format!("/api/v1/questions/{}", question_id),
         json!({ "stem": "试图修改" }),
         &token,
     )
     .await;
-    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(status, StatusCode::OK, "已发布题目纠错编辑应成功: {:?}", body);
+    assert_eq!(body["status"], "pending");
+    assert_eq!(body["version"], 4);
 
-    // 7. 列选题目列表
-    let (status, body) = get_auth(&mut app, "/api/v1/questions?status=published", &token).await;
+    // 7. 列选题目列表（纠错降级后按 pending 过滤）
+    let (status, body) = get_auth(&mut app, "/api/v1/questions?status=pending", &token).await;
     assert_eq!(status, StatusCode::OK);
     let list = body["items"].as_array().unwrap();
     assert!(!list.is_empty());
@@ -646,7 +649,8 @@ async fn test_question_delete_draft_only() {
             "stem": "临时题目",
             "question_type": "solution",
             "difficulty": 1,
-            "correct_answer": ["证明略"]
+            "correct_answer": ["证明略"],
+            "analysis": "略证过程"
         }),
         &token,
     )
@@ -684,7 +688,8 @@ async fn test_question_review_reject() {
             "question_type": "choice",
             "difficulty": 1,
             "correct_answer": ["A"],
-            "options": [{"label":"A","content":"OK"},{"label":"B","content":"NO"}]
+            "options": [{"label":"A","content":"OK"},{"label":"B","content":"NO"}],
+            "analysis": "选 A"
         }),
         &token,
     )
@@ -736,7 +741,8 @@ async fn test_question_stats() {
             "question_type": "choice",
             "difficulty": 1,
             "correct_answer": ["A"],
-            "options": [{"label":"A","content":"正确"},{"label":"B","content":"错误"}]
+            "options": [{"label":"A","content":"正确"},{"label":"B","content":"错误"}],
+            "analysis": "选 A"
         }),
         &token,
     )
@@ -848,7 +854,8 @@ async fn test_teacher_cannot_review() {
             "question_type": "choice",
             "difficulty": 1,
             "correct_answer": ["A"],
-            "options": [{"label":"A","content":"正确"},{"label":"B","content":"错误"}]
+            "options": [{"label":"A","content":"正确"},{"label":"B","content":"错误"}],
+            "analysis": "选 A"
         }),
         &teacher_token,
     )
@@ -895,7 +902,8 @@ async fn test_non_creator_cannot_submit() {
             "stem": "提交权限测试",
             "question_type": "solution",
             "difficulty": 1,
-            "correct_answer": ["证明略"]
+            "correct_answer": ["证明略"],
+            "analysis": "略证过程"
         }),
         &token_a,
     )

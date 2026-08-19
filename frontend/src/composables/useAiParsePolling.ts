@@ -1,5 +1,5 @@
 import { ref, onUnmounted } from 'vue'
-import { aiTaskApi, type AiParseTaskDetail } from '@/api/client'
+import { aiTaskApi, type AiParseTaskDetail, type ParseMode } from '@/api/client'
 
 /// 轮询间隔（毫秒）
 const POLL_INTERVAL_MS = 2000
@@ -111,7 +111,8 @@ export function useAiParsePolling() {
   }
 
   /// 入口：为已确认 Document 创建任务并开始轮询
-  async function startPolling(documentId: string) {
+  /// parseMode：pdf_direct=仅 PDF 直连（失败由调用方引导回退）/ page=仅逐页 / 缺省=自动降级
+  async function startPolling(documentId: string, parseMode?: ParseMode) {
     reset()
     isPolling.value = true
     statusText.value = '正在提交任务…'
@@ -119,7 +120,7 @@ export function useAiParsePolling() {
 
     let submitTaskId: string
     try {
-      const { data } = await aiTaskApi.createParseTask(documentId)
+      const { data } = await aiTaskApi.createParseTask(documentId, parseMode)
       submitTaskId = data.task_id
       taskId.value = submitTaskId
       statusText.value = '正在排队…'

@@ -249,6 +249,19 @@ pub struct CreateQuestionRequest {
     /// 关联试卷 ID 列表（同步写入 paper_questions 关联表）
     #[serde(default)]
     pub paper_ids: Option<Vec<Uuid>>,
+    /// AI 智能录入来源元数据：提供时后端从 ai_parse_tasks.progress.staged_questions
+    /// 读取对应暂存项，完成容器关联、AI 标签写入、未匹配候选写入，并标记暂存项已保存。
+    #[serde(default)]
+    pub ai_meta: Option<AiCreateMeta>,
+}
+
+/// AI 智能录入创建来源（确认保存时携带，指向待落库的暂存项）
+#[derive(Debug, Clone, Deserialize)]
+pub struct AiCreateMeta {
+    /// 解析任务 ID
+    pub task_id: Uuid,
+    /// 暂存项 index（如 `p1_i0` / `c0_i2`）
+    pub staged_index: String,
 }
 
 /// 更新题目请求（B2 重构）

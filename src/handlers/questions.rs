@@ -17,10 +17,10 @@ use crate::auth::permissions::{
     is_admin_user, list_reviewers, PermissionError,
 };
 use crate::models::question::{
-    CreateQuestionRequest, KnowledgeNodeSummary, Question, QuestionDetail, QuestionQuery,
-    QuestionStatus, QuestionSummary, QuestionType, RejectRequest, SubmitReviewRequest,
-    TagSummary, TransferQuestionRequest, UpdateQuestionRequest, is_answer_empty,
-    refresh_system_flags,
+    AiCreateMeta, CreateQuestionRequest, KnowledgeNodeSummary, Question, QuestionDetail,
+    QuestionQuery, QuestionStatus, QuestionSummary, QuestionType, RejectRequest,
+    SubmitReviewRequest, TagSummary, TransferQuestionRequest, UpdateQuestionRequest,
+    is_answer_empty, refresh_system_flags,
 };
 use crate::models::space::SpaceKind;
 use crate::models::user::{GlobalRole, User};
@@ -525,11 +525,17 @@ fn validate_question_completeness(
     }
 
     // 2. 选择题选项校验
+    // options 的规范存储格式是数组 [{label, content}]（创建接口原样落库、
+    // worker 序列化 Vec<ParsedOption>、前端 API 类型一致）；
+    // 防御性兼容历史对象包裹格式 {"options": [...]}
     if matches!(question.question_type, QuestionType::Choice | QuestionType::Multiple) {
-        let options_empty = question.options.as_ref().map_or(true, |o| {
-            o.get("options")
+        let options_empty = question.options.as_ref().map_or(true, |o| match o {
+            serde_json::Value::Array(a) => a.is_empty(),
+            serde_json::Value::Object(_) => o
+                .get("options")
                 .and_then(|arr| arr.as_array())
-                .map_or(true, |a| a.is_empty())
+                .map_or(true, |a| a.is_empty()),
+            _ => true,
         });
         if options_empty {
             return Err((
@@ -909,6 +915,114 @@ fn apply_question_filters<'a>(
     }
 }
 
+/// 加载并校验 AI 智能录入的暂存项（确认保存时使用）
+///
+/// - 校验任务归属（本人或管理员）
+/// - 按 `staged_index` 从 `progress.staged_questions` 定位暂存项
+/// - 已保存的暂存项拒绝重复提交
+async fn load_ai_staged_item(
+    pool: &sqlx::PgPool,
+    meta: &AiCreateMeta,
+    auth: &AuthUser,
+) -> Result<serde_json::Value, (StatusCode, Json<serde_json::Value>)> {
+    let task_row: Option<(Uuid, serde_json::Value)> = sqlx::query_as(
+        "SELECT creator_id, progress FROM ai_parse_tasks WHERE id = $1",
+    )
+    .bind(meta.task_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| db_err(format!("查询解析任务失败: {e}")))?;
+
+    let (creator_id, progress) = task_row
+        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "解析任务不存在"}))))?;
+    if creator_id != auth.id && !is_admin_user(auth) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "解析任务不存在"})),
+        ));
+    }
+
+    let staged = progress
+        .get("staged_questions")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| {
+            arr.iter().find(|item| {
+                item.get("index").and_then(|i| i.as_str()) == Some(meta.staged_index.as_str())
+            })
+        })
+        .cloned()
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "暂存题目不存在，可能已被保存或丢弃"})),
+            )
+        })?;
+
+    if staged.get("saved").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({"error": "该题目已保存，请勿重复提交"})),
+        ));
+    }
+
+    Ok(staged)
+}
+
+/// 标记 AI 暂存项已保存：写 saved/saved_question_id + 幂等映射（index → 题目 ID）
+async fn mark_ai_staged_saved(
+    pool: &sqlx::PgPool,
+    task_id: Uuid,
+    staged_index: &str,
+    question_id: Uuid,
+) {
+    // 1. 暂存项标记 saved + saved_question_id（供前端防重复提交）
+    let _ = sqlx::query(
+        r#"
+        UPDATE ai_parse_tasks
+        SET progress = jsonb_set(
+              progress,
+              '{staged_questions}',
+              (
+                SELECT COALESCE(jsonb_agg(
+                  CASE WHEN elem->>'index' = $3
+                       THEN elem || jsonb_build_object('saved', true, 'saved_question_id', $2::text)
+                       ELSE elem END
+                  ORDER BY ord
+                ), '[]'::jsonb)
+                FROM jsonb_array_elements(progress->'staged_questions')
+                  WITH ORDINALITY AS t(elem, ord)
+              )
+            ),
+            updated_at = NOW()
+        WHERE id = $1
+        "#,
+    )
+    .bind(task_id)
+    .bind(question_id.to_string())
+    .bind(staged_index)
+    .execute(pool)
+    .await;
+
+    // 2. 幂等映射（供 GET parse-task 返回 question_ids；值为 uuid 字符串）
+    let _ = sqlx::query(
+        r#"
+        UPDATE ai_parse_tasks
+        SET progress = jsonb_set(
+              progress,
+              '{idempotency_map}',
+              COALESCE(progress->'idempotency_map', '{}'::jsonb) || jsonb_build_object($3::text, $2::text)
+            ),
+            updated_at = NOW()
+        WHERE id = $1
+        "#,
+    )
+    .bind(task_id)
+    .bind(question_id.to_string())
+    .bind(staged_index)
+    .execute(pool)
+    .await;
+}
+
 /// POST /api/v1/questions — 创建草稿
 pub async fn create_question(
     State(state): State<AppState>,
@@ -945,6 +1059,12 @@ pub async fn create_question(
         return Err((StatusCode::FORBIDDEN, Json(json!({"error": "无权在该空间创建题目"}))));
     }
 
+    // ── AI 智能录入：加载暂存项（校验归属 + 未保存），容器关联/候选/标记据此完成 ──
+    let ai_staged: Option<serde_json::Value> = match &req.ai_meta {
+        Some(meta) => Some(load_ai_staged_item(&state.pool, meta, &auth_user).await?),
+        None => None,
+    };
+
     let id = Uuid::new_v4();
     let now = chrono::Utc::now();
     let creator_id = auth_user.id;
@@ -952,50 +1072,8 @@ pub async fn create_question(
 
     let mut tx = state.pool.begin().await.map_err(|e| db_err(format!("开启事务失败: {}", e)))?;
 
-    // ── OCR 配额扣减与跨日重置（事务内，与题目写入保证绝对原子性） ──
-    // 仅当录入方式为 "ocr" 时触发；manual / ai_parse / 缺省均跳过
-    if req.input_method.as_deref() == Some("ocr") {
-        // FOR UPDATE 行锁 — 防止并发请求超额扣减
-        let user_row = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1 FOR UPDATE")
-            .bind(auth_user.id)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|e| db_err(format!("查询用户配额失败: {}", e)))?;
-
-        let now_utc = chrono::Utc::now();
-        // 跨日重置：当前时间已过重置点 → used 清零，reset_at 顺延至明天
-        let (used, reset_at) = if now_utc > user_row.ocr_quota_reset_at {
-            (0i32, now_utc + chrono::Duration::days(1))
-        } else {
-            (user_row.ocr_quota_used, user_row.ocr_quota_reset_at)
-        };
-
-        // 配额不足 — 403 拦截（tx 在 drop 时自动回滚，不污染任何数据）
-        if used >= user_row.ocr_quota_daily {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(json!({
-                    "error": "今日 OCR 配额已用尽，请明日重置后再试",
-                    "code": "ERR_OCR_QUOTA_EXCEEDED",
-                    "quota_daily": user_row.ocr_quota_daily,
-                    "quota_used": used,
-                    "reset_at": reset_at
-                })),
-            ));
-        }
-
-        // 配额充足 — 扣减 1 并写回（同事务内）
-        let new_used = used + 1;
-        sqlx::query(
-            "UPDATE users SET ocr_quota_used = $1, ocr_quota_reset_at = $2 WHERE id = $3",
-        )
-        .bind(new_used)
-        .bind(reset_at)
-        .bind(auth_user.id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| db_err(format!("更新 OCR 配额失败: {}", e)))?;
-    }
+    // 注：配额已统一由 ai_usage_log 计量（任务创建时原子抢占，见 ai_tasks.rs），
+    // 题目落库本身不再单独扣减配额。
 
     // ── V2.1.1 去重 hash（创建接口即时计算，计划书 §八） ──
     // 空答案统一按 JSON null 参与 hash（与下方 INSERT 写入值一致）
@@ -1063,6 +1141,42 @@ pub async fn create_question(
             .map_err(|e| db_err(format!("关联主知识点失败: {}", e)))?;
     }
 
+    // ── AI 智能录入：把暂存项已匹配的知识树节点标记为 AI 来源（source='ai'） ──
+    // 覆盖前端 manual 关联中的同名节点，保留用户额外增补的 manual 关联；
+    // 不触碰 is_primary（由上方 update_knowledge_nodes 依据 primary_knowledge_node_id 决定）。
+    if let Some(ref staged) = ai_staged {
+        if let Some(matched) = staged.get("matched").and_then(|m| m.as_array()) {
+            use rust_decimal::prelude::FromPrimitive;
+            for m in matched {
+                let Some(node_id) = m
+                    .get("node_id")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| Uuid::parse_str(s).ok())
+                else {
+                    continue;
+                };
+                let score = m.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                let ai_confidence = rust_decimal::Decimal::from_f32(score);
+                sqlx::query(
+                    r#"
+                    INSERT INTO question_knowledge_nodes
+                      (question_id, node_id, is_primary, source, ai_confidence, created_at)
+                    VALUES ($1, $2, FALSE, 'ai', $3, NOW())
+                    ON CONFLICT (question_id, node_id) DO UPDATE SET
+                      source = 'ai',
+                      ai_confidence = EXCLUDED.ai_confidence
+                    "#,
+                )
+                .bind(id)
+                .bind(node_id)
+                .bind(ai_confidence)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| db_err(format!("写入 AI 知识树标签失败: {e}")))?;
+            }
+        }
+    }
+
     // 合并已有 tag_ids + 自建 new_tags（Upsert 后取 ID）
     let tag_ids_provided = req.tag_ids.is_some();
     let new_tags_provided = req
@@ -1098,6 +1212,65 @@ pub async fn create_question(
     tx.commit()
         .await
         .map_err(|e| db_err(format!("提交事务失败: {}", e)))?;
+
+    // ── AI 智能录入后处理（尽力而为，不阻塞题目已成功创建） ──
+    if let (Some(meta), Some(staged)) = (&req.ai_meta, &ai_staged) {
+        let parsed: Option<crate::ai::types::ParsedQuestion> = staged
+            .get("parsed")
+            .and_then(|p| serde_json::from_value(p.clone()).ok());
+
+        let paper_id = staged
+            .get("paper_id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok());
+        let collection_id = staged
+            .get("collection_id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok());
+        let is_mixed = staged.get("is_mixed").and_then(|v| v.as_bool()).unwrap_or(false);
+
+        // 容器关联（试卷/集合），题号/顺序取自暂存项的解析结果
+        if let Some(ref p) = parsed {
+            crate::workers::ai_parse_worker::link_to_container(
+                &state,
+                id,
+                paper_id,
+                collection_id,
+                is_mixed,
+                p,
+            )
+            .await;
+        }
+
+        // 未匹配标签 → 候选队列（章节/知识点/方法）
+        let confidence = parsed.as_ref().map(|p| p.confidence).unwrap_or(0.0);
+        if let Some(unmatched) = staged.get("unmatched").and_then(|u| u.as_object()) {
+            for (kind, names_val) in unmatched {
+                let names: Vec<String> = names_val
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|n| n.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !names.is_empty() {
+                    crate::workers::ai_parse_worker::create_tag_candidates(
+                        &state,
+                        meta.task_id,
+                        id,
+                        confidence,
+                        kind,
+                        &names,
+                    )
+                    .await;
+                }
+            }
+        }
+
+        // 标记暂存项已保存 + 写幂等映射（供 GET parse-task 返回 question_ids）
+        mark_ai_staged_saved(&state.pool, meta.task_id, &meta.staged_index, id).await;
+    }
 
     let question = sqlx::query_as::<_, Question>("SELECT * FROM questions WHERE id = $1")
         .bind(id)
@@ -1422,11 +1595,16 @@ pub async fn delete_question(
 
     // ── 删除权限：按空间类型分流 ──
     // 个人空间：创建者或管理员可删除
-    // 团队/公共空间：仅超级管理员或空间 Owner 可删除
+    // 团队/公共空间：
+    //   - Draft（未提交草稿）：创建者可丢弃自己的（AI 录题工作台"丢弃未确认题目"依赖，
+    //     未提交草稿无协作价值）；管理员/Owner 亦可
+    //   - 已发布题目：仅超级管理员或空间 Owner 可删除（保持协作保护）
     let can_delete = match space.kind {
         SpaceKind::Personal => existing.creator_id == auth_user.id || is_admin_user(&auth_user),
         SpaceKind::Team | SpaceKind::Public => {
-            is_admin_user(&auth_user) || space.owner_user_id == Some(auth_user.id)
+            (existing.status == QuestionStatus::Draft && existing.creator_id == auth_user.id)
+                || is_admin_user(&auth_user)
+                || space.owner_user_id == Some(auth_user.id)
         }
     };
 
@@ -1543,6 +1721,74 @@ fn cleanup_question_images(upload_dir: &str, filenames: &[String]) {
             }
         }
     });
+}
+
+/// GC：清理 AI 录题孤儿草稿（用户从未确认保存的 worker 落库题目）
+///
+/// 兜底场景：用户关闭浏览器/崩溃，前端"丢弃"通道未触达，草稿永久残留。
+/// 判定（同时满足）：
+/// - `metadata->>'source' = 'ai_parse'`（worker 落库时打标）
+/// - `status = 'draft'`（从未提交审核）
+/// - `version = 1`（用户保存 = update 会递增 version；=1 即从未保存过）
+/// - `created_at < 72h 前`（保留恢复窗口，用户可从批量快照恢复）
+/// 手动创建的草稿经过显式"保存"动作，不受本 GC 影响。
+/// 图片清理复用 delete_question 逻辑，防止物理文件泄漏。
+pub async fn gc_abandoned_ai_drafts(pool: &sqlx::PgPool, upload_dir: &str) {
+    let ids: Vec<Uuid> = match sqlx::query_scalar(
+        r#"
+        SELECT id FROM questions
+        WHERE status = 'draft'
+          AND version = 1
+          AND metadata->>'source' = 'ai_parse'
+          AND created_at < NOW() - INTERVAL '72 hours'
+        LIMIT 500
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("[gc] AI 孤儿草稿查询失败: {e}");
+            return;
+        }
+    };
+    if ids.is_empty() {
+        return;
+    }
+
+    let mut deleted = 0usize;
+    for id in ids {
+        let filenames = match extract_image_filenames(pool, id).await {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!("[gc] 题目 {id} 图片扫描失败，跳过: {:?}", e.1);
+                continue;
+            }
+        };
+        // 与 delete_question 一致：先删子题目再删主题目（parent_id 外键无级联）；
+        // question_knowledge_nodes / paper_questions / collection_questions 为 CASCADE
+        let delete_result: Result<(), sqlx::Error> = async {
+            sqlx::query("DELETE FROM questions WHERE parent_id = $1")
+                .bind(id)
+                .execute(pool)
+                .await?;
+            sqlx::query("DELETE FROM questions WHERE id = $1")
+                .bind(id)
+                .execute(pool)
+                .await?;
+            Ok(())
+        }
+        .await;
+        match delete_result {
+            Ok(()) => {
+                cleanup_question_images(upload_dir, &filenames);
+                deleted += 1;
+            }
+            Err(e) => tracing::warn!("[gc] 题目 {id} 删除失败: {e}"),
+        }
+    }
+    tracing::info!("[gc] AI 孤儿草稿清理完成：删除 {deleted} 题");
 }
 
 // ---------------------------------------------------------------------------

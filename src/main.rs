@@ -75,6 +75,25 @@ async fn main() {
     tokio::spawn(mathset::workers::ai_parse_worker::start_worker(state.clone()));
     tracing::info!("🤖 AI 解析 worker 已在后台启动");
 
+    // 启动 AI 孤儿草稿 GC（每 6 小时一次，清理落库 72h 后用户从未保存的 worker 草稿；
+    // 兜底用户直接关闭浏览器导致前端"丢弃"通道未触达的场景）
+    {
+        let gc_state = state.clone();
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(6 * 3600));
+            loop {
+                interval.tick().await;
+                mathset::handlers::questions::gc_abandoned_ai_drafts(
+                    &gc_state.pool,
+                    &gc_state.upload_dir,
+                )
+                .await;
+            }
+        });
+        tracing::info!("🧹 AI 孤儿草稿 GC 已启动 (6 小时间隔 / 72h TTL)");
+    }
+
     // 启动 SSE 票据过期清理后台任务（每 5 分钟清理一次过期 ticket）
     {
         let cleanup_state = state.clone();

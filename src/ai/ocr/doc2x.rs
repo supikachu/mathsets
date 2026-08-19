@@ -441,10 +441,33 @@ impl OcrProvider for Doc2XProvider {
         extract_pages_md_from_value(parsed.data.as_ref())
     }
 
-    /// PDF 异步 OCR → 全文 Markdown
+    /// PDF 异步 OCR → 全文 Markdown（无进度回调）
     ///
     /// submit (preupload) → PUT 上传 → poll status
     async fn ocr_pdf_async(&self, pdf_bytes: &[u8]) -> Result<String, OcrError> {
+        self.ocr_pdf_async_inner(pdf_bytes, None).await
+    }
+
+    /// PDF 异步 OCR（带进度回调）：processing 期间每 3s 上报 0~100 百分比
+    async fn ocr_pdf_async_with_progress(
+        &self,
+        pdf_bytes: &[u8],
+        on_progress: &crate::ai::ocr::PdfProgressCallback,
+    ) -> Result<String, OcrError> {
+        self.ocr_pdf_async_inner(pdf_bytes, Some(on_progress)).await
+    }
+}
+
+impl Doc2XProvider {
+    /// PDF 直传实现主体
+    ///
+    /// submit (preupload) → PUT 上传 → poll status；
+    /// `on_progress` 存在时在 processing 轮询分支上报 `data.progress` 百分比。
+    async fn ocr_pdf_async_inner(
+        &self,
+        pdf_bytes: &[u8],
+        on_progress: Option<&crate::ai::ocr::PdfProgressCallback>,
+    ) -> Result<String, OcrError> {
         // ── Step 1：preupload 获取上传 url ──
         let preupload_url = self.url("/api/v2/parse/preupload");
         let resp = self
@@ -610,6 +633,16 @@ impl OcrProvider for Doc2XProvider {
                 }
                 // processing / 其他状态 / None → 继续 polling
                 _ => {
+                    // 上报进度（0~100；progress 缺失/不可解析时跳过本轮）
+                    if let (Some(cb), Some(pct)) = (
+                        on_progress,
+                        data.progress
+                            .as_ref()
+                            .and_then(crate::ai::ocr::parse_percent_value)
+                            .map(|f| f.clamp(0.0, 100.0) as u8),
+                    ) {
+                        cb(pct);
+                    }
                     tracing::debug!(
                         uid = %uid,
                         status = ?data.status,

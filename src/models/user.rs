@@ -47,16 +47,6 @@ pub struct User {
     // ── 用户头像 ──
     pub avatar_url: Option<String>,
 
-    // ── OCR / AI 额度 ──
-    /// 每日 OCR 免费额度
-    pub ocr_quota_daily: i32,
-    /// 今日已使用 OCR 次数
-    pub ocr_quota_used: i32,
-    /// 额度重置时间
-    pub ocr_quota_reset_at: DateTime<Utc>,
-    /// AI 解析 Token 剩余额度
-    pub ai_token_quota: i32,
-
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -132,24 +122,43 @@ pub struct ChangePasswordRequest {
     pub new_password: String,
 }
 
+/// 每日 AI 解析任务额度（单一计量源：ai_usage_log，见 ai_tasks.rs 原子抢占）
+pub const DAILY_TASK_QUOTA: i64 = 50;
+
 /// 用户配额查询响应
+///
+/// 配额统一以 ai_usage_log 为单一计量源：
+/// - used_today = 当日（UTC）ai_usage_log 记录数，与任务创建时的抢占校验口径一致
+/// - reset_at = 次日 UTC 零点（CURRENT_DATE 跨日自动重置）
 #[derive(Debug, Serialize)]
 pub struct UserQuota {
-    pub ocr_quota_daily: i32,
-    pub ocr_quota_used: i32,
-    pub ocr_quota_remaining: i32,
-    pub ocr_quota_reset_at: DateTime<Utc>,
-    pub ai_token_quota: i32,
+    pub daily_quota: i64,
+    pub used_today: i64,
+    pub remaining: i64,
+    pub reset_at: DateTime<Utc>,
 }
 
-impl From<&User> for UserQuota {
-    fn from(u: &User) -> Self {
-        Self {
-            ocr_quota_daily: u.ocr_quota_daily,
-            ocr_quota_used: u.ocr_quota_used,
-            ocr_quota_remaining: (u.ocr_quota_daily - u.ocr_quota_used).max(0),
-            ocr_quota_reset_at: u.ocr_quota_reset_at,
-            ai_token_quota: u.ai_token_quota,
-        }
+impl UserQuota {
+    /// 查询用户当日配额使用情况（ai_usage_log 单一计量）
+    pub async fn today(
+        pool: &sqlx::PgPool,
+        user_id: Uuid,
+    ) -> Result<Self, sqlx::Error> {
+        let used_today: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM ai_usage_log WHERE user_id = $1 AND created_at >= CURRENT_DATE",
+        )
+        .bind(user_id)
+        .fetch_one(pool)
+        .await?;
+
+        let tomorrow = (chrono::Utc::now().date_naive() + chrono::Duration::days(1))
+            .and_hms_opt(0, 0, 0)
+            .expect("次日零点必然合法");
+        Ok(Self {
+            daily_quota: DAILY_TASK_QUOTA,
+            used_today,
+            remaining: (DAILY_TASK_QUOTA - used_today).max(0),
+            reset_at: chrono::DateTime::from_naive_utc_and_offset(tomorrow, Utc),
+        })
     }
 }

@@ -50,10 +50,20 @@ pub struct UserProfileResponse {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-impl From<User> for UserProfileResponse {
-    fn from(u: User) -> Self {
-        let quota = UserQuota::from(&u);
-        Self {
+impl UserProfileResponse {
+    /// 构建用户资料响应（配额以 ai_usage_log 实时计算）
+    pub async fn build(
+        pool: &sqlx::PgPool,
+        u: User,
+    ) -> Result<Self, (StatusCode, Json<serde_json::Value>)> {
+        let quota = UserQuota::today(pool, u.id).await.map_err(|e| {
+            tracing::error!("配额查询失败 (user_id={}): {:?}", u.id, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("数据库查询失败: {}", e)})),
+            )
+        })?;
+        Ok(Self {
             id: u.id,
             username: u.username,
             email: u.email,
@@ -65,7 +75,7 @@ impl From<User> for UserProfileResponse {
             quota,
             created_at: u.created_at,
             updated_at: u.updated_at,
-        }
+        })
     }
 }
 
@@ -123,7 +133,7 @@ pub async fn get_my_profile(
         })?
         .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "用户不存在"}))))?;
 
-    Ok(Json(UserProfileResponse::from(user)))
+    Ok(Json(UserProfileResponse::build(&state.pool, user).await?))
 }
 
 /// PUT /api/v1/users/me — 更新基础资料（display_name / email）
@@ -213,7 +223,7 @@ pub async fn update_my_profile(
     })?
     .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "用户不存在"}))))?;
 
-    Ok(Json(UserProfileResponse::from(updated_user)))
+    Ok(Json(UserProfileResponse::build(&state.pool, updated_user).await?))
 }
 
 /// PUT /api/v1/users/password — 修改密码

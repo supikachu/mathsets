@@ -120,7 +120,7 @@ pub struct AiTaggingResponse {
     pub unmatched_knowledge_points: Vec<String>,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct KnowledgeNodeMatch {
     /// AI 原始名称（收敛选择阶段的候选名）
     pub ai_name: String,
@@ -537,10 +537,18 @@ fn resolve_selection<'a>(
 
 /// 对 AI 返回的每个知识点名称，在 knowledge_nodes 表中找最佳匹配
 /// （供 ai.rs 的 AI 智能录题后处理链路使用，不受两阶段重构影响）
+/// 在指定维度的知识树中匹配 AI 提取的标签名
+///
+/// - `tree_kind`：knowledge_trees.kind（'chapter' 章节 / 'knowledge' 知识点 /
+///   'ability' 解题方法）。按维度隔离检索，杜绝跨树错配
+///   （如知识点「集合的交集」模糊命中章节树「集合的分类」）
+/// - `space_id`：None 仅搜全局树；Some(sid) 同时搜全局 + 该空间树
+///   （worker 落库应传题目所属空间，个人空间自建节点才能被召回）
 pub(crate) async fn match_knowledge_nodes(
     pool: &sqlx::PgPool,
     ai_names: &[String],
     space_id: Option<Uuid>,
+    tree_kind: &str,
 ) -> Result<
     (Vec<KnowledgeNodeMatch>, Vec<String>),
     (StatusCode, Json<serde_json::Value>),
@@ -586,6 +594,7 @@ pub(crate) async fn match_knowledge_nodes(
             JOIN knowledge_trees kt ON kt.id = kn.tree_id
             WHERE kn.is_active = TRUE
               AND kt.is_active = TRUE
+              AND kt.kind = $3::knowledge_tree_kind
               AND (kt.space_id IS NULL OR kt.space_id = $2)
               -- 叶子节点约束：与 recall_candidates 保持一致，防止选中父节点导致前端级联冲突
               AND NOT EXISTS (
@@ -606,20 +615,21 @@ pub(crate) async fn match_knowledge_nodes(
         )
         .bind(name)
         .bind(space_id)
+        .bind(tree_kind)
         .fetch_optional(pool)
         .await
         .map_err(|e| {
-            tracing::warn!("知识点匹配查询失败: {e}");
+            tracing::warn!("[{tree_kind}] 标签匹配查询失败: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("知识点匹配查询失败: {e}")})),
+                Json(json!({"error": format!("标签匹配查询失败: {e}")})),
             )
         })?;
 
         match result {
             Some(m) if m.score >= 0.3 => {
                 tracing::debug!(
-                    "知识点「{}」匹配到「{}」(score={:.2}, type={})",
+                    "[{tree_kind}] 「{}」匹配到「{}」(score={:.2}, type={})",
                     m.ai_name,
                     m.node_name,
                     m.score,
@@ -628,7 +638,7 @@ pub(crate) async fn match_knowledge_nodes(
                 matched.push(m);
             }
             _ => {
-                tracing::debug!("知识点「{}」未找到匹配", name);
+                tracing::debug!("[{tree_kind}] 「{}」未找到匹配", name);
                 unmatched.push(name.clone());
             }
         }

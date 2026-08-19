@@ -9,6 +9,7 @@ import {
   type ConfirmDocumentRequest,
   type QuestionDetail,
   type QuestionCollectionSummary,
+  type AiStagedQuestion,
 } from '@/api/client'
 import { AppButton, AppModal, AppConfirm, AppIcon } from '@/components/ui'
 import { useToast } from '@/composables/useToast'
@@ -63,8 +64,8 @@ const emit = defineEmits<{
 
 const toast = useToast()
 
-// AI Mode tab: 'markdown' | 'image'
-const aiMode = ref<'markdown' | 'image'>('markdown')
+// AI Mode tab: 'markdown' | 'image' | 'pdf'（图片与 PDF 各走独立通道）
+const aiMode = ref<'markdown' | 'image' | 'pdf'>('markdown')
 const aiText = ref('')
 const aiError = ref('')
 const aiParsing = ref(false)
@@ -73,7 +74,16 @@ const promptCopied = ref(false)
 
 // V2.1.1 资料流程状态：idle（选文件）→ uploading（上传+分类中）→ confirm（确认类型）
 // → progress（解析中）→ grouping（Mixed 分组）
-const docFlowState = ref<'idle' | 'uploading' | 'confirm' | 'progress' | 'grouping'>('idle')
+// PDF 通道新增 pdf_fallback：直连解析失败 → 用户选择是否拆页 OCR 回退
+const docFlowState = ref<'idle' | 'uploading' | 'confirm' | 'progress' | 'grouping' | 'pdf_fallback'>('idle')
+// 当前文件流程归属通道（pdf 通道确认类型后以 pdf_direct 模式建任务）
+const docFlowKind = ref<'image' | 'pdf'>('image')
+// 当前轮询任务是否为 pdf_direct 模式（用于识别 PDF_DIRECT_FAILED 失败）
+const pdfDirectActive = ref(false)
+// PDF 直连失败原因（pdf_fallback 态展示）
+const pdfFallbackReason = ref('')
+// 回退任务提交中
+const pdfFallbackSubmitting = ref(false)
 const currentDoc = ref<DocumentMeta | null>(null)
 const docConfirming = ref(false)
 const cancelling = ref(false)
@@ -217,26 +227,47 @@ function doApplyAiResult(q: ParsedQuestion) {
   })
 }
 
-// File Drag/Drop & Select
+// File Drag/Drop & Select — 按文件实际类型路由通道：
+// 图片 → 图片 OCR 通道；PDF → PDF 直连通道（自动切换到对应 tab）
+function isPdfFile(file: File): boolean {
+  return file.type === 'application/pdf' || /\.pdf$/i.test(file.name)
+}
+
 function handleFileDrop(e: DragEvent) {
   aiUploadAreaHover.value = false
   const file = e.dataTransfer?.files?.[0]
-  if (file) startImageParse(file)
+  if (file) startFileParse(file)
 }
 
 function handleFileSelect(e: Event) {
   const file = (e.target as HTMLInputElement).files?.[0]
-  if (file) startImageParse(file)
+  if (file) startFileParse(file)
+  // 允许重复选择同一文件重新触发 change
+  ;(e.target as HTMLInputElement).value = ''
 }
 
-async function startImageParse(file: File) {
+async function startFileParse(file: File) {
+  if (!isPdfFile(file) && !file.type.startsWith('image/')) {
+    toast.error('仅支持图片或 PDF 文件')
+    return
+  }
   const oldSnapshot = await hasUnfinishedSnapshot()
   if (oldSnapshot) {
-    pendingUploadAction = () => doStartImageParse(file)
+    pendingUploadAction = () => doStartFileParse(file)
     snapshotOverwriteConfirm.value = true
     return
   }
-  doStartImageParse(file)
+  doStartFileParse(file)
+}
+
+function doStartFileParse(file: File) {
+  if (isPdfFile(file)) {
+    aiMode.value = 'pdf'
+    doStartPdfParse(file)
+  } else {
+    aiMode.value = 'image'
+    doStartImageParse(file)
+  }
 }
 
 async function executePendingUpload() {
@@ -252,20 +283,33 @@ function dismissSnapshotOverwrite() {
   pendingUploadAction = null
 }
 
+/** 图片通道：压缩 → 上传（file_type=image，无原始 PDF）→ AI 分类 → 类型确认 */
 async function doStartImageParse(file: File) {
+  docFlowKind.value = 'image'
   aiImageFile.value = file
-  const isPdf = file.type === 'application/pdf'
   try {
-    // 1. 生成页面图片（PDF 前端渲染；图片压缩）
-    const pages = isPdf ? await renderPdfPages(file) : await compressToPage(file)
+    const pages = await compressToPage(file)
+    await uploadAndClassify(pages, false, undefined)
+  } catch (e: any) {
+    toast.error(e?.message || '图片解析失败')
+    resetDocFlow()
+  }
+}
+
+/** PDF 通道：前端拆页渲染（后端 pages 必填 + 回退模式复用）→ 上传（附原始 PDF）
+ *  → AI 分类 → 类型确认 → pdf_direct 模式建任务（失败回 pdf_fallback 让用户选择） */
+async function doStartPdfParse(file: File) {
+  docFlowKind.value = 'pdf'
+  aiImageFile.value = file
+  try {
+    const pages = await renderPdfPages(file)
     if (pages.length === 0) {
       toast.error('未能生成页面图片')
       return
     }
-    // 2. 上传 → 3. AI 分类 → 4. 类型确认页
-    await uploadAndClassify(pages, isPdf)
+    await uploadAndClassify(pages, true, file)
   } catch (e: any) {
-    toast.error(e?.message || '文件解析失败')
+    toast.error(e?.message || 'PDF 解析失败')
     resetDocFlow()
   }
 }
@@ -313,11 +357,14 @@ async function compressToPage(file: File): Promise<File[]> {
 }
 
 /** 上传页图集 → 触发 AI 分类 → 进入类型确认步骤 */
-async function uploadAndClassify(pages: File[], isPdf: boolean) {
+async function uploadAndClassify(pages: File[], isPdf: boolean, originalPdf?: File) {
   docFlowState.value = 'uploading'
   aiBatchProgress.value = { current: 0, total: pages.length, text: '正在上传资料（最多 30 页）…' }
   const res = await withBackoffRetry(() =>
-    documentApi.upload(pages, { file_type: isPdf ? 'pdf' : 'image' }),
+    documentApi.upload(pages, {
+      file_type: isPdf ? 'pdf' : 'image',
+      pdf: originalPdf,
+    }),
   )
   const doc = res.data.data
 
@@ -335,9 +382,14 @@ function resetDocFlow() {
   resetPolling()
   groupingQuestions.value = []
   groupingCollections.value = []
+  pdfDirectActive.value = false
+  pdfFallbackReason.value = ''
+  pdfFallbackSubmitting.value = false
 }
 
-/** 用户确认资料类型 → 创建解析任务（P0-C） */
+/** 用户确认资料类型 → 创建解析任务（P0-C）
+ *  PDF 通道以 pdf_direct 模式建任务：仅直连解析，失败回 pdf_fallback 让用户选择回退；
+ *  图片通道缺省模式（自动降级，与既有行为一致） */
 async function onConfirmDoc(body: ConfirmDocumentRequest) {
   const doc = currentDoc.value
   if (!doc) return
@@ -346,7 +398,9 @@ async function onConfirmDoc(body: ConfirmDocumentRequest) {
     const res = await documentApi.confirm(doc.id, body)
     currentDoc.value = res.data.data
     toast.success('资料类型已确认，开始解析')
-    await startTask(doc.id)
+    const parseMode = docFlowKind.value === 'pdf' ? 'pdf_direct' : undefined
+    pdfDirectActive.value = parseMode === 'pdf_direct'
+    await startTask(doc.id, parseMode)
   } catch (e: any) {
     toast.error(e?.response?.data?.error || e?.message || '确认失败')
   } finally {
@@ -355,9 +409,22 @@ async function onConfirmDoc(body: ConfirmDocumentRequest) {
 }
 
 /** 创建解析任务并进入进度页 */
-async function startTask(documentId: string) {
+async function startTask(documentId: string, parseMode?: 'pdf_direct' | 'page') {
   docFlowState.value = 'progress'
-  await startPolling(documentId)
+  await startPolling(documentId, parseMode)
+}
+
+/** PDF 直连失败 → 用户确认回退：同 Document 重建 page 模式任务（页面图已上传，无需重传） */
+async function fallbackToPageOcr() {
+  const doc = currentDoc.value
+  if (!doc) return
+  pdfFallbackSubmitting.value = true
+  try {
+    pdfDirectActive.value = false
+    await startTask(doc.id, 'page')
+  } finally {
+    pdfFallbackSubmitting.value = false
+  }
 }
 
 /** 取消解析（已识别的题目保留在库中） */
@@ -388,12 +455,15 @@ function detailToParsed(d: QuestionDetail): ParsedQuestion {
     confidence: 0.9,
     warnings: [],
     image_placeholders: [],
-    image_urls: [],
+    // DB images 列（Worker 已把占位符替换为页面图/真实 URL，stem 内联可直接渲染）
+    image_urls: Array.isArray(d.images) ? (d.images as string[]) : [],
     kp_matches: (d.knowledge_nodes ?? []).map(kn => ({
       ai_name: kn.name,
       matched_id: kn.id,
       matched_name: kn.name,
       score: kn.ai_confidence ?? 0,
+      // 携带树类型，工作台按 kind 分发到 章节/知识点/方法（缺失兜底知识点）
+      kind: kn.kind,
     })),
   }
 }
@@ -412,53 +482,80 @@ async function loadParsedQuestions(ids: string[]): Promise<ParsedQuestion[]> {
   return out
 }
 
+/// 暂存项 → ParsedQuestion（解析结果暂存、确认后入库链路）
+///
+/// 后端不再自动落库：`parsed` 为后端 ParsedQuestion 序列化，`matched` 为
+/// 三维标签匹配结果（kind 携带 chapter/knowledge/ability），前端据此回填知识树。
+/// 携带 `ai_meta`（task_id + staged_index），保存时后端据此完成容器关联/候选/标记。
+function stagedToParsed(s: AiStagedQuestion, taskId: string): ParsedQuestion {
+  const p = s.parsed as any
+  return {
+    question_type: p.question_type ?? 'solution',
+    sub_type: p.sub_type,
+    difficulty: p.difficulty,
+    stem: p.stem ?? '',
+    options: p.options,
+    correct_answer: (p.correct_answer ?? { kind: 'solution', value: { subs: [] } }) as any,
+    analysis: Array.isArray(p.analysis) ? p.analysis : [],
+    knowledge_points: Array.isArray(p.knowledge_points) ? p.knowledge_points : [],
+    confidence: typeof p.confidence === 'number' ? p.confidence : 0,
+    warnings: Array.isArray(p.warnings) ? p.warnings : [],
+    image_placeholders: Array.isArray(p.image_placeholders) ? p.image_placeholders : [],
+    image_urls: Array.isArray(s.images) ? s.images : [],
+    kp_matches: (s.matched ?? []).map(m => ({
+      ai_name: m.ai_name,
+      matched_id: m.node_id,
+      matched_name: m.node_name,
+      score: m.score,
+      kind: m.kind,
+    })),
+    ai_meta: { task_id: taskId, staged_index: s.index },
+  }
+}
+
 /// 监听任务终态：成功 → 工作台（非 Mixed）/ 分组（Mixed）
 watch(pollTask, async (t) => {
   if (!t) return
   if (t.status === 'success' || t.status === 'partial_success') {
-    if (t.question_ids.length === 0) {
+    pdfDirectActive.value = false
+    // 暂存链路：题目尚未落库，从 staged_questions 构建待确认列表（跳过已保存/跨页合并项）
+    const staged = (t.staged_questions ?? []).filter(s => !s.saved && !s.merged_into)
+    if (staged.length === 0) {
       toast.warning('未识别到有效题目')
       docFlowState.value = 'confirm'
       return
     }
-    const questions = await loadParsedQuestions(t.question_ids)
-    if (questions.length === 0) {
-      toast.error('题目加载失败，请重试')
-      docFlowState.value = 'confirm'
-      return
-    }
-    const doc = currentDoc.value
-    if (doc?.document_type === 'mixed') {
-      // Mixed：进入人工分组步骤
-      try {
-        const { data } = await collectionApi.list({ document_id: doc.id, page_size: 100 })
-        groupingCollections.value = data.items
-      } catch {
-        groupingCollections.value = []
-      }
-      groupingQuestions.value = t.question_ids.map((id, i) => ({
-        question_id: id,
-        question_no: null,
-        stem: questions[i]?.stem ?? '',
-        collection_id: null,
-      }))
-      docFlowState.value = 'grouping'
-      toast.success(`成功识别 ${questions.length} 道题，请把题目归入对应集合`)
-    } else {
-      emit('batch-parsed', questions)
-      resetDocFlow()
-      show.value = false
-      toast.success(
-        t.status === 'partial_success'
-          ? `部分成功：${t.success_count} 题已录入（${t.failed_count} 题失败）`
-          : `成功识别 ${questions.length} 道题，已进入批量录入工作台`,
-      )
-    }
+    const questions = staged.map(s => stagedToParsed(s, t.id))
+    // 暂存链路下题目未落库，Mixed 分组改为在工作台保存时按暂存项 collection_id 归组；
+    // 分组交互（batchAddQuestions 依赖已落库题目）在确认入库前不再适用。
+    emit('batch-parsed', questions)
+    resetDocFlow()
+    show.value = false
+    const base =
+      t.status === 'partial_success'
+        ? `部分成功：${t.success_count} 题待确认（${t.failed_count} 题失败）`
+        : `成功识别 ${questions.length} 道题，已进入批量录入工作台（确认保存后入库）`
+    // 未匹配标签将在确认保存时进入候选审核队列
+    toast.success(
+      t.pending_candidate_count > 0
+        ? `${base}；${t.pending_candidate_count} 个未匹配标签待候选审核`
+        : base,
+    )
   } else if (t.status === 'failed') {
-    toast.error(taskError.value || t.error_message || '解析失败')
-    docFlowState.value = 'confirm'
+    const errMsg = t.error_message || taskError.value || '解析失败'
+    // PDF 直连模式失败（PDF_DIRECT_FAILED 前缀）→ 不回到确认页，
+    // 进入 pdf_fallback 让用户选择是否拆页 OCR 重试
+    if (pdfDirectActive.value && errMsg.startsWith('PDF_DIRECT_FAILED')) {
+      pdfDirectActive.value = false
+      pdfFallbackReason.value = errMsg.replace(/^PDF_DIRECT_FAILED:?\s*/, '')
+      docFlowState.value = 'pdf_fallback'
+    } else {
+      toast.error(errMsg)
+      docFlowState.value = 'confirm'
+    }
   } else if (t.status === 'cancelled') {
-    toast.warning('解析已取消，已识别的题目已保留在题库中')
+    pdfDirectActive.value = false
+    toast.warning('解析已取消，未保存任何题目')
     docFlowState.value = 'confirm'
   }
 })
@@ -547,7 +644,7 @@ defineExpose({
   },
   triggerFileParse: (file: File) => {
     show.value = true
-    startImageParse(file)
+    startFileParse(file)
   }
 })
 </script>
@@ -555,14 +652,16 @@ defineExpose({
 <template>
   <div>
     <!-- AI 智能识别弹窗 -->
-    <AppModal v-model="show" title="AI 智能识别" size="lg">
+    <!-- width 固定 680px：三个 Tab（Markdown/图片/PDF）切换时外框尺寸完全一致 -->
+    <AppModal v-model="show" title="AI 智能识别" width="680px">
       <div class="ai-dialog-body">
         <!-- 输入区 -->
         <div v-if="!aiResult" class="ai-input-section">
-          <!-- 模式切换 Tab -->
+          <!-- 模式切换 Tab（图片 / PDF 各走独立解析通道） -->
           <div class="ai-mode-tabs">
             <button :class="{ active: aiMode === 'markdown' }" @click="aiMode = 'markdown'">Markdown 粘贴</button>
-            <button :class="{ active: aiMode === 'image' }" @click="aiMode = 'image'">图片/PDF 识别</button>
+            <button :class="{ active: aiMode === 'image' }" @click="aiMode = 'image'">图片识别</button>
+            <button :class="{ active: aiMode === 'pdf' }" @click="aiMode = 'pdf'">PDF 识别</button>
           </div>
 
           <!-- Markdown 模式：引导卡片（折叠式提示词） -->
@@ -602,9 +701,10 @@ defineExpose({
             </AppButton>
           </div>
 
-          <!-- 图片/PDF 上传区（V2.1.1：上传 → 分类 → 确认类型） -->
-          <div v-if="aiMode === 'image'" class="ai-upload-section">
-            <!-- ① 选文件 -->
+          <!-- 图片/PDF 上传区（V2.1.1：上传 → 分类 → 确认类型 → 解析）；
+               idle 态按 tab 区分通道，非 idle 态两个通道共用流程状态机 -->
+          <div v-if="aiMode === 'image' || aiMode === 'pdf'" class="ai-upload-section">
+            <!-- ① 选文件（图片：图片 OCR 通道；PDF：优先直连解析） -->
             <template v-if="docFlowState === 'idle'">
               <div
                 class="ai-upload-area"
@@ -615,12 +715,18 @@ defineExpose({
                 @click="fileInputRef?.click()"
               >
                 <AppIcon name="upload" :size="48" />
-                <p class="ai-upload-hint">点击或拖拽上传图片/PDF 文件</p>
-                <p class="ai-upload-sub">支持 JPEG / PNG / WebP / PDF（最多 30 页）</p>
+                <template v-if="aiMode === 'pdf'">
+                  <p class="ai-upload-hint">点击或拖拽上传 PDF 文件</p>
+                  <p class="ai-upload-sub">将优先尝试 PDF 直连解析，失败后可选择拆分图片逐页识别</p>
+                </template>
+                <template v-else>
+                  <p class="ai-upload-hint">点击或拖拽上传图片文件</p>
+                  <p class="ai-upload-sub">支持 JPEG / PNG / WebP</p>
+                </template>
                 <input
                   ref="fileInputRef"
                   type="file"
-                  accept="image/*,application/pdf"
+                  :accept="aiMode === 'pdf' ? 'application/pdf' : 'image/*'"
                   style="display:none"
                   @change="handleFileSelect"
                 />
@@ -643,7 +749,23 @@ defineExpose({
               </div>
             </template>
 
-            <!-- ③ 资料类型确认 -->
+            <!-- ③ PDF 直连失败 → 用户选择是否拆页 OCR 回退 -->
+            <template v-else-if="docFlowState === 'pdf_fallback'">
+              <div class="pdf-fallback-card">
+                <div class="pdf-fallback-icon"><AppIcon name="alert" :size="28" /></div>
+                <h4 class="pdf-fallback-title">PDF 直连解析失败</h4>
+                <p v-if="pdfFallbackReason" class="pdf-fallback-reason">{{ pdfFallbackReason }}</p>
+                <p class="pdf-fallback-hint">是否继续将 PDF 拆分为图片，逐页 OCR 识别？</p>
+                <div class="ai-actions">
+                  <AppButton variant="ghost" @click="resetDocFlow">取消</AppButton>
+                  <AppButton variant="primary" :loading="pdfFallbackSubmitting" @click="fallbackToPageOcr">
+                    <AppIcon name="sparkles" :size="16" /> 继续拆分图片识别
+                  </AppButton>
+                </div>
+              </div>
+            </template>
+
+            <!-- ④ 资料类型确认 -->
             <template v-else-if="docFlowState === 'confirm' && currentDoc">
               <DocumentTypeConfirmStep
                 :doc="currentDoc"
@@ -654,7 +776,7 @@ defineExpose({
               />
             </template>
 
-            <!-- ④ 解析进度 -->
+            <!-- ⑤ 解析进度 -->
             <template v-else-if="docFlowState === 'progress'">
               <TaskProgressPanel
                 :task="pollTask"
@@ -670,7 +792,7 @@ defineExpose({
               </div>
             </template>
 
-            <!-- ⑤ Mixed 题目分组 -->
+            <!-- ⑥ Mixed 题目分组 -->
             <template v-else-if="docFlowState === 'grouping'">
               <QuestionGroupingStep
                 :questions="groupingQuestions"
@@ -769,9 +891,23 @@ defineExpose({
   display: flex;
   flex-direction: column;
   gap: 16px;
+  /* 统一固定高度（≥380px 保底）：Tab 切换时外框不随内容抽搐；
+     宽度由 AppModal width="680px" 统一控制，高度取三 Tab 最高的
+     Markdown 模式，图片/PDF 模式由 Dropzone flex:1 填满剩余空间 */
+  height: 520px;
+  min-height: 380px;
+}
+
+/* 输入区（Tab + 内容）：撑满主体，供内部 flex:1 元素分配剩余空间 */
+.ai-input-section {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .ai-mode-tabs {
+  flex-shrink: 0;
   display: flex;
   gap: 4px;
   border-bottom: 2px solid var(--border);
@@ -802,6 +938,7 @@ defineExpose({
 
 /* ===== Markdown 模式：引导卡片 ===== */
 .ai-guide-card {
+  flex-shrink: 0;
   background: var(--bg-secondary, var(--bg-input));
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -909,7 +1046,8 @@ defineExpose({
 
 .ai-textarea {
   width: 100%;
-  min-height: 200px;
+  flex: 1;
+  min-height: 180px;
   padding: 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -935,9 +1073,20 @@ defineExpose({
 }
 
 .ai-actions {
+  flex-shrink: 0;
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+/* 结果预览：撑满主体并内部滚动（固定高度下长题干不撑破弹窗） */
+.ai-result-section {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .ai-result-meta {
@@ -1012,8 +1161,11 @@ defineExpose({
 }
 
 /* 图片/PDF 上传区 */
-.ai-upload-section { display: flex; flex-direction: column; gap: 16px; }
+/* 上传区容器：撑满主体剩余空间，Dropzone 随之伸缩 */
+.ai-upload-section { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 16px; }
 .ai-upload-area {
+  flex: 1;
+  justify-content: center;
   border: 2px dashed var(--border-color);
   border-radius: 12px;
   padding: 48px 24px;
@@ -1032,6 +1184,41 @@ defineExpose({
 }
 .ai-upload-hint { font-size: 15px; font-weight: 500; color: var(--text-primary); margin: 0; }
 .ai-upload-sub { font-size: 13px; margin: 0; }
+
+/* PDF 直连失败回退卡片（margin auto 垂直居中于撑满的上传区内） */
+.pdf-fallback-card {
+  margin: auto 0;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 28px 24px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  background: var(--bg-secondary, var(--bg-input));
+}
+.pdf-fallback-icon {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(240, 160, 30, 0.12);
+  color: var(--warning, #e8a030);
+}
+.pdf-fallback-title { margin: 0; font-size: 16px; font-weight: 600; color: var(--text-primary); }
+.pdf-fallback-reason {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+  max-width: 460px;
+  word-break: break-all;
+  max-height: 90px;
+  overflow-y: auto;
+}
+.pdf-fallback-hint { margin: 0; font-size: 14px; color: var(--text-primary); }
 
 /* 批量进度 */
 .ai-batch-progress { display: flex; align-items: center; gap: 12px; }

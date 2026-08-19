@@ -158,6 +158,14 @@ pub struct TaskStatusResponse {
     // 结果关联（懒查询填充）
     pub paper_id: Option<Uuid>,
     pub collection_ids: Vec<Uuid>,
-    /// 任务产出的题目 ID 列表（按解析顺序）
+    /// 任务产出（已确认保存）的题目 ID 列表（按解析顺序）
     pub question_ids: Vec<Uuid>,
+    /// 本任务产生、待审核的未匹配标签候选数（章节/知识点/方法）
+    pub pending_candidate_count: i64,
+    /// 暂存题目（解析完成、待人工确认保存；按原文顺序排序）
+    ///
+    /// 结构：`{index, parsed, images, page_image_url, space_id, paper_id,
+    /// collection_id, is_mixed, existing_question_id, matched[], unmatched{},
+    /// order?, merged_into?, saved, saved_question_id?}`
+    pub staged_questions: Vec<serde_json::Value>,
 }

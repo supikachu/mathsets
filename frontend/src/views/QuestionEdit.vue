@@ -35,21 +35,30 @@
       </header>
 
       <!-- ==================== 批量录题答题卡导航（仅 questionList.length > 1 显示）==================== -->
-      <!-- 设计：纯数字圆角小方块（答题卡风格），三态颜色（默认浅灰/已保存浅绿/选中蓝） -->
+      <!-- 设计：纯数字圆角小方块（答题卡风格），三态颜色（默认浅灰/已保存浅绿/选中蓝）；
+           hover 角标 × = 丢弃该题（从未保存且 worker 已落库 → 同步删除后端草稿） -->
       <div v-if="questionList.length > 1" class="question-nav-grid">
-        <button
-          v-for="(item, idx) in questionList"
-          :key="idx"
-          class="nav-block"
-          :class="{
-            'is-active': idx === activeIndex,
-            'is-saved': item.saved,
-          }"
-          :disabled="idx === activeIndex"
-          @click="switchToTab(idx)"
-        >
-          {{ idx + 1 }}
-        </button>
+        <div v-for="(item, idx) in questionList" :key="idx" class="nav-block-wrap">
+          <button
+            class="nav-block"
+            :class="{
+              'is-active': idx === activeIndex,
+              'is-saved': item.saved,
+            }"
+            :disabled="idx === activeIndex"
+            @click="switchToTab(idx)"
+          >
+            {{ idx + 1 }}
+          </button>
+          <button
+            class="nav-block-x"
+            :title="item.saved ? '从工作台移除（已保存题目保留在题库）' : '丢弃本题（未保存的将从题库删除）'"
+            :disabled="discarding || discardingAll"
+            @click.stop="discardBatchQuestion(idx)"
+          >
+            <AppIcon name="x" :size="9" />
+          </button>
+        </div>
       </div>
 
       <!-- 知识树分类失败提示条：节点暂存，可重试分类（保存时原样并入，不丢数据） -->
@@ -291,15 +300,23 @@
       @batch-parsed="handleBatchParsed"
     />
 
-    <!-- 离开确认 -->
-    <AppConfirm
-      v-model="leaveDialog"
-      title="未保存提示"
-      :message="leaveMessage"
-      confirm-text="离开"
-      danger
-      @confirm="onLeaveConfirm"
-    />
+    <!-- 离开确认：批量模式下三选项（丢弃未确认题目=删除后端草稿 / 保留草稿离开 / 继续编辑） -->
+      <AppModal v-model="leaveDialog" title="未保存提示" width="460px">
+        <div class="leave-dialog-body">
+          <p class="leave-dialog-msg">{{ leaveMessage }}</p>
+          <div class="leave-dialog-actions">
+            <template v-if="deletableDrafts.length > 0">
+              <AppButton variant="ghost" :disabled="discardingAll" @click="leaveDialog = false">继续编辑</AppButton>
+              <AppButton variant="outline" :disabled="discardingAll" @click="onLeaveKeepDrafts">保留草稿离开</AppButton>
+              <AppButton variant="danger" :loading="discardingAll" @click="onLeaveDiscardAll">丢弃未确认题目并离开</AppButton>
+            </template>
+            <template v-else>
+              <AppButton variant="ghost" @click="leaveDialog = false">继续编辑</AppButton>
+              <AppButton variant="primary" @click="onLeaveKeepDrafts">离开</AppButton>
+            </template>
+          </div>
+        </div>
+      </AppModal>
 
     <!-- 草稿恢复确认 -->
     <AppConfirm
@@ -364,7 +381,7 @@ import { useToast } from '@/composables/useToast'
 import { getKnowledgeTreeList } from '@/composables/useKnowledgeTreeCache'
 import { useSpaceStore } from '@/stores/space'
 import { useAuthStore } from '@/stores/auth'
-import { hasUnfinishedSnapshot, type BatchSnapshot } from '@/utils/batchSnapshot'
+import { hasUnfinishedSnapshot, clearBatchSnapshot, type BatchSnapshot } from '@/utils/batchSnapshot'
 import { processMarkdownImages, type UploadCache } from '@/utils/markdownImages'
 import { uploadsApi } from '@/api/client'
 import type { ImageConfig, ImageClickPayload } from '@/components/LatexRender.vue'
@@ -459,6 +476,8 @@ function saveBatchDraft() {
           saved: cur?.saved ?? false,
           savedQid: cur?.savedQid,
           hasUnsaved: (cur?.hasUnsaved && !cur?.saved) || form.hasUnsaved,
+          // 保留暂存链路元信息：草稿恢复后仍能携带 ai_meta 落库
+          aiMeta: cur?.aiMeta,
         }
       }
       return JSON.parse(JSON.stringify(q))
@@ -590,11 +609,17 @@ const leaveConfirmed = ref(false)
 // pendingLeaveTo：非"返回按钮"触发的导航（如点击链接），确认后恢复到该目标路径
 let pendingLeaveTo: string | null = null
 
-// 离开确认弹窗文案（批量模式显示未保存题数，提示可恢复）
+// 离开确认弹窗文案（批量模式区分「从未确认保存的 worker 草稿」与「本地修改」）
+const deletableDrafts = computed(() =>
+  questionList.value.filter(q => !q.saved && q.savedQid) as { savedQid: string }[],
+)
 const leaveMessage = computed(() => {
-  if (questionList.value.length > 1) {
-    const unsavedCount = questionList.value.filter(q => !q.saved || q.hasUnsaved).length
-    return `当前批量录入工作台有 ${unsavedCount} 道题尚未保存到服务器，确定离开吗？（离开后可通过"恢复草稿"找回未保存的内容）`
+  if (questionList.value.length > 0) {
+    const n = deletableDrafts.value.length
+    if (n > 0) {
+      return `有 ${n} 道题尚未确认保存（目前以草稿存于题库）。「丢弃」将删除这些草稿；「保留」可稍后从草稿恢复继续编辑。`
+    }
+    return '当前题目均已保存，本地未保存的修改可通过"恢复草稿"找回。确定离开吗？'
   }
   return '有未保存的修改，确定离开吗？'
 })
@@ -608,11 +633,9 @@ function handleBack() {
   }
 }
 
-// 用户在离开确认弹窗点击"离开"
-function onLeaveConfirm() {
-  leaveDialog.value = false
+/** 离开动作统一出口（恢复被守卫拦截的原始导航 / 返回上一页） */
+function doLeave() {
   if (pendingLeaveTo) {
-    // 恢复被守卫拦截的原始导航（如点击链接跳转）
     const target = pendingLeaveTo
     pendingLeaveTo = null
     leaveConfirmed.value = true
@@ -620,6 +643,39 @@ function onLeaveConfirm() {
   } else {
     goBack()
   }
+}
+
+/** 保留草稿离开（原「离开」语义：后端草稿原样保留，可通过恢复草稿续录） */
+function onLeaveKeepDrafts() {
+  leaveDialog.value = false
+  doLeave()
+}
+
+/** 丢弃未确认题目并离开：批量 DELETE 从未保存（!saved）且 worker 已落库（savedQid）
+ *  的草稿 + 清除 IndexedDB 批量快照（防止恢复指向已删除题目） */
+const discardingAll = ref(false)
+async function onLeaveDiscardAll() {
+  const targets = deletableDrafts.value.map(q => q.savedQid)
+  discardingAll.value = true
+  let ok = 0
+  let fail = 0
+  for (const qid of targets) {
+    try {
+      await questionApi.delete(qid)
+      ok++
+    } catch {
+      fail++
+    }
+  }
+  discardingAll.value = false
+  leaveDialog.value = false
+  await clearBatchSnapshot()
+  if (fail > 0) {
+    toast.warning(`已丢弃 ${ok} 题；${fail} 题删除失败，已保留为草稿`)
+  } else {
+    toast.success(`已丢弃 ${ok} 道未确认题目`)
+  }
+  doLeave()
 }
 
 function goBack() {
@@ -1014,6 +1070,12 @@ function buildPayload() {
     tag_ids: form.tagIds,
     paper_ids: paperIds.value,
   }
+  // 暂存链路：未落库题目保存时携带 ai_meta，后端据此完成容器关联/候选/标记；
+  // 一旦落库（savedQid 已回写）后续保存走 update，不再携带 ai_meta 避免重复处理
+  const currentSnapshot = questionList.value[activeIndex.value]
+  if (currentSnapshot?.aiMeta && !currentSnapshot.savedQid) {
+    payload.ai_meta = currentSnapshot.aiMeta
+  }
   switch (form.question_type) {
     case 'choice':
       payload.options = (form.options || []).filter(o => o.content.trim())
@@ -1289,6 +1351,8 @@ watch(activeIndex, async (newIdx, oldIdx) => {
         saved: prev?.saved ?? false,
         savedQid: prev?.savedQid,
         hasUnsaved: prev?.hasUnsaved ?? false,
+        // 保留暂存链路元信息：切换 Tab 后再切回，保存时仍需携带 ai_meta 落库
+        aiMeta: prev?.aiMeta,
       }
     }
     // 2. 加载目标题到 form
@@ -1671,6 +1735,8 @@ function markCurrentSaved(qid: string): boolean {
     saved: true,
     savedQid: qid,
     hasUnsaved: false,
+    // 落库后 ai_meta 不再需要（后续保存走 update），但保留以保持快照结构一致
+    aiMeta: questionList.value[currentIdx]?.aiMeta,
   }
   // 保存成功后立即持久化批量草稿（反映 saved 状态，避免恢复后对已保存题重复 create）
   saveBatchDraft()
@@ -1745,8 +1811,11 @@ function applyFormSnapshot(s: any) {
   form.version = s.version ?? 1
   form.hasUnsaved = false // 切换后的目标题视为未修改
 
-  // 每题独立保存 knowledgeNodeIds
+  // 每题独立保存三维已选节点（chapter/method 仅存在于 form 之外的独立 ref，
+  // watch 是 ref→form 单向同步，切换快照时必须手动回写 ref）
   knowledgeNodeIds.value = Array.isArray(s.knowledgeNodeIds) ? [...s.knowledgeNodeIds] : []
+  chapterNodeIds.value = Array.isArray(s.chapterNodeIds) ? [...s.chapterNodeIds] : []
+  methodNodeIds.value = Array.isArray(s.methodNodeIds) ? [...s.methodNodeIds] : []
 }
 
 // 切换到指定 Tab（保存当前题 → 加载目标题）
@@ -1754,6 +1823,77 @@ function switchToTab(idx: number) {
   if (idx === activeIndex.value) return
   if (idx < 0 || idx >= questionList.value.length) return
   activeIndex.value = idx
+}
+
+// ===== 批量模式：丢弃单题（答题卡角标 ×） =====
+// 语义：从未保存（!saved）且 worker 已落库（savedQid）→ 同步 DELETE 后端草稿；
+//      已保存过的题目 = 仅从工作台移除（后端保留）；纯本地题 = 直接移除
+const discarding = ref(false)
+async function discardBatchQuestion(idx: number) {
+  const item = questionList.value[idx] as any
+  if (!item || discarding.value || discardingAll.value) return
+
+  const preview = stripStemPreview(item.stem) || `第 ${idx + 1} 题`
+  const willDelete = !item.saved && item.savedQid
+  const msg = willDelete
+    ? `确定丢弃「${preview}」？该题尚未确认保存，将同时从题库草稿中删除。`
+    : item.saved
+      ? `确定从工作台移除「${preview}」？（该题已保存，保留在题库中）`
+      : `确定丢弃「${preview}」？`
+  if (!window.confirm(msg)) return
+
+  // 非当前题被丢弃：先把当前题最新编辑态写回槽位（与 watch(activeIndex) 第 1 步一致），
+  // 防止 saveBatchDraft 保存的是旧快照
+  if (idx !== activeIndex.value && questionList.value.length > 1) {
+    const cur = questionList.value[activeIndex.value] as any
+    questionList.value[activeIndex.value] = {
+      ...captureFormSnapshot(),
+      saved: cur?.saved ?? false,
+      savedQid: cur?.savedQid,
+      hasUnsaved: cur?.hasUnsaved ?? false,
+    }
+  }
+
+  discarding.value = true
+  try {
+    if (willDelete) {
+      await questionApi.delete(item.savedQid as string)
+    }
+    questionList.value.splice(idx, 1)
+
+    // 整批丢弃完 → 清快照退出工作台
+    if (questionList.value.length === 0) {
+      await clearBatchSnapshot()
+      toast.success('已丢弃全部题目')
+      leaveConfirmed.value = true
+      router.replace('/questions')
+      return
+    }
+
+    // 修正 activeIndex：必须闸住 watch(activeIndex)——splice 后新旧索引含义已错位，
+    // watch 的"写回旧槽位"会把当前题表单覆盖到别的题目上
+    isSwitchingTab.value = true
+    try {
+      if (idx === activeIndex.value) {
+        // 当前题被删：落到滑入同位的下一题（或末题），表单切换为新题
+        const newIdx = Math.min(idx, questionList.value.length - 1)
+        activeIndex.value = newIdx
+        applyFormSnapshot(questionList.value[newIdx])
+      } else if (idx < activeIndex.value) {
+        // 前面的题被删：当前题整体前移，表单不变
+        activeIndex.value -= 1
+      }
+      await nextTick()
+    } finally {
+      isSwitchingTab.value = false
+    }
+    saveBatchDraft()
+    toast.success(`已丢弃（剩余 ${questionList.value.length} 题）`)
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error || '丢弃失败，请重试')
+  } finally {
+    discarding.value = false
+  }
 }
 
 // Tab 预览文本：去掉 LaTeX 标记 / Markdown 图片 / 换行，截断到 14 字符
@@ -1862,12 +2002,19 @@ function parsedQuestionToSnapshot(q: ParsedQuestion): any {
     sub_answers = q.correct_answer.value.subs.map(s => s.content)
   }
 
-  // 计算 knowledgeNodeIds（高置信度匹配，沿用 kp_matches 字段）
-  let knowledgeNodeIds: string[] = []
+  // 回填 DB 已落库的全部标签匹配（kp_matches 携带题目详情接口返回的
+  // question_knowledge_nodes；后端匹配阈值 0.3 已在落库时过滤，前端直接采用，
+  // 含 fuzzy 匹配——否则 10 题只有 exact 命中的 2-3 题能回填）
+  // 三维分发：按 kp_matches.kind 路由到 章节/知识点/方法（缺失 kind 兜底知识点）
+  const knowledgeNodeIds: string[] = []
+  const chapterNodeIds: string[] = []
+  const methodNodeIds: string[] = []
   if (q.kp_matches?.length) {
-    const highConfidenceMatch = q.kp_matches.find(m => m.score >= 0.95 && m.matched_id)
-    if (highConfidenceMatch) {
-      knowledgeNodeIds = [highConfidenceMatch.matched_id!]
+    for (const m of q.kp_matches) {
+      if (!m.matched_id) continue
+      if (m.kind === 'chapter') chapterNodeIds.push(m.matched_id)
+      else if (m.kind === 'ability') methodNodeIds.push(m.matched_id)
+      else knowledgeNodeIds.push(m.matched_id)
     }
   }
 
@@ -1901,6 +2048,8 @@ function parsedQuestionToSnapshot(q: ParsedQuestion): any {
     solutions: q.analysis.map(a => a.content),
     gradingSteps: [],
     knowledgeNodeIds,
+    chapterNodeIds,
+    methodNodeIds,
     tagIds: [],
     reviewer_ids: [],
     reviewer: '',
@@ -1914,6 +2063,8 @@ function parsedQuestionToSnapshot(q: ParsedQuestion): any {
     // 批量模式元信息（显式声明占位，确保 Vue 3 Proxy 追踪）
     saved: false,
     savedQid: q.id as string | undefined,
+    // 暂存链路：未落库题目保存时走 create + ai_meta（与 savedQid 互斥）
+    aiMeta: q.ai_meta,
   }
 }
 
@@ -3225,6 +3376,43 @@ async function handleCropped(blob: Blob) {
 }
 
 /* 1. 默认状态：浅灰小方块 */
+.nav-block-wrap {
+  position: relative;
+}
+
+/* 角标 ×：hover 显示，丢弃该题（见 discardBatchQuestion） */
+.nav-block-x {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: 1px solid #fff;
+  border-radius: 50%;
+  background: #ef4444;
+  color: #fff;
+  cursor: pointer;
+  z-index: 1;
+}
+
+.nav-block-wrap:hover .nav-block-x:not(:disabled) {
+  display: flex;
+}
+
+.nav-block-x:not(:disabled):hover {
+  background: #dc2626;
+}
+
+.nav-block-x:disabled {
+  display: flex;
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .nav-block {
   display: flex;
   align-items: center;
@@ -3265,6 +3453,28 @@ async function handleCropped(blob: Blob) {
   background: var(--accent);
   color: #ffffff;
   box-shadow: 0 2px 6px rgba(37, 99, 235, 0.3);
+}
+
+/* 离开确认弹窗（三选项：丢弃未确认题目 / 保留草稿 / 继续编辑） */
+.leave-dialog-body {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding-top: 2px;
+}
+
+.leave-dialog-msg {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--text-primary, #374151);
+}
+
+.leave-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .nav-block.is-active:hover:not(:disabled) {

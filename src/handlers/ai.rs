@@ -113,6 +113,30 @@ fn strip_options_residue_from_stem(q: &mut ParsedQuestion) {
     }
 }
 
+/// solution_methods 字符串数组 → 对象数组归一化（纯函数）
+///
+/// LLM 对 `"solution_methods": [{"name":"...","confidence":...}]` 的遵循不稳定，
+/// 常退化为 `["数形结合"]` 纯字符串数组——直接反序列化 `Vec<SolutionMethod>`
+/// 会类型不匹配导致整题被丢弃。此处把字符串元素包成 `{name}` 对象。
+fn normalize_solution_methods(mut q_val: serde_json::Value) -> serde_json::Value {
+    let Some(arr) = q_val.get("solution_methods").and_then(|v| v.as_array()) else {
+        return q_val;
+    };
+    let needs_fix = arr.iter().any(|e| e.is_string());
+    if !needs_fix {
+        return q_val;
+    }
+    let normalized: Vec<serde_json::Value> = arr
+        .iter()
+        .map(|e| match e.as_str() {
+            Some(name) => serde_json::json!({ "name": name }),
+            None => e.clone(),
+        })
+        .collect();
+    q_val["solution_methods"] = serde_json::Value::Array(normalized);
+    q_val
+}
+
 /// 批量后处理：清洗 → 截断检测(补丁七) → 逐题隔离解析(补丁十防连坐) → 知识点匹配
 ///
 /// v1.1（T1.12）：当 Stage 2 输出被 `max_tokens` 截断导致 JSON 残缺时，
@@ -175,7 +199,10 @@ pub(crate) async fn post_process_batch(
     let mut results = Vec::new();
 
     for (i, q_val) in questions_val.iter().enumerate() {
-        match serde_json::from_value::<ParsedQuestion>(q_val.clone()) {
+        // solution_methods 容错归一化：LLM 常输出 ["数形结合"] 字符串数组而非
+        // [{"name":"..."}] 对象数组 → 先转对象再反序列化，避免整题因类型不匹配被丢弃
+        let q_val = normalize_solution_methods(q_val.clone());
+        match serde_json::from_value::<ParsedQuestion>(q_val) {
             Ok(mut q) => {
                 // 校验 question_type
                 if !["choice", "fill", "solution", "multiple"].contains(&q.question_type.as_str()) {
@@ -199,9 +226,9 @@ pub(crate) async fn post_process_batch(
                     q.correct_answer = Some(ParsedAnswer::empty_for_type(&q.question_type));
                     q.warnings.push("AI 未返回答案，已自动填充空答案".into());
                 }
-                // 知识点匹配（B3 重构：SQL 三级匹配，失败不影响整体解析）
+                // 知识点匹配（限定 knowledge 树，杜绝跨树错配；失败不影响整体解析）
                 if !q.knowledge_points.is_empty() {
-                    match match_knowledge_nodes(pool, &q.knowledge_points, None).await {
+                    match match_knowledge_nodes(pool, &q.knowledge_points, None, "knowledge").await {
                         Ok((matched, _)) => {
                             for m in &matched {
                                 if m.score < 0.95 {
@@ -554,6 +581,23 @@ pub(crate) async fn resolve_ai_config(
     Ok((api_key, provider_name.to_string(), model, base_url))
 }
 
+/// OCR 引擎决策来源判定（纯函数，供 resolve_ocr_config 决策日志使用）
+///
+/// 优先级：任务/请求 override > 用户偏好（非 auto）> auto 兜底。
+/// 返回值对应 tracing target=ocr::engine_select 日志的 `decision_source` 字段：
+/// - `task_override`   — 任务显式指定（ocr_provider_override / API 参数），即使值与偏好相同
+/// - `user_preference` — 用户设置页保存的偏好（非 auto，含显式 qwen_vl）
+/// - `auto_default`    — 无偏好 / 偏好为 auto → 兜底
+pub(crate) fn ocr_decision_source(requested: Option<&str>, user_pref: Option<&str>) -> &'static str {
+    match requested {
+        Some(_) => "task_override",
+        None => match user_pref {
+            Some("auto") | None => "auto_default",
+            Some(_) => "user_preference",
+        },
+    }
+}
+
 /// 解析 OCR 引擎配置（v1.1，两阶段流水线 Stage 1）
 ///
 /// 优先级（M3 配置下沉）：
@@ -586,8 +630,30 @@ pub(crate) async fn resolve_ocr_config(
         .or_else(|| user_setting.as_ref().map(|s| s.ocr_provider.clone()))
         .unwrap_or_else(|| "auto".to_string());
 
+    // 决策来源：任务/请求 override > 用户偏好（非 auto）> auto 兜底
+    let decision_source = ocr_decision_source(
+        requested,
+        user_setting.as_ref().map(|s| s.ocr_provider.as_str()),
+    );
+    // 引擎选择决策追踪（target=ocr::engine_select 便于集中检索分析切换原因）
+    tracing::info!(
+        target: "ocr::engine_select",
+        user_id = %auth.id,
+        requested = ?requested,
+        user_pref = ?user_setting.as_ref().map(|s| s.ocr_provider.as_str()),
+        effective = %effective,
+        decision_source,
+        "OCR 引擎决策"
+    );
+
     if effective == "doc2x" {
         let base_url = state.ai_config.doc2x_base_url.clone();
+
+        // 是否配置了个人 Key 密文（用于识别"配了却没用上"的场景）
+        let has_personal_cipher = user_setting
+            .as_ref()
+            .map(|s| s.doc2x_api_key_enc.is_some() && s.doc2x_api_key_iv.is_some())
+            .unwrap_or(false);
 
         // 优先用用户个人 Doc2X Key（DB 解密），否则回退平台默认 Key
         let personal_key = user_setting.as_ref().and_then(|s| {
@@ -598,11 +664,26 @@ pub(crate) async fn resolve_ocr_config(
                 .and_then(|mk| decrypt_api_key(enc, iv, &mk))
                 .ok()
         });
+        if has_personal_cipher && personal_key.is_none() {
+            tracing::warn!(
+                target: "ocr::engine_select",
+                user_id = %auth.id,
+                "Doc2X 个人 Key 密文存在但解密失败（或主密钥未配置），本次回退平台 Key"
+            );
+        }
+        let key_source = if personal_key.is_some() { "personal" } else { "platform" };
         let api_key = personal_key
             .or_else(|| state.ai_config.doc2x_api_key.clone())
             .ok_or_else(|| {
                 "未配置 Doc2X API Key，请在设置页配置或切换其他 OCR 引擎".to_string()
             })?;
+        tracing::info!(
+            target: "ocr::engine_select",
+            user_id = %auth.id,
+            engine = "doc2x",
+            key_source,
+            "OCR 引擎决策结果"
+        );
 
         return Ok(OcrConfig {
             provider: "doc2x".into(),
@@ -637,6 +718,13 @@ pub(crate) async fn resolve_ocr_config(
             })
             .unwrap_or_default();
 
+        tracing::info!(
+            target: "ocr::engine_select",
+            user_id = %auth.id,
+            engine = %effective,
+            endpoint_source = "user_private",
+            "OCR 引擎决策结果"
+        );
         return Ok(OcrConfig {
             provider: "mineru_local".into(),
             api_key,
@@ -649,12 +737,23 @@ pub(crate) async fn resolve_ocr_config(
     // auto / qwen_vl / 未知引擎 → 兜底 qwen_vl（保持 AC-07 等价行为）
     if effective != "auto" && effective != "qwen_vl" {
         tracing::warn!(
+            target: "ocr::engine_select",
+            user_id = %auth.id,
+            effective = %effective,
             "OCR 引擎 `{effective}` 在当前版本未实现，自动降级 qwen_vl 兜底"
         );
     }
 
     let (api_key, _provider_name, model, base_url) =
         resolve_ai_config(auth, state, ModelKind::Vision).await?;
+
+    tracing::info!(
+        target: "ocr::engine_select",
+        user_id = %auth.id,
+        engine = "qwen_vl",
+        reason = if effective == "auto" { "auto_default_vision_model" } else { "qwen_vl_direct" },
+        "OCR 引擎决策结果"
+    );
 
     Ok(OcrConfig {
         provider: "qwen_vl".into(),
@@ -1111,6 +1210,34 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_string_solution_methods() {
+        // LLM 退化输出：字符串数组 → 包装为 {name} 对象数组
+        let v = serde_json::json!({ "solution_methods": ["数形结合", "分类讨论"] });
+        let out = normalize_solution_methods(v);
+        assert_eq!(
+            out["solution_methods"],
+            serde_json::json!([{ "name": "数形结合" }, { "name": "分类讨论" }])
+        );
+        // 已是对象数组 → 原样返回
+        let v2 = serde_json::json!({ "solution_methods": [{ "name": "换元法", "confidence": 0.9 }] });
+        let out2 = normalize_solution_methods(v2);
+        assert_eq!(out2["solution_methods"][0]["name"], "换元法");
+        // 字段缺失 → 不动
+        let v3 = serde_json::json!({ "stem": "x" });
+        let out3 = normalize_solution_methods(v3);
+        assert!(out3.get("solution_methods").is_none());
+        // 归一化后可整体反序列化为 ParsedQuestion
+        let full = serde_json::json!({
+            "question_type": "solution", "stem": "求值", "analysis": [],
+            "knowledge_points": [], "confidence": 0.9, "warnings": [],
+            "image_placeholders": [], "solution_methods": ["配方法"]
+        });
+        let q: ParsedQuestion =
+            serde_json::from_value(normalize_solution_methods(full)).unwrap();
+        assert_eq!(q.solution_methods[0].name, "配方法");
+    }
+
+    #[test]
     fn strips_inline_options_after_period() {
         let mut q = make_choice("求 x 的值。 A. 1 B. 2 C. 3 D. 4", true);
         strip_options_residue_from_stem(&mut q);
@@ -1171,5 +1298,36 @@ mod tests {
         strip_options_residue_from_stem(&mut q);
         assert!(q.stem.contains("A. 1"));
         assert!(q.warnings.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // OCR 引擎决策来源判定：ocr_decision_source（决策日志 decision_source 字段）
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_decision_source_task_override_takes_priority() {
+        // 任务显式指定引擎 → 恒为 task_override，即使与用户偏好相同
+        assert_eq!(ocr_decision_source(Some("doc2x"), Some("mineru_local")), "task_override");
+        assert_eq!(ocr_decision_source(Some("doc2x"), Some("doc2x")), "task_override");
+        // 显式 auto 也算任务级覆盖（语义：本任务强制 auto）
+        assert_eq!(ocr_decision_source(Some("auto"), Some("doc2x")), "task_override");
+        // 无偏好时 override 依然最高
+        assert_eq!(ocr_decision_source(Some("qwen_vl"), None), "task_override");
+    }
+
+    #[test]
+    fn test_decision_source_user_preference_when_no_override() {
+        // 无 override：非 auto 偏好 → user_preference
+        assert_eq!(ocr_decision_source(None, Some("doc2x")), "user_preference");
+        assert_eq!(ocr_decision_source(None, Some("mineru_local")), "user_preference");
+        // 显式偏好 qwen_vl 同样是用户决策（区别于 auto 兜底）
+        assert_eq!(ocr_decision_source(None, Some("qwen_vl")), "user_preference");
+    }
+
+    #[test]
+    fn test_decision_source_auto_default_fallback() {
+        // 偏好为 auto / 无设置行 → auto_default
+        assert_eq!(ocr_decision_source(None, Some("auto")), "auto_default");
+        assert_eq!(ocr_decision_source(None, None), "auto_default");
     }
 }

@@ -35,6 +35,7 @@ pub const CORE_PARSE_RULES: &str = r#"
 - 绝对禁止自行推导公式（如把题目条件推导为结论）
 - 绝对禁止自行生成解答过程（如自己写一段解析）
 - 绝对禁止补全缺失的答案（如题目没给答案，绝不自行编造）
+【唯一例外】`knowledge_points` / `chapter_path` / `solution_methods` 是标签分类推断，不属于做题：必须根据题目内容主动推断（考查的知识点、所属章节、所用解题方法），不受上述禁止约束。
 如果原图/原文中没有答案，`correct_answer` 必须为对应题型的空结构（choice→`{"kind":"choice","value":{"options":[]}}`，fill→`{"kind":"fill","value":{"blanks":[]}}`，solution→`{"kind":"solution","value":{"subs":[]}}`），**绝不允许输出 `null`**。`analysis` 必须为 []。
 
 # 输出 JSON Schema（必须严格遵守）
@@ -65,9 +66,16 @@ pub const CORE_PARSE_RULES: &str = r#"
   "question_no": "题号，如 17(2) / 1 / 一、1（无法判断可省略）",
   "display_order": 整数展示顺序（可省略，按出现顺序）,
   "score": 分值整数（原图标注的分值，没有可省略）,
-  "chapter_path": ["章节", "子章节"]（原图/原文有章节信息才填，否则空数组）,
-  "solution_methods": [{"name":"解题方法名","confidence":0.0-1.0}]（原文有才填，否则空数组）
+  "chapter_path": ["章节", "子章节"]（推断本题所属教材章节，由大到小，如 ["函数","函数的奇偶性"]；无法判断才为空数组）,
+  "solution_methods": [{"name":"解题方法名","confidence":0.0-1.0}]（推断本题用到的解题方法/数学思想，如 数形结合、分类讨论、待定系数法；无法判断才为空数组）
 }
+
+# 三维标签推断规则（chapter_path / solution_methods / knowledge_points）
+这三个字段是标签分类任务，不属于"做题"，必须对每一道题主动推断输出：
+1. `chapter_path`：推断题目所属教材章节，由大到小排列（如 ["函数","函数的奇偶性"]），1-3 层
+2. `solution_methods`：推断解题所用的方法/数学思想，每题 1-3 个。常见示例：数形结合、分类讨论、待定系数法、换元法、配方法、转化与化归、函数与方程思想、整体思想、构造法、反证法、归纳法、特殊值法
+3. `knowledge_points`：推断考查的具体知识点
+【强制】三者在能判断时都必须输出，不允许因为"原文没写"就整体省略字段；确实无法判断才输出空数组。
 
 # 题型识别规则
 - 有 A/B/C/D 选项 → choice
@@ -368,6 +376,14 @@ mod tests {
         assert!(CORE_PARSE_RULES.contains("答案留空规则"));
         assert!(CORE_PARSE_RULES.contains("绝不允许输出 `null`"));
         assert!(CORE_PARSE_RULES.contains("analysis` 必须为 []"));
+
+        // 验证三维度标签为推断式（chapter/method 不再是"原文有才填"）
+        assert!(CORE_PARSE_RULES.contains("推断本题所属教材章节"));
+        assert!(CORE_PARSE_RULES.contains("推断本题用到的解题方法"));
+        assert!(CORE_PARSE_RULES.contains("标签分类推断，不属于做题"));
+        // 三维标签推断规则专项段（method 维度输出强化）
+        assert!(CORE_PARSE_RULES.contains("三维标签推断规则"));
+        assert!(CORE_PARSE_RULES.contains("数形结合、分类讨论、待定系数法"));
     }
 
     #[test]

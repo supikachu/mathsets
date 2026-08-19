@@ -332,6 +332,8 @@ export interface CreateQuestionRequest {
   primary_knowledge_node_id?: string
   space_id?: string
   input_method?: string
+  /// AI 智能录入来源（暂存项 task_id + staged_index）；保存时后端据此完成容器关联/候选/标记
+  ai_meta?: { task_id: string; staged_index: string }
 }
 
 /// 更新题目请求（B2：与后端 UpdateQuestionRequest 对齐，所有字段可选）
@@ -979,6 +981,10 @@ export interface KpMatch {
   matched_id: string | null
   matched_name: string | null
   score: number
+  /// 匹配节点所属树类型（'chapter'|'knowledge'|'ability'）；
+  /// AI 录入回填时由题目详情的 knowledge_nodes.kind 携带，
+  /// 工作台据此分发到 章节/知识点/方法 三个已选数组（缺失时兜底按知识点处理）
+  kind?: string
 }
 
 export interface ParsedQuestion {
@@ -1000,6 +1006,9 @@ export interface ParsedQuestion {
   image_placeholders: string[]
   image_urls: string[]
   kp_matches: KpMatch[]
+  /// AI 智能录入暂存来源：提供时保存走 create + ai_meta（后端从暂存项落库）；
+  /// 与 id（已落库）互斥，用于"解析结果暂存、确认后入库"链路
+  ai_meta?: { task_id: string; staged_index: string }
 }
 
 export interface AiSettings {
@@ -1150,6 +1159,43 @@ export interface AiParseTaskDetail {
   paper_id: string | null
   collection_ids: string[]
   question_ids: string[]
+  /** 本任务产生、待审核的未匹配标签候选数（章节/知识点/方法） */
+  pending_candidate_count: number
+  /** 暂存题目（解析完成、待人工确认保存；按原文顺序） */
+  staged_questions: AiStagedQuestion[]
+}
+
+/// AI 智能录入暂存项（对应后端 progress.staged_questions 数组元素）
+export interface AiStagedQuestion {
+  index: string
+  /// 后端 ParsedQuestion 序列化结果（含 chapter_path / solution_methods / question_no 等）
+  parsed: Record<string, unknown>
+  images: string[]
+  page_image_url?: string | null
+  space_id: string
+  paper_id?: string | null
+  collection_id?: string | null
+  is_mixed?: boolean
+  /// hash 命中已有题目时携带（前端提示复用，不重复创建）
+  existing_question_id?: string | null
+  matched: AiStagedMatch[]
+  unmatched?: Record<string, string[]>
+  saved: boolean
+  saved_question_id?: string | null
+  merged_into?: string
+  order?: { question_no?: string | null; display_order?: number | null }
+}
+
+export interface AiStagedMatch {
+  node_id: string
+  node_name: string
+  ai_name: string
+  tree_id?: string
+  path?: string
+  depth?: number
+  score: number
+  match_type: string
+  kind: string
 }
 
 export interface SubmitParseTaskResponse {
@@ -1158,9 +1204,15 @@ export interface SubmitParseTaskResponse {
   created_at: string
 }
 
+/// 解析模式：pdf_direct=仅 PDF 直连（失败回前端引导）/ page=仅逐页 OCR / 缺省=自动降级
+export type ParseMode = 'pdf_direct' | 'page'
+
 export const aiTaskApi = {
-  createParseTask(document_id: string) {
-    return client.post<SubmitParseTaskResponse>('/ai/parse-task', { document_id })
+  createParseTask(document_id: string, parse_mode?: ParseMode) {
+    return client.post<SubmitParseTaskResponse>('/ai/parse-task', {
+      document_id,
+      ...(parse_mode ? { parse_mode } : {}),
+    })
   },
   getParseTask(task_id: string) {
     return client.get<AiParseTaskDetail>(`/ai/parse-task/${task_id}`)
@@ -1286,13 +1338,15 @@ export interface ConfirmDocumentRequest {
 
 export const documentApi = {
   /// 上传页面图片集（PDF 前端渲染为页图后上传）
-  upload(pages: File[], meta: { file_name?: string; file_type?: string }) {
+  /// pdf：原始 PDF 二进制（可选），后端保留供 Doc2X/MinerU 整档直传 OCR 快速路径
+  upload(pages: File[], meta: { file_name?: string; file_type?: string; pdf?: File }) {
     const formData = new FormData()
     for (const page of pages) {
       formData.append('pages', page)
     }
     if (meta.file_name) formData.append('file_name', meta.file_name)
     if (meta.file_type) formData.append('file_type', meta.file_type)
+    if (meta.pdf) formData.append('pdf', meta.pdf)
     return client.post<{ data: DocumentMeta }>('/ai/documents', formData, {
       timeout: 120000,
     })
@@ -1392,11 +1446,10 @@ export const collectionApi = {
 // ===========================================================================
 
 export interface UserQuota {
-  ocr_quota_daily: number
-  ocr_quota_used: number
-  ocr_quota_remaining: number
-  ocr_quota_reset_at: string
-  ai_token_quota: number
+  daily_quota: number
+  used_today: number
+  remaining: number
+  reset_at: string
 }
 
 export interface UserProfile {

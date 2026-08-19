@@ -36,6 +36,8 @@ use crate::AppState;
 const MAX_PAGE_BYTES: usize = 10 * 1024 * 1024;
 /// 文档页数上限（TD-1 前端 pdfjs 渲染同样限制 30 页）
 const MAX_PAGES: usize = 30;
+/// 原始 PDF 大小上限（PDF 直传快速路径用；Doc2X/MinerU 单文件限制内）
+const MAX_PDF_BYTES: usize = 50 * 1024 * 1024;
 
 /// 分类置信度门槛（低于则升级检测层级；最终仍低于 → unknown）
 const CLASSIFY_CONFIDENCE_THRESHOLD: f32 = 0.6;
@@ -202,6 +204,7 @@ pub async fn upload_document(
     let mut pages: Vec<(Vec<u8>, &'static str)> = Vec::new();
     let mut file_name: Option<String> = None;
     let mut file_type: Option<String> = None;
+    let mut original_pdf: Option<Vec<u8>> = None;
 
     while let Some(field) = multipart
         .next_field()
@@ -275,6 +278,43 @@ pub async fn upload_document(
                     ));
                 }
             }
+            "pdf" => {
+                // 原始 PDF 二进制（可选字段）：前端 pdfjs 拆页时一并附传，
+                // 供 Doc2X/MinerU PDF 直传快速路径整档 OCR 使用
+                let mut bytes: Vec<u8> = Vec::new();
+                let mut field = field;
+                loop {
+                    let chunk = field.chunk().await.map_err(|e| {
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({"error": format!("读取 PDF 数据失败: {e}")})),
+                        )
+                    })?;
+                    match chunk {
+                        Some(c) => {
+                            bytes.extend_from_slice(&c);
+                            if bytes.len() > MAX_PDF_BYTES {
+                                return Err((
+                                    StatusCode::PAYLOAD_TOO_LARGE,
+                                    Json(json!({"error": format!("原始 PDF 不能超过 {}MB", MAX_PDF_BYTES / 1024 / 1024)})),
+                                ));
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                if bytes.is_empty() {
+                    return Err((StatusCode::BAD_REQUEST, Json(json!({"error": "PDF 文件为空"}))));
+                }
+                // 魔数校验：%PDF- 开头（容忍前导空白）
+                if !bytes.starts_with(b"%PDF") {
+                    return Err((
+                        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                        Json(json!({"error": "非法的 PDF 文件（缺少 %PDF 文件头）"})),
+                    ));
+                }
+                original_pdf = Some(bytes);
+            }
             "file_name" => {
                 file_name = Some(
                     String::from_utf8_lossy(&field.bytes().await.map_err(|e| {
@@ -319,11 +359,6 @@ pub async fn upload_document(
     } else {
         None
     };
-    let mime = match pages[0].1 {
-        "jpg" => Some("image/jpeg"),
-        "png" => Some("image/png"),
-        _ => Some("image/webp"),
-    };
 
     // 落盘：{upload_dir}/documents/{doc_id}/page_{n}.{ext}
     let dir = std::path::Path::new(&state.upload_dir)
@@ -350,7 +385,34 @@ pub async fn upload_document(
         page_files.push(file_name);
     }
 
-    let metadata = json!({ "pages": page_files });
+    // 原始 PDF 落盘（供 PDF 直传快速路径整档 OCR；metadata.pdf_file 为权威标记）
+    let mut has_original_pdf = false;
+    if let Some(pdf_bytes) = original_pdf {
+        if let Err(e) = tokio::fs::write(dir.join("original.pdf"), &pdf_bytes).await {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("写入原始 PDF 失败: {e}")})),
+            ));
+        }
+        has_original_pdf = true;
+    }
+
+    let metadata = if has_original_pdf {
+        json!({ "pages": page_files, "pdf_file": "original.pdf" })
+    } else {
+        json!({ "pages": page_files })
+    };
+
+    // 来源是 PDF 时 mime 如实记为 application/pdf（供任务 source_type 统计与直传判定）
+    let mime = if has_original_pdf {
+        "application/pdf"
+    } else {
+        match pages[0].1 {
+            "jpg" => "image/jpeg",
+            "png" => "image/png",
+            _ => "image/webp",
+        }
+    };
 
     let doc: Document = sqlx::query_as::<_, Document>(
         r#"
