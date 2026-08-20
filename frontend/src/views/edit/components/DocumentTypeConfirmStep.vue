@@ -163,9 +163,6 @@ function selectType(t: DocumentType) {
   colForm.title = title.value
 }
 
-const showTypePicker = ref(!aiType.value || aiType.value === 'unknown')
-const showAdvanced = ref(false)
-
 function addCollection() {
   mixedCollections.value.push({ title: '', collection_type: 'class_exercise' as CollectionType })
 }
@@ -280,14 +277,10 @@ function doConfirm() {
       </p>
     </div>
 
-    <!-- 资料类型：有推荐时默认收起 16 类网格 -->
+    <!-- 资料类型单选 -->
     <div class="doc-type-section">
       <div class="doc-type-label">资料类型 <span class="doc-required">*</span></div>
-      <div v-if="!showTypePicker && selectedType && selectedType !== 'unknown'" class="doc-type-compact">
-        <span class="doc-type-compact-name">{{ DOCUMENT_TYPE_LABELS[selectedType] }}</span>
-        <button type="button" class="ai-reclassify" @click="showTypePicker = true">更改</button>
-      </div>
-      <div v-else class="doc-type-grid">
+      <div class="doc-type-grid">
         <button
           v-for="(label, key) in DOCUMENT_TYPE_LABELS"
           :key="key"
@@ -308,28 +301,23 @@ function doConfirm() {
       <input v-model="typeLabel" class="doc-input" placeholder="如：校本资料 / 竞赛资料" />
     </div>
 
-    <!-- 通用字段：资料名称；来源等长尾进可选折叠 -->
+    <!-- 通用字段：资料名称 / 来源 -->
     <div class="doc-form-row">
       <label class="doc-form-label">资料名称</label>
       <input v-model="title" class="doc-input" placeholder="资料标题" />
     </div>
-    <details class="doc-advanced" :open="showAdvanced" @toggle="showAdvanced = ($event.target as HTMLDetailsElement).open">
-      <summary class="doc-advanced-summary">补充来源信息（可选，解析后也可改）</summary>
-      <div class="doc-form-row">
-        <label class="doc-form-label">来源</label>
-        <input v-model="sourceType" class="doc-input" placeholder="如：学校统一 / 网络" />
-      </div>
-    </details>
+    <div class="doc-form-row">
+      <label class="doc-form-label">来源</label>
+      <input v-model="sourceType" class="doc-input" placeholder="如：teacher_created / 学校统一 / 网络" />
+    </div>
 
-    <!-- ── 试卷元数据：名称必填，其余可选折叠 ── -->
+    <!-- ── 试卷元数据表单（exam / mock_exam） ── -->
     <div v-if="isPaperType" class="doc-meta-card">
       <div class="doc-meta-title">试卷信息</div>
       <div class="doc-form-row">
         <label class="doc-form-label">试卷名称 <span class="doc-required">*</span></label>
         <input v-model="paperForm.title" class="doc-input" placeholder="如：2025 高一数学期中考试" />
       </div>
-      <details class="doc-advanced">
-        <summary class="doc-advanced-summary">年份 / 学段 / 地区等（可选）</summary>
       <div class="doc-form-grid">
         <div class="doc-form-row">
           <label class="doc-form-label">年份</label>
@@ -383,53 +371,49 @@ function doConfirm() {
           <option v-for="p in paperBriefs" :key="p.id" :value="p.id">{{ p.title }}</option>
         </select>
       </div>
-      </details>
     </div>
 
-    <!-- ── 非试卷单集合：名称可见，学段等可选 ── -->
+    <!-- ── 非试卷单集合元数据 ── -->
     <div v-else-if="!isMixed && selectedType && selectedType !== 'unknown' && selectedType !== 'other'" class="doc-meta-card">
       <div class="doc-meta-title">资料集合信息</div>
-      <div class="doc-form-row">
-        <label class="doc-form-label">集合名称</label>
-        <input v-model="colForm.title" class="doc-input" placeholder="如：二次函数课堂练习" />
-      </div>
-      <details class="doc-advanced">
-        <summary class="doc-advanced-summary">学段 / 章节等（可选）</summary>
-        <div class="doc-form-grid">
-          <div class="doc-form-row">
-            <label class="doc-form-label">学段</label>
-            <select v-model="colForm.stage" class="doc-input">
-              <option value="">未选择</option>
-              <option v-for="s in STAGE_LABELS" :key="s.value" :value="s.value">{{ s.label }}</option>
-            </select>
-          </div>
-          <div class="doc-form-row">
-            <label class="doc-form-label">年级</label>
-            <input v-model="colForm.grade" class="doc-input" placeholder="如：高一 / 八年级" />
-          </div>
-          <div class="doc-form-row">
-            <label class="doc-form-label">学科</label>
-            <select v-model="colForm.subject" class="doc-input">
-              <option v-for="s in SUBJECT_LABELS" :key="s" :value="s">{{ s }}</option>
-            </select>
-          </div>
-          <div class="doc-form-row">
-            <label class="doc-form-label">学期</label>
-            <select v-model="colForm.semester" class="doc-input">
-              <option value="">未选择</option>
-              <option v-for="s in SEMESTER_LABELS" :key="s.value" :value="s.value">{{ s.label }}</option>
-            </select>
-          </div>
-          <div class="doc-form-row">
-            <label class="doc-form-label">来源</label>
-            <input v-model="colForm.sourceType" class="doc-input" placeholder="如：学校统一" />
-          </div>
+      <div class="doc-form-grid">
+        <div class="doc-form-row">
+          <label class="doc-form-label">集合名称</label>
+          <input v-model="colForm.title" class="doc-input" placeholder="如：二次函数课堂练习" />
         </div>
         <div class="doc-form-row">
-          <label class="doc-form-label">章节（可选）</label>
-          <KnowledgeTreeCascader v-model="chapterIdModel" :max="1" placeholder="选择章节…" />
+          <label class="doc-form-label">学段</label>
+          <select v-model="colForm.stage" class="doc-input">
+            <option value="">未选择</option>
+            <option v-for="s in STAGE_LABELS" :key="s.value" :value="s.value">{{ s.label }}</option>
+          </select>
         </div>
-      </details>
+        <div class="doc-form-row">
+          <label class="doc-form-label">年级</label>
+          <input v-model="colForm.grade" class="doc-input" placeholder="如：高一 / 八年级" />
+        </div>
+        <div class="doc-form-row">
+          <label class="doc-form-label">学科</label>
+          <select v-model="colForm.subject" class="doc-input">
+            <option v-for="s in SUBJECT_LABELS" :key="s" :value="s">{{ s }}</option>
+          </select>
+        </div>
+        <div class="doc-form-row">
+          <label class="doc-form-label">学期</label>
+          <select v-model="colForm.semester" class="doc-input">
+            <option value="">未选择</option>
+            <option v-for="s in SEMESTER_LABELS" :key="s.value" :value="s.value">{{ s.label }}</option>
+          </select>
+        </div>
+        <div class="doc-form-row">
+          <label class="doc-form-label">来源</label>
+          <input v-model="colForm.sourceType" class="doc-input" placeholder="如：teacher_created" />
+        </div>
+      </div>
+      <div class="doc-form-row">
+        <label class="doc-form-label">章节（可选）</label>
+        <KnowledgeTreeCascader v-model="chapterIdModel" :max="1" placeholder="选择章节…" />
+      </div>
     </div>
 
     <!-- ── Mixed：集合壳编辑器 ── -->
@@ -459,7 +443,7 @@ function doConfirm() {
     <div class="doc-actions">
       <AppButton variant="ghost" @click="emit('back')">重新上传</AppButton>
       <AppButton variant="primary" :loading="props.loading" @click="doConfirm">
-        <AppIcon name="sparkles" :size="16" /> 开始解析
+        <AppIcon name="check" :size="16" /> 确认资料类型
       </AppButton>
     </div>
   </div>
@@ -552,31 +536,6 @@ function doConfirm() {
   align-items: center;
   justify-content: center;
 }
-.doc-type-compact {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 0 2px;
-}
-.doc-type-compact-name {
-  font-size: 15px;
-  font-weight: 700;
-  color: var(--text-primary);
-}
-.doc-advanced {
-  border: 1px dashed var(--border);
-  border-radius: 8px;
-  padding: 8px 10px;
-}
-.doc-advanced-summary {
-  cursor: pointer;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  list-style: none;
-}
-.doc-advanced-summary::-webkit-details-marker { display: none; }
-.doc-advanced[open] .doc-advanced-summary { margin-bottom: 10px; }
 
 /* 表单 */
 .doc-form-row { display: flex; flex-direction: column; gap: 4px; }

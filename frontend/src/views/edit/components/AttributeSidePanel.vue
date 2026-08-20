@@ -4,7 +4,7 @@
  *
  * 设计要点：
  * - 320px 宽常驻右侧，Flex 纵向布局，与编辑区/预览区并排
- * - 顶部 AI 打标：导入回填后降为「重新打标」；空题时仍为一键回填
+ * - 顶部 "✨ AI 智能打标" 按钮，调用 aiTaggingApi.tag() 一键回填
  * - 知识树标注：可折叠内联面板（Accordion），收起态仅展示已选 Tag + "展开知识树"按钮
  *   展开后原地平滑展开 Tabs（章节|知识点|题型专题）+ 动态折叠树，勾选实时同步无需确定
  *   动态拉取对应 tree（expectedCode = `${subject}_${mode}_${stage}` 严格精确匹配）
@@ -975,11 +975,6 @@ const difficultyStars = computed<number>({
 // AI 智能打标
 // ─────────────────────────────────────────────────────────────────────
 const aiTagging = ref(false)
-const taggingAlreadyFilled = computed(() =>
-  Boolean(props.form.taggingSuggestionId)
-  || (props.form.taggingUnmatched?.length ?? 0) > 0
-  || aiGeneratedFields.value.has('knowledge_node'),
-)
 const taggingTaskId = ref('')
 const taggingPhase = ref('')
 let taggingCancelled = false
@@ -1504,15 +1499,14 @@ onBeforeUnmount(() => {
             取消
           </AppButton>
           <AppButton
-            :variant="taggingAlreadyFilled ? 'ghost' : 'primary'"
+            variant="primary"
             size="sm"
             :loading="aiTagging"
             :disabled="aiTagging"
-            :title="taggingAlreadyFilled ? '导入时已自动打标，仅在改题后需要重跑' : '根据题干智能回填知识点与标签'"
             @click="runAiTagging"
           >
             <AppIcon name="sparkles" :size="14" />
-            <span>{{ aiTagging ? (taggingPhase || '打标中…') : (taggingAlreadyFilled ? '重新打标' : 'AI 智能打标') }}</span>
+            <span>{{ aiTagging ? (taggingPhase || '打标中…') : 'AI 智能打标' }}</span>
           </AppButton>
         </div>
       </header>

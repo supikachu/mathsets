@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, nextTick, onBeforeUnmount } from 'vue'
+import { ref, watch, nextTick } from 'vue'
 import {
   documentApi,
   collectionApi,
@@ -7,7 +7,6 @@ import {
   type ParsedQuestion,
   type DocumentMeta,
   type ConfirmDocumentRequest,
-  type DocumentType,
   type QuestionDetail,
   type QuestionCollectionSummary,
   type AiStagedQuestion,
@@ -23,7 +22,6 @@ import { compressImage, blobToFile } from '@/utils/imageCompressor'
 import { withBackoffRetry } from '@/utils/concurrency'
 import { pdfToImages, type PdfPageImage } from '@/utils/pdfToImages'
 import { clearBatchSnapshot, hasUnfinishedSnapshot, type BatchSnapshot } from '@/utils/batchSnapshot'
-import { fileFromClipboard } from '@/utils/pendingImport'
 import DocumentTypeConfirmStep from './DocumentTypeConfirmStep.vue'
 import TaskProgressPanel from './TaskProgressPanel.vue'
 import QuestionGroupingStep, { type GroupQuestion } from './QuestionGroupingStep.vue'
@@ -71,8 +69,8 @@ const emit = defineEmits<{
 
 const toast = useToast()
 
-// AI Mode tab: 'file'（图片/PDF 同一入口）| 'markdown'（高级粘贴）
-const aiMode = ref<'file' | 'markdown'>('file')
+// AI Mode tab: 'markdown' | 'image' | 'pdf'（图片与 PDF 各走独立通道）
+const aiMode = ref<'markdown' | 'image' | 'pdf'>('markdown')
 const aiText = ref('')
 const aiError = ref('')
 const aiParsing = ref(false)
@@ -263,14 +261,6 @@ function handleFileSelect(e: Event) {
   ;(e.target as HTMLInputElement).value = ''
 }
 
-function handleUploadPaste(e: ClipboardEvent) {
-  if (aiMode.value !== 'file' || docFlowState.value !== 'idle') return
-  const file = fileFromClipboard(e)
-  if (!file) return
-  e.preventDefault()
-  startFileParse(file)
-}
-
 async function startFileParse(file: File) {
   if (!isPdfFile(file) && !file.type.startsWith('image/')) {
     toast.error('仅支持图片或 PDF 文件')
@@ -381,7 +371,7 @@ async function compressToPage(file: File): Promise<File[]> {
   return [new File([compressed], `upload.${ext}`, { type: mimeType })]
 }
 
-/** 上传页图集 → 触发 AI 分类 → 高置信自动确认并解析，否则进入类型确认 */
+/** 上传页图集 → 触发 AI 分类 → 进入类型确认步骤 */
 async function uploadAndClassify(pages: File[], isPdf: boolean, originalPdf?: File) {
   docFlowState.value = 'uploading'
   aiBatchProgress.value = { current: 0, total: pages.length, text: '正在上传资料（最多 30 页）…' }
@@ -396,59 +386,8 @@ async function uploadAndClassify(pages: File[], isPdf: boolean, originalPdf?: Fi
   aiBatchProgress.value = { current: 1, total: 1, text: 'AI 正在识别资料类型…' }
   const cls = await withBackoffRetry(() => documentApi.classify(doc.id))
   currentDoc.value = cls.data.data
-  if (await tryAutoConfirm(currentDoc.value)) return
   docFlowState.value = 'confirm'
   aiBatchProgress.value = { current: 0, total: 0, text: '' }
-}
-
-const DOC_TYPE_LABELS: Record<string, string> = {
-  exam: '正式试卷',
-  mock_exam: '模拟试卷',
-  class_exercise: '课堂练习',
-  class_example: '课堂例题',
-  homework: '课后作业',
-  preview_exercise: '课前预习',
-  textbook_example: '教材例题',
-  teaching_material: '教学讲义/资料',
-  exercise_book: '教辅练习',
-  chapter_exercise: '章节练习',
-  unit_exercise: '单元练习',
-  special_training: '专题训练',
-  wrong_question: '错题整理',
-}
-
-function defaultTitle(doc: DocumentMeta): string {
-  return (
-    doc.ai_classification?.title
-    || doc.title
-    || doc.file_name.replace(/\.[^.]+$/, '')
-    || '未命名资料'
-  ).trim()
-}
-
-/** 高置信且非 unknown/mixed/other 时跳过类型确认页，元数据可在工作台补 */
-function buildAutoConfirmBody(doc: DocumentMeta): ConfirmDocumentRequest | null {
-  const cls = doc.ai_classification
-  if (!cls) return null
-  const t = cls.document_type as DocumentType
-  if (!t || t === 'unknown' || t === 'mixed' || t === 'other') return null
-  if ((cls.confidence ?? 0) < 0.6) return null
-  const title = defaultTitle(doc)
-  if (t === 'exam' || t === 'mock_exam') {
-    return { document_type: t, title, paper_meta: { title } }
-  }
-  return { document_type: t, title }
-}
-
-async function tryAutoConfirm(doc: DocumentMeta): Promise<boolean> {
-  const body = buildAutoConfirmBody(doc)
-  if (!body) return false
-  const label = DOC_TYPE_LABELS[body.document_type] || body.document_type
-  const ok = await onConfirmDoc(body, { silent: true })
-  if (ok) {
-    toast.success(`已按「${label}」开始解析，来源信息可在工作台补充`)
-  }
-  return ok
 }
 
 function resetDocFlow() {
@@ -466,23 +405,19 @@ function resetDocFlow() {
 /** 用户确认资料类型 → 创建解析任务（P0-C）
  *  PDF 通道以 pdf_direct 模式建任务：仅直连解析，失败回 pdf_fallback 让用户选择回退；
  *  图片通道缺省模式（自动降级，与既有行为一致） */
-async function onConfirmDoc(body: ConfirmDocumentRequest, opts?: { silent?: boolean }): Promise<boolean> {
+async function onConfirmDoc(body: ConfirmDocumentRequest) {
   const doc = currentDoc.value
-  if (!doc) return false
+  if (!doc) return
   docConfirming.value = true
   try {
     const res = await documentApi.confirm(doc.id, body)
     currentDoc.value = res.data.data
-    if (!opts?.silent) toast.success('资料类型已确认，开始解析')
+    toast.success('资料类型已确认，开始解析')
     const parseMode = docFlowKind.value === 'pdf' ? 'pdf_direct' : undefined
     pdfDirectActive.value = parseMode === 'pdf_direct'
     await startTask(doc.id, parseMode)
-    return true
   } catch (e: any) {
     toast.error(e?.response?.data?.error || e?.message || '确认失败')
-    docFlowState.value = 'confirm'
-    aiBatchProgress.value = { current: 0, total: 0, text: '' }
-    return false
   } finally {
     docConfirming.value = false
   }
@@ -658,12 +593,7 @@ watch(pollTask, async (t) => {
     if (pdfDirectActive.value && errMsg.startsWith('PDF_DIRECT_FAILED')) {
       pdfDirectActive.value = false
       pdfFallbackReason.value = errMsg.replace(/^PDF_DIRECT_FAILED:?\s*/, '')
-      if (currentDoc.value) {
-        toast.info('PDF 直连解析失败，已自动改为逐页识别')
-        fallbackToPageOcr()
-      } else {
-        docFlowState.value = 'pdf_fallback'
-      }
+      docFlowState.value = 'pdf_fallback'
     } else {
       toast.error(errMsg)
       docFlowState.value = 'confirm'
@@ -758,80 +688,90 @@ defineExpose({
     snapshotRestoreConfirm.value = true
   },
   triggerFileParse: (file: File) => {
-    aiMode.value = 'file'
     show.value = true
     startFileParse(file)
   }
-})
-
-watch(show, (v) => {
-  if (v) window.addEventListener('paste', handleUploadPaste)
-  else window.removeEventListener('paste', handleUploadPaste)
-})
-
-onBeforeUnmount(() => {
-  window.removeEventListener('paste', handleUploadPaste)
 })
 </script>
 
 <template>
   <div>
     <!-- AI 智能识别弹窗 -->
-    <!-- width 固定 680px：上传 / 粘贴文本切换时外框尺寸保持一致 -->
-    <AppModal v-model="show" title="智能导入" width="680px">
+    <!-- width 固定 680px：三个 Tab（Markdown/图片/PDF）切换时外框尺寸完全一致 -->
+    <AppModal v-model="show" title="AI 智能识别" width="680px">
       <div class="ai-dialog-body">
         <!-- 输入区 -->
         <div v-if="!aiResult" class="ai-input-section">
-          <!-- 模式切换：默认上传文件，粘贴文本为高级入口 -->
+          <!-- 模式切换 Tab（图片 / PDF 各走独立解析通道） -->
           <div class="ai-mode-tabs">
-            <button :class="{ active: aiMode === 'file' }" @click="aiMode = 'file'">上传文件</button>
-            <button :class="{ active: aiMode === 'markdown' }" @click="aiMode = 'markdown'">粘贴文本</button>
+            <button :class="{ active: aiMode === 'markdown' }" @click="aiMode = 'markdown'">Markdown 粘贴</button>
+            <button :class="{ active: aiMode === 'image' }" @click="aiMode = 'image'">图片识别</button>
+            <button :class="{ active: aiMode === 'pdf' }" @click="aiMode = 'pdf'">PDF 识别</button>
           </div>
 
-          <!-- Markdown 模式：高级入口，Prompt 默认折叠 -->
+          <!-- Markdown 模式：引导卡片（折叠式提示词） -->
           <div v-if="aiMode === 'markdown'" class="ai-guide-card">
-            <p class="ai-guide-lead">已有结构化 Markdown 时粘贴到下方，系统会解析并填入表单。</p>
+            <!-- 步骤指示 -->
+            <div class="ai-guide-steps">
+              <div class="ai-guide-step">
+                <span class="ai-step-num">1</span>
+                <span class="ai-step-text">复制下方标准提示词并发送给 AI</span>
+              </div>
+              <div class="ai-guide-step">
+                <span class="ai-step-num">2</span>
+                <span class="ai-step-text">将 AI 生成的 Markdown 粘贴到下方文本框</span>
+              </div>
+            </div>
+
+            <!-- 折叠的提示词详情 -->
             <details class="ai-prompt-details">
               <summary class="ai-prompt-summary">
                 <span class="ai-prompt-summary-text">
                   <AppIcon name="chevron-down" :size="14" />
-                  <span>没有现成文本？复制标准 Prompt 给外部 AI</span>
+                  <span>查看完整提示词</span>
                 </span>
               </summary>
               <div class="ai-prompt-preview">{{ RECOMMENDED_PROMPT }}</div>
-              <AppButton
-                class="ai-copy-btn"
-                :variant="promptCopied ? 'success' : 'primary'"
-                size="md"
-                @click="copyPrompt"
-              >
-                <AppIcon :name="promptCopied ? 'check-circle' : 'copy'" :size="16" />
-                {{ promptCopied ? '已复制' : '复制标准 Prompt' }}
-              </AppButton>
             </details>
+
+            <!-- 一键复制按钮（含成功态视觉反馈） -->
+            <AppButton
+              class="ai-copy-btn"
+              :variant="promptCopied ? 'success' : 'primary'"
+              size="md"
+              @click="copyPrompt"
+            >
+              <AppIcon :name="promptCopied ? 'check-circle' : 'copy'" :size="16" />
+              {{ promptCopied ? '已复制，去粘贴到 AI' : '一键复制标准 Prompt' }}
+            </AppButton>
           </div>
 
-          <!-- 图片/PDF 统一上传 -->
-          <div v-if="aiMode === 'file'" class="ai-upload-section">
-            <!-- ① 选文件 -->
+          <!-- 图片/PDF 上传区（V2.1.1：上传 → 分类 → 确认类型 → 解析）；
+               idle 态按 tab 区分通道，非 idle 态两个通道共用流程状态机 -->
+          <div v-if="aiMode === 'image' || aiMode === 'pdf'" class="ai-upload-section">
+            <!-- ① 选文件（图片：图片 OCR 通道；PDF：优先直连解析） -->
             <template v-if="docFlowState === 'idle'">
               <div
                 class="ai-upload-area"
                 :class="{ dragover: aiUploadAreaHover }"
-                tabindex="0"
                 @dragover.prevent="aiUploadAreaHover = true"
                 @dragleave.prevent="aiUploadAreaHover = false"
                 @drop.prevent="handleFileDrop"
                 @click="fileInputRef?.click()"
-                @paste="handleUploadPaste"
               >
                 <AppIcon name="upload" :size="48" />
-                <p class="ai-upload-hint">点击、拖拽或粘贴截图</p>
-                <p class="ai-upload-sub">支持 JPEG / PNG / WebP / PDF，上传后自动拆题</p>
+                <template v-if="aiMode === 'pdf'">
+                  <p class="ai-upload-hint">点击或拖拽上传 PDF 文件</p>
+                  <p class="ai-upload-sub">将优先尝试 PDF 直连解析，失败后可选择拆分图片逐页识别</p>
+                </template>
+                <template v-else>
+                  <p class="ai-upload-hint">点击或拖拽上传图片文件</p>
+                  <p class="ai-upload-sub">支持 JPEG / PNG / WebP</p>
+                </template>
                 <input
                   ref="fileInputRef"
                   type="file"
-                  accept="image/*,application/pdf,.pdf"
+                  :accept="aiMode === 'pdf' ? 'application/pdf' : 'image/*'"
                   style="display:none"
                   @change="handleFileSelect"
                 />
@@ -909,6 +849,7 @@ onBeforeUnmount(() => {
 
           <!-- Markdown 模式：文本输入区 -->
           <template v-if="aiMode === 'markdown'">
+            <p class="ai-hint">粘贴 AI 按推荐格式输出的 Markdown，系统将自动解析并填入表单。</p>
             <textarea
               v-model="aiText"
               class="ai-textarea"
@@ -1050,13 +991,6 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 12px;
-}
-
-.ai-guide-lead {
-  margin: 0;
-  font-size: 13px;
-  color: var(--text-secondary);
-  line-height: 1.5;
 }
 
 .ai-guide-steps {

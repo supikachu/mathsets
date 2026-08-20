@@ -10,7 +10,7 @@
       <header class="top-bar">
         <div class="top-bar-left">
           <AppButton variant="ghost" size="sm" @click="handleBack"><AppIcon name="chevron-left" :size="15" /> 返回</AppButton>
-          <AppButton variant="ghost" size="sm" @click="handleAi"><AppIcon name="sparkles" :size="15" /> 智能导入</AppButton>
+          <AppButton variant="ghost" size="sm" @click="handleAi"><AppIcon name="sparkles" :size="15" /> AI 智能识别</AppButton>
           <h1 class="edit-title">{{ isNew ? '录入新题' : '编辑题目' }}</h1>
           <AppBadge v-if="!isNew" color="gray">v{{ form.version }}</AppBadge>
         </div>
@@ -398,11 +398,6 @@ import { hasUnfinishedSnapshot, clearBatchSnapshot, type BatchSnapshot } from '@
 import { processMarkdownImages, type UploadCache } from '@/utils/markdownImages'
 import { uploadsApi } from '@/api/client'
 import type { ImageConfig, ImageClickPayload } from '@/components/LatexRender.vue'
-import {
-  fileFromClipboard,
-  takePendingImportFile,
-  takePendingImportOpen,
-} from '@/utils/pendingImport'
 
 // 常驻组件（首屏即需）
 import LivePreviewCard from './edit/components/LivePreviewCard.vue'
@@ -445,10 +440,10 @@ const aiHighlightIds = ref<string[]>([])
 const selectionCache = new Map<string, { chapter: string[]; knowledge: string[]; method: string[] }>()
 const applyingAiResult = ref(false)
 const aiDialogRef = ref<InstanceType<typeof AiRecognizeDialog> | null>(null)
+// AiRecognizeDialog 异步加载前的待恢复快照：
 // onMounted 时若异步组件尚未挂载，aiDialogRef.value 为 null，
 // 缓存快照并 watch aiDialogRef 变化，组件就绪后补发 triggerSnapshotRestore
 const pendingSnapshotRestore = ref<BatchSnapshot | null>(null)
-const pendingImportFile = ref<File | null>(null)
 
 // ===== 批量录题工作台模式 =====
 // questionList 存放每道题的快照（plain object），activeIndex 指向当前编辑的题目
@@ -737,38 +732,6 @@ onBeforeRouteLeave((to) => {
 // AI trigger
 function handleAi() {
   showAiDialog.value = true
-}
-
-function consumePendingImport() {
-  const inst = aiDialogRef.value
-  const file = takePendingImportFile()
-  const open = takePendingImportOpen() || route.query.import === '1' || route.query.import === 'true'
-  if (file) {
-    showAiDialog.value = true
-    if (inst) inst.triggerFileParse(file)
-    else pendingImportFile.value = file
-  } else if (open) {
-    showAiDialog.value = true
-  }
-  if (route.query.import) {
-    const nextQuery = { ...route.query }
-    delete nextQuery.import
-    router.replace({ path: route.path, query: nextQuery })
-  }
-}
-
-function onEditPaste(e: ClipboardEvent) {
-  if (!isNew || showAiDialog.value) return
-  const target = e.target as HTMLElement | null
-  if (target?.closest('textarea, input, [contenteditable="true"]')) return
-  const file = fileFromClipboard(e)
-  if (!file) return
-  e.preventDefault()
-  showAiDialog.value = true
-  nextTick(() => {
-    if (aiDialogRef.value) aiDialogRef.value.triggerFileParse(file)
-    else pendingImportFile.value = file
-  })
 }
 
 function onAiApplied() {
@@ -2261,10 +2224,8 @@ function handleBeforeUnload(e: BeforeUnloadEvent) {
 
 onMounted(() => {
   window.addEventListener('beforeunload', handleBeforeUnload)
-  window.addEventListener('paste', onEditPaste)
   loadSpaceMembers()
   loadTags()
-  consumePendingImport()
 
   // 优先处理：从其他页面携带 parsedQuestions 进入批量工作台（新批次，跳过草稿恢复）
   // 用法：router.push({ path: '/questions/new', state: { parsedQuestions: [...] } })
@@ -2285,15 +2246,13 @@ onMounted(() => {
   }
 
   // 单题/批量草稿恢复：批量草稿优先 → 单题草稿回退
-  // 智能导入带文件进入时不恢复旧草稿，避免冲掉即将解析的批次
   loadQuestion().then(() => {
     if (!isNew) restoreDraft()
   })
-  if (isNew && !pendingImportFile.value) restoreDraft()
+  if (isNew) restoreDraft()
 })
 
 onMounted(async () => {
-  if (pendingImportFile.value) return
   const snapshot = await hasUnfinishedSnapshot()
   if (snapshot) {
     if (aiDialogRef.value) {
@@ -2305,22 +2264,16 @@ onMounted(async () => {
   }
 })
 
-// AiRecognizeDialog 异步加载完成后补发快照恢复 / 待导入文件
+// AiRecognizeDialog 异步加载完成后补发快照恢复
 watch(aiDialogRef, (inst) => {
-  if (!inst) return
-  if (pendingSnapshotRestore.value) {
+  if (inst && pendingSnapshotRestore.value) {
     inst.triggerSnapshotRestore(pendingSnapshotRestore.value)
     pendingSnapshotRestore.value = null
-  }
-  if (pendingImportFile.value) {
-    inst.triggerFileParse(pendingImportFile.value)
-    pendingImportFile.value = null
   }
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('beforeunload', handleBeforeUnload)
-  window.removeEventListener('paste', onEditPaste)
   if (autoSaveTimer) clearTimeout(autoSaveTimer)
   if (draftStatusTimer) clearTimeout(draftStatusTimer)
 })
