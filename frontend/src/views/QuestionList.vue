@@ -1,5 +1,17 @@
 <template>
-  <div class="ql-page">
+  <div
+    class="ql-page"
+    :class="{ 'is-import-drag': importDragOver }"
+    @dragenter.prevent="onImportDragEnter"
+    @dragover.prevent="onImportDragOver"
+    @dragleave="onImportDragLeave"
+    @drop.prevent="onImportDrop"
+  >
+    <div v-if="importDragOver" class="ql-import-overlay">
+      <AppIcon name="upload" :size="40" />
+      <p class="ql-import-overlay-title">松开即可智能导入</p>
+      <p class="ql-import-overlay-sub">支持图片、PDF，也可 Ctrl+V 粘贴截图</p>
+    </div>
     <!-- ===== 主体：左侧知识树导航 + 右侧列表区 ===== -->
     <div class="ql-body">
       <!-- 左侧常驻知识树导航（替代旧的 KpTreePanel） -->
@@ -140,9 +152,19 @@
             <span class="ql-basket-count">{{ basket.count.value }}</span>
           </button>
 
-          <!-- 新建题目按钮 (Primary CTA: bg-blue-500 hover:bg-blue-600 rounded-full) -->
+          <!-- 智能导入：题库一级入口，拖拽/粘贴在页面级处理 -->
           <button
-            class="ql-new-btn flex items-center gap-1.5 px-4 h-9 bg-blue-500 hover:bg-blue-600 active:bg-blue-700 text-white rounded-full text-sm font-medium shadow-sm transition-colors cursor-pointer shrink-0"
+            class="ql-import-btn flex items-center gap-1.5 px-4 h-9 bg-blue-500 hover:bg-blue-600 active:bg-blue-700 text-white rounded-full text-sm font-medium shadow-sm transition-colors cursor-pointer shrink-0"
+            title="上传图片或 PDF，AI 拆题入库"
+            @click="goSmartImport()"
+          >
+            <AppIcon name="sparkles" :size="15" />
+            <span class="ql-import-label">智能导入</span>
+          </button>
+
+          <!-- 手工单题录入 -->
+          <button
+            class="ql-new-btn flex items-center gap-1.5 px-4 h-9 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 text-gray-700 dark:text-gray-200 hover:border-blue-500 hover:text-blue-500 rounded-full text-sm font-medium transition-colors cursor-pointer shadow-sm shrink-0"
             @click="$router.push('/questions/new')"
           >
             <AppIcon name="plus" :size="15" />
@@ -732,7 +754,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onBeforeUnmount, onActivated, watch, nextTick } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount, onActivated, onDeactivated, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { questionApi, type QuestionSummary, type QuestionDetail, type QuestionQuery, type GradeLevel, type SemesterType, type ExamType, type KnowledgeNodeSummary } from '@/api/client'
 import LatexRender from '@/components/LatexRender.vue'
@@ -752,6 +774,12 @@ import {
   diffBadgeColor,
   statusBadgeColor,
 } from '@/utils/questionDisplay'
+import {
+  fileFromClipboard,
+  isImportableFile,
+  setPendingImportFile,
+  setPendingImportOpen,
+} from '@/utils/pendingImport'
 
 // keep-alive 缓存匹配名：AppLayout 中 <keep-alive :include="['QuestionList']"> 据此识别
 defineOptions({ name: 'QuestionList' })
@@ -760,6 +788,62 @@ const router = useRouter()
 const toast = useToast()
 const space = useSpaceStore()
 const basket = useQuestionBasket()
+
+const importDragOver = ref(false)
+let importDragDepth = 0
+
+function goSmartImport(file?: File) {
+  if (file) {
+    if (!isImportableFile(file)) {
+      toast.warning('请上传图片或 PDF 文件')
+      return
+    }
+    setPendingImportFile(file)
+  } else {
+    setPendingImportOpen(true)
+  }
+  router.push('/questions/new?import=1')
+}
+
+function onImportDragEnter(e: DragEvent) {
+  if (!e.dataTransfer?.types?.includes('Files')) return
+  importDragDepth += 1
+  importDragOver.value = true
+}
+
+function onImportDragOver(e: DragEvent) {
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'
+}
+
+function onImportDragLeave() {
+  importDragDepth = Math.max(0, importDragDepth - 1)
+  if (importDragDepth === 0) importDragOver.value = false
+}
+
+function onImportDrop(e: DragEvent) {
+  importDragDepth = 0
+  importDragOver.value = false
+  const file = e.dataTransfer?.files?.[0]
+  if (file) goSmartImport(file)
+}
+
+function onListPaste(e: ClipboardEvent) {
+  const target = e.target as HTMLElement | null
+  if (target?.closest('input, textarea, [contenteditable="true"]')) return
+  const file = fileFromClipboard(e)
+  if (!file) return
+  e.preventDefault()
+  goSmartImport(file)
+}
+
+function bindListPaste() {
+  window.removeEventListener('paste', onListPaste)
+  window.addEventListener('paste', onListPaste)
+}
+
+function unbindListPaste() {
+  window.removeEventListener('paste', onListPaste)
+}
 
 // 左侧知识树导航选中的节点 ID（空字符串 = 全部题目）
 const navNodeId = ref('')
@@ -1559,6 +1643,7 @@ onMounted(() => {
   fetchList()
   fetchPendingCount()
   fetchIncompleteCount()
+  bindListPaste()
 })
 
 // keep-alive 缓存组件从详情页返回时触发 —— onMounted 不会再次执行
@@ -1569,10 +1654,20 @@ onActivated(() => {
   fetchList()
   fetchPendingCount()
   fetchIncompleteCount()
+  importDragDepth = 0
+  importDragOver.value = false
+  bindListPaste()
+})
+
+onDeactivated(() => {
+  unbindListPaste()
+  importDragDepth = 0
+  importDragOver.value = false
 })
 
 onBeforeUnmount(() => {
   if (searchTimer) clearTimeout(searchTimer)
+  unbindListPaste()
 })
 </script>
 
@@ -1768,6 +1863,32 @@ onBeforeUnmount(() => {
   overflow: hidden; /* 锁定外层高度，彻底掐断全局滚动条 */
 }
 
+.ql-import-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: color-mix(in srgb, var(--bg-primary) 72%, transparent);
+  backdrop-filter: blur(8px);
+  border: 2px dashed var(--accent, #3b82f6);
+  color: var(--text-primary);
+  pointer-events: none;
+}
+.ql-import-overlay-title {
+  margin: 8px 0 0;
+  font-size: 18px;
+  font-weight: 650;
+}
+.ql-import-overlay-sub {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
 /* ===== 主体：左侧知识树 + 右侧列表区 ===== */
 /* 浅灰背景托起白色卡片，padding+gap 营造呼吸感 */
 .ql-body {
@@ -1860,16 +1981,14 @@ onBeforeUnmount(() => {
 }
 
 .ql-filter-btn:active,
-.ql-new-btn:active {
+.ql-new-btn:active,
+.ql-import-btn:active {
   transform: scale(0.97);
 }
 
-.ql-new-btn:hover {
+.ql-new-btn:hover,
+.ql-import-btn:hover {
   opacity: 0.85;
-}
-
-.ql-new-btn:active {
-  transform: scale(0.96);
 }
 
 /* 试题篮按钮 */
@@ -3176,11 +3295,13 @@ onBeforeUnmount(() => {
 
 /* ── 中窄屏 (< 1280px)：极简图标化 + 动态收缩策略 ── */
 @media (max-width: 1279px) {
-  /* +新建题目 图标化：隐藏文字，缩为方形图标按钮 */
-  .ql-new-label {
+  /* +新建题目 / 智能导入 图标化：隐藏文字，缩为方形图标按钮 */
+  .ql-new-label,
+  .ql-import-label {
     display: none;
   }
-  .ql-new-btn {
+  .ql-new-btn,
+  .ql-import-btn {
     padding: 0;
     width: 36px;
     justify-content: center;
