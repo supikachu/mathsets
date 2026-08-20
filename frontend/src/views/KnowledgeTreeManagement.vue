@@ -439,7 +439,7 @@ function treeKindIcon(kind: KnowledgeTreeKind): string {
 }
 
 function treeKindLabel(kind: KnowledgeTreeKind): string {
-  if (kind === 'ability') return '能力'
+  if (kind === 'ability') return '专题'
   if (kind === 'chapter') return '章节'
   return '知识'
 }
@@ -679,7 +679,7 @@ onMounted(loadTrees)
       <div class="dialog-body">
         <div class="form-group">
           <label>编码 <span class="required">*</span></label>
-          <input v-model="newTree.code" placeholder="如：math_knowledge" class="form-input" />
+          <input v-model="newTree.code" placeholder="如：math_knowledge_high / math_method_high" class="form-input" />
         </div>
         <div class="form-group">
           <label>名称 <span class="required">*</span></label>
@@ -689,7 +689,7 @@ onMounted(loadTrees)
           <label>类型</label>
           <select v-model="newTree.kind" class="form-input">
             <option value="knowledge">知识树</option>
-            <option value="ability">能力树</option>
+            <option value="ability">专题技法树</option>
             <option value="chapter">章节树</option>
           </select>
         </div>

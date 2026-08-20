@@ -12,10 +12,7 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 async fn create_test_app() -> Option<(axum::Router, sqlx::PgPool)> {
-    let _ = dotenvy::dotenv();
-    let database_url = std::env::var("DATABASE_URL_TEST")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .ok()?;
+    let database_url = mathset::testing::database_url()?;
     let pool = db::create_pool(&database_url, 5).await;
     db::run_migrations(&pool).await;
     let state = AppState::new(
@@ -164,7 +161,7 @@ async fn create_question(app: &mut axum::Router, token: &str, stem: &str) -> Str
 #[tokio::test]
 async fn test_candidate_review_four_branches() {
     let Some((mut app, pool)) = create_test_app().await else {
-        eprintln!("跳过：未配置 DATABASE_URL");
+        eprintln!("跳过：未配置 DATABASE_URL_TEST");
         return;
     };
     let (admin_token, _) = register_admin(&mut app, &pool).await;
@@ -240,6 +237,11 @@ async fn test_candidate_review_four_branches() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["candidate"]["raw_name"], "参数分离法");
     assert!(body["source_stem"].is_string());
+    assert!(body["source_question"]["stem"].is_string());
+    assert!(body["source_question"]["question_type"].is_string());
+    // 建议节点/标签摘要字段始终返回（无建议时为 null）
+    assert!(body.get("suggested_node").is_some());
+    assert!(body.get("suggested_tag").is_some());
 
     // ── 分支 1：new_node（接受为新标签） ──
     let (status, body) = post_auth(
@@ -304,6 +306,13 @@ async fn test_candidate_review_four_branches() {
             .await
             .expect("查询审计失败");
     assert_eq!(records, 1, "merge 分支应写审计记录");
+    let merge_status: String =
+        sqlx::query_scalar("SELECT status FROM tag_candidates WHERE id = $1")
+            .bind(c_merge)
+            .fetch_one(&pool)
+            .await
+            .expect("查询 merge 状态失败");
+    assert_eq!(merge_status, "merged");
 
     // ── 分支 4：reject ──
     let (status, _) = post_auth(
@@ -335,7 +344,7 @@ async fn test_candidate_review_four_branches() {
 #[tokio::test]
 async fn test_merge_knowledge_node_cycle_and_relations() {
     let Some((mut app, pool)) = create_test_app().await else {
-        eprintln!("跳过：未配置 DATABASE_URL");
+        eprintln!("跳过：未配置 DATABASE_URL_TEST");
         return;
     };
     let (admin_token, _) = register_admin(&mut app, &pool).await;
@@ -479,7 +488,7 @@ async fn test_merge_knowledge_node_cycle_and_relations() {
 #[tokio::test]
 async fn test_search_filters_year_region_document_type() {
     let Some((mut app, pool)) = create_test_app().await else {
-        eprintln!("跳过：未配置 DATABASE_URL");
+        eprintln!("跳过：未配置 DATABASE_URL_TEST");
         return;
     };
     let (token, user_id) = register_and_login(&mut app).await;
@@ -588,7 +597,7 @@ async fn test_search_filters_year_region_document_type() {
 #[tokio::test]
 async fn test_tag_usage_endpoint() {
     let Some((mut app, pool)) = create_test_app().await else {
-        eprintln!("跳过：未配置 DATABASE_URL");
+        eprintln!("跳过：未配置 DATABASE_URL_TEST");
         return;
     };
     // 全局预置标签需要管理员权限
@@ -609,4 +618,277 @@ async fn test_tag_usage_endpoint() {
     assert_eq!(body["name"], "数形结合");
     assert_eq!(body["category"], "method");
     assert!(body["question_count"].is_number());
+}
+
+/// tag_candidates.kind 支持 pattern（题型专题），与 method（通用方法）隔离
+#[tokio::test]
+async fn test_pattern_kind_candidate_list_filter() {
+    let Some((mut app, pool)) = create_test_app().await else {
+        eprintln!("跳过：未配置 DATABASE_URL_TEST");
+        return;
+    };
+    let (admin_token, _) = register_admin(&mut app, &pool).await;
+    let q = create_question(&mut app, &admin_token, "题型专题候选测试").await;
+    let q_uuid = Uuid::parse_str(&q).unwrap();
+    let cid = Uuid::new_v4();
+    let raw = format!("凹凸反转_{}", cid.simple());
+    sqlx::query(
+        r#"
+        INSERT INTO tag_candidates (id, kind, raw_name, normalized_name, ai_confidence, match_score, source_question_id)
+        VALUES ($1, 'pattern', $2, $2, 0.7, 0, $3)
+        "#,
+    )
+    .bind(cid)
+    .bind(&raw)
+    .bind(q_uuid)
+    .execute(&pool)
+    .await
+    .expect("插入 pattern 候选失败");
+
+    let (status, body) = get_auth(
+        &mut app,
+        "/api/v1/admin/tag-candidates?kind=pattern&status=pending",
+        &admin_token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let items = body["items"].as_array().expect("items 应为数组");
+    assert!(
+        items.iter().any(|c| c["id"] == json!(cid.to_string()) && c["kind"] == "pattern"),
+        "应按 kind=pattern 过滤到刚插入的候选: {body}"
+    );
+}
+
+async fn insert_candidate(
+    pool: &sqlx::PgPool,
+    kind: &str,
+    target_type: &str,
+    raw: &str,
+    question_id: Uuid,
+) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO tag_candidates (id, kind, target_type, raw_name, normalized_name, ai_confidence, match_score, source_question_id)
+        VALUES ($1, $2, $3, $4, $4, 0.8, 0, $5)
+        "#,
+    )
+    .bind(id)
+    .bind(kind)
+    .bind(target_type)
+    .bind(raw)
+    .bind(question_id)
+    .execute(pool)
+    .await
+    .expect("插入候选失败");
+    id
+}
+
+async fn insert_tree(pool: &sqlx::PgPool, kind: &str) -> Uuid {
+    let tree_id = Uuid::new_v4();
+    let code = format!("tg_{}_{}", kind, Uuid::new_v4().simple());
+    sqlx::query(
+        "INSERT INTO knowledge_trees (id, code, name, kind, is_active, created_at, updated_at) VALUES ($1, $2, $3, $4::knowledge_tree_kind, TRUE, NOW(), NOW())",
+    )
+    .bind(tree_id)
+    .bind(&code)
+    .bind(format!("树-{kind}"))
+    .bind(kind)
+    .execute(pool)
+    .await
+    .expect("插入知识树失败");
+    tree_id
+}
+
+async fn insert_node(pool: &sqlx::PgPool, tree_id: Uuid, name: &str, path: &str) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO knowledge_nodes (id, tree_id, path, depth, name, is_active, status, source, question_count, created_at, updated_at) VALUES ($1, $2, $3::ltree, 1, $4, TRUE, 'active', 'system', 0, NOW(), NOW())",
+    )
+    .bind(id)
+    .bind(tree_id)
+    .bind(path)
+    .bind(name)
+    .execute(pool)
+    .await
+    .expect("插入节点失败");
+    id
+}
+
+#[tokio::test]
+async fn test_candidate_kind_tree_mismatch_rejected() {
+    let Some((mut app, pool)) = create_test_app().await else {
+        eprintln!("跳过：未配置 DATABASE_URL_TEST");
+        return;
+    };
+    let (admin_token, _) = register_admin(&mut app, &pool).await;
+    let knowledge_tree = insert_tree(&pool, "knowledge").await;
+    let q = create_question(&mut app, &admin_token, "维度校验题").await;
+    let cid = insert_candidate(
+        &pool,
+        "chapter",
+        "knowledge_node",
+        "人教A版高一上",
+        Uuid::parse_str(&q).unwrap(),
+    )
+    .await;
+
+    let (status, body) = post_auth(
+        &mut app,
+        &format!("/api/v1/admin/tag-candidates/{cid}/approve"),
+        json!({ "action": "new_node", "tree_id": knowledge_tree }),
+        &admin_token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("章节"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn test_candidate_parent_must_belong_to_tree() {
+    let Some((mut app, pool)) = create_test_app().await else {
+        eprintln!("跳过：未配置 DATABASE_URL_TEST");
+        return;
+    };
+    let (admin_token, _) = register_admin(&mut app, &pool).await;
+    let tree_a = insert_tree(&pool, "knowledge").await;
+    let tree_b = insert_tree(&pool, "knowledge").await;
+    let parent = insert_node(&pool, tree_a, "函数", "fn_a").await;
+    let q = create_question(&mut app, &admin_token, "父节点树校验题").await;
+    let cid = insert_candidate(
+        &pool,
+        "knowledge",
+        "knowledge_node",
+        "二次函数",
+        Uuid::parse_str(&q).unwrap(),
+    )
+    .await;
+
+    let (status, body) = post_auth(
+        &mut app,
+        &format!("/api/v1/admin/tag-candidates/{cid}/approve"),
+        json!({ "action": "new_node", "tree_id": tree_b, "parent_id": parent, "name": "二次函数" }),
+        &admin_token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("父节点"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn test_method_candidate_creates_tag_and_reject_persists_reason() {
+    let Some((mut app, pool)) = create_test_app().await else {
+        eprintln!("跳过：未配置 DATABASE_URL_TEST");
+        return;
+    };
+    let (admin_token, _) = register_admin(&mut app, &pool).await;
+    let q = create_question(&mut app, &admin_token, "方法候选题").await;
+    let q_uuid = Uuid::parse_str(&q).unwrap();
+    let unique = format!("参数分离_{}", Uuid::new_v4().simple());
+    let c_new = insert_candidate(&pool, "method", "tag", &unique, q_uuid).await;
+    let c_reject = insert_candidate(&pool, "method", "tag", "应拒绝的方法", q_uuid).await;
+
+    let (status, body) = post_auth(
+        &mut app,
+        &format!("/api/v1/admin/tag-candidates/{c_new}/approve"),
+        json!({ "action": "new_node", "name": unique }),
+        &admin_token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let tag_id = body["target_tag_id"].as_str().expect("应返回 target_tag_id");
+    let tag_id = Uuid::parse_str(tag_id).unwrap();
+    let category: String = sqlx::query_scalar("SELECT category::text FROM tags WHERE id = $1")
+        .bind(tag_id)
+        .fetch_one(&pool)
+        .await
+        .expect("查询新标签失败");
+    assert_eq!(category, "method");
+    let linked: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM question_tags_relation WHERE question_id = $1 AND tag_id = $2",
+    )
+    .bind(q_uuid)
+    .bind(tag_id)
+    .fetch_one(&pool)
+    .await
+    .expect("查询标签关联失败");
+    assert_eq!(linked, 1);
+    let use_count: i32 = sqlx::query_scalar("SELECT use_count FROM tags WHERE id = $1")
+        .bind(tag_id)
+        .fetch_one(&pool)
+        .await
+        .expect("查询 use_count 失败");
+    assert_eq!(use_count, 1);
+
+    let (status, _) = get_auth(
+        &mut app,
+        "/api/v1/admin/tag-candidates?target_type=tag&kind=method&status=approved",
+        &admin_token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = post_auth(
+        &mut app,
+        &format!("/api/v1/admin/tag-candidates/{c_reject}/reject"),
+        json!({ "reason": "不是通用方法" }),
+        &admin_token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let note: Option<String> =
+        sqlx::query_scalar("SELECT review_note FROM tag_candidates WHERE id = $1")
+            .bind(c_reject)
+            .fetch_one(&pool)
+            .await
+            .expect("查询拒绝原因失败");
+    assert_eq!(note.as_deref(), Some("不是通用方法"));
+}
+
+#[tokio::test]
+async fn test_approve_does_not_increment_count_when_relation_exists() {
+    let Some((mut app, pool)) = create_test_app().await else {
+        eprintln!("跳过：未配置 DATABASE_URL_TEST");
+        return;
+    };
+    let (admin_token, _) = register_admin(&mut app, &pool).await;
+    let tree_id = insert_tree(&pool, "knowledge").await;
+    let node_id = insert_node(&pool, tree_id, "二次函数", "quad").await;
+    let q = create_question(&mut app, &admin_token, "计数幂等题").await;
+    let q_uuid = Uuid::parse_str(&q).unwrap();
+    sqlx::query(
+        "INSERT INTO question_knowledge_nodes (question_id, node_id, source, created_at) VALUES ($1, $2, 'manual', NOW())",
+    )
+    .bind(q_uuid)
+    .bind(node_id)
+    .execute(&pool)
+    .await
+    .expect("预置关联失败");
+    let before: i32 = sqlx::query_scalar("SELECT question_count FROM knowledge_nodes WHERE id = $1")
+        .bind(node_id)
+        .fetch_one(&pool)
+        .await
+        .expect("查询计数失败");
+    let cid = insert_candidate(&pool, "knowledge", "knowledge_node", "二次函数图像", q_uuid).await;
+
+    let (status, body) = post_auth(
+        &mut app,
+        &format!("/api/v1/admin/tag-candidates/{cid}/approve"),
+        json!({ "action": "alias", "target_node_id": node_id }),
+        &admin_token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let count: i32 = sqlx::query_scalar("SELECT question_count FROM knowledge_nodes WHERE id = $1")
+        .bind(node_id)
+        .fetch_one(&pool)
+        .await
+        .expect("查询计数失败");
+    assert_eq!(count, before, "已有关联时不应再增加 question_count");
 }

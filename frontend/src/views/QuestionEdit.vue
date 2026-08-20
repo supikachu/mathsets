@@ -72,6 +72,15 @@
         </AppButton>
       </div>
 
+      <!-- hash 命中已有题目：提示查看，不自动复用 -->
+      <div v-if="currentExistingQuestionId" class="classify-retry-banner">
+        <AppIcon name="alert" :size="14" />
+        <span class="classify-retry-text">
+          题库中已有内容相同的题目。保存将创建新题，不会自动复用。
+        </span>
+        <router-link class="dup-link" :to="`/questions/${currentExistingQuestionId}`">查看已有题目</router-link>
+      </div>
+
       <!-- ==================== 主内容 三栏：编辑 + 预览 + 属性面板 ==================== -->
       <div class="main-content">
         <!-- 左栏：编辑 -->
@@ -275,10 +284,12 @@
           v-model:paperIds="paperIds"
           :selection-cache="selectionCache"
           :initial-node-names="initialNodeNames"
+          :initial-node-tree-ids="initialNodeTreeIds"
           :competenceTags="competenceTags"
           :methodTags="methodTags"
           :schoolTags="schoolTags"
           :form="form"
+          :question-id="currentQuestionId"
         />
       </div>
     </template>
@@ -294,6 +305,8 @@
       v-model="showAiDialog"
       v-model:applyingAiResult="applyingAiResult"
       v-model:knowledgeNodeIds="knowledgeNodeIds"
+      v-model:chapterNodeIds="chapterNodeIds"
+      v-model:methodNodeIds="methodNodeIds"
       v-model:aiGeneratedFields="aiGeneratedFields"
       :form="form"
       @applied="onAiApplied"
@@ -375,7 +388,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick, defineAsyncComponent } from 'vue'
 import { useRoute, useRouter, onBeforeRouteLeave } from 'vue-router'
-import { questionApi, spaceApi, tagsApi, paperApi, type SpaceMemberInfo, type Tag, type ParsedQuestion } from '@/api/client'
+import { questionApi, spaceApi, tagsApi, paperApi, type SpaceMemberInfo, type Tag, type ParsedQuestion, type TaggingUnmatched, type TaggingMatch } from '@/api/client'
 import { AppButton, AppBadge, AppModal, AppConfirm, AppIcon } from '@/components/ui'
 import { useToast } from '@/composables/useToast'
 import { getKnowledgeTreeList } from '@/composables/useKnowledgeTreeCache'
@@ -478,6 +491,7 @@ function saveBatchDraft() {
           hasUnsaved: (cur?.hasUnsaved && !cur?.saved) || form.hasUnsaved,
           // 保留暂存链路元信息：草稿恢复后仍能携带 ai_meta 落库
           aiMeta: cur?.aiMeta,
+          existingQuestionId: cur?.existingQuestionId,
         }
       }
       return JSON.parse(JSON.stringify(q))
@@ -517,13 +531,27 @@ function hasUnsavedChanges(): boolean {
 
 // Selected Knowledge node IDs（与 AttributeSidePanel v-model 双向绑定）
 const knowledgeNodeIds = ref<string[]>([])
-// 章节 / 解题方法节点 ID（与 AttributeSidePanel v-model 双向绑定，提交时与知识点合并）
+// 章节 / 题型专题节点 ID（与 AttributeSidePanel v-model 双向绑定，提交时与知识点合并）
 const chapterNodeIds = ref<string[]>([])
 const methodNodeIds = ref<string[]>([])
 // 主知识点节点 ID（每题最多 1 个，跨三组节点单选；与 AttributeSidePanel v-model 双向绑定）
 const primaryKnowledgeNodeId = ref<string | null>(null)
+
+const currentQuestionId = computed(() => {
+  const batchId = questionList.value[activeIndex.value]?.savedQid as string | undefined
+  if (batchId) return batchId
+  if (!isNew && typeof route.params.id === 'string') return route.params.id
+  return null
+})
+
+const currentExistingQuestionId = computed(() => {
+  const id = questionList.value[activeIndex.value]?.existingQuestionId
+  return typeof id === 'string' && id ? id : ''
+})
 // 初始节点名称映射（编辑场景 loadQuestion 后填充，传给 AttributeSidePanel 展示 Tag）
 const initialNodeNames = ref<Record<string, string>>({})
+/** 节点 → tree_id（与 initialNodeNames 同步，供属性面板切树勾选） */
+const initialNodeTreeIds = ref<Record<string, string>>({})
 // 知识树分类元数据（knowledgeTreeApi.list）加载失败时的待分发节点
 // 保留 id/name/tree_id，重试后按 tree_id->kind 精准分发；绝不静默错分为知识点
 const pendingNodes = ref<{ id: string; name: string; tree_id: string }[]>([])
@@ -750,6 +778,11 @@ const form = reactive({
   // ── 主知识点（每题最多 1 个，跨三组节点单选；后端 DTO 字段对齐） ──
   primaryKnowledgeNodeId: null as string | null,
   tagIds: [] as string[],
+  cognitive_level: '' as string,
+  taggingSuggestionId: '' as string,
+  taggingUnmatched: [] as TaggingUnmatched[],
+  taggingUnmatchedIds: [] as string[],
+  taggingAliasMaps: [] as { unmatched_id: string; node_id?: string | null; tag_id?: string | null }[],
   reviewer: '' as string,
   reviewer_ids: [] as string[],
   internal_note: '',
@@ -1042,6 +1075,7 @@ function buildPayload() {
   if (form.sub_source_type) metadata.sub_source_type = form.sub_source_type
   metadata.stage = form.stage
   metadata.subject = form.subject
+  if (form.cognitive_level) metadata.cognitive_level = form.cognitive_level
   // 异步补全机制：无需解析标记写入 metadata.system_flags.no_analysis_needed
   metadata.system_flags = { no_analysis_needed: noAnalysisNeeded.value }
 
@@ -1075,6 +1109,13 @@ function buildPayload() {
   const currentSnapshot = questionList.value[activeIndex.value]
   if (currentSnapshot?.aiMeta && !currentSnapshot.savedQid) {
     payload.ai_meta = currentSnapshot.aiMeta
+  }
+  if (form.taggingSuggestionId) {
+    payload.ai_tagging_confirmation = {
+      suggestion_id: form.taggingSuggestionId,
+      unmatched_ids: form.taggingUnmatchedIds ?? [],
+      alias_maps: (form.taggingAliasMaps ?? []).filter((m) => m.node_id || m.tag_id),
+    }
   }
   switch (form.question_type) {
     case 'choice':
@@ -1353,6 +1394,7 @@ watch(activeIndex, async (newIdx, oldIdx) => {
         hasUnsaved: prev?.hasUnsaved ?? false,
         // 保留暂存链路元信息：切换 Tab 后再切回，保存时仍需携带 ai_meta 落库
         aiMeta: prev?.aiMeta,
+        existingQuestionId: prev?.existingQuestionId,
       }
     }
     // 2. 加载目标题到 form
@@ -1500,7 +1542,7 @@ async function loadSpaceMembers() {
   } catch { /* handled */ }
 }
 
-// 将扁平知识节点按 tree_id -> kind 映射分发到 章节/知识点/方法 三个数组
+// 将扁平知识节点按 tree_id -> kind 映射分发到 章节/知识点/题型专题 三个数组
 // 同时回填 primaryKnowledgeNodeId（来自 is_primary 字段，每题最多 1 个）
 // 返回 true 表示分发成功；树列表不可用时返回 false（调用方负责兜底，绝不静默错分）
 async function distributeNodesByTreeKind(
@@ -1533,6 +1575,7 @@ async function distributeNodesByTreeKind(
   primaryKnowledgeNodeId.value = primaryId
   form.primaryKnowledgeNodeId = primaryId
   initialNodeNames.value = nameMap
+  initialNodeTreeIds.value = Object.fromEntries(knodes.map((k) => [k.id, k.tree_id]))
   return true
 }
 
@@ -1577,6 +1620,7 @@ async function loadQuestion() {
     form.sub_source_type = meta.sub_source_type || ''
     form.stage = meta.stage === 'junior' ? 'junior' : 'senior'
     form.subject = meta.subject === 'physics' ? 'physics' : 'math'
+    form.cognitive_level = meta.cognitive_level || ''
     // 异步补全机制：回填无需解析标记
     const rawFlags = (meta.system_flags ?? {}) as Record<string, any>
     noAnalysisNeeded.value = !!rawFlags.no_analysis_needed
@@ -1600,6 +1644,7 @@ async function loadQuestion() {
         // 树列表加载失败：暂存原始节点（含 tree_id），不静默错分；UI 提示重试，提交时原样并入 payload
         pendingNodes.value = knodes
         initialNodeNames.value = Object.fromEntries(knodes.map(k => [k.id, k.name]))
+        initialNodeTreeIds.value = Object.fromEntries(knodes.map(k => [k.id, k.tree_id]))
         knowledgeNodeIds.value = []
         chapterNodeIds.value = []
         methodNodeIds.value = []
@@ -1622,6 +1667,7 @@ async function loadQuestion() {
       primaryKnowledgeNodeId.value = null
       form.primaryKnowledgeNodeId = null
       initialNodeNames.value = {}
+      initialNodeTreeIds.value = {}
       pendingNodes.value = []
     }
     form.tagIds = d.tags?.map(t => t.id) || []
@@ -1708,6 +1754,10 @@ function captureFormSnapshot(): any {
   return {
     ...JSON.parse(JSON.stringify(form)),
     knowledgeNodeIds: JSON.parse(JSON.stringify(knowledgeNodeIds.value)),
+    chapterNodeIds: JSON.parse(JSON.stringify(chapterNodeIds.value)),
+    methodNodeIds: JSON.parse(JSON.stringify(methodNodeIds.value)),
+    nodeNames: { ...initialNodeNames.value },
+    nodeTreeIds: { ...initialNodeTreeIds.value },
   }
 }
 
@@ -1737,6 +1787,7 @@ function markCurrentSaved(qid: string): boolean {
     hasUnsaved: false,
     // 落库后 ai_meta 不再需要（后续保存走 update），但保留以保持快照结构一致
     aiMeta: questionList.value[currentIdx]?.aiMeta,
+    existingQuestionId: questionList.value[currentIdx]?.existingQuestionId,
   }
   // 保存成功后立即持久化批量草稿（反映 saved 状态，避免恢复后对已保存题重复 create）
   saveBatchDraft()
@@ -1786,6 +1837,9 @@ function applyFormSnapshot(s: any) {
   form.source_type = s.source_type ?? ''
   form.sub_source_type = s.sub_source_type ?? ''
   form.estimated_time = s.estimated_time ?? 5
+  if (s.stage === 'junior' || s.stage === 'senior') {
+    form.stage = s.stage
+  }
   form.solutions = Array.isArray(s.solutions) ? [...s.solutions] : ['']
   form.options = Array.isArray(s.options)
     ? s.options.map((o: any) => ({ ...o }))
@@ -1816,6 +1870,19 @@ function applyFormSnapshot(s: any) {
   knowledgeNodeIds.value = Array.isArray(s.knowledgeNodeIds) ? [...s.knowledgeNodeIds] : []
   chapterNodeIds.value = Array.isArray(s.chapterNodeIds) ? [...s.chapterNodeIds] : []
   methodNodeIds.value = Array.isArray(s.methodNodeIds) ? [...s.methodNodeIds] : []
+  form.cognitive_level = s.cognitive_level ?? ''
+  form.taggingSuggestionId = s.taggingSuggestionId ?? ''
+  form.taggingUnmatched = Array.isArray(s.taggingUnmatched) ? [...s.taggingUnmatched] : []
+  form.taggingUnmatchedIds = Array.isArray(s.taggingUnmatchedIds) ? [...s.taggingUnmatchedIds] : []
+  form.taggingAliasMaps = Array.isArray(s.taggingAliasMaps)
+    ? s.taggingAliasMaps.map((m: { unmatched_id: string; node_id?: string | null; tag_id?: string | null }) => ({ ...m }))
+    : []
+  if (s.nodeNames && typeof s.nodeNames === 'object') {
+    initialNodeNames.value = { ...s.nodeNames }
+  }
+  if (s.nodeTreeIds && typeof s.nodeTreeIds === 'object') {
+    initialNodeTreeIds.value = { ...s.nodeTreeIds }
+  }
 }
 
 // 切换到指定 Tab（保存当前题 → 加载目标题）
@@ -1851,6 +1918,8 @@ async function discardBatchQuestion(idx: number) {
       saved: cur?.saved ?? false,
       savedQid: cur?.savedQid,
       hasUnsaved: cur?.hasUnsaved ?? false,
+      aiMeta: cur?.aiMeta,
+      existingQuestionId: cur?.existingQuestionId,
     }
   }
 
@@ -2002,30 +2071,78 @@ function parsedQuestionToSnapshot(q: ParsedQuestion): any {
     sub_answers = q.correct_answer.value.subs.map(s => s.content)
   }
 
-  // 回填 DB 已落库的全部标签匹配（kp_matches 携带题目详情接口返回的
-  // question_knowledge_nodes；后端匹配阈值 0.3 已在落库时过滤，前端直接采用，
-  // 含 fuzzy 匹配——否则 10 题只有 exact 命中的 2-3 题能回填）
-  // 三维分发：按 kp_matches.kind 路由到 章节/知识点/方法（缺失 kind 兜底知识点）
+  // 与编辑页「AI 智能打标」applyAiTaggingResult 同一套回填：优先 suggestion.matches
+  const GRADE_MAP: Record<string, { grade: string; stage: 'junior' | 'senior' }> = {
+    grade_7: { grade: '七年级', stage: 'junior' },
+    grade_8: { grade: '八年级', stage: 'junior' },
+    grade_9: { grade: '九年级', stage: 'junior' },
+    grade_10: { grade: '高一', stage: 'senior' },
+    grade_11: { grade: '高二', stage: 'senior' },
+    grade_12: { grade: '高三', stage: 'senior' },
+  }
+  const NODE_CAP = { chapter: 3, knowledge: 3, pattern: 3 }
+  const uniqCap = (ids: string[], n: number) => [...new Set(ids)].slice(0, n)
+
   const knowledgeNodeIds: string[] = []
   const chapterNodeIds: string[] = []
   const methodNodeIds: string[] = []
-  if (q.kp_matches?.length) {
+  const nodeNames: Record<string, string> = {}
+  const nodeTreeIds: Record<string, string> = {}
+  const matches: TaggingMatch[] = q.tagging_matches ?? []
+
+  if (matches.length) {
+    for (const m of matches) {
+      if (m.target_type === 'knowledge_node' && m.target_id) {
+        const label = (m.target_name || m.ai_name || '').trim()
+        if (!label) continue
+        nodeNames[m.target_id] = label
+        if (m.tree_id) nodeTreeIds[m.target_id] = m.tree_id
+        if (m.dimension === 'chapter') chapterNodeIds.push(m.target_id)
+        else if (m.dimension === 'knowledge') knowledgeNodeIds.push(m.target_id)
+        else if (m.dimension === 'pattern') methodNodeIds.push(m.target_id)
+      }
+    }
+  } else if (q.kp_matches?.length) {
     for (const m of q.kp_matches) {
       if (!m.matched_id) continue
+      if (m.matched_name) nodeNames[m.matched_id] = m.matched_name
       if (m.kind === 'chapter') chapterNodeIds.push(m.matched_id)
-      else if (m.kind === 'ability') methodNodeIds.push(m.matched_id)
+      else if (m.kind === 'ability' || m.kind === 'pattern') methodNodeIds.push(m.matched_id)
       else knowledgeNodeIds.push(m.matched_id)
     }
   }
 
+  const tagIdsFromMatches = matches
+    .filter((m) => m.target_type === 'tag' && m.target_id)
+    .map((m) => m.target_id)
+  const tagIds = tagIdsFromMatches.length
+    ? [...new Set(tagIdsFromMatches)]
+    : (q.tag_matches ?? []).map(t => t.tag_id).filter(Boolean)
+
+  const stage: 'junior' | 'senior' = q.tagging_stage === 'junior' ? 'junior' : 'senior'
+  let grade: string | undefined
+  if (q.grade_level && GRADE_MAP[q.grade_level]) {
+    const g = GRADE_MAP[q.grade_level]
+    if (g.stage === stage) grade = g.grade
+  }
+
+  let difficulty = q.difficulty || 'medium'
+  let difficultyCoefficientOut = difficultyCoefficient
+  if (q.tagging_difficulty != null) {
+    difficulty = difficultyNumToString(q.tagging_difficulty)
+    const diffStars = q.tagging_difficulty
+    difficultyCoefficientOut = [0.9, 0.75, 0.55, 0.35, 0.2][diffStars - 1] ?? 0.55
+  }
+
   return {
     stem: q.stem,
-    question_type: q.question_type,
+    question_type: q.tagging_question_type || q.question_type,
     sub_type: q.sub_type || '',
-    difficulty: q.difficulty || 'medium',
-    difficulty_coefficient: difficultyCoefficient,
+    difficulty,
+    difficulty_coefficient: difficultyCoefficientOut,
     default_score: 5,
-    grade: undefined,
+    stage,
+    grade,
     semester: undefined,
     grade_semester: '',
     year: '',
@@ -2047,24 +2164,28 @@ function parsedQuestionToSnapshot(q: ParsedQuestion): any {
     solutionAnswer: '',
     solutions: q.analysis.map(a => a.content),
     gradingSteps: [],
-    knowledgeNodeIds,
-    chapterNodeIds,
-    methodNodeIds,
-    tagIds: [],
+    knowledgeNodeIds: uniqCap(knowledgeNodeIds, NODE_CAP.knowledge),
+    chapterNodeIds: uniqCap(chapterNodeIds, NODE_CAP.chapter),
+    methodNodeIds: uniqCap(methodNodeIds, NODE_CAP.pattern),
+    tagIds,
+    nodeNames,
+    nodeTreeIds,
+    taggingSuggestionId: q.tagging_suggestion_id || '',
+    taggingUnmatched: Array.isArray(q.tagging_unmatched) ? q.tagging_unmatched : [],
+    taggingUnmatchedIds: [],
+    taggingAliasMaps: [],
+    cognitive_level: q.cognitive_level || '',
     reviewer_ids: [],
     reviewer: '',
     internal_note: '',
     status: '',
     version: 1,
-    // 初始 UI 状态：未主动保存 → 浅灰色标签，离开触发拦截（与图片模式一致）
-    // savedQid 携带 worker 落库的 UUID，保存时走 update 而非 create，避免重复落库
     hasUnsaved: true,
     estimated_time: 5,
-    // 批量模式元信息（显式声明占位，确保 Vue 3 Proxy 追踪）
     saved: false,
     savedQid: q.id as string | undefined,
-    // 暂存链路：未落库题目保存时走 create + ai_meta（与 savedQid 互斥）
     aiMeta: q.ai_meta,
+    existingQuestionId: q.existing_question_id || null,
   }
 }
 
@@ -2794,6 +2915,18 @@ async function handleCropped(blob: Blob) {
   color: #fbbf24;
   background: rgba(251, 191, 36, 0.08);
   border-color: rgba(251, 191, 36, 0.3);
+}
+
+.dup-link {
+  flex-shrink: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #b45309;
+  text-decoration: none;
+}
+
+.dup-link:hover {
+  text-decoration: underline;
 }
 
 .edit-col {

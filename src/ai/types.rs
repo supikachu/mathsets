@@ -20,7 +20,7 @@ pub struct AnalysisMethod {
     pub content: String,
 }
 
-/// V2.1.1 解题方法（AI 输出，后端做模糊匹配）
+/// V2.1.1 通用解题方法（AI 输出；匹配 tags.category=method，不匹配专题树）
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SolutionMethod {
     pub name: String,
@@ -119,7 +119,8 @@ pub struct ParsedQuestion {
     /// 章节路径（如 ["高中数学", "函数", "导数"]）
     #[serde(default)]
     pub chapter_path: Vec<String>,
-    /// 解题方法（如 [{"name": "导数法", "confidence": 0.91}]）
+    /// 解题方法（通用方法/数学思想，如 [{"name": "数形结合", "confidence": 0.91}]）
+    /// 不匹配题型专题树；编辑页由 tags.category=method 承载
     #[serde(default)]
     pub solution_methods: Vec<SolutionMethod>,
 }

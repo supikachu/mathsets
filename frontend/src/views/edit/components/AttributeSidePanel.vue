@@ -6,11 +6,11 @@
  * - 320px 宽常驻右侧，Flex 纵向布局，与编辑区/预览区并排
  * - 顶部 "✨ AI 智能打标" 按钮，调用 aiTaggingApi.tag() 一键回填
  * - 知识树标注：可折叠内联面板（Accordion），收起态仅展示已选 Tag + "展开知识树"按钮
- *   展开后原地平滑展开 Tabs（章节|知识点|解题方法）+ 动态折叠树，勾选实时同步无需确定
+ *   展开后原地平滑展开 Tabs（章节|知识点|题型专题）+ 动态折叠树，勾选实时同步无需确定
  *   动态拉取对应 tree（expectedCode = `${subject}_${mode}_${stage}` 严格精确匹配）
- *   实时勾选同步到 chapterNodeIds / knowledgeNodeIds / methodNodeIds
+ *   实时勾选同步到 chapterNodeIds / knowledgeNodeIds / methodNodeIds（method = 题型专题）
  *   面板外用 Tag 融合展示三组已选节点，支持 x 移除
- * - 标签分为核心素养 / 解题方法 / 学校来源 三组
+ * - 标签分为核心素养 / 通用方法 / 学校来源 三组
  * - AI 回填字段加 --purple-light 边框高亮动画，用户手动修改后取消
  * - 严格使用 CSS 变量，复用 AppButton / AppIcon / AppSelect，无第三方 UI 库
  */
@@ -25,9 +25,16 @@ import {
   type PaperBrief,
   type KnowledgeTree,
   type KnowledgeNodeTreeNode,
+  type TaggingMatch,
+  type TaggingUnmatched,
+  type TaggingDimension,
+  type TaggingAliasMap,
+  type AiTaggingResponse,
+  type KnowledgeTreeKind,
 } from '@/api/client'
 import { AppButton, AppIcon, AppSelect } from '@/components/ui'
 import KnowledgeTreeCheckbox from '@/components/KnowledgeTreeCheckbox.vue'
+import KnowledgeTreeCascader from '@/components/KnowledgeTreeCascader.vue'
 import { useToast } from '@/composables/useToast'
 import {
   getKnowledgeTreeList,
@@ -44,7 +51,7 @@ const tagIds = defineModel<string[]>('tagIds', { required: true })
 const knowledgeNodeIds = defineModel<string[]>('knowledgeNodeIds', { required: true })
 /** 章节节点 ID（前端独立维护，提交时与知识点/方法合并为统一 knowledge_node_ids） */
 const chapterNodeIds = defineModel<string[]>('chapterNodeIds', { default: () => [] })
-/** 解题方法节点 ID（前端独立维护，提交时合并） */
+/** 题型专题节点 ID（前端独立维护，提交时合并；对应 kind=ability / math_method_*） */
 const methodNodeIds = defineModel<string[]>('methodNodeIds', { default: () => [] })
 /** 主知识点节点 ID（每题最多 1 个，跨三组节点单选；后端 DTO 字段对齐） */
 const primaryKnowledgeNodeId = defineModel<string | null>('primaryKnowledgeNodeId', { default: null })
@@ -84,12 +91,23 @@ const props = defineProps<{
     // ── 知识树动态加载依赖：学段 / 学科（提交时进 metadata） ──
     stage: 'junior' | 'senior'
     subject: 'math' | 'physics'
+    cognitive_level?: string
+    taggingSuggestionId?: string
+    taggingUnmatched?: TaggingUnmatched[]
+    taggingUnmatchedIds?: string[]
+    taggingAliasMaps?: TaggingAliasMap[]
   }
+  /**
+   * 已落库题目 ID（编辑页打标时回传 question_id）
+   */
+  questionId?: string | null
   /**
    * 初始节点名称映射（id → name），用于编辑场景下不打开弹窗也能展示 Tag 名称。
    * 父组件 loadQuestion 时从 d.knowledge_nodes 构建。
    */
   initialNodeNames?: Record<string, string>
+  /** 初始节点所属 tree_id（id → tree_id），用于勾选回显时切到正确知识树 */
+  initialNodeTreeIds?: Record<string, string>
   /**
    * 学段/学科切换的三组节点勾选缓存（父组件持有，随页面销毁）。
    * key = `${subject}_${stage}`，切走前快照、命中时瞬时恢复。
@@ -115,7 +133,7 @@ const MODE_CODE: Record<TreeMode, string> = { chapter: 'chapter', knowledge: 'kn
 const MODES: { key: TreeMode; label: string }[] = [
   { key: 'chapter', label: '章节' },
   { key: 'knowledge', label: '知识点' },
-  { key: 'method', label: '解题方法' },
+  { key: 'method', label: '题型专题' },
 ]
 
 // 顶部学段 / 学科下拉选项
@@ -200,7 +218,9 @@ const currentModeSelectedIds = computed<string[]>({
 const nodeNameMap = ref<Map<string, string>>(new Map())
 /** 节点 ID → { parentId, name, namePath } 扁平 meta（跨已加载树合并），用于 chips 折叠与路径悬浮 */
 const nodeMetaMap = ref<Map<string, TreeMetaInfo>>(new Map())
-/** 全量树元数据列表（共享缓存只拉一次），用于「解题方法」Tab 可用性判断 */
+/** 节点 ID → 所属 tree_id（AI 打标 / 题目回填），用于切换到正确树以勾选回显 */
+const nodeTreeIdMap = ref<Map<string, string>>(new Map())
+/** 全量树元数据列表（共享缓存只拉一次），用于「题型专题」Tab 可用性判断 */
 const treeList = ref<KnowledgeTree[]>([])
 
 /** 期望的 tree code，如 'math_knowledge_high'（高中数学知识点树） */
@@ -211,10 +231,10 @@ const expectedCode = computed(() => {
   return `${subj}_${mode}_${stage}`
 })
 
-/** 物理学科 / 解题方法 等后端尚未覆盖时的兜底提示 */
+/** 物理学科 / 题型专题 等后端尚未覆盖时的兜底提示 */
 const emptyHint = computed(() => {
   if (props.form.subject === 'physics') return '物理学科资源敬请期待'
-  if (treeMode.value === 'method') return '暂无解题方法树'
+  if (treeMode.value === 'method') return '暂无题型专题树'
   if (treeData.value.length === 0) return '当前模式暂无知识树'
   return '无节点'
 })
@@ -235,7 +255,7 @@ interface SelectedNodeTag {
 
 /**
  * 每组 ID 折叠为「最高层已选节点」：沿 nodeMetaMap.parentId 向上找到未选中的最高点，
- * 其下被代管的已选子孙数记为 hiddenCount；无 meta（树未加载）的节点按最高层处理
+ * 其下被代管的已选子孙数记为 hiddenCount；无名称的幽灵 ID 直接跳过（不展示「未识别节点」）
  */
 function collapseToTopmost(
   ids: string[],
@@ -258,28 +278,61 @@ function collapseToTopmost(
       topmost.set(root, (topmost.get(root) ?? 0) + 1)
     }
   }
-  return [...topmost.entries()].map(([id, hiddenCount]) => {
-    const meta = nodeMetaMap.value.get(id)
-    const name = meta?.name ?? nodeNameMap.value.get(id)
-    if (!name) {
-      console.warn('[AttributeSidePanel] 已选节点缺少名称映射，id =', id)
-    }
-    return {
-      id,
-      type,
-      typeLabel,
-      name: name ?? '未知知识点',
-      hiddenCount,
-      path: meta?.namePath ?? name ?? '未知知识点',
-      isPrimary: id === primaryId,
-    }
-  })
+  return [...topmost.entries()]
+    .map(([id, hiddenCount]) => {
+      const meta = nodeMetaMap.value.get(id)
+      const name = meta?.name ?? nodeNameMap.value.get(id)
+      if (!name) return null
+      return {
+        id,
+        type,
+        typeLabel,
+        name,
+        hiddenCount,
+        path: meta?.namePath ?? name,
+        isPrimary: id === primaryId,
+      }
+    })
+    .filter((t): t is SelectedNodeTag => t != null)
+}
+
+/** 当前学段树 code 后缀 junior | high */
+function currentStageSuffix() {
+  return STAGE_CODE[props.form.stage]
+}
+
+/** 节点是否属于当前学段（有 tree_id 时校验；仅有名称/meta 时视为可保留） */
+function nodeBelongsToCurrentStage(id: string): boolean {
+  const tid = nodeTreeIdMap.value.get(id)
+  if (tid) {
+    const t = treeList.value.find((x) => x.id === tid)
+    if (t) return t.code.endsWith(`_${currentStageSuffix()}`)
+    // tree_id 有记录但列表里找不到 → 不可信，丢掉
+    return false
+  }
+  return nodeMetaMap.value.has(id) && !!(nodeMetaMap.value.get(id)?.name)
+}
+
+/** 清掉错学段 / 无名称幽灵 ID，消除「未识别节点」标签 */
+function pruneInvalidSelectedNodes() {
+  const keep = (ids: string[]) =>
+    ids.filter((id) => {
+      const named = !!(nodeMetaMap.value.get(id)?.name ?? nodeNameMap.value.get(id))
+      if (!named) return false
+      return nodeBelongsToCurrentStage(id)
+    })
+  chapterNodeIds.value = keep(chapterNodeIds.value)
+  knowledgeNodeIds.value = keep(knowledgeNodeIds.value)
+  methodNodeIds.value = keep(methodNodeIds.value)
+  if (primaryKnowledgeNodeId.value && !nodeBelongsToCurrentStage(primaryKnowledgeNodeId.value)) {
+    primaryKnowledgeNodeId.value = null
+  }
 }
 
 const allSelectedNodes = computed<SelectedNodeTag[]>(() => [
   ...collapseToTopmost(chapterNodeIds.value, 'chapter', '章节', primaryKnowledgeNodeId.value),
   ...collapseToTopmost(knowledgeNodeIds.value, 'knowledge', '知识点', primaryKnowledgeNodeId.value),
-  ...collapseToTopmost(methodNodeIds.value, 'method', '方法', primaryKnowledgeNodeId.value),
+  ...collapseToTopmost(methodNodeIds.value, 'method', '专题', primaryKnowledgeNodeId.value),
 ])
 
 const totalSelectedNodes = computed(
@@ -293,7 +346,7 @@ const modeCounts = computed<Record<TreeMode, number>>(() => ({
   method: methodNodeIds.value.length,
 }))
 
-/** 后端是否存在当前学段/学科的解题方法树（无则禁用 Tab） */
+/** 后端是否存在当前学段/学科的题型专题树（无则禁用 Tab） */
 const methodTreeAvailable = computed(() => {
   const code = `${SUBJECT_CODE[props.form.subject]}_${MODE_CODE.method}_${STAGE_CODE[props.form.stage]}`
   return treeList.value.some(t => t.code === code)
@@ -301,14 +354,31 @@ const methodTreeAvailable = computed(() => {
 
 // ─── 数据加载（共享内存缓存：列表全量只拉一次，单树按 treeId 缓存） ───
 /**
- * 加载知识树列表，按 expectedCode 严格精确匹配（无 kind 兜底，避免初中物理误抓高中数学）
+ * 加载知识树列表，按 expectedCode 严格精确匹配（无 kind 兜底，避免初中物理误抓高中数学）。
+ * 已选节点的 tree_id 仅在「同学段」时可用于切树回显，禁止把高中面板切到初中树。
  */
 async function loadTrees() {
   try {
     const list = await getKnowledgeTreeList()
     treeList.value = list
-    const matched = list.find(t => t.code === expectedCode.value)
-    activeTreeId.value = matched?.id ?? ''
+    const expected = list.find((t) => t.code === expectedCode.value)
+    const stageSuffix = STAGE_CODE[props.form.stage] // junior | high
+
+    const selected =
+      treeMode.value === 'chapter' ? chapterNodeIds.value
+      : treeMode.value === 'knowledge' ? knowledgeNodeIds.value
+      : methodNodeIds.value
+    let preferred: string | undefined
+    for (const id of selected) {
+      const tid = nodeTreeIdMap.value.get(id)
+      const tree = tid ? list.find((t) => t.id === tid) : undefined
+      if (tree && tree.code.endsWith(`_${stageSuffix}`)) {
+        preferred = tree.id
+        break
+      }
+    }
+
+    activeTreeId.value = preferred ?? expected?.id ?? ''
   } catch (e) {
     console.error('[AttributeSidePanel] 加载知识树列表失败', e)
     activeTreeId.value = ''
@@ -336,6 +406,28 @@ async function loadTreeData() {
     walkTreeToNameMap(data)
     const meta = buildTreeMetaIndex(data)
     for (const [id, info] of meta) nodeMetaMap.value.set(id, info)
+
+    // 树加载后再次清理：无名称或错学段的幽灵 ID（不再展示「未识别节点」）
+    pruneInvalidSelectedNodes()
+
+    // 已选节点若不在当前树：按同学段 tree_id 切到正确树，保证勾选回显
+    const selected =
+      treeMode.value === 'chapter' ? chapterNodeIds.value
+      : treeMode.value === 'knowledge' ? knowledgeNodeIds.value
+      : methodNodeIds.value
+    const missing = selected.filter((id) => !meta.has(id))
+    if (missing.length > 0) {
+      const stageSuffix = STAGE_CODE[props.form.stage]
+      const altTreeId = missing
+        .map((id) => nodeTreeIdMap.value.get(id))
+        .map((tid) => (tid ? treeList.value.find((t) => t.id === tid) : undefined))
+        .find((t) => t && t.code.endsWith(`_${stageSuffix}`) && t.id !== activeTreeId.value)
+        ?.id
+      if (altTreeId) {
+        activeTreeId.value = altTreeId
+        return
+      }
+    }
   } catch (e) {
     console.error('[AttributeSidePanel] 加载知识点树失败', e)
     treeData.value = []
@@ -363,16 +455,27 @@ function setMode(m: TreeMode) {
 const treeCheckboxRef = ref<{ expandTo: (id: string) => Promise<boolean> } | null>(null)
 
 /**
- * 反向定位：双击已选标签 → 自动展开面板并切换对应 Tab → 等待树数据
- * 就绪后展开祖先路径、高亮并平滑滚动到该节点（KnowledgeTreeCheckbox.expandTo）
+ * 反向定位：单击已选标签 → 自动展开面板并切换对应 Tab → 必要时切到节点所属树
+ * → 等待树数据就绪后展开祖先路径、高亮并平滑滚动到该节点
  */
 function locateTreeNode(tag: SelectedNodeTag) {
   if (!tag?.id) return
-  // 1. 展开知识树面板（默认收起态，双击标签需让树可见）
+  // 1. 展开知识树面板（默认收起态，单击标签需让树可见）
   treeExpanded.value = true
   // 2. 自动切换 Tab（章节/知识点/方法）
   setMode(tag.type)
-  // 3. 等目标模式的树就绪后定位：
+  // 3. 若节点属于同学段的另一棵树，先切过去（禁止跨学段切树）
+  const preferred = nodeTreeIdMap.value.get(tag.id)
+  const preferredTree = preferred ? treeList.value.find((t) => t.id === preferred) : undefined
+  const stageSuffix = STAGE_CODE[props.form.stage]
+  if (
+    preferredTree
+    && preferredTree.code.endsWith(`_${stageSuffix}`)
+    && preferredTree.id !== activeTreeId.value
+  ) {
+    activeTreeId.value = preferredTree.id
+  }
+  // 4. 等目标模式的树就绪后定位：
   //    - 加载中 / 树被置空（切换中）→ 继续等，不 stop
   //    - 树就绪且定位成功（await expandTo 判定）→ stop
   //    - 兜底：15 秒内未定位成功（无树/慢网络加载失败）→ 超时 stop 防泄漏 + 提示
@@ -380,7 +483,7 @@ function locateTreeNode(tag: SelectedNodeTag) {
     stop()
     toast.info('未能定位到该知识点，请确认知识树已加载')
   }, 15000)
-  const stop = watch([treeData, treeLoading], () => {
+  const stop = watch([treeData, treeLoading, activeTreeId], () => {
     if (treeLoading.value) return
     if (treeData.value.length === 0) return // 无树或加载中置空：继续等，由超时兜底
     void nextTick().then(() => {
@@ -394,23 +497,34 @@ function locateTreeNode(tag: SelectedNodeTag) {
   }, { immediate: true })
 }
 
-/** 面板外 Tag 移除：按 type 定位对应数组 */
+/** 面板外 Tag 移除：按 type 定位对应数组；同时清掉该节点下已选子孙（折叠 chip 的 +N） */
 function removeNode(id: string, type: TreeMode) {
+  const removeSet = new Set<string>([id])
+  const stack = [...(nodeMetaMap.value.get(id)?.childrenIds ?? [])]
+  while (stack.length > 0) {
+    const cur = stack.pop()!
+    removeSet.add(cur)
+    const kids = nodeMetaMap.value.get(cur)?.childrenIds
+    if (kids?.length) stack.push(...kids)
+  }
+
+  const filterOut = (ids: string[]) => ids.filter((x) => !removeSet.has(x))
+
   if (type === 'knowledge') {
-    knowledgeNodeIds.value = knowledgeNodeIds.value.filter(x => x !== id)
+    knowledgeNodeIds.value = filterOut(knowledgeNodeIds.value)
   } else if (type === 'chapter') {
-    chapterNodeIds.value = chapterNodeIds.value.filter(x => x !== id)
+    chapterNodeIds.value = filterOut(chapterNodeIds.value)
   } else {
-    methodNodeIds.value = methodNodeIds.value.filter(x => x !== id)
+    methodNodeIds.value = filterOut(methodNodeIds.value)
   }
   clearFieldHighlight('knowledge_node')
   // 联动：被移除的节点若是主知识点，清空主知识点引用
-  if (primaryKnowledgeNodeId.value === id) {
+  if (primaryKnowledgeNodeId.value && removeSet.has(primaryKnowledgeNodeId.value)) {
     primaryKnowledgeNodeId.value = null
   }
   // 手动移除的节点同步移出 AI 高亮
-  if (aiHighlightIds.value.includes(id)) {
-    aiHighlightIds.value = aiHighlightIds.value.filter(x => x !== id)
+  if (aiHighlightIds.value.some((x) => removeSet.has(x))) {
+    aiHighlightIds.value = aiHighlightIds.value.filter((x) => !removeSet.has(x))
   }
 }
 
@@ -448,6 +562,9 @@ watch(activeTreeId, (id) => {
   if (id) loadTreeData()
 })
 
+// AI 回填进行中：避免学段/学科 watch 把刚写入的知识树节点清掉
+let aiTaggingInProgress = false
+
 // ─── 侦听：treeMode / stage / subject 变化 → 重新加载树 ──────────────
 watch(
   [treeMode, () => props.form.stage, () => props.form.subject],
@@ -455,7 +572,8 @@ watch(
     const stageChanged = old && old[1] !== newStage
     const subjectChanged = old && old[2] !== newSubject
     // 学段 / 学科变化：旧 key 快照三组勾选，新 key 命中缓存则瞬时恢复（无弹窗、无丢失）
-    if (stageChanged || subjectChanged) {
+    // AI 打标回填年级时会改 stage，此时必须保留引擎刚写入的节点 ID
+    if ((stageChanged || subjectChanged) && !aiTaggingInProgress) {
       const cache = props.selectionCache
       if (cache) {
         const oldKey = `${old[2]}_${old[1]}`
@@ -495,6 +613,98 @@ const TAG_LIMITS: Record<TagCategory, number> = {
   error_prone: 2,
 }
 
+const NODE_LIMITS = {
+  chapter: 3,
+  knowledge: 3,
+  pattern: 3,
+}
+
+const GRADE_MAP: Record<string, { grade: string; stage: 'junior' | 'senior' }> = {
+  grade_7: { grade: '七年级', stage: 'junior' },
+  grade_8: { grade: '八年级', stage: 'junior' },
+  grade_9: { grade: '九年级', stage: 'junior' },
+  grade_10: { grade: '高一', stage: 'senior' },
+  grade_11: { grade: '高二', stage: 'senior' },
+  grade_12: { grade: '高三', stage: 'senior' },
+}
+
+const COGNITIVE_OPTIONS = [
+  { label: '记忆', value: 'remember' },
+  { label: '理解', value: 'understand' },
+  { label: '应用', value: 'apply' },
+  { label: '分析', value: 'analyze' },
+  { label: '评价', value: 'evaluate' },
+  { label: '创造', value: 'create' },
+]
+
+const UNMATCHED_LABEL: Record<string, string> = {
+  chapter: '章节',
+  knowledge: '知识点',
+  pattern: '题型专题',
+  ability: '题型专题',
+  method: '通用方法',
+  core_competence: '核心素养',
+}
+
+function unmatchedDimLabel(dim: string | undefined): string {
+  if (!dim) return '未分类'
+  return UNMATCHED_LABEL[dim] || dim
+}
+
+function normalizeUnmatchedList(raw: unknown): TaggingUnmatched[] {
+  if (!Array.isArray(raw)) return []
+  const out: TaggingUnmatched[] = []
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue
+    const u = item as Partial<TaggingUnmatched> & { name?: string }
+    const rawName = (u.raw_name || u.name || '').trim()
+    if (!rawName) continue
+    const dim = (u.dimension || 'knowledge') as TaggingDimension
+    out.push({
+      id: u.id || `u-${out.length}-${rawName}`,
+      dimension: dim,
+      target_type: u.target_type || (dim === 'method' || dim === 'core_competence' ? 'tag' : 'knowledge_node'),
+      raw_name: rawName,
+      normalized_name: u.normalized_name || rawName,
+      confidence: u.confidence ?? null,
+      reason: u.reason || 'no_deterministic_match',
+      eligible_for_candidate: u.eligible_for_candidate !== false,
+    })
+  }
+  return out
+}
+
+function mergeLimited(existing: string[], incoming: string[], limit: number): { ids: string[]; truncated: boolean } {
+  const out = [...existing]
+  let truncated = false
+  for (const id of incoming) {
+    if (out.includes(id)) continue
+    if (out.length >= limit) {
+      truncated = true
+      continue
+    }
+    out.push(id)
+  }
+  return { ids: out, truncated }
+}
+
+/** AI 回填：以本次建议为准替换该维（不去与旧勾选硬合并），避免「明明标签不多却提示超限」 */
+function replaceLimited(incoming: string[], limit: number): { ids: string[]; truncated: boolean; dropped: number } {
+  const unique: string[] = []
+  for (const id of incoming) {
+    if (!id || unique.includes(id)) continue
+    unique.push(id)
+  }
+  if (unique.length <= limit) {
+    return { ids: unique, truncated: false, dropped: 0 }
+  }
+  return {
+    ids: unique.slice(0, limit),
+    truncated: true,
+    dropped: unique.length - limit,
+  }
+}
+
 const allTagsMap = computed(() => {
   const m = new Map<string, Tag>()
   for (const t of props.methodTags) m.set(t.id, t)
@@ -517,6 +727,12 @@ const selectedMethodTags = computed(() =>
 )
 const selectedSchoolTags = computed(() =>
   selectedTagsList.value.filter((t) => t.category === 'school'),
+)
+
+const unmatchedTreeHints = computed(() =>
+  (props.form.taggingUnmatched ?? []).filter((u) =>
+    u.dimension === 'chapter' || u.dimension === 'knowledge' || u.dimension === 'pattern',
+  ),
 )
 
 const topMethods = computed(() =>
@@ -759,6 +975,17 @@ const difficultyStars = computed<number>({
 // AI 智能打标
 // ─────────────────────────────────────────────────────────────────────
 const aiTagging = ref(false)
+const taggingTaskId = ref('')
+const taggingPhase = ref('')
+let taggingCancelled = false
+
+const USE_ASYNC_TAGGING = import.meta.env.VITE_AI_TAGGING_ASYNC !== '0'
+const TAGGING_POLL_MS = 1500
+const TAGGING_POLL_TIMEOUT_MS = 180_000
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
 
 /** 拼接题干 + 选项 + 答案 + 解析为完整题目文本 */
 function buildTaggingContent(): string {
@@ -785,73 +1012,148 @@ function difficultyNumToString(n: number | null): string {
   return 'hard'
 }
 
-async function runAiTagging() {
-  const content = buildTaggingContent()
-  if (!content.trim()) {
-    toast.warning('请先输入题干内容')
-    return
-  }
-  aiTagging.value = true
-  aiTaggingInProgress = true
-  try {
-    const res = await aiTaggingApi.tag({
-      content,
-      space_id: space.currentSpaceId || undefined,
-    })
-    const data = res.data
+async function applyAiTaggingResult(data: AiTaggingResponse) {
     const newAiFields = new Set<string>()
 
-    // 知识点回填：三维合一分发 —— 按 tree_id → tree.kind 路由到对应数组
-    if (data.knowledge_nodes?.length) {
-      // 构建 tree_id → kind 映射（chapter/knowledge/ability）
-      const treeKindMap = new Map<string, string>()
-      for (const t of treeList.value) {
-        treeKindMap.set(t.id, t.kind)
+    if (treeList.value.length === 0) {
+      try {
+        treeList.value = await getKnowledgeTreeList()
+      } catch {
+        /* 树列表失败时仍回填，依赖后端学段过滤 */
       }
+    }
 
-      const chapterAiIds: string[] = []
-      const knowledgeAiIds: string[] = []
-      const methodAiIds: string[] = []
-
-      for (const n of data.knowledge_nodes) {
-        if (n.node_name) nodeNameMap.value.set(n.node_id, n.node_name)
-        const kind = treeKindMap.get(n.tree_id)
-        if (kind === 'chapter') chapterAiIds.push(n.node_id)
-        else if (kind === 'ability') methodAiIds.push(n.node_id)
-        else knowledgeAiIds.push(n.node_id) // 兜底归入知识点
+    // 学段以面板为准：AI 年级仅在同学段内回填，禁止把高中题改成初中学段
+    if (data.grade_level && GRADE_MAP[data.grade_level]) {
+      const g = GRADE_MAP[data.grade_level]
+      if (g.stage === props.form.stage) {
+        await nextTick()
+        props.form.grade = g.grade
+        newAiFields.add('grade')
+      } else {
+        console.warn(
+          '[AttributeSidePanel] AI grade_level 学段与面板不一致，已忽略',
+          data.grade_level,
+          props.form.stage,
+        )
       }
+    }
 
-      // 记录新增 ID（用于 AI 高亮）
-      const prevChapter = new Set(chapterNodeIds.value)
-      const prevKnowledge = new Set(knowledgeNodeIds.value)
-      const prevMethod = new Set(methodNodeIds.value)
-      const added: string[] = []
-      for (const id of chapterAiIds) if (!prevChapter.has(id)) added.push(id)
-      for (const id of knowledgeAiIds) if (!prevKnowledge.has(id)) added.push(id)
-      for (const id of methodAiIds) if (!prevMethod.has(id)) added.push(id)
+    const matches: TaggingMatch[] = data.matches?.length
+      ? data.matches
+      : [
+          ...(data.knowledge_nodes ?? []).map((n) => ({
+            dimension: 'knowledge' as TaggingDimension,
+            target_type: 'knowledge_node' as const,
+            ai_name: n.ai_name,
+            target_id: n.node_id,
+            target_name: n.node_name,
+            tree_id: n.tree_id,
+            path: n.path,
+            depth: n.depth,
+            category: null,
+            score: n.score,
+            match_type: n.match_type,
+          })),
+          ...(data.competency_tags ?? []).map((t) => ({
+            dimension: 'core_competence' as TaggingDimension,
+            target_type: 'tag' as const,
+            ai_name: t.ai_name,
+            target_id: t.tag_id,
+            target_name: t.tag_name,
+            category: t.category,
+            score: t.score,
+            match_type: t.match_type,
+          })),
+          ...(data.method_tags ?? []).map((t) => ({
+            dimension: 'method' as TaggingDimension,
+            target_type: 'tag' as const,
+            ai_name: t.ai_name,
+            target_id: t.tag_id,
+            target_name: t.tag_name,
+            category: t.category,
+            score: t.score,
+            match_type: t.match_type,
+          })),
+        ]
 
-      // 合并（并集，绝不覆盖用户已选）
-      if (chapterAiIds.length) chapterNodeIds.value = [...new Set([...chapterNodeIds.value, ...chapterAiIds])]
-      if (knowledgeAiIds.length) knowledgeNodeIds.value = [...new Set([...knowledgeNodeIds.value, ...knowledgeAiIds])]
-      if (methodAiIds.length) methodNodeIds.value = [...new Set([...methodNodeIds.value, ...methodAiIds])]
+    const chapterAiIds: string[] = []
+    const knowledgeAiIds: string[] = []
+    const patternAiIds: string[] = []
+    const methodTagIds: string[] = []
+    const competenceTagIds: string[] = []
 
-      if (added.length > 0) {
-        aiHighlightIds.value = [...new Set([...aiHighlightIds.value, ...added])]
+    const stageSuffix = STAGE_CODE[props.form.stage]
+    const treeOk = (treeId: string | null | undefined) => {
+      if (!treeId) return false
+      const t = treeList.value.find((x) => x.id === treeId)
+      if (!t) return false
+      return t.code.endsWith(`_${stageSuffix}`)
+    }
+
+    // 先清掉历史错学段 / 无名称残留，再合并本次 AI 结果
+    pruneInvalidSelectedNodes()
+
+    for (const m of matches) {
+      if (m.target_type === 'knowledge_node' && m.target_id) {
+        if (!treeOk(m.tree_id)) continue
+        const label = (m.target_name || m.ai_name || '').trim()
+        if (!label) continue
+        nodeNameMap.value.set(m.target_id, label)
+        if (m.tree_id) nodeTreeIdMap.value.set(m.target_id, m.tree_id)
+        if (m.dimension === 'chapter') chapterAiIds.push(m.target_id)
+        else if (m.dimension === 'knowledge') knowledgeAiIds.push(m.target_id)
+        else if (m.dimension === 'pattern') patternAiIds.push(m.target_id)
+        continue
       }
+      if (m.dimension === 'method') methodTagIds.push(m.target_id)
+      else if (m.dimension === 'core_competence') competenceTagIds.push(m.target_id)
+    }
+
+    const prevChapter = new Set(chapterNodeIds.value)
+    const prevKnowledge = new Set(knowledgeNodeIds.value)
+    const prevMethod = new Set(methodNodeIds.value)
+    const added: string[] = []
+    const truncateHints: string[] = []
+
+    if (chapterAiIds.length) {
+      const r = replaceLimited(chapterAiIds, NODE_LIMITS.chapter)
+      chapterNodeIds.value = r.ids
+      if (r.truncated) truncateHints.push(`章节保留 ${NODE_LIMITS.chapter} 个（截去 ${r.dropped}）`)
+      for (const id of r.ids) if (!prevChapter.has(id)) added.push(id)
+    }
+    if (knowledgeAiIds.length) {
+      const r = replaceLimited(knowledgeAiIds, NODE_LIMITS.knowledge)
+      knowledgeNodeIds.value = r.ids
+      if (r.truncated) truncateHints.push(`知识点保留 ${NODE_LIMITS.knowledge} 个（截去 ${r.dropped}）`)
+      for (const id of r.ids) if (!prevKnowledge.has(id)) added.push(id)
+    }
+    if (patternAiIds.length) {
+      const r = replaceLimited(patternAiIds, NODE_LIMITS.pattern)
+      methodNodeIds.value = r.ids
+      if (r.truncated) truncateHints.push(`题型专题保留 ${NODE_LIMITS.pattern} 个（截去 ${r.dropped}）`)
+      for (const id of r.ids) if (!prevMethod.has(id)) added.push(id)
+    }
+    if (added.length > 0) {
+      aiHighlightIds.value = [...new Set([...aiHighlightIds.value, ...added])]
       newAiFields.add('knowledge_node')
     }
 
-    // 核心素养 + 解题方法标签回填：与用户已选取并集，受 TAG_LIMITS 上限约束
-    const aiTagIds = [
-      ...(data.competency_tags ?? []).map(t => t.tag_id),
-      ...(data.method_tags ?? []).map(t => t.tag_id),
-    ]
-    if (aiTagIds.length > 0) {
-      tagIds.value = [...new Set([...tagIds.value, ...aiTagIds])]
+    const mergeTagsByCategory = (incoming: string[], category: TagCategory, label: string) => {
+      if (!incoming.length) return
+      const limit = TAG_LIMITS[category] ?? 99
+      const r = replaceLimited(incoming, limit)
+      const others = tagIds.value.filter((id) => {
+        const t = allTagsMap.value.get(id)
+        return t && t.category !== category
+      })
+      tagIds.value = [...new Set([...others, ...r.ids])]
+      if (r.truncated) truncateHints.push(`${label}保留 ${limit} 个（截去 ${r.dropped}）`)
       newAiFields.add('tag')
     }
+    mergeTagsByCategory(competenceTagIds, 'core_competence', '核心素养')
+    mergeTagsByCategory(methodTagIds, 'method', '解题方法')
 
-    // 难度回填
     if (data.difficulty != null) {
       props.form.difficulty = difficultyNumToString(data.difficulty)
       const diffStars = data.difficulty
@@ -860,38 +1162,241 @@ async function runAiTagging() {
       newAiFields.add('difficulty')
     }
 
-    // 题型回填
     if (data.question_type) {
       props.form.question_type = data.question_type as QuestionType
       newAiFields.add('question_type')
     }
 
-    // 年级 / 认知层次回填（暂存到 aiGeneratedFields 标记位，由父组件决定是否使用）
-    if (data.grade_level) newAiFields.add(`grade_level:${data.grade_level}`)
-    if (data.cognitive_level) newAiFields.add(`cognitive_level:${data.cognitive_level}`)
+    if (data.cognitive_level) {
+      props.form.cognitive_level = data.cognitive_level
+      newAiFields.add('cognitive_level')
+    }
 
-    if (data.unmatched_knowledge_points?.length) {
-      toast.info(`AI 识别到 ${data.unmatched_knowledge_points.length} 个未匹配知识点，请手动确认`)
+    props.form.taggingSuggestionId = data.suggestion_id || ''
+    const unmatched = normalizeUnmatchedList(data.unmatched)
+    props.form.taggingUnmatched = unmatched
+    props.form.taggingUnmatchedIds = []
+    props.form.taggingAliasMaps = []
+
+    if (unmatched.length) {
+      toast.info(`识别到 ${unmatched.length} 个未匹配项，勾选后确认保存将提交审核`)
+    }
+    if (truncateHints.length) {
+      toast.warning(`部分 AI 建议超限：${truncateHints.join('；')}`)
     }
 
     aiGeneratedFields.value = newAiFields
-    toast.success(`AI 打标完成，已回填 ${newAiFields.size} 个字段`)
-    // 等待 watch 触发完毕后再放开标记，防止清掉刚加的高亮
+    const nodeFilled = added.length
+    toast.success(
+      nodeFilled
+        ? `AI 打标完成，已回填 ${newAiFields.size} 个字段`
+        : unmatched.length
+          ? `AI 打标完成；知识树未命中，请核对下方未匹配建议`
+          : `AI 打标完成，已回填 ${newAiFields.size} 个字段`,
+    )
     await nextTick()
+    // 按 AI 返回的 tree_id 重新对齐当前 Tab，使树上勾选与上方标签一致
+    const needRealign =
+      (treeMode.value === 'chapter' && chapterAiIds.length > 0)
+      || (treeMode.value === 'knowledge' && knowledgeAiIds.length > 0)
+      || (treeMode.value === 'method' && patternAiIds.length > 0)
+    if (needRealign) {
+      await loadTrees()
+    }
+}
+
+async function runAiTaggingAsync(content: string) {
+  const { data } = await aiTaggingApi.createTask({
+    content,
+    space_id: space.currentSpaceId || undefined,
+    question_id: props.questionId || undefined,
+    stage: props.form.stage,
+  })
+  taggingTaskId.value = data.id
+  taggingPhase.value = data.reused ? '复用进行中任务' : '排队中'
+  const started = Date.now()
+  while (Date.now() - started < TAGGING_POLL_TIMEOUT_MS) {
+    if (taggingCancelled) return
+    const { data: task } = await aiTaggingApi.getTask(data.id)
+    if (taggingCancelled) return
+    if (task.cancelling) taggingPhase.value = '正在取消…'
+    else if (task.status === 'pending') taggingPhase.value = '排队中'
+    else if (task.status === 'retrying') taggingPhase.value = '重试中'
+    else taggingPhase.value = '打标中'
+
+    if (task.status === 'success' && task.suggestion) {
+      await applyAiTaggingResult(task.suggestion)
+      return
+    }
+    if (task.status === 'cancelled') {
+      toast.info('已取消打标')
+      return
+    }
+    if (task.status === 'failed') {
+      throw new Error(task.error_message || 'AI 打标失败')
+    }
+    await sleep(TAGGING_POLL_MS)
+  }
+  throw new Error('打标超时，请稍后重试')
+}
+
+async function runAiTagging() {
+  const content = buildTaggingContent()
+  if (!content.trim()) {
+    toast.warning('请先输入题干内容')
+    return
+  }
+  aiTagging.value = true
+  aiTaggingInProgress = true
+  taggingCancelled = false
+  taggingTaskId.value = ''
+  taggingPhase.value = '打标中'
+  try {
+    if (USE_ASYNC_TAGGING) {
+      try {
+        await runAiTaggingAsync(content)
+        return
+      } catch (e: any) {
+        if (e?.response?.status === 404) {
+          const res = await aiTaggingApi.tag({
+            content,
+            space_id: space.currentSpaceId || undefined,
+            question_id: props.questionId || undefined,
+          })
+          await applyAiTaggingResult(res.data)
+          return
+        }
+        throw e
+      }
+    }
+    const res = await aiTaggingApi.tag({
+      content,
+      space_id: space.currentSpaceId || undefined,
+      question_id: props.questionId || undefined,
+    })
+    await applyAiTaggingResult(res.data)
   } catch (e: any) {
-    toast.error(e.response?.data?.error || 'AI 打标失败，请稍后重试')
+    if (!taggingCancelled) {
+      const msg = e?.message || e?.response?.data?.error || 'AI 打标失败，请稍后重试'
+      if (!(e as { __quotaHandled?: boolean })?.__quotaHandled) {
+        toast.error(msg)
+      }
+    }
   } finally {
     aiTagging.value = false
     aiTaggingInProgress = false
+    taggingTaskId.value = ''
+    taggingPhase.value = ''
   }
+}
+
+async function cancelAiTagging() {
+  taggingCancelled = true
+  const id = taggingTaskId.value
+  if (id) {
+    try {
+      await aiTaggingApi.cancelTask(id)
+    } catch { /* 任务可能已结束 */ }
+  }
+  aiTagging.value = false
+  aiTaggingInProgress = false
+  taggingPhase.value = ''
+}
+
+function toggleUnmatched(id: string) {
+  const item = (props.form.taggingUnmatched ?? []).find((u) => u.id === id)
+  if (item && item.eligible_for_candidate === false) return
+  const ids = props.form.taggingUnmatchedIds ?? []
+  const idx = ids.indexOf(id)
+  if (idx >= 0) {
+    ids.splice(idx, 1)
+  } else {
+    ids.push(id)
+    clearAlias(id)
+  }
+  props.form.taggingUnmatchedIds = [...ids]
+}
+
+const aliasPickerOpen = ref('')
+
+function ensureAliasMaps(): TaggingAliasMap[] {
+  if (!Array.isArray(props.form.taggingAliasMaps)) {
+    props.form.taggingAliasMaps = []
+  }
+  return props.form.taggingAliasMaps
+}
+
+function aliasFor(id: string): TaggingAliasMap | undefined {
+  return (props.form.taggingAliasMaps ?? []).find((m) => m.unmatched_id === id)
+}
+
+function unmatchedTreeKind(dim: string): KnowledgeTreeKind {
+  if (dim === 'chapter') return 'chapter'
+  if (dim === 'pattern') return 'ability'
+  return 'knowledge'
+}
+
+function isTagUnmatched(dim: string) {
+  return dim === 'method' || dim === 'core_competence'
+}
+
+function aliasNodeIds(id: string): string[] {
+  const m = aliasFor(id)
+  return m?.node_id ? [m.node_id] : []
+}
+
+function uncheckUnmatched(id: string) {
+  props.form.taggingUnmatchedIds = (props.form.taggingUnmatchedIds ?? []).filter((x) => x !== id)
+}
+
+function clearAlias(id: string) {
+  props.form.taggingAliasMaps = ensureAliasMaps().filter((m) => m.unmatched_id !== id)
+}
+
+function attachMappedNode(dim: string, nodeId: string) {
+  if (dim === 'chapter') {
+    chapterNodeIds.value = mergeLimited(chapterNodeIds.value, [nodeId], NODE_LIMITS.chapter).ids
+  } else if (dim === 'pattern') {
+    methodNodeIds.value = mergeLimited(methodNodeIds.value, [nodeId], NODE_LIMITS.pattern).ids
+  } else {
+    knowledgeNodeIds.value = mergeLimited(knowledgeNodeIds.value, [nodeId], NODE_LIMITS.knowledge).ids
+  }
+}
+
+function setAliasNode(u: TaggingUnmatched, ids: string[]) {
+  if (!ids.length) {
+    if (aliasFor(u.id)?.node_id) clearAlias(u.id)
+    return
+  }
+  const maps = ensureAliasMaps().filter((m) => m.unmatched_id !== u.id)
+  const nodeId = ids[0]
+  maps.push({ unmatched_id: u.id, node_id: nodeId })
+  uncheckUnmatched(u.id)
+  attachMappedNode(u.dimension, nodeId)
+  aliasPickerOpen.value = ''
+  props.form.taggingAliasMaps = maps
+}
+
+function setAliasTag(u: TaggingUnmatched, tagId: string) {
+  const maps = ensureAliasMaps().filter((m) => m.unmatched_id !== u.id)
+  if (tagId) {
+    maps.push({ unmatched_id: u.id, tag_id: tagId })
+    uncheckUnmatched(u.id)
+    const tag = allTagsMap.value.get(tagId)
+    if (tag && !tagIds.value.includes(tagId)) {
+      toggleTag(tag)
+    }
+  }
+  props.form.taggingAliasMaps = maps
+}
+
+function aliasTagsFor(dim: string): Tag[] {
+  return dim === 'core_competence' ? props.competenceTags : props.methodTags
 }
 
 // ─────────────────────────────────────────────────────────────────────
 // 手动编辑 → 取消 AI 高亮
 // ─────────────────────────────────────────────────────────────────────
-// AI 回填进行中的标志：避免 watch 在 AI 设置字段时立刻清掉刚加的高亮
-let aiTaggingInProgress = false
-
 function clearFieldHighlight(field: string) {
   if (aiTaggingInProgress) return
   if (!aiGeneratedFields.value.has(field)) return
@@ -899,6 +1404,15 @@ function clearFieldHighlight(field: string) {
   next.delete(field)
   aiGeneratedFields.value = next
 }
+
+watch(
+  () => props.form.grade,
+  () => clearFieldHighlight('grade'),
+)
+watch(
+  () => props.form.cognitive_level,
+  () => clearFieldHighlight('cognitive_level'),
+)
 
 // 知识点手动变更 → 取消高亮
 watch(knowledgeNodeIds, () => {
@@ -941,6 +1455,17 @@ watch(
   { immediate: true },
 )
 
+watch(
+  () => props.initialNodeTreeIds,
+  (val) => {
+    if (!val) return
+    for (const [id, treeId] of Object.entries(val)) {
+      if (treeId) nodeTreeIdMap.value.set(id, treeId)
+    }
+  },
+  { immediate: true },
+)
+
 onMounted(() => {
   // 预加载当前 stage/subject/mode 对应的树（默认知识点模式）
   loadTrees().then(loadTreeData)
@@ -950,6 +1475,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  taggingCancelled = true
   document.removeEventListener('click', onPaperClickOutside)
 })
 </script>
@@ -965,6 +1491,14 @@ onBeforeUnmount(() => {
         </div>
         <div class="asp-header-actions">
           <AppButton
+            v-if="aiTagging && taggingTaskId"
+            variant="ghost"
+            size="sm"
+            @click="cancelAiTagging"
+          >
+            取消
+          </AppButton>
+          <AppButton
             variant="primary"
             size="sm"
             :loading="aiTagging"
@@ -972,7 +1506,7 @@ onBeforeUnmount(() => {
             @click="runAiTagging"
           >
             <AppIcon name="sparkles" :size="14" />
-            <span>{{ aiTagging ? '打标中…' : 'AI 智能打标' }}</span>
+            <span>{{ aiTagging ? (taggingPhase || '打标中…') : 'AI 智能打标' }}</span>
           </AppButton>
         </div>
       </header>
@@ -1036,14 +1570,17 @@ onBeforeUnmount(() => {
           </div>
 
           <!-- 第三行左：年级（级联：根据学段动态计算） -->
-          <div class="asp-meta-cell">
+          <div
+            class="asp-meta-cell"
+            :class="{ 'ai-highlight': aiGeneratedFields.has('grade') }"
+          >
             <AppSelect
               :model-value="props.form.grade || undefined"
               :options="gradeOptions"
               placeholder="年级"
               clearable
               class="asp-meta-select"
-              @update:model-value="(v: string | undefined) => { props.form.grade = v ?? '' }"
+              @update:model-value="(v: string | undefined) => { props.form.grade = v ?? ''; clearFieldHighlight('grade') }"
             />
           </div>
 
@@ -1123,6 +1660,21 @@ onBeforeUnmount(() => {
               @update:model-value="(v: string | undefined) => { props.form.sub_source_type = v ?? '' }"
             />
           </div>
+
+          <!-- 第六行：认知层次 -->
+          <div
+            class="asp-meta-cell"
+            :class="{ 'ai-highlight': aiGeneratedFields.has('cognitive_level') }"
+          >
+            <AppSelect
+              :model-value="props.form.cognitive_level || undefined"
+              :options="COGNITIVE_OPTIONS"
+              placeholder="认知层次"
+              clearable
+              class="asp-meta-select"
+              @update:model-value="(v: string | undefined) => { props.form.cognitive_level = v ?? ''; clearFieldHighlight('cognitive_level') }"
+            />
+          </div>
         </div>
       </section>
 
@@ -1142,8 +1694,8 @@ onBeforeUnmount(() => {
             :key="t.id"
             class="asp-node-chip"
             :class="['is-' + t.type, { 'is-primary': t.isPrimary }]"
-            :title="t.path"
-            @dblclick="locateTreeNode(t)"
+            :title="`${t.path}\n点击定位到知识树中的该节点`"
+            @click="locateTreeNode(t)"
           >
             <span class="asp-node-chip-type">{{ t.typeLabel }}</span>
             <span class="asp-node-chip-name">{{ t.name }}</span>
@@ -1155,7 +1707,6 @@ onBeforeUnmount(() => {
               :class="{ active: t.isPrimary }"
               :title="t.isPrimary ? '取消主知识点' : '设为主知识点'"
               @click.stop="togglePrimary(t.id)"
-              @dblclick.stop
             >
               <AppIcon name="star" :size="11" />
             </button>
@@ -1164,10 +1715,21 @@ onBeforeUnmount(() => {
               class="asp-node-chip-x"
               :title="`移除${t.typeLabel}`"
               @click.stop="removeNode(t.id, t.type)"
-              @dblclick.stop
             >
               <AppIcon name="x" :size="10" />
             </button>
+          </span>
+        </div>
+        <div v-if="unmatchedTreeHints.length && !allSelectedNodes.length" class="asp-unmatched-chips">
+          <span
+            v-for="u in unmatchedTreeHints"
+            :key="'hint-' + u.id"
+            class="asp-unmatched-chip"
+            :title="'未在知识树命中，可展开树手动选择或勾选下方建议'"
+          >
+            <span class="asp-node-chip-type">{{ unmatchedDimLabel(u.dimension) }}</span>
+            <span class="asp-node-chip-name">{{ u.raw_name }}</span>
+            <span class="asp-unmatched-chip-flag">未匹配</span>
           </span>
         </div>
         <!-- 展开按钮（收起态：点击原地展开 Tabs + 树） -->
@@ -1191,7 +1753,7 @@ onBeforeUnmount(() => {
                 class="asp-tree-tab"
                 :class="{ active: treeMode === m.key }"
                 :disabled="m.key === 'method' && !methodTreeAvailable"
-                :title="m.key === 'method' && !methodTreeAvailable ? '当前学段/学科暂无解题方法树' : undefined"
+                :title="m.key === 'method' && !methodTreeAvailable ? '当前学段/学科暂无题型专题树' : undefined"
                 role="tab"
                 :aria-selected="treeMode === m.key"
                 @click="setMode(m.key)"
@@ -1209,6 +1771,7 @@ onBeforeUnmount(() => {
                 :nodes="treeData"
                 v-model="currentModeSelectedIds"
                 :highlight-ids="aiHighlightIds"
+                :cascade="treeMode !== 'chapter'"
               />
             </div>
             <button
@@ -1219,6 +1782,70 @@ onBeforeUnmount(() => {
               <AppIcon name="chevron-down" :size="14" class="asp-tree-toggle-icon-up" />
               <span>收起 / 完成</span>
             </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 未匹配建议：勾选后确认保存才进候选审核 -->
+      <section v-if="(props.form.taggingUnmatched ?? []).length" class="asp-section">
+        <div class="asp-section-head">
+          <label class="asp-label">未匹配建议</label>
+          <span class="asp-counter">{{ (props.form.taggingUnmatchedIds ?? []).length }}/{{ (props.form.taggingUnmatched ?? []).length }}</span>
+        </div>
+        <p class="asp-unmatched-hint">默认不提交审核。仅勾选「提交为新」或点「等于已有」后，确认保存才会进入管理员审核。</p>
+        <div
+          v-for="u in props.form.taggingUnmatched"
+          :key="u.id"
+          class="asp-unmatched-item"
+          :class="{ mapped: !!aliasFor(u.id) }"
+        >
+          <label class="asp-unmatched-row">
+            <input
+              type="checkbox"
+              class="asp-unmatched-check"
+              :checked="(props.form.taggingUnmatchedIds ?? []).includes(u.id)"
+              :disabled="!!aliasFor(u.id) || u.eligible_for_candidate === false"
+              :title="u.eligible_for_candidate === false ? '过短或过泛，不能提交为新标签，请用「等于已有」' : ''"
+              @change="toggleUnmatched(u.id)"
+            />
+            <span class="asp-unmatched-dim">{{ unmatchedDimLabel(u.dimension) }}</span>
+            <span class="asp-unmatched-name">{{ u.raw_name }}</span>
+          </label>
+          <div class="asp-unmatched-actions">
+            <button
+              v-if="!aliasFor(u.id)"
+              type="button"
+              class="asp-unmatched-alias-btn"
+              @click="aliasPickerOpen = aliasPickerOpen === u.id ? '' : u.id"
+            >等于已有</button>
+            <button
+              v-else
+              type="button"
+              class="asp-unmatched-alias-btn is-on"
+              @click="clearAlias(u.id)"
+            >取消映射</button>
+          </div>
+          <p v-if="aliasFor(u.id)" class="asp-unmatched-mapped">
+            将作为已有{{ isTagUnmatched(u.dimension) ? '标签' : '节点' }}的别名提交审核
+          </p>
+          <div v-if="aliasPickerOpen === u.id || aliasFor(u.id)" class="asp-unmatched-picker">
+            <KnowledgeTreeCascader
+              v-if="!isTagUnmatched(u.dimension)"
+              :model-value="aliasNodeIds(u.id)"
+              :kind="unmatchedTreeKind(u.dimension)"
+              :max="1"
+              placeholder="选择已有节点…"
+              @update:model-value="(ids) => setAliasNode(u, ids)"
+            />
+            <select
+              v-else
+              class="asp-unmatched-tag-select"
+              :value="aliasFor(u.id)?.tag_id || ''"
+              @change="setAliasTag(u, ($event.target as HTMLSelectElement).value)"
+            >
+              <option value="" disabled>选择已有标签…</option>
+              <option v-for="t in aliasTagsFor(u.dimension)" :key="t.id" :value="t.id">{{ t.name }}</option>
+            </select>
           </div>
         </div>
       </section>
@@ -1245,17 +1872,17 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <!-- 解题方法 -->
+      <!-- 通用方法 -->
       <section class="asp-section">
         <div class="asp-section-head">
-          <label class="asp-label">解题方法</label>
+          <label class="asp-label">通用方法</label>
           <span class="asp-counter">{{ selectedMethodTags.length }}/5</span>
         </div>
         <div class="asp-typeahead">
           <input
             v-model="suggestMethod.query"
             class="asp-input"
-            placeholder="搜索或创建方法标签…"
+            placeholder="搜索或创建通用方法…"
             @input="onSuggestInput(suggestMethod, 'method')"
           />
           <div v-if="suggestMethod.results.length" class="asp-popover">
@@ -1749,6 +2376,153 @@ onBeforeUnmount(() => {
   padding: 6px 0;
 }
 
+.asp-unmatched-hint {
+  margin: 0 0 8px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.asp-unmatched-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  font-size: 12.5px;
+  border-radius: 8px;
+  background: var(--bg-input);
+  line-height: 1.4;
+}
+
+.asp-unmatched-item.mapped {
+  background: color-mix(in srgb, var(--accent, #3b82f6) 8%, var(--bg-input));
+}
+
+.asp-unmatched-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.asp-unmatched-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.asp-unmatched-alias-btn {
+  border: none;
+  background: none;
+  padding: 0;
+  font-size: 11.5px;
+  color: var(--accent, #3b82f6);
+  cursor: pointer;
+}
+
+.asp-unmatched-alias-btn.is-on {
+  color: var(--text-muted);
+}
+
+.asp-unmatched-mapped {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.asp-unmatched-picker {
+  min-width: 0;
+}
+
+.asp-unmatched-tag-select {
+  width: 100%;
+  font-size: 12px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border, #e5e5ea);
+  background: var(--bg-card, #fff);
+}
+
+.asp-unmatched-check {
+  appearance: none !important;
+  -webkit-appearance: none !important;
+  padding: 0 !important;
+  margin: 2px 0 0;
+  width: 14px !important;
+  height: 14px !important;
+  min-width: 14px;
+  max-width: 14px;
+  flex-shrink: 0;
+  box-sizing: border-box;
+  border: 1.5px solid #c0c4cc;
+  border-radius: 3px;
+  background: #fff;
+  box-shadow: none;
+  cursor: pointer;
+  position: relative;
+}
+
+.asp-unmatched-check:checked {
+  background: var(--accent, #3b82f6);
+  border-color: var(--accent, #3b82f6);
+}
+
+.asp-unmatched-check:checked::after {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 1px;
+  width: 4px;
+  height: 7px;
+  border: 1.5px solid #fff;
+  border-top: none;
+  border-left: none;
+  transform: rotate(45deg);
+}
+
+.asp-unmatched-dim {
+  flex-shrink: 0;
+  font-size: 10.5px;
+  color: var(--text-muted);
+  background: var(--bg-card);
+  border-radius: 4px;
+  padding: 1px 6px;
+  white-space: nowrap;
+  line-height: 1.6;
+}
+
+.asp-unmatched-name {
+  flex: 1;
+  min-width: 0;
+  white-space: normal;
+  word-break: break-word;
+  color: var(--text-primary);
+}
+
+.asp-unmatched-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.asp-unmatched-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px;
+  border-radius: 9999px;
+  border: 1px dashed var(--border-strong, #d1d1d6);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  max-width: 100%;
+}
+
+.asp-unmatched-chip-flag {
+  flex-shrink: 0;
+  font-size: 9.5px;
+  color: var(--text-muted);
+}
+
 /* ===== 输入框 ===== */
 .asp-input {
   width: 100%;
@@ -1904,7 +2678,12 @@ onBeforeUnmount(() => {
   font-size: 11.5px;
   font-weight: 500;
   max-width: 100%;
-  transition: background 0.15s ease, border-color 0.15s ease;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.asp-node-chip:hover {
+  box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 22%, transparent);
 }
 
 /* 按 type 区分色调（章节/知识点/方法） */
@@ -2287,7 +3066,7 @@ onBeforeUnmount(() => {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
 }
 
-/* Tab 禁用态（后端无对应树，如解题方法） */
+/* Tab 禁用态（后端无对应树，如题型专题） */
 .asp-tree-tab:disabled {
   opacity: 0.45;
   cursor: not-allowed;

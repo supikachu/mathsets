@@ -75,6 +75,12 @@ async fn main() {
     tokio::spawn(mathset::workers::ai_parse_worker::start_worker(state.clone()));
     tracing::info!("🤖 AI 解析 worker 已在后台启动");
 
+    tokio::spawn(mathset::workers::ai_tagging_worker::start_worker(state.clone()));
+    tracing::info!("🏷️ AI 打标 worker 已在后台启动");
+
+    tokio::spawn(mathset::ai::embedding::start_backfill(state.pool.clone()));
+    tracing::info!("🧭 知识树/标签 embedding 回填已在后台启动");
+
     // 启动 AI 孤儿草稿 GC（每 6 小时一次，清理落库 72h 后用户从未保存的 worker 草稿；
     // 兜底用户直接关闭浏览器导致前端"丢弃"通道未触达的场景）
     {

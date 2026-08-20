@@ -10,6 +10,9 @@ import {
   type QuestionDetail,
   type QuestionCollectionSummary,
   type AiStagedQuestion,
+  type TagMatch,
+  type TaggingMatch,
+  type TaggingUnmatched,
 } from '@/api/client'
 import { AppButton, AppModal, AppConfirm, AppIcon } from '@/components/ui'
 import { useToast } from '@/composables/useToast'
@@ -26,6 +29,8 @@ import QuestionGroupingStep, { type GroupQuestion } from './QuestionGroupingStep
 const show = defineModel<boolean>({ required: true })
 const applyingAiResult = defineModel<boolean>('applyingAiResult', { default: false })
 const knowledgeNodeIds = defineModel<string[]>('knowledgeNodeIds', { required: true })
+const chapterNodeIds = defineModel<string[]>('chapterNodeIds', { default: () => [] })
+const methodNodeIds = defineModel<string[]>('methodNodeIds', { default: () => [] })
 const aiGeneratedFields = defineModel<Set<string>>('aiGeneratedFields', { required: true })
 
 const props = defineProps<{
@@ -208,10 +213,20 @@ function doApplyAiResult(q: ParsedQuestion) {
   aiGeneratedFields.value.add('solutions')
 
   if (q.kp_matches?.length) {
-    const highConfidenceMatch = q.kp_matches.find(m => m.score >= 0.95 && m.matched_id)
-    if (highConfidenceMatch) {
-      knowledgeNodeIds.value = [highConfidenceMatch.matched_id!]
-      props.form.knowledgeNodeIds = [highConfidenceMatch.matched_id!]
+    const kIds: string[] = []
+    const cIds: string[] = []
+    const mIds: string[] = []
+    for (const m of q.kp_matches) {
+      if (!m.matched_id) continue
+      if (m.kind === 'chapter') cIds.push(m.matched_id)
+      else if (m.kind === 'ability' || m.kind === 'pattern') mIds.push(m.matched_id)
+      else kIds.push(m.matched_id)
+    }
+    knowledgeNodeIds.value = kIds
+    props.form.knowledgeNodeIds = kIds
+    chapterNodeIds.value = cIds
+    methodNodeIds.value = mIds
+    if (kIds.length + cIds.length + mIds.length > 0) {
       aiGeneratedFields.value.add('knowledge_node')
     }
   }
@@ -485,10 +500,23 @@ async function loadParsedQuestions(ids: string[]): Promise<ParsedQuestion[]> {
 /// 暂存项 → ParsedQuestion（解析结果暂存、确认后入库链路）
 ///
 /// 后端不再自动落库：`parsed` 为后端 ParsedQuestion 序列化，`matched` 为
-/// 三维标签匹配结果（kind 携带 chapter/knowledge/ability），前端据此回填知识树。
+/// 三维标签匹配结果（kind 携带 chapter/knowledge/ability=题型专题），前端据此回填知识树。
 /// 携带 `ai_meta`（task_id + staged_index），保存时后端据此完成容器关联/候选/标记。
 function stagedToParsed(s: AiStagedQuestion, taskId: string): ParsedQuestion {
   const p = s.parsed as any
+  const suggestion = s.suggestion
+  const matches = suggestion?.matches ?? []
+  const tagMatches: TagMatch[] = matches
+    .filter((m) => m.target_type === 'tag')
+    .map((m) => ({
+      ai_name: m.ai_name,
+      tag_id: m.target_id,
+      tag_name: m.target_name,
+      category: m.category || (m.dimension === 'method' ? 'method' : 'core_competence'),
+      score: m.score,
+      match_type: m.match_type,
+    }))
+  const unmatched: TaggingUnmatched[] = suggestion?.unmatched ?? []
   return {
     question_type: p.question_type ?? 'solution',
     sub_type: p.sub_type,
@@ -510,6 +538,18 @@ function stagedToParsed(s: AiStagedQuestion, taskId: string): ParsedQuestion {
       kind: m.kind,
     })),
     ai_meta: { task_id: taskId, staged_index: s.index },
+    tagging_suggestion_id: s.suggestion_id || suggestion?.suggestion_id || null,
+    tagging_unmatched: unmatched,
+    tag_matches: tagMatches,
+    tagging_matches: matches as TaggingMatch[],
+    grade_level: suggestion?.grade_level ?? null,
+    cognitive_level: suggestion?.cognitive_level ?? null,
+    tagging_difficulty: suggestion?.difficulty ?? null,
+    tagging_question_type: suggestion?.question_type ?? null,
+    tagging_stage: s.tagging_stage === 'junior' || s.tagging_stage === 'senior'
+      ? s.tagging_stage
+      : null,
+    existing_question_id: s.existing_question_id ?? null,
   }
 }
 
@@ -531,16 +571,21 @@ watch(pollTask, async (t) => {
     emit('batch-parsed', questions)
     resetDocFlow()
     show.value = false
+    const unmatchedCount = staged.reduce((n, s) => {
+      if (Array.isArray(s.suggestion?.unmatched)) return n + s.suggestion!.unmatched!.length
+      const u = s.unmatched || {}
+      return n + Object.values(u).reduce((a, arr) => a + (arr?.length ?? 0), 0)
+    }, 0)
+    const dupCount = staged.filter(s => s.existing_question_id).length
     const base =
       t.status === 'partial_success'
         ? `部分成功：${t.success_count} 题待确认（${t.failed_count} 题失败）`
         : `成功识别 ${questions.length} 道题，已进入批量录入工作台（确认保存后入库）`
-    // 未匹配标签将在确认保存时进入候选审核队列
-    toast.success(
-      t.pending_candidate_count > 0
-        ? `${base}；${t.pending_candidate_count} 个未匹配标签待候选审核`
-        : base,
-    )
+    const extra = [
+      unmatchedCount > 0 ? `${unmatchedCount} 个未匹配项，确认保存后提交审核` : '',
+      dupCount > 0 ? `${dupCount} 题与题库已有内容重复` : '',
+    ].filter(Boolean).join('；')
+    toast.success(extra ? `${base}；${extra}` : base)
   } else if (t.status === 'failed') {
     const errMsg = t.error_message || taskError.value || '解析失败'
     // PDF 直连模式失败（PDF_DIRECT_FAILED 前缀）→ 不回到确认页，

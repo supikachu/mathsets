@@ -2,8 +2,8 @@
 -- 清理自动化测试残留数据（tests/* 直接使用 dev 库时产生）
 --
 -- 匹配规则：测试用户名格式 = 前缀 + 8 位 hex UUID 片段
---   test_ / doc_ / pb_ / pt_ / src_ / tg_ / wkr_ / leader_
--- 严格正则校验，防止误删真实账号。知识树按测试 code 前缀 tg_tree% 匹配。
+--   test_ / doc_ / pb_ / pt_ / src_ / tg_ / wkr_ / leader_ / tgtsk_
+-- 严格正则校验，防止误删真实账号。知识树按测试 code 前缀匹配（见 §7）。
 --
 -- 执行：psql "$DATABASE_URL" -f scripts/clean_test_data.sql
 -- 幂等：重复执行不会误删真实数据（正则保证）。
@@ -89,8 +89,22 @@ DELETE FROM space_members WHERE user_id IN (
 DELETE FROM spaces WHERE owner_user_id IN (
     SELECT id FROM users WHERE username ~ '^(test_|doc_|pb_|pt_|src_|tg_|wkr_|leader_)[0-9a-f]{8}$');
 
--- 7. 测试知识树（code 前缀 tg_tree%，级联删除节点与节点关联）
-DELETE FROM knowledge_trees WHERE code LIKE 'tg_tree%';
+-- 7. 测试知识树（集成测试 code 前缀，级联删除节点与节点关联）
+--    tk_  test_knowledge_points_crud（名称「测试知识树」）
+--    lt_  test_question_full_lifecycle（名称「生命周期测试树」）
+--    tp_  test_register_preserves_ability_tree_kind
+--    tg_tree% / tg_tree2% / tg_{kind}_  tag_governance_api
+--    e7_% / tgapi_%  ai_tagging_engine / ai_tagging_api
+DELETE FROM knowledge_trees WHERE
+    code LIKE 'tk_%'
+    OR code LIKE 'lt_%'
+    OR code LIKE 'tp_%'
+    OR code LIKE 'tg_tree%'
+    OR code LIKE 'tg_tree2%'
+    OR code LIKE 'e7_%'
+    OR code LIKE 'tgapi_%'
+    OR code ~ '^tg_(knowledge|chapter|ability)_'
+    OR code = 'tg_test_tree';
 
 -- 8. 测试用户
 DELETE FROM users WHERE username ~ '^(test_|doc_|pb_|pt_|src_|tg_|wkr_|leader_)[0-9a-f]{8}$';

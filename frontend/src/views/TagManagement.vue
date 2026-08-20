@@ -86,7 +86,7 @@
           <label>标签类别</label>
           <select v-model="createForm.category" class="dialog-input">
             <option value="core_competence">核心素养</option>
-            <option value="method">解题方法</option>
+            <option value="method">通用方法</option>
             <option value="school">学校</option>
           </select>
         </div>
@@ -150,7 +150,7 @@ const sortDesc = ref(true)
 const tabs = computed(() => [
   { value: 'all' as const, label: '全部', count: tags.value.length },
   { value: 'core_competence' as const, label: '核心素养', count: tags.value.filter(t => t.category === 'core_competence').length },
-  { value: 'method' as const, label: '解题方法', count: tags.value.filter(t => t.category === 'method').length },
+  { value: 'method' as const, label: '通用方法', count: tags.value.filter(t => t.category === 'method').length },
   { value: 'school' as const, label: '学校', count: tags.value.filter(t => t.category === 'school').length },
 ])
 
@@ -312,7 +312,7 @@ async function doDelete() {
 function categoryLabel(c: string): string {
   const map: Record<string, string> = {
     core_competence: '核心素养',
-    method: '解题方法',
+    method: '通用方法',
     school: '学校',
   }
   return map[c] || c

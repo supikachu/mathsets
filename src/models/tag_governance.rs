@@ -11,13 +11,16 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct TagCandidate {
     pub id: Uuid,
-    /// chapter / knowledge / method
+    /// chapter / knowledge / method（通用方法）/ pattern（题型专题）/ core_competence
     pub kind: String,
+    /// knowledge_node / tag
+    pub target_type: String,
     /// AI 原始标签
     pub raw_name: String,
     /// 规范化标签（去重键之一）
     pub normalized_name: String,
     pub suggested_node_id: Option<Uuid>,
+    pub suggested_tag_id: Option<Uuid>,
     pub ai_confidence: Option<rust_decimal::Decimal>,
     pub match_score: Option<rust_decimal::Decimal>,
     pub source_task_id: Option<Uuid>,
@@ -26,6 +29,8 @@ pub struct TagCandidate {
     pub status: String,
     pub reviewed_by: Option<Uuid>,
     pub reviewed_at: Option<DateTime<Utc>>,
+    /// 通过或拒绝时的审核备注
+    pub review_note: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -34,6 +39,7 @@ pub struct TagCandidate {
 pub struct TagCandidateQuery {
     pub status: Option<String>,
     pub kind: Option<String>,
+    pub target_type: Option<String>,
     pub page: Option<i64>,
     pub page_size: Option<i64>,
 }
@@ -43,14 +49,16 @@ pub struct TagCandidateQuery {
 pub struct ApproveCandidateRequest {
     /// new_node（接受为新标签）/ alias（作为已有标签的别名）/ merge（并入已有标签）
     pub action: String,
-    /// new_node 分支：目标树
+    /// new_node 分支：目标树（knowledge_node）
     pub tree_id: Option<Uuid>,
     /// new_node 分支：父节点（可选，缺省为树根）
     pub parent_id: Option<Uuid>,
     /// new_node 分支：节点名（缺省用 raw_name）
     pub name: Option<String>,
-    /// alias / merge 分支：目标已有标签
+    /// alias / merge：目标知识节点（knowledge_node）；tag 分支也可作 target_tag_id 回退
     pub target_node_id: Option<Uuid>,
+    /// alias / merge：目标扁平标签（tag）；缺省回退 target_node_id
+    pub target_tag_id: Option<Uuid>,
     /// 审核备注
     pub reason: Option<String>,
 }

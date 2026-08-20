@@ -302,7 +302,7 @@ const submitting = ref(false)
 const rejectDialog = ref(false)
 const rejectComment = ref('')
 
-/** 知识点标签按维度着色：chapter→灰、knowledge→蓝、ability→紫（与列表页/编辑页统一） */
+/** 知识点标签按维度着色：chapter→灰、knowledge→蓝、ability→紫（题型专题，与列表页/编辑页统一） */
 function kpTagClass(kind: string): string {
   if (kind === 'chapter') return 'kp-kind-chapter'
   if (kind === 'ability') return 'kp-kind-method'
@@ -1452,7 +1452,7 @@ watch(() => route.params.id, (newId, oldId) => {
   color: var(--accent, #2563eb);
 }
 
-/* 解题方法 (ability)：紫色调 */
+/* 题型专题 (ability)：紫色调 */
 .kp-tag.kp-kind-method {
   background: var(--purple-light, #f3e8ff);
   color: var(--purple, #8b5cf6);

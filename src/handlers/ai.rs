@@ -247,6 +247,11 @@ pub(crate) async fn post_process_batch(
                                     score: m.score,
                                 })
                                 .collect();
+                            crate::ai::tagging::shadow::maybe_log_knowledge_shadow(
+                                pool,
+                                &q.knowledge_points,
+                            )
+                            .await;
                         }
                         Err(e) => {
                             tracing::warn!(

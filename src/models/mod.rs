@@ -1,5 +1,6 @@
 pub mod ai_setting;
 pub mod ai_task;
+pub mod ai_tagging_task;
 pub mod collection;
 pub mod document;
 pub mod notification;

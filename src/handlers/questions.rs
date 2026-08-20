@@ -10,6 +10,9 @@ use serde_json::json;
 use std::collections::HashSet;
 use uuid::Uuid;
 
+use crate::ai::tagging::{
+    apply_tagging_suggestion, confirmation_or_legacy, insert_confirmed_candidates,
+};
 use crate::auth::middleware::AuthUser;
 use crate::auth::permissions::{
     can_access_space, can_edit_question, can_publish_question, can_review_question,
@@ -108,7 +111,7 @@ pub(crate) async fn update_knowledge_nodes(
         .await?;
     }
 
-    // 4. 插入新增关联（统一标记为 manual；AI 来源只能由 upsert_ai_knowledge_nodes 写入）
+    // 4. 插入新增关联（统一标记为 manual；AI 来源由 TaggingFinalizer 在保存后回写）
     //    保留 retained 关联的 source 与 ai_confidence，避免覆盖 AI 审计数据
     for node_id in &added {
         let is_primary = primary_node_id == Some(*node_id);
@@ -149,73 +152,6 @@ pub(crate) async fn update_knowledge_nodes(
         .bind(primary_id)
         .execute(&mut **tx)
         .await?;
-    }
-
-    Ok(())
-}
-
-/// AI 专用的知识点关联 Upsert（B3 新增）
-///
-/// 与 `update_knowledge_nodes` 的差异：
-/// - `source = 'ai'`（审计追溯，区分人工/AI 标注）
-/// - 将 `KnowledgeNodeMatch.score`（f32）写入 `ai_confidence`（NUMERIC(5,4)）
-/// - `ON CONFLICT DO UPDATE`（覆盖已有 manual 关联的 source 与置信度）
-pub(crate) async fn upsert_ai_knowledge_nodes(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    question_id: Uuid,
-    matches: &[crate::handlers::ai_tagging::KnowledgeNodeMatch],
-    primary_node_id: Option<Uuid>,
-) -> Result<(), sqlx::Error> {
-    sqlx::query("DELETE FROM question_knowledge_nodes WHERE question_id = $1")
-        .bind(question_id)
-        .execute(&mut **tx)
-        .await?;
-
-    for m in matches {
-        let is_primary = primary_node_id == Some(m.node_id);
-        // f32 → rust_decimal::Decimal（ai_confidence 列为 NUMERIC(5,4)）
-        let ai_confidence = {
-            use rust_decimal::prelude::FromPrimitive;
-            rust_decimal::Decimal::from_f32(m.score)
-        };
-
-        sqlx::query(
-            r#"
-            INSERT INTO question_knowledge_nodes
-              (question_id, node_id, is_primary, source, ai_confidence, created_at)
-            VALUES ($1, $2, $3, 'ai', $4, NOW())
-            ON CONFLICT (question_id, node_id) DO UPDATE SET
-              is_primary = EXCLUDED.is_primary,
-              source = 'ai',
-              ai_confidence = EXCLUDED.ai_confidence
-            "#,
-        )
-        .bind(question_id)
-        .bind(m.node_id)
-        .bind(is_primary)
-        .bind(ai_confidence)
-        .execute(&mut **tx)
-        .await?;
-    }
-
-    // 确保 primary 唯一性：若 primary_node_id 不在 matches 中，单独插入
-    if let Some(primary_id) = primary_node_id {
-        if !matches.iter().any(|m| m.node_id == primary_id) {
-            sqlx::query(
-                r#"
-                INSERT INTO question_knowledge_nodes
-                  (question_id, node_id, is_primary, source, created_at)
-                VALUES ($1, $2, TRUE, 'ai', NOW())
-                ON CONFLICT (question_id, node_id) DO UPDATE SET
-                  is_primary = TRUE,
-                  source = 'ai'
-                "#,
-            )
-            .bind(question_id)
-            .bind(primary_id)
-            .execute(&mut **tx)
-            .await?;
-        }
     }
 
     Ok(())
@@ -1023,6 +959,55 @@ async fn mark_ai_staged_saved(
     .await;
 }
 
+fn merge_primary(mut node_ids: Vec<Uuid>, primary: Option<Uuid>) -> Vec<Uuid> {
+    if let Some(p) = primary {
+        if !node_ids.contains(&p) {
+            node_ids.push(p);
+        }
+    }
+    node_ids
+}
+
+/// 旧录题路径：把暂存 matched 节点标为 AI 来源（无 suggestion 时使用）
+async fn apply_legacy_staged_matches(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    question_id: Uuid,
+    staged: &serde_json::Value,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    let Some(matched) = staged.get("matched").and_then(|m| m.as_array()) else {
+        return Ok(());
+    };
+    use rust_decimal::prelude::FromPrimitive;
+    for m in matched {
+        let Some(node_id) = m
+            .get("node_id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+        else {
+            continue;
+        };
+        let score = m.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+        let ai_confidence = rust_decimal::Decimal::from_f32(score);
+        sqlx::query(
+            r#"
+            INSERT INTO question_knowledge_nodes
+              (question_id, node_id, is_primary, source, ai_confidence, created_at)
+            VALUES ($1, $2, FALSE, 'ai', $3, NOW())
+            ON CONFLICT (question_id, node_id) DO UPDATE SET
+              source = 'ai',
+              ai_confidence = EXCLUDED.ai_confidence
+            "#,
+        )
+        .bind(question_id)
+        .bind(node_id)
+        .bind(ai_confidence)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| db_err(format!("写入 AI 知识树标签失败: {e}")))?;
+    }
+    Ok(())
+}
+
 /// POST /api/v1/questions — 创建草稿
 pub async fn create_question(
     State(state): State<AppState>,
@@ -1141,42 +1126,6 @@ pub async fn create_question(
             .map_err(|e| db_err(format!("关联主知识点失败: {}", e)))?;
     }
 
-    // ── AI 智能录入：把暂存项已匹配的知识树节点标记为 AI 来源（source='ai'） ──
-    // 覆盖前端 manual 关联中的同名节点，保留用户额外增补的 manual 关联；
-    // 不触碰 is_primary（由上方 update_knowledge_nodes 依据 primary_knowledge_node_id 决定）。
-    if let Some(ref staged) = ai_staged {
-        if let Some(matched) = staged.get("matched").and_then(|m| m.as_array()) {
-            use rust_decimal::prelude::FromPrimitive;
-            for m in matched {
-                let Some(node_id) = m
-                    .get("node_id")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| Uuid::parse_str(s).ok())
-                else {
-                    continue;
-                };
-                let score = m.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-                let ai_confidence = rust_decimal::Decimal::from_f32(score);
-                sqlx::query(
-                    r#"
-                    INSERT INTO question_knowledge_nodes
-                      (question_id, node_id, is_primary, source, ai_confidence, created_at)
-                    VALUES ($1, $2, FALSE, 'ai', $3, NOW())
-                    ON CONFLICT (question_id, node_id) DO UPDATE SET
-                      source = 'ai',
-                      ai_confidence = EXCLUDED.ai_confidence
-                    "#,
-                )
-                .bind(id)
-                .bind(node_id)
-                .bind(ai_confidence)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| db_err(format!("写入 AI 知识树标签失败: {e}")))?;
-            }
-        }
-    }
-
     // 合并已有 tag_ids + 自建 new_tags（Upsert 后取 ID）
     let tag_ids_provided = req.tag_ids.is_some();
     let new_tags_provided = req
@@ -1198,6 +1147,29 @@ pub async fn create_question(
             .map_err(|e| db_err(format!("关联标签失败: {}", e)))?;
     }
 
+    let confirmation = confirmation_or_legacy(
+        req.ai_tagging_confirmation.clone(),
+        ai_staged.as_ref(),
+    );
+    let mut pending_candidates = Vec::new();
+    if let Some(ref conf) = confirmation {
+        let node_ids = merge_primary(
+            req.knowledge_node_ids.clone().unwrap_or_default(),
+            req.primary_knowledge_node_id,
+        );
+        pending_candidates = apply_tagging_suggestion(
+            &mut tx,
+            auth_user.id,
+            id,
+            conf,
+            &node_ids,
+            &all_tag_ids,
+        )
+        .await?;
+    } else if let Some(ref staged) = ai_staged {
+        apply_legacy_staged_matches(&mut tx, id, staged).await?;
+    }
+
     // 同步题目 ↔ 试卷关联（全量覆盖）
     if let Some(ref paper_ids) = req.paper_ids {
         sync_question_papers(&mut tx, id, paper_ids)
@@ -1212,6 +1184,8 @@ pub async fn create_question(
     tx.commit()
         .await
         .map_err(|e| db_err(format!("提交事务失败: {}", e)))?;
+
+    insert_confirmed_candidates(&state.pool, id, &pending_candidates).await;
 
     // ── AI 智能录入后处理（尽力而为，不阻塞题目已成功创建） ──
     if let (Some(meta), Some(staged)) = (&req.ai_meta, &ai_staged) {
@@ -1240,32 +1214,6 @@ pub async fn create_question(
                 p,
             )
             .await;
-        }
-
-        // 未匹配标签 → 候选队列（章节/知识点/方法）
-        let confidence = parsed.as_ref().map(|p| p.confidence).unwrap_or(0.0);
-        if let Some(unmatched) = staged.get("unmatched").and_then(|u| u.as_object()) {
-            for (kind, names_val) in unmatched {
-                let names: Vec<String> = names_val
-                    .as_array()
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|n| n.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                if !names.is_empty() {
-                    crate::workers::ai_parse_worker::create_tag_candidates(
-                        &state,
-                        meta.task_id,
-                        id,
-                        confidence,
-                        kind,
-                        &names,
-                    )
-                    .await;
-                }
-            }
         }
 
         // 标记暂存项已保存 + 写幂等映射（供 GET parse-task 返回 question_ids）
@@ -1534,6 +1482,41 @@ pub async fn update_question(
             .map_err(|e| db_err(format!("更新标签关联失败: {}", e)))?;
     }
 
+    let mut pending_candidates = Vec::new();
+    if let Some(ref conf) = req.ai_tagging_confirmation {
+        let node_ids = if let Some(ref ids) = req.knowledge_node_ids {
+            merge_primary(ids.clone(), req.primary_knowledge_node_id)
+        } else {
+            sqlx::query_scalar::<_, Uuid>(
+                "SELECT node_id FROM question_knowledge_nodes WHERE question_id = $1",
+            )
+            .bind(id)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| db_err(format!("查询知识点关联失败: {e}")))?
+        };
+        let tag_ids = if tag_ids_provided || new_tags_provided {
+            all_tag_ids.clone()
+        } else {
+            sqlx::query_scalar::<_, Uuid>(
+                "SELECT tag_id FROM question_tags_relation WHERE question_id = $1",
+            )
+            .bind(id)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| db_err(format!("查询标签关联失败: {e}")))?
+        };
+        pending_candidates = apply_tagging_suggestion(
+            &mut tx,
+            auth_user.id,
+            id,
+            conf,
+            &node_ids,
+            &tag_ids,
+        )
+        .await?;
+    }
+
     // 同步题目 ↔ 试卷关联（全量覆盖）
     if let Some(ref paper_ids) = req.paper_ids {
         sync_question_papers(&mut tx, id, paper_ids)
@@ -1548,6 +1531,8 @@ pub async fn update_question(
     tx.commit()
         .await
         .map_err(|e| db_err(format!("提交事务失败: {}", e)))?;
+
+    insert_confirmed_candidates(&state.pool, id, &pending_candidates).await;
 
     // ── 删后：异步清理被遗弃的旧图片文件 ──
     //    DB 更新已成功提交，物理文件删除失败不应阻断 API 响应

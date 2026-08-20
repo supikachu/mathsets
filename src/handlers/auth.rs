@@ -29,8 +29,8 @@ async fn copy_default_knowledge_tree(
     target_space_id: Uuid,
 ) -> Result<(), sqlx::Error> {
     // 1. 复制全局树（space_id IS NULL）
-    let global_trees = sqlx::query_as::<_, (Uuid, String, String, Option<String>)>(
-        "SELECT id, code, name, description FROM knowledge_trees WHERE space_id IS NULL AND is_active = TRUE",
+    let global_trees = sqlx::query_as::<_, (Uuid, String, String, String, Option<String>)>(
+        "SELECT id, code, name, kind::text, description FROM knowledge_trees WHERE space_id IS NULL AND is_active = TRUE",
     )
     .fetch_all(pool)
     .await?;
@@ -41,17 +41,18 @@ async fn copy_default_knowledge_tree(
 
     let now = chrono::Utc::now();
     let mut tree_map: std::collections::HashMap<Uuid, Uuid> = std::collections::HashMap::new();
-    for (old_id, code, name, description) in &global_trees {
+    for (old_id, code, name, kind, description) in &global_trees {
         let new_id = Uuid::new_v4();
         sqlx::query(
             r#"
             INSERT INTO knowledge_trees (id, code, name, kind, space_id, description, is_active, created_at, updated_at)
-            VALUES ($1, $2, $3, 'knowledge', $4, $5, TRUE, $6, $6)
+            VALUES ($1, $2, $3, $4::knowledge_tree_kind, $5, $6, TRUE, $7, $7)
             "#,
         )
         .bind(new_id)
         .bind(code)
         .bind(name)
+        .bind(kind)
         .bind(target_space_id)
         .bind(description)
         .bind(now)
@@ -68,6 +69,7 @@ async fn copy_default_knowledge_tree(
         FROM knowledge_nodes n
         JOIN knowledge_trees t ON t.id = n.tree_id
         WHERE t.space_id IS NULL
+          AND n.is_active = TRUE
         ORDER BY n.depth, n.sort_order
         "#,
     )

@@ -4,7 +4,7 @@
  *
  * 三层专业导航架构：
  *   1. 顶层联动：学段（初中 / 高中） + 学科（数学 / 物理）
- *   2. 中部 Tabs：章节选题 / 知识点选题 / 解题方法（Segmented Control 风格）
+ *   2. 中部 Tabs：章节选题 / 知识点选题 / 题型专题（Segmented Control 风格）
  *   3. 底部动态树：依据 stage + subject + treeMode 组合渲染
  *
  * 视觉规范：260px 宽，右侧 1px 分割线，扁平化树渲染，全部 CSS 变量
@@ -53,11 +53,11 @@ const SUBJECTS: { key: Subject; label: string }[] = [
   { key: 'math', label: '数学' },
   { key: 'physics', label: '物理' },
 ]
-/** 模式 → 后端 KnowledgeTreeKind 映射；method 暂无原生 kind，复用 ability 语义兜底 */
+/** 模式 → 后端 KnowledgeTreeKind 映射；method Tab 对应 kind=ability（题型专题树） */
 const MODES: { key: TreeMode; label: string; kind: KnowledgeTreeKind | null }[] = [
   { key: 'chapter', label: '章节', kind: 'chapter' },
   { key: 'knowledge', label: '知识点', kind: 'knowledge' },
-  { key: 'method', label: '解题方法', kind: 'ability' },
+  { key: 'method', label: '题型专题', kind: 'ability' },
 ]
 
 const currentStage = ref<Stage>(
@@ -129,10 +129,10 @@ const availableTrees = computed<KnowledgeTree[]>(() =>
     : trees.value.filter((t) => t.kind === expectedKind.value),
 )
 
-/** 物理学科 / 解题方法 等后端尚未覆盖时的兜底提示 */
+/** 物理学科 / 题型专题 等后端尚未覆盖时的兜底提示 */
 const emptyHint = computed(() => {
   if (currentSubject.value === 'physics') return '物理学科资源敬请期待'
-  if (treeMode.value === 'method') return '暂无解题方法树'
+  if (treeMode.value === 'method') return '暂无题型专题树'
   if (availableTrees.value.length === 0) return '当前模式暂无知识树'
   return '无知识点'
 })
@@ -296,7 +296,7 @@ watch([currentStage, currentSubject], () => {
   loadTrees()
 })
 
-// 分类视角切换（章节/知识点/解题方法）：仅重新加载左侧树，不影响右侧列表
+// 分类视角切换（章节/知识点/题型专题）：仅重新加载左侧树，不影响右侧列表
 // 右侧列表保持当前数据，直到用户明确点击新树上的某个节点
 watch(treeMode, () => {
   expandedIds.value = new Set()
@@ -329,7 +329,7 @@ onMounted(async () => {
         </div>
       </header>
 
-      <!-- 主体内容：固定宽度 260px，外层像"拉窗帘"一样裁切，防止文字换行错乱 -->
+      <!-- 主体内容：固定宽度 260px，支持节点多行换行 -->
       <div v-show="!isCollapsed" class="kt-nav-body">
         <!-- ===== 顶部筛选区组：三行等宽无界 Tab + 底部分割线 ===== -->
         <div class="kt-filter-group">
@@ -526,7 +526,7 @@ onMounted(async () => {
   color: var(--text-muted);
 }
 
-/* ── 滚动主体（右侧留出 14px 内边距，解耦滚动条与右侧浮动折叠按键） ── */
+/* ── 滚动主体（筛选区固定，仅树列表滚动） ── */
 .kt-nav-body {
   flex: 1;
   min-height: 0;
@@ -534,20 +534,7 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  overflow-y: auto;
-  overflow-x: hidden;
-  overscroll-behavior: contain;
-  /* 隐藏滚动条 — Firefox */
-  scrollbar-width: none;
-  /* 隐藏滚动条 — IE 10+ */
-  -ms-overflow-style: none;
-}
-
-/* 隐藏滚动条 — Chrome, Safari, Edge */
-.kt-nav-body::-webkit-scrollbar {
-  display: none;
-  width: 0;
-  height: 0;
+  overflow: hidden;
 }
 
 /* ── 顶部筛选区组：胶囊间距 + 极浅灰色分割线 ── */
@@ -558,6 +545,7 @@ onMounted(async () => {
   padding-bottom: 16px;
   margin-bottom: 16px;
   border-bottom: 1px solid var(--divider);
+  flex-shrink: 0;
 }
 
 /* ═══ 第 1 层：学段 — 全圆角浮岛胶囊 (Pill-in-Pill) ═══ */
@@ -693,10 +681,12 @@ onMounted(async () => {
 }
 
 /* "全部题目"快捷项 — 作为树形结构的根目录节点，融入树列表 */
+/* 树列表：占据剩余高度并独立滚动 */
 .kt-nav-all {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-shrink: 0;
   padding: 6px 10px;
   border: none;
   border-radius: 8px;
@@ -736,8 +726,11 @@ onMounted(async () => {
   color: var(--accent);
 }
 
-/* 树列表：左右内边距，避免高亮色块顶满边缘 */
+/* 树列表：占据剩余高度并独立滚动，避免挤压上方面包屑 */
 .kt-nav-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 1px;
@@ -852,13 +845,13 @@ onMounted(async () => {
   background: var(--accent);
 }
 
-/* 节点文本：过长时省略号截断，防止撑开容器宽度 */
+/* 节点文本：过长时自动换行 */
 .row-name {
   flex: 1;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
   padding-top: 1px;
 }
 

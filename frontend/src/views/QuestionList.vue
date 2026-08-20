@@ -989,7 +989,7 @@ function updateKpExpandState(cardId: string, e: MouseEvent) {
   kpExpandIds.value = next
 }
 
-/** 知识点标签按维度着色：chapter→灰、knowledge→蓝、ability→紫 */
+/** 知识点标签按维度着色：chapter→灰、knowledge→蓝、ability→紫（题型专题） */
 function kpTagClass(kind: string): string {
   if (kind === 'chapter') return 'kp-kind-chapter'
   if (kind === 'ability') return 'kp-kind-method'
@@ -2552,7 +2552,7 @@ onBeforeUnmount(() => {
   color: var(--accent, #2563eb);
 }
 
-/* 解题方法 (ability)：紫色调 */
+/* 题型专题 (ability)：紫色调 */
 .q-kp-tag.kp-kind-method {
   background: var(--purple-light, #f3e8ff);
   color: var(--purple, #8b5cf6);

@@ -127,7 +127,7 @@ pub enum ExamType {
 pub enum TagCategory {
     /// 核心素养
     CoreCompetence,
-    /// 解题方法 / 数学思想
+    /// 解题方法 / 数学思想（扁平 tags，与题型专题树拆分）
     Method,
     /// 学校来源
     School,
@@ -144,9 +144,9 @@ pub enum TagCategory {
 pub enum KnowledgeTreeKind {
     /// 知识树（核心，按数学学科结构）
     Knowledge,
-    /// 能力树（核心素养 + 布鲁姆）
+    /// 题型专题 / 专题技法树（存于 math_method_*，历史枚举名 ability）
     Ability,
-    /// 章节树（教材版本，如人教版/北师大版）
+    /// 章节树（教材版本：高中人教 A 版 / 初中浙教版）
     Chapter,
 }
 
@@ -253,6 +253,9 @@ pub struct CreateQuestionRequest {
     /// 读取对应暂存项，完成容器关联、AI 标签写入、未匹配候选写入，并标记暂存项已保存。
     #[serde(default)]
     pub ai_meta: Option<AiCreateMeta>,
+    /// 统一打标确认：建议 ID + 勾选进入候选的 unmatched.id
+    #[serde(default)]
+    pub ai_tagging_confirmation: Option<crate::ai::tagging::AiTaggingConfirmation>,
 }
 
 /// AI 智能录入创建来源（确认保存时携带，指向待落库的暂存项）
@@ -288,6 +291,9 @@ pub struct UpdateQuestionRequest {
     /// 关联试卷 ID 列表（同步写入 paper_questions 关联表，全量覆盖）
     #[serde(default)]
     pub paper_ids: Option<Vec<Uuid>>,
+    /// 统一打标确认（编辑页 AI 打标后保存）
+    #[serde(default)]
+    pub ai_tagging_confirmation: Option<crate::ai::tagging::AiTaggingConfirmation>,
 }
 
 /// 自建标签输入（B2 重构：category 改为 enum，新增 parent_id 支持层级）
@@ -619,7 +625,7 @@ pub struct PublicLibrarySubmissionDetail {
 // 知识树与知识点（B2 全新设计，替代旧 KnowledgePoint 系列）
 // ===========================================================================
 
-/// 知识树（多树支持：知识树 / 能力树 / 章节树）
+/// 知识树（多树支持：知识树 / 题型专题树 / 章节树）
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct KnowledgeTree {
     pub id: Uuid,

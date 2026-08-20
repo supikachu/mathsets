@@ -14,13 +14,14 @@
  * - 树采用"扁平化 + 深度缩进"渲染，规避递归组件的复杂度
  * - 选中状态用 Set 存储，O(1) 查询；不联动父子（保持最小可用语义）
  */
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { AppIcon, AppEmpty } from '@/components/ui'
 import {
   knowledgeTreeApi,
   knowledgeNodeApi,
   type KnowledgeTree,
   type KnowledgeNodeTreeNode,
+  type KnowledgeTreeKind,
 } from '@/api/client'
 import { unwrapTreeResponse } from '@/composables/useKnowledgeTreeCache'
 
@@ -30,6 +31,8 @@ const props = withDefaults(
     modelValue: string[]
     /** 锁定知识树 ID（不传则允许用户在多棵树之间切换） */
     treeId?: string
+    /** 按知识树 kind 过滤（chapter / knowledge / ability） */
+    kind?: KnowledgeTreeKind
     placeholder?: string
     disabled?: boolean
     /** 最大可选数量，0 = 不限 */
@@ -59,6 +62,26 @@ const selectedIds = ref<Set<string>>(new Set(props.modelValue))
 
 /** ID → 节点，用于回显已选名称（即便节点不在当前树里也能展示） */
 const nodeMap = ref<Map<string, KnowledgeNodeTreeNode>>(new Map())
+
+/** 反向定位：点击已选 chip 时短暂高亮目标行 */
+const locatingId = ref<string | null>(null)
+let locateTimer: number | null = null
+let scrollTimer: number | null = null
+/** 等待切树 / 加载完成后再定位 */
+let pendingLocateId: string | null = null
+let pendingLocateStop: (() => void) | null = null
+let pendingLocateTimeout: number | null = null
+
+onBeforeUnmount(() => {
+  if (locateTimer !== null) window.clearTimeout(locateTimer)
+  if (scrollTimer !== null) window.clearTimeout(scrollTimer)
+  if (pendingLocateTimeout !== null) window.clearTimeout(pendingLocateTimeout)
+  pendingLocateStop?.()
+  locateTimer = null
+  scrollTimer = null
+  pendingLocateTimeout = null
+  pendingLocateStop = null
+})
 
 // ─── 计算属性 ─────────────────────────────────────────────────────────
 const showTreeSelector = computed(() => !props.treeId && trees.value.length > 1)
@@ -150,6 +173,89 @@ function onEscape() {
   if (open.value) open.value = false
 }
 
+/**
+ * 在当前已加载树中展开祖先、高亮并滚动到节点。
+ * @returns 节点存在于当前树则 true
+ */
+async function expandToInCurrentTree(nodeId: string): Promise<boolean> {
+  const node = nodeMap.value.get(nodeId)
+  if (!node) return false
+
+  open.value = true
+
+  const chain: string[] = []
+  let cur = node.parent_id
+  while (cur) {
+    chain.push(cur)
+    cur = nodeMap.value.get(cur)?.parent_id ?? null
+  }
+  const next = new Set(expandedIds.value)
+  chain.forEach((id) => next.add(id))
+  expandedIds.value = next
+
+  if (locatingId.value === nodeId) {
+    locatingId.value = null
+    await nextTick()
+  }
+  locatingId.value = nodeId
+  if (locateTimer !== null) window.clearTimeout(locateTimer)
+  locateTimer = window.setTimeout(() => {
+    if (locatingId.value === nodeId) locatingId.value = null
+    locateTimer = null
+  }, 2000)
+
+  await nextTick()
+  if (scrollTimer !== null) window.clearTimeout(scrollTimer)
+  scrollTimer = window.setTimeout(() => {
+    scrollTimer = null
+    document
+      .querySelector(`[data-cascader-node-id="${CSS.escape(nodeId)}"]`)
+      ?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }, 400)
+  return true
+}
+
+function cancelPendingLocate() {
+  pendingLocateStop?.()
+  pendingLocateStop = null
+  pendingLocateId = null
+  if (pendingLocateTimeout !== null) {
+    window.clearTimeout(pendingLocateTimeout)
+    pendingLocateTimeout = null
+  }
+}
+
+/**
+ * 点击已选 chip → 展开面板并定位到该节点。
+ * chip 来自当前树的 nodeMap；若树仍在加载则等待后再定位。
+ */
+async function locateChip(nodeId: string) {
+  if (props.disabled || !nodeId) return
+
+  if (nodeMap.value.has(nodeId)) {
+    await expandToInCurrentTree(nodeId)
+    return
+  }
+
+  // 节点尚未进入 nodeMap（树仍在加载）：展开面板并等待
+  open.value = true
+  cancelPendingLocate()
+  pendingLocateId = nodeId
+  pendingLocateTimeout = window.setTimeout(() => {
+    cancelPendingLocate()
+  }, 15000)
+  pendingLocateStop = watch(
+    [loading, () => nodeMap.value.size],
+    () => {
+      if (loading.value || !pendingLocateId) return
+      void expandToInCurrentTree(pendingLocateId).then((ok) => {
+        if (ok) cancelPendingLocate()
+      })
+    },
+    { immediate: true },
+  )
+}
+
 function rebuildNodeMap() {
   const map = new Map<string, KnowledgeNodeTreeNode>()
   function walk(nodes: KnowledgeNodeTreeNode[]) {
@@ -165,12 +271,18 @@ function rebuildNodeMap() {
 // ─── 数据加载 ─────────────────────────────────────────────────────────
 async function loadTrees() {
   try {
-    const res = await knowledgeTreeApi.list()
+    const res = await knowledgeTreeApi.list(props.kind ? { kind: props.kind } : undefined)
     trees.value = res.data
     if (props.treeId) {
       activeTreeId.value = props.treeId
-    } else if (trees.value.length > 0 && !activeTreeId.value) {
-      activeTreeId.value = trees.value[0].id
+    } else if (trees.value.length > 0) {
+      const stillValid = trees.value.some((t) => t.id === activeTreeId.value)
+      if (!stillValid) {
+        activeTreeId.value = trees.value[0].id
+      }
+    } else {
+      activeTreeId.value = ''
+      treeData.value = []
     }
   } catch (e) {
     console.error('[Cascader] 加载知识树列表失败', e)
@@ -208,6 +320,14 @@ watch(
   () => props.treeId,
   (newId) => {
     if (newId) activeTreeId.value = newId
+  },
+)
+
+watch(
+  () => props.kind,
+  async () => {
+    await loadTrees()
+    if (activeTreeId.value) await loadTreeData()
   },
 )
 
@@ -264,11 +384,17 @@ onMounted(async () => {
       </span>
     </button>
 
-    <!-- 已选 chips（默认最多 2 个，超出折叠为 +N 徽标） -->
+    <!-- 已选 chips（默认最多 2 个，超出折叠为 +N 徽标；点击名称展开并定位到树节点） -->
     <div v-if="selectedNodes.length > 0" class="cascader-chips">
-      <span v-for="n in visibleChips" :key="n.id" class="chip">
+      <span
+        v-for="n in visibleChips"
+        :key="n.id"
+        class="chip chip-clickable"
+        :title="`点击定位到「${n.name}」`"
+        @click="locateChip(n.id)"
+      >
         <span class="chip-name">{{ n.name }}</span>
-        <button class="chip-x" type="button" @click="toggleSelect(n.id)">
+        <button class="chip-x" type="button" @click.stop="toggleSelect(n.id)">
           <AppIcon name="x" :size="11" />
         </button>
       </span>
@@ -323,7 +449,11 @@ onMounted(async () => {
                 v-for="item in flatList"
                 :key="item.node.id"
                 class="pop-row"
-                :class="{ selected: isSelected(item.node.id) }"
+                :class="{
+                  selected: isSelected(item.node.id),
+                  locating: locatingId === item.node.id,
+                }"
+                :data-cascader-node-id="item.node.id"
                 :style="{ paddingLeft: 8 + item.depth * 20 + 'px' }"
                 @click="toggleSelect(item.node.id)"
               >
@@ -492,6 +622,16 @@ onMounted(async () => {
   max-width: 200px;
 }
 
+.chip-clickable {
+  cursor: pointer;
+  transition: filter 0.15s, box-shadow 0.15s;
+}
+
+.chip-clickable:hover {
+  filter: brightness(0.97);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
 .chip-name {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -634,6 +774,25 @@ onMounted(async () => {
 .pop-row.selected {
   background: var(--accent-light);
   color: var(--accent);
+}
+
+.pop-row.locating {
+  animation: cascader-locate-pulse 2s ease-out;
+}
+
+@keyframes cascader-locate-pulse {
+  0% {
+    background: rgba(250, 204, 21, 0.45);
+    box-shadow: 0 0 0 3px rgba(250, 204, 21, 0.35);
+  }
+  60% {
+    background: rgba(250, 204, 21, 0.2);
+    box-shadow: 0 0 0 2px rgba(250, 204, 21, 0.15);
+  }
+  100% {
+    background: transparent;
+    box-shadow: none;
+  }
 }
 
 .row-expand {

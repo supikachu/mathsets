@@ -16,7 +16,7 @@ use uuid::Uuid;
 use crate::auth::middleware::AuthUser;
 use crate::auth::permissions::is_admin_user;
 use crate::models::ai_task::{AiParseTask, AiTaskSourceType, TaskStatusResponse};
-use crate::models::user::DAILY_TASK_QUOTA;
+use crate::models::user::try_consume_quota;
 use crate::AppState;
 
 // ---------------------------------------------------------------------------
@@ -208,21 +208,9 @@ pub async fn submit_parse_task(
     }
 
     // 3. 配额：日 50 次（原子抢占，防 TOCTOU）
-    let quota_ok = sqlx::query(
-        r#"
-        INSERT INTO ai_usage_log (user_id, endpoint, created_at)
-        SELECT $1, $2, NOW()
-        WHERE (SELECT COUNT(*) FROM ai_usage_log WHERE user_id = $1 AND created_at >= CURRENT_DATE) < $3
-        RETURNING id
-        "#,
-    )
-    .bind(auth.id)
-    .bind("parse_task")
-    .bind(DAILY_TASK_QUOTA)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(|e| db_err(format!("配额校验失败: {e}")))?
-    .is_some();
+    let quota_ok = try_consume_quota(&state.pool, auth.id, "parse_task")
+        .await
+        .map_err(|e| db_err(format!("配额校验失败: {e}")))?;
 
     if !quota_ok {
         return Err((

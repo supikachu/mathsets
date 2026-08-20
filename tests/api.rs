@@ -15,11 +15,7 @@ use uuid::Uuid;
 // ---------------------------------------------------------------------------
 
 async fn create_test_app() -> Option<axum::Router> {
-    // 加载 .env 文件中的环境变量（如 AI_KEY_ENCRYPTION_KEY）
-    let _ = dotenvy::dotenv();
-    let database_url = std::env::var("DATABASE_URL_TEST")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .ok()?;
+    let database_url = mathset::testing::database_url()?;
     let pool = db::create_pool(&database_url, 5).await;
     db::run_migrations(&pool).await;
     let state = AppState::new(
@@ -192,10 +188,9 @@ async fn register_leader_and_login(app: &mut axum::Router) -> String {
     .unwrap();
 
     // 用独立连接池升级为 SuperAdmin（拥有审核一票通过权）
-    // 必须与 create_test_app 使用同一测试库（DATABASE_URL_TEST 优先）
-    let database_url = std::env::var("DATABASE_URL_TEST")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .expect("DATABASE_URL 未设置");
+    // 必须与 create_test_app 使用同一测试库
+    let database_url = mathset::testing::database_url()
+        .expect("DATABASE_URL_TEST 未设置，请配置独立测试库");
     let pool = mathset::db::create_pool(&database_url, 5).await;
     sqlx::query("UPDATE users SET global_role = 'super_admin' WHERE id = $1")
         .bind(claims.sub)
@@ -235,7 +230,7 @@ async fn test_auth_register_and_login() {
     let mut app = match create_test_app().await {
         Some(app) => app,
         None => {
-            eprintln!("⚠️  跳过 auth 测试: DATABASE_URL 未设置");
+            eprintln!("⚠️  跳过 auth 测试: DATABASE_URL_TEST 未设置");
             return;
         }
     };
@@ -289,6 +284,62 @@ async fn test_auth_register_and_login() {
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+/// 注册复制全局树时必须保留原 kind（ability 不得被写成 knowledge）
+#[tokio::test]
+async fn test_register_preserves_ability_tree_kind() {
+    let mut app = match create_test_app().await {
+        Some(app) => app,
+        None => {
+            eprintln!("⚠️  跳过: DATABASE_URL_TEST 未设置");
+            return;
+        }
+    };
+
+    let database_url = mathset::testing::database_url()
+        .expect("DATABASE_URL_TEST 未设置，请配置独立测试库");
+    let pool = mathset::db::create_pool(&database_url, 5).await;
+    let tree_id = Uuid::new_v4();
+    let code = format!("tp_{}", tree_id.simple());
+    sqlx::query(
+        r#"
+        INSERT INTO knowledge_trees (id, code, name, kind, space_id, is_active, created_at, updated_at)
+        VALUES ($1, $2, '测试题型专题树', 'ability', NULL, TRUE, NOW(), NOW())
+        "#,
+    )
+    .bind(tree_id)
+    .bind(&code)
+    .execute(&pool)
+    .await
+    .expect("插入全局 ability 树失败");
+
+    let token = register_and_login(&mut app).await;
+    let (status, body) = get_auth(&mut app, "/api/v1/knowledge-trees", &token).await;
+    assert_eq!(status, StatusCode::OK, "列出知识树失败: {:?}", body);
+    let trees = body
+        .as_array()
+        .or_else(|| body.get("data").and_then(|d| d.as_array()))
+        .expect("知识树列表应为数组");
+    let copies: Vec<_> = trees.iter().filter(|t| t["code"] == code).collect();
+    assert!(
+        copies.len() >= 2,
+        "应同时看到全局树与空间副本，实际: {:?}",
+        copies
+    );
+    for t in &copies {
+        assert_eq!(
+            t["kind"].as_str(),
+            Some("ability"),
+            "复制后 kind 必须保持 ability: {t:?}"
+        );
+    }
+
+    let _ = sqlx::query("DELETE FROM knowledge_trees WHERE code = $1")
+        .bind(&code)
+        .execute(&pool)
+        .await;
+    pool.close().await;
 }
 
 #[tokio::test]

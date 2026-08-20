@@ -1,7 +1,9 @@
 pub mod cleaner;
 pub mod deepseek;
+pub mod embedding;
 pub mod kp_matcher;
 pub mod ocr;
 pub mod prompt;
 pub mod provider;
+pub mod tagging;
 pub mod types;

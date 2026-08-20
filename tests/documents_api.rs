@@ -21,10 +21,7 @@ use uuid::Uuid;
 // ---------------------------------------------------------------------------
 
 async fn create_test_app() -> Option<axum::Router> {
-    let _ = dotenvy::dotenv();
-    let database_url = std::env::var("DATABASE_URL_TEST")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .ok()?;
+    let database_url = mathset::testing::database_url()?;
     let pool = db::create_pool(&database_url, 5).await;
     db::run_migrations(&pool).await;
     let state = AppState::new(
@@ -168,7 +165,7 @@ async fn upload_multipart(app: &mut axum::Router, token: &str, field_name: &str)
 #[tokio::test]
 async fn test_document_upload_list_get() {
     let Some(mut app) = create_test_app().await else {
-        eprintln!("跳过：未配置 DATABASE_URL");
+        eprintln!("跳过：未配置 DATABASE_URL_TEST");
         return;
     };
     let token = register_and_login(&mut app).await;
@@ -203,7 +200,7 @@ async fn test_document_upload_list_get() {
 #[tokio::test]
 async fn test_document_upload_rejects_non_image() {
     let Some(mut app) = create_test_app().await else {
-        eprintln!("跳过：未配置 DATABASE_URL");
+        eprintln!("跳过：未配置 DATABASE_URL_TEST");
         return;
     };
     let token = register_and_login(&mut app).await;
@@ -227,7 +224,7 @@ async fn test_document_upload_rejects_non_image() {
 #[tokio::test]
 async fn test_document_upload_requires_pages() {
     let Some(mut app) = create_test_app().await else {
-        eprintln!("跳过：未配置 DATABASE_URL");
+        eprintln!("跳过：未配置 DATABASE_URL_TEST");
         return;
     };
     let token = register_and_login(&mut app).await;
@@ -238,7 +235,7 @@ async fn test_document_upload_requires_pages() {
 #[tokio::test]
 async fn test_document_upload_rejects_tiny_image() {
     let Some(mut app) = create_test_app().await else {
-        eprintln!("跳过：未配置 DATABASE_URL");
+        eprintln!("跳过：未配置 DATABASE_URL_TEST");
         return;
     };
     let token = register_and_login(&mut app).await;
@@ -270,7 +267,7 @@ async fn test_document_upload_rejects_tiny_image() {
 #[tokio::test]
 async fn test_document_confirm_validation_branches() {
     let Some(mut app) = create_test_app().await else {
-        eprintln!("跳过：未配置 DATABASE_URL");
+        eprintln!("跳过：未配置 DATABASE_URL_TEST");
         return;
     };
     let token = register_and_login(&mut app).await;
@@ -399,7 +396,7 @@ async fn test_document_confirm_validation_branches() {
 #[tokio::test]
 async fn test_document_permissions_and_classify_404() {
     let Some(mut app) = create_test_app().await else {
-        eprintln!("跳过：未配置 DATABASE_URL");
+        eprintln!("跳过：未配置 DATABASE_URL_TEST");
         return;
     };
     let token_a = register_and_login(&mut app).await;

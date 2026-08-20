@@ -121,7 +121,7 @@ export type TagCategory =
   | 'scene'
   | 'error_prone'
 
-/// 知识树类型（lowercase）
+/// 知识树类型（lowercase）。ability = 题型专题树（math_method_*），非核心素养
 export type KnowledgeTreeKind = 'knowledge' | 'ability' | 'chapter'
 
 /// 知识点关联来源（lowercase）— 审计用
@@ -334,6 +334,12 @@ export interface CreateQuestionRequest {
   input_method?: string
   /// AI 智能录入来源（暂存项 task_id + staged_index）；保存时后端据此完成容器关联/候选/标记
   ai_meta?: { task_id: string; staged_index: string }
+  /// 统一打标确认：建议 ID + 勾选进入候选的 unmatched.id + 等于已有节点的映射
+  ai_tagging_confirmation?: {
+    suggestion_id: string
+    unmatched_ids?: string[]
+    alias_maps?: TaggingAliasMap[]
+  }
 }
 
 /// 更新题目请求（B2：与后端 UpdateQuestionRequest 对齐，所有字段可选）
@@ -361,6 +367,12 @@ export interface UpdateQuestionRequest {
   new_tags?: NewTagInput[]
   knowledge_node_ids?: string[]
   primary_knowledge_node_id?: string
+  paper_ids?: string[]
+  ai_tagging_confirmation?: {
+    suggestion_id: string
+    unmatched_ids?: string[]
+    alias_maps?: TaggingAliasMap[]
+  }
 }
 
 export interface QuestionStats {
@@ -628,7 +640,7 @@ export const publicLibraryApi = {
 // 知识树 & 知识点节点（B2/B3 新增，替代旧 KnowledgePoint）
 // ===========================================================================
 
-/// 知识树（多树容器：知识树 / 能力树 / 章节树）
+/// 知识树（多树容器：知识树 / 题型专题树 / 章节树）
 export interface KnowledgeTree {
   id: string
   code: string
@@ -688,7 +700,7 @@ export interface KnowledgeNodeSummary {
   name: string
   path: string
   depth: number
-  /// 所属知识树类型（chapter / knowledge / ability）
+  /// 所属知识树类型（chapter / knowledge / ability=题型专题）
   kind: string
   /// 是否主知识点（每题最多 1 个）
   is_primary: boolean
@@ -732,8 +744,8 @@ export interface UpdateKnowledgeNodeRequest {
 }
 
 export const knowledgeTreeApi = {
-  list() {
-    return client.get<KnowledgeTree[]>('/knowledge-trees')
+  list(params?: { kind?: KnowledgeTreeKind; space_id?: string }) {
+    return client.get<KnowledgeTree[]>('/knowledge-trees', { params })
   },
   create(data: CreateKnowledgeTreeRequest) {
     return client.post<KnowledgeTree>('/knowledge-trees', data)
@@ -792,10 +804,12 @@ export const knowledgeNodeApi = {
 
 export interface TagCandidate {
   id: string
-  kind: 'chapter' | 'knowledge' | 'method'
+  kind: 'chapter' | 'knowledge' | 'method' | 'pattern' | 'core_competence'
+  target_type: 'knowledge_node' | 'tag'
   raw_name: string
   normalized_name: string
   suggested_node_id: string | null
+  suggested_tag_id: string | null
   ai_confidence: string | null
   match_score: string | null
   source_task_id: string | null
@@ -803,13 +817,38 @@ export interface TagCandidate {
   status: 'pending' | 'approved' | 'rejected' | 'merged'
   reviewed_by: string | null
   reviewed_at: string | null
+  review_note: string | null
   created_at: string
+}
+
+export interface TagCandidateSuggestedNode {
+  id: string
+  name: string
+  name_path: string
+  tree_name: string
+  tree_kind: string
+}
+
+export interface TagCandidateSuggestedTag {
+  id: string
+  name: string
+  category: string
+}
+
+export interface TagCandidateSourceQuestion {
+  id: string
+  stem: string
+  question_type: string
+  options: { label: string; content: string }[] | string[] | null
 }
 
 export interface TagCandidateDetail {
   candidate: TagCandidate
   source_stem: string | null
+  source_question?: TagCandidateSourceQuestion | null
   source_task_id: string | null
+  suggested_node?: TagCandidateSuggestedNode | null
+  suggested_tag?: TagCandidateSuggestedTag | null
 }
 
 export interface TagCandidateListResponse {
@@ -826,21 +865,25 @@ export interface ApproveCandidateRequest {
   parent_id?: string
   name?: string
   target_node_id?: string
+  target_tag_id?: string
   reason?: string
 }
 
 export const tagCandidateApi = {
-  list(params?: { status?: string; kind?: string; page?: number; page_size?: number }) {
+  list(params?: { status?: string; kind?: string; target_type?: string; page?: number; page_size?: number }) {
     return client.get<TagCandidateListResponse>('/admin/tag-candidates', { params })
   },
   get(id: string) {
     return client.get<TagCandidateDetail>(`/admin/tag-candidates/${id}`)
   },
   approve(id: string, body: ApproveCandidateRequest) {
-    return client.post<{ message: string; action: string; target_node_id: string }>(
-      `/admin/tag-candidates/${id}/approve`,
-      body,
-    )
+    return client.post<{
+      message: string
+      action: string
+      status?: string
+      target_node_id?: string | null
+      target_tag_id?: string | null
+    }>(`/admin/tag-candidates/${id}/approve`, body)
   },
   reject(id: string, reason?: string) {
     return client.post<{ message: string }>(`/admin/tag-candidates/${id}/reject`, { reason })
@@ -983,7 +1026,7 @@ export interface KpMatch {
   score: number
   /// 匹配节点所属树类型（'chapter'|'knowledge'|'ability'）；
   /// AI 录入回填时由题目详情的 knowledge_nodes.kind 携带，
-  /// 工作台据此分发到 章节/知识点/方法 三个已选数组（缺失时兜底按知识点处理）
+  /// 工作台据此分发到 章节/知识点/题型专题 三个已选数组（缺失时兜底按知识点处理）
   kind?: string
 }
 
@@ -1009,6 +1052,19 @@ export interface ParsedQuestion {
   /// AI 智能录入暂存来源：提供时保存走 create + ai_meta（后端从暂存项落库）；
   /// 与 id（已落库）互斥，用于"解析结果暂存、确认后入库"链路
   ai_meta?: { task_id: string; staged_index: string }
+  /// 统一打标建议 ID（确认保存时回传）
+  tagging_suggestion_id?: string | null
+  tagging_unmatched?: TaggingUnmatched[]
+  tag_matches?: TagMatch[]
+  existing_question_id?: string | null
+  /** 与编辑页「AI 智能打标」同一套 matches；OCR 回填时优先于 kp_matches */
+  tagging_matches?: TaggingMatch[]
+  grade_level?: string | null
+  cognitive_level?: string | null
+  tagging_difficulty?: number | null
+  tagging_question_type?: string | null
+  /** junior | senior，OCR worker 打标时使用的学段 */
+  tagging_stage?: 'junior' | 'senior' | null
 }
 
 export interface AiSettings {
@@ -1059,6 +1115,50 @@ export interface AiTaggingRequest {
   content: string
   /// 可选空间 ID（限定在该空间的知识树 + 全局树内匹配）
   space_id?: string
+  question_id?: string
+  /** 学段 junior | senior，约束只召回对应学段知识树 */
+  stage?: 'junior' | 'senior'
+}
+
+export type TaggingDimension =
+  | 'chapter'
+  | 'knowledge'
+  | 'pattern'
+  | 'method'
+  | 'core_competence'
+
+export type TaggingTargetType = 'knowledge_node' | 'tag'
+
+export interface TaggingMatch {
+  dimension: TaggingDimension
+  target_type: TaggingTargetType
+  ai_name: string
+  target_id: string
+  target_name: string
+  tree_id?: string | null
+  path?: string | null
+  depth?: number | null
+  category?: string | null
+  score: number
+  match_type: string
+}
+
+export interface TaggingUnmatched {
+  id: string
+  dimension: TaggingDimension
+  target_type: TaggingTargetType
+  raw_name: string
+  normalized_name: string
+  confidence: number | null
+  reason: string
+  eligible_for_candidate: boolean
+}
+
+/** 编辑页把未匹配指到已有节点/标签；与后端 AiTaggingConfirmation.alias_maps 对齐 */
+export interface TaggingAliasMap {
+  unmatched_id: string
+  node_id?: string | null
+  tag_id?: string | null
 }
 
 /// AI 打标返回的单个知识点匹配结果
@@ -1081,7 +1181,7 @@ export interface KnowledgeNodeMatch {
   match_type: string
 }
 
-/// AI 打标返回的单个标签匹配结果（核心素养 / 解题方法）
+/// AI 打标返回的单个标签匹配结果（核心素养 / 通用方法）
 export interface TagMatch {
   /// AI 返回的原始名称
   ai_name: string
@@ -1103,7 +1203,7 @@ export interface AiTaggingResponse {
   knowledge_nodes: KnowledgeNodeMatch[]
   /// 匹配成功的核心素养标签列表
   competency_tags: TagMatch[]
-  /// 匹配成功的解题方法标签列表
+  /// 匹配成功的通用方法标签列表
   method_tags: TagMatch[]
   /// AI 推断的难度（1-5）
   difficulty: number | null
@@ -1115,13 +1215,54 @@ export interface AiTaggingResponse {
   cognitive_level: CognitiveLevel | null
   /// AI 返回但未匹配上的知识点名称（前端可提示用户手动选择）
   unmatched_knowledge_points: string[]
+  /// 统一建议 ID（确认保存时回传）
+  suggestion_id?: string | null
+  engine_version?: string
+  needs_review?: boolean
+  unmatched?: TaggingUnmatched[]
+  matches?: TaggingMatch[]
 }
 
 export const aiTaggingApi = {
   /// 智能打标：分析题目文本 → LLM 提取标签 → pg_trgm 三级匹配知识点 UUID
   tag(data: AiTaggingRequest) {
-    return client.post<AiTaggingResponse>('/questions/ai-tagging', data)
+    return client.post<AiTaggingResponse>('/questions/ai-tagging', data, { timeout: 180000 })
   },
+  createTask(data: AiTaggingRequest) {
+    return client.post<{ id: string; status: string; reused: boolean }>(
+      '/questions/ai-tagging-tasks',
+      data,
+    )
+  },
+  getTask(id: string) {
+    return client.get<AiTaggingTaskDetail>(`/questions/ai-tagging-tasks/${id}`)
+  },
+  cancelTask(id: string) {
+    return client.post<{ id: string; status: string }>(`/questions/ai-tagging-tasks/${id}/cancel`)
+  },
+}
+
+export type AiTaggingTaskStatus =
+  | 'pending'
+  | 'processing'
+  | 'retrying'
+  | 'success'
+  | 'failed'
+  | 'cancelled'
+  | 'cancelling'
+
+export interface AiTaggingTaskDetail {
+  id: string
+  status: AiTaggingTaskStatus
+  retry_count: number
+  error_message: string | null
+  suggestion_id: string | null
+  suggestion: AiTaggingResponse | null
+  cancelling?: boolean
+  created_at: string
+  started_at: string | null
+  completed_at: string | null
+  updated_at: string
 }
 
 // ===========================================================================
@@ -1159,7 +1300,7 @@ export interface AiParseTaskDetail {
   paper_id: string | null
   collection_ids: string[]
   question_ids: string[]
-  /** 本任务产生、待审核的未匹配标签候选数（章节/知识点/方法） */
+  /** 本任务产生、待审核的未匹配标签候选数（章节/知识点/通用方法/题型专题） */
   pending_candidate_count: number
   /** 暂存题目（解析完成、待人工确认保存；按原文顺序） */
   staged_questions: AiStagedQuestion[]
@@ -1184,6 +1325,19 @@ export interface AiStagedQuestion {
   saved_question_id?: string | null
   merged_into?: string
   order?: { question_no?: string | null; display_order?: number | null }
+  suggestion_id?: string | null
+  engine_version?: string | null
+  suggestion?: {
+    suggestion_id?: string | null
+    unmatched?: TaggingUnmatched[]
+    matches?: TaggingMatch[]
+    difficulty?: number | null
+    question_type?: string | null
+    grade_level?: string | null
+    cognitive_level?: string | null
+  } | null
+  /** OCR worker 打标时使用的学段，与编辑页 AI 智能打标一致 */
+  tagging_stage?: 'junior' | 'senior' | null
 }
 
 export interface AiStagedMatch {

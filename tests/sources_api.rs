@@ -12,10 +12,7 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 async fn create_test_app() -> Option<(axum::Router, sqlx::PgPool)> {
-    let _ = dotenvy::dotenv();
-    let database_url = std::env::var("DATABASE_URL_TEST")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .ok()?;
+    let database_url = mathset::testing::database_url()?;
     let pool = db::create_pool(&database_url, 5).await;
     db::run_migrations(&pool).await;
     let state = AppState::new(
@@ -141,7 +138,7 @@ async fn create_question(app: &mut axum::Router, token: &str, stem: &str) -> Str
 #[tokio::test]
 async fn test_question_sources_unified_view() {
     let Some((mut app, pool)) = create_test_app().await else {
-        eprintln!("跳过：未配置 DATABASE_URL");
+        eprintln!("跳过：未配置 DATABASE_URL_TEST");
         return;
     };
     let (token, user_id) = register_and_login(&mut app).await;
@@ -252,7 +249,7 @@ async fn test_question_sources_unified_view() {
 #[tokio::test]
 async fn test_data_quality_summary_admin_only() {
     let Some((mut app, pool)) = create_test_app().await else {
-        eprintln!("跳过：未配置 DATABASE_URL");
+        eprintln!("跳过：未配置 DATABASE_URL_TEST");
         return;
     };
     let (token, user_id) = register_and_login(&mut app).await;

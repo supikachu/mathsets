@@ -12,6 +12,7 @@
 |------|------|----------|
 | v0.1 | 2026-05-08 | 初稿：四级全局角色 + 教研组审核 |
 | v0.2 | 2026-07-12 | **权限模型重构**：引入「空间」归属、角色收窄为 Admin/User、灵活审题（自审 / 指定 / 团队默认）、团队空间创建者回避、公共题库双向流通（复制语义）、移除 `groups` 模块 |
+| v0.3 | 2026-08-19 | 题型专题树（`math_method_*`）与通用方法标签（`tags.method`）语义拆分 |
 
 ---
 
@@ -236,6 +237,40 @@
 - 一道题可关联 **1~5 个**知识点标签
 - 知识点树**首期仍全局共享**（不按空间隔离）；二期可按空间拆分
 - 维护权限：Admin 与任意空间 owner 均可（首期不细分）
+
+### 4.3 题型专题 vs 通用方法（2026-08）
+
+题目标注拆成互不替代的两层：
+
+| 载体 | 用途 | 示例 |
+|------|------|------|
+| `math_method_*` 树（`kind=ability`） | 题型专题 / 专题技法，列表按节点精确筛选 | 凹凸反转、隐零点、极值点偏移·乘积型 |
+| `tags.category=method` | 通用解题方法 / 数学思想 | 数形结合、分类讨论、放缩法 |
+
+章节树（高中人教 A、初中浙教）与知识点树仍按学段锁定。题型专题可由智能打标与编辑页同时挂载，规则见 §4.4。
+
+### 4.4 统一智能打标（2026-08）
+
+编辑页与 AI 录题共用 `TaggingEngine`（`src/ai/tagging/`，引擎版本 `tagging-v4`）：
+
+| 维度 | 落点 | 约束 |
+|------|------|------|
+| `chapter` | `knowledge_nodes`（`tree.kind=chapter`） | 允许父节点 |
+| `knowledge` | `knowledge_nodes`（`tree.kind=knowledge`） | 仅活动叶子 |
+| `pattern` | `knowledge_nodes`（`tree.kind=ability`） | 仅活动叶子 |
+| `method` | `tags.category=method` | 不进专题树 |
+| `core_competence` | `tags.category=core_competence` | 封闭词表 |
+
+规则摘要：
+
+- 召回：名称精确 `1.0`、alias `0.95`；其余（包含、分词词根、`word_similarity` / `pg_trgm`）一律为 fuzzy ≥ `0.3` 或包含命中。排除 merged / inactive / 带 `canonical_id` 的节点；空间树与全局树隔离。短关键词（如「集合」）应对上教材式长名（如「第一章 集合与常用逻辑用语」）；转写（如「集合的交集运算」）应对上已有叶子（如「交集的概念及运算」），不得因汉字不完全相同就落入未匹配。
+- exact/alias 直接确定；fuzzy 才二次 LLM **语义**收敛（输出关键词→候选原名；禁止把关键词当新标签）。收敛 JSON 损坏或关闭收敛时**不**静默采用每维 Top1。
+- 确认保存：`unmatched_ids` 提交为新标签；`alias_maps` 把未匹配指到已有节点/标签（写入 `tag_candidates.suggested_node_id`）。详见 `docs/语义匹配与别名沉淀.md`。
+- 服务端强制上限：章节 3、知识点 3、题型专题 3、通用方法 5、核心素养 3。
+- 建议写入 `ai_tagging_suggestions`，**不**直接写题目关联或 `tag_candidates`。用户确认保存后由 Finalizer 写入关联（`source=ai` + `suggestion_id`）和勾选的候选。
+- 年级、认知层次由前端写入 `questions.metadata`（`grade` / `cognitive_level`），不再使用已废弃的题目列。
+- 编辑页默认 `POST /questions/ai-tagging-tasks` 轮询；`VITE_AI_TAGGING_ASYNC=0` 时回退同步 `POST /questions/ai-tagging`。
+- 观测：引擎 tracing 记录版本、输入种类、各维召回/命中/未匹配与耗时，**不**输出题文。`TAGGING_SHADOW_COMPARE=1` 时对比旧 Top1 与确定性匹配，不额外调用 LLM。
 
 ---
 

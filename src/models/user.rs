@@ -122,8 +122,30 @@ pub struct ChangePasswordRequest {
     pub new_password: String,
 }
 
-/// 每日 AI 解析任务额度（单一计量源：ai_usage_log，见 ai_tasks.rs 原子抢占）
+/// 每日 AI 任务额度（单一计量源：ai_usage_log；解析任务与打标任务共用）
 pub const DAILY_TASK_QUOTA: i64 = 50;
+
+/// 原子抢占当日额度。返回 `true` 表示写入了一条用量并允许继续；`false` 表示已用尽。
+pub async fn try_consume_quota(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    endpoint: &str,
+) -> Result<bool, sqlx::Error> {
+    let inserted = sqlx::query(
+        r#"
+        INSERT INTO ai_usage_log (user_id, endpoint, created_at)
+        SELECT $1, $2, NOW()
+        WHERE (SELECT COUNT(*) FROM ai_usage_log WHERE user_id = $1 AND created_at >= CURRENT_DATE) < $3
+        RETURNING id
+        "#,
+    )
+    .bind(user_id)
+    .bind(endpoint)
+    .bind(DAILY_TASK_QUOTA)
+    .fetch_optional(pool)
+    .await?;
+    Ok(inserted.is_some())
+}
 
 /// 用户配额查询响应
 ///

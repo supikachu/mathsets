@@ -21,10 +21,7 @@ use uuid::Uuid;
 // ---------------------------------------------------------------------------
 
 async fn create_test_app() -> Option<(axum::Router, sqlx::PgPool)> {
-    let _ = dotenvy::dotenv();
-    let database_url = std::env::var("DATABASE_URL_TEST")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .ok()?;
+    let database_url = mathset::testing::database_url()?;
     let pool = db::create_pool(&database_url, 5).await;
     db::run_migrations(&pool).await;
     let state = AppState::new(
@@ -180,7 +177,7 @@ async fn confirm_document(app: &mut axum::Router, token: &str, doc_id: &str, bod
 #[tokio::test]
 async fn test_parse_task_lifecycle_and_409() {
     let Some((mut app, pool)) = create_test_app().await else {
-        eprintln!("跳过：未配置 DATABASE_URL");
+        eprintln!("跳过：未配置 DATABASE_URL_TEST");
         return;
     };
     let (token, _) = register_and_login(&mut app).await;
@@ -273,7 +270,7 @@ async fn test_parse_task_lifecycle_and_409() {
 #[tokio::test]
 async fn test_parse_task_requires_confirmed_document() {
     let Some((mut app, _)) = create_test_app().await else {
-        eprintln!("跳过：未配置 DATABASE_URL");
+        eprintln!("跳过：未配置 DATABASE_URL_TEST");
         return;
     };
     let (token, _) = register_and_login(&mut app).await;
@@ -304,7 +301,7 @@ async fn test_parse_task_requires_confirmed_document() {
 #[tokio::test]
 async fn test_parse_task_paper_snapshot_and_quota() {
     let Some((mut app, pool)) = create_test_app().await else {
-        eprintln!("跳过：未配置 DATABASE_URL");
+        eprintln!("跳过：未配置 DATABASE_URL_TEST");
         return;
     };
     let (token, user_id) = register_and_login(&mut app).await;
@@ -365,7 +362,7 @@ async fn test_parse_task_paper_snapshot_and_quota() {
 #[tokio::test]
 async fn test_parse_task_permission_isolation() {
     let Some((mut app, _)) = create_test_app().await else {
-        eprintln!("跳过：未配置 DATABASE_URL");
+        eprintln!("跳过：未配置 DATABASE_URL_TEST");
         return;
     };
     let (token_a, _) = register_and_login(&mut app).await;

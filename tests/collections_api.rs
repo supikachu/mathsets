@@ -19,10 +19,7 @@ use uuid::Uuid;
 // ---------------------------------------------------------------------------
 
 async fn create_test_app() -> Option<(axum::Router, sqlx::PgPool)> {
-    let _ = dotenvy::dotenv();
-    let database_url = std::env::var("DATABASE_URL_TEST")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .ok()?;
+    let database_url = mathset::testing::database_url()?;
     let pool = db::create_pool(&database_url, 5).await;
     db::run_migrations(&pool).await;
     let state = AppState::new(
@@ -174,7 +171,7 @@ async fn question_hashes(pool: &sqlx::PgPool, question_id: &str) -> (Option<Stri
 #[tokio::test]
 async fn test_question_create_writes_dedup_hashes() {
     let Some((mut app, pool)) = create_test_app().await else {
-        eprintln!("跳过：未配置 DATABASE_URL");
+        eprintln!("跳过：未配置 DATABASE_URL_TEST");
         return;
     };
     let (token, _) = register_and_login(&mut app).await;
@@ -205,7 +202,7 @@ async fn test_question_create_writes_dedup_hashes() {
 #[tokio::test]
 async fn test_collections_batch_add_detail_remove() {
     let Some((mut app, pool)) = create_test_app().await else {
-        eprintln!("跳过：未配置 DATABASE_URL");
+        eprintln!("跳过：未配置 DATABASE_URL_TEST");
         return;
     };
     let (token, user_id) = register_and_login(&mut app).await;
@@ -323,7 +320,7 @@ async fn test_collections_batch_add_detail_remove() {
 #[tokio::test]
 async fn test_collections_permission_isolation() {
     let Some((mut app, pool)) = create_test_app().await else {
-        eprintln!("跳过：未配置 DATABASE_URL");
+        eprintln!("跳过：未配置 DATABASE_URL_TEST");
         return;
     };
     let (token_a, user_a) = register_and_login(&mut app).await;
@@ -385,7 +382,7 @@ async fn test_collections_permission_isolation() {
 #[tokio::test]
 async fn test_paper_metadata_and_question_no_roundtrip() {
     let Some((mut app, _)) = create_test_app().await else {
-        eprintln!("跳过：未配置 DATABASE_URL");
+        eprintln!("跳过：未配置 DATABASE_URL_TEST");
         return;
     };
     let (token, _) = register_and_login(&mut app).await;

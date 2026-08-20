@@ -25,17 +25,17 @@ use crate::ai::ocr::{
 };
 use crate::ai::prompt::{BATCH_IMAGE_OCR_FULL_PROMPT, STAGE2_PARSE_FULL_PROMPT};
 use crate::ai::provider::{create_provider, AiError, AiProvider};
+use crate::ai::tagging::{
+    run_tagging, tagging_content_from_parsed, TaggingContext, TaggingInput, TaggingPolicy,
+};
 use crate::ai::types::ParsedQuestion;
 use crate::auth::middleware::AuthUser;
 use crate::auth::permissions::ensure_personal_space;
 use crate::handlers::ai::{post_process_batch, resolve_ai_config, resolve_ocr_config, ModelKind};
-use crate::handlers::ai_tagging::{match_knowledge_nodes, KnowledgeNodeMatch};
 use crate::handlers::collections::{get_or_create_collection, link_question_to_collection};
-use crate::handlers::questions::{save_version, upsert_ai_knowledge_nodes};
 use crate::models::ai_task::{AiParseTask, AiTaskSourceType, AiTaskStatus};
 use crate::models::document::is_paper_type;
-use crate::models::question::{Difficulty, QuestionStatus, QuestionType};
-use crate::util::normalize::{compute_content_hash, compute_normalized_content_hash};
+use crate::util::normalize::compute_normalized_content_hash;
 use crate::AppState;
 
 // ---------------------------------------------------------------------------
@@ -974,42 +974,154 @@ async fn localize_external_images(parsed: &mut ParsedQuestion, upload_dir: &str)
     );
 }
 
-/// 图片占位符解析：`![配图](IMAGE_PLACEHOLDER_N)` → 真实可访问 URL
-///
-/// 视觉模型无法给出题内插图的位置/裁剪信息，唯一真实图源是该题所在页的
-/// 页面截图，因此所有占位符统一映射为页面图 URL（编辑器中可再人工裁剪）。
-/// Stage 1（Doc2X/MinerU）提取的真实 URL 已在先行的 localize_external_images
-/// 中本地化为 /uploads/questions/*，此处直接汇总进 images 列。
-///
-/// 布局格式（与既有题库系统的图片渲染约定保持一致）：
-/// - 占位符替换为**独立成行**的 `![配图](url)`——LatexRender 后处理将
-///   独立成行的无配置图片归为 `img-block`（块级居中、可点击调宽）；
-///   若留在行中会被判为 `img-inline`（max-height 1.5em 的小图标），
-///   几何图形将不可读。
-/// - 多个占位符逐行独立成块（AI 无法判断并排关系；
-///   用户可在编辑器中用 `:::img-row` 围栏重组并排图组）。
-///
-/// 返回值：写入 questions.images 的去重 URL 列表（可能为空）。
-fn resolve_question_images(parsed: &mut ParsedQuestion, page_image_url: Option<&str>) -> Vec<String> {
-    let mut urls: Vec<String> = parsed.image_urls.iter().cloned().collect();
-
-    let has_placeholder = parsed.stem.contains("IMAGE_PLACEHOLDER")
-        || parsed.options.as_ref().is_some_and(|opts| {
-            opts.iter().any(|o| o.content.contains("IMAGE_PLACEHOLDER"))
-        })
-        || parsed
-            .analysis
-            .iter()
-            .any(|a| a.content.contains("IMAGE_PLACEHOLDER"));
-
-    let Some(url) = page_image_url.filter(|_| has_placeholder) else {
-        urls.dedup();
-        return urls;
+/// Markdown / HTML 中的真实图片 URL（排除 IMAGE_PLACEHOLDER）。
+fn harvest_markdown_image_urls(md: &str) -> Vec<(usize, String)> {
+    let md_re = regex::Regex::new(r"!\[[^\]]*\]\(([^)\s]+)\)").expect("配图正则必然合法");
+    let html_re = regex::Regex::new(r#"(?i)<img[^>]+src=["']([^"']+)["']"#).expect("img 正则必然合法");
+    let mut out: Vec<(usize, String)> = Vec::new();
+    let mut push = |pos: usize, url: String| {
+        if url.starts_with("IMAGE_PLACEHOLDER") || url.trim().is_empty() {
+            return;
+        }
+        if !out.iter().any(|(_, u)| u == &url) {
+            out.push((pos, url));
+        }
     };
+    for cap in md_re.captures_iter(md) {
+        let m = cap.get(1).unwrap();
+        push(m.start(), cap[1].to_string());
+    }
+    for cap in html_re.captures_iter(md) {
+        let m = cap.get(1).unwrap();
+        push(m.start(), cap[1].to_string());
+    }
+    out.sort_by_key(|(pos, _)| *pos);
+    out
+}
 
+fn question_body_text(parsed: &ParsedQuestion) -> String {
+    let mut s = parsed.stem.clone();
+    if let Some(opts) = &parsed.options {
+        for o in opts {
+            s.push('\n');
+            s.push_str(&o.content);
+        }
+    }
+    for a in &parsed.analysis {
+        s.push('\n');
+        s.push_str(&a.content);
+    }
+    s
+}
+
+fn mentions_figure(parsed: &ParsedQuestion) -> bool {
+    const HINTS: &[&str] = &[
+        "如图",
+        "见图",
+        "下图",
+        "上图",
+        "右图",
+        "左图",
+        "图中",
+        "图示",
+        "附图",
+        "图象如下",
+        "图像如下",
+        "图如下",
+        "阴影部分",
+    ];
+    let hay = question_body_text(parsed);
+    HINTS.iter().any(|h| hay.contains(h))
+}
+
+fn has_real_md_image(text: &str) -> bool {
+    !harvest_markdown_image_urls(text).is_empty()
+}
+
+fn question_has_inline_image(parsed: &ParsedQuestion) -> bool {
+    has_real_md_image(&question_body_text(parsed))
+}
+
+fn find_question_offset(markdown: &str, q: &ParsedQuestion) -> Option<usize> {
+    let no_img = regex::Regex::new(r"!\[[^\]]*\]\([^)]+\)")
+        .expect("剥离配图正则必然合法")
+        .replace_all(&q.stem, "");
+    let first_line = no_img.lines().next().unwrap_or("").trim();
+    if first_line.chars().count() >= 8 {
+        let prefix: String = first_line.chars().take(18).collect();
+        if let Some(pos) = markdown.find(&prefix) {
+            return Some(pos);
+        }
+        let no_tex = regex::Regex::new(r"\$[^$]*\$")
+            .expect("剥离公式正则必然合法")
+            .replace_all(&prefix, "");
+        let compact = no_tex.trim();
+        if compact.chars().count() >= 8 {
+            if let Some(pos) = markdown.find(compact) {
+                return Some(pos);
+            }
+        }
+    }
+    q.question_no.as_ref().and_then(|no| {
+        let needles = [format!("{no}."), format!("{no}、"), format!("{no}．")];
+        needles.iter().find_map(|n| markdown.find(n.as_str()))
+    })
+}
+
+/// 把 OCR 原文块中的配图划给各题：按题干在原文中的位置归属；
+/// 提到「如图」但 Stage2 丢掉图片的题目，再从尚未占用的图里补一张。
+fn assign_chunk_images(markdown: &str, questions: &mut [ParsedQuestion]) {
+    let images = harvest_markdown_image_urls(markdown);
+    if images.is_empty() {
+        return;
+    }
+
+    let mut offsets: Vec<(usize, usize)> = questions
+        .iter()
+        .enumerate()
+        .filter_map(|(i, q)| find_question_offset(markdown, q).map(|pos| (pos, i)))
+        .collect();
+    offsets.sort_by_key(|(pos, _)| *pos);
+
+    if !offsets.is_empty() {
+        for (k, &(start, qi)) in offsets.iter().enumerate() {
+            let end = offsets.get(k + 1).map(|(p, _)| *p).unwrap_or(markdown.len());
+            let q = &mut questions[qi];
+            for (pos, url) in &images {
+                if *pos >= start && *pos < end && !q.image_urls.contains(url) {
+                    q.image_urls.push(url.clone());
+                }
+            }
+        }
+    }
+
+    let used: std::collections::HashSet<String> = questions
+        .iter()
+        .flat_map(|q| q.image_urls.iter().cloned())
+        .collect();
+    let unused: Vec<String> = images
+        .iter()
+        .map(|(_, u)| u.clone())
+        .filter(|u| !used.contains(u))
+        .collect();
+    let mut unused = unused.into_iter();
+    for q in questions.iter_mut() {
+        if !mentions_figure(q) {
+            continue;
+        }
+        if question_has_inline_image(q) || !q.image_urls.is_empty() {
+            continue;
+        }
+        if let Some(url) = unused.next() {
+            q.image_urls.push(url);
+        } else if let Some((_, url)) = images.first() {
+            q.image_urls.push(url.clone());
+        }
+    }
+}
+
+fn replace_placeholders_with_url(parsed: &mut ParsedQuestion, url: &str) {
     let re = regex::Regex::new(r"\n*!\[[^\]]*\]\(IMAGE_PLACEHOLDER_\d+\)\n*").expect("占位符正则必然合法");
-    // 独立成行：替换为 \n![配图](url)\n（前后恰好一个换行 → img-block 块级渲染，
-    // 与既有题库系统手动插图的布局一致）；相邻多余换行统一归一为单个
     let img_line = format!("![配图]({url})");
     let re_before = regex::Regex::new(r"\n+(!\[配图\]\()").expect("图前换行正则必然合法");
     let re_after = regex::Regex::new(r"(!\[配图\]\([^\n]*\))\n+").expect("图后换行正则必然合法");
@@ -1032,11 +1144,117 @@ fn resolve_question_images(parsed: &mut ParsedQuestion, page_image_url: Option<&
     for a in parsed.analysis.iter_mut() {
         sub(&mut a.content);
     }
+}
 
-    if !urls.contains(&url.to_string()) {
-        urls.push(url.to_string());
+fn inject_block_image(text: &str, url: &str) -> String {
+    if text.contains(&format!("]({url})")) {
+        return text.to_string();
     }
+    let img_line = format!("![配图]({url})");
+    let trimmed = text.trim_end();
+    if trimmed.is_empty() {
+        format!("{img_line}\n")
+    } else {
+        format!("{trimmed}\n{img_line}\n")
+    }
+}
+
+fn has_placeholder(parsed: &ParsedQuestion) -> bool {
+    parsed.stem.contains("IMAGE_PLACEHOLDER")
+        || parsed.options.as_ref().is_some_and(|opts| {
+            opts.iter().any(|o| o.content.contains("IMAGE_PLACEHOLDER"))
+        })
+        || parsed
+            .analysis
+            .iter()
+            .any(|a| a.content.contains("IMAGE_PLACEHOLDER"))
+}
+
+/// 图片占位符解析：`![配图](IMAGE_PLACEHOLDER_N)` → 真实可访问 URL
+///
+/// 视觉模型无法给出题内插图的位置/裁剪信息，唯一真实图源是该题所在页的
+/// 页面截图，因此所有占位符统一映射为页面图 URL（编辑器中可再人工裁剪）。
+/// Stage 1（Doc2X/MinerU）提取的真实 URL 已在先行的 localize_external_images
+/// 中本地化为 /uploads/questions/*，此处直接汇总进 images 列。
+///
+/// 布局格式（与既有题库系统的图片渲染约定保持一致）：
+/// - 占位符替换为**独立成行**的 `![配图](url)`——LatexRender 后处理将
+///   独立成行的无配置图片归为 `img-block`（块级居中、可点击调宽）；
+///   若留在行中会被判为 `img-inline`（max-height 1.5em 的小图标），
+///   几何图形将不可读。
+/// - 多个占位符逐行独立成块（AI 无法判断并排关系；
+///   用户可在编辑器中用 `:::img-row` 围栏重组并排图组）。
+///
+/// 另：Stage2 常把「如图」留下却丢掉 `![...](url)`。若题面提到配图但没有任何
+/// 内联图片，则把 `image_urls` 或页面图注入题干，避免预览空白。
+///
+/// 返回值：写入 questions.images 的去重 URL 列表（可能为空）。
+fn resolve_question_images(parsed: &mut ParsedQuestion, page_image_url: Option<&str>) -> Vec<String> {
+    let mut urls: Vec<String> = parsed.image_urls.iter().cloned().collect();
+    for (_, url) in harvest_markdown_image_urls(&question_body_text(parsed)) {
+        if !urls.contains(&url) {
+            urls.push(url);
+        }
+    }
+
+    let placeholder = has_placeholder(parsed);
+
+    if placeholder {
+        if let Some(url) = page_image_url
+            .map(|s| s.to_string())
+            .or_else(|| urls.first().cloned())
+        {
+            replace_placeholders_with_url(parsed, &url);
+            if !urls.contains(&url) {
+                urls.push(url);
+            }
+        }
+    }
+
+    if !question_has_inline_image(parsed) {
+        let inject = urls.first().cloned().or_else(|| {
+            if mentions_figure(parsed) {
+                page_image_url.map(|s| s.to_string())
+            } else {
+                None
+            }
+        });
+        if let Some(url) = inject {
+            parsed.stem = inject_block_image(&parsed.stem, &url);
+            if !urls.contains(&url) {
+                urls.push(url);
+            }
+        }
+    }
+
+    urls.dedup();
     urls
+}
+
+/// 录入快照中的学段：`paper_meta.stage` 或首个集合 `stage`。
+/// 与编辑页默认 `senior` 对齐，缺省时返回 senior，避免 OCR 打标跨学段召回。
+fn tagging_stage_from_paper_meta(pm: &serde_json::Value) -> String {
+    let normalize = |s: &str| -> Option<String> {
+        match s.trim() {
+            "junior" | "初中" => Some("junior".into()),
+            "senior" | "high" | "高中" => Some("senior".into()),
+            _ => None,
+        }
+    };
+    pm.pointer("/paper_meta/stage")
+        .and_then(|v| v.as_str())
+        .and_then(normalize)
+        .or_else(|| {
+            pm.get("collections")
+                .and_then(|c| c.as_array())
+                .and_then(|arr| {
+                    arr.iter().find_map(|c| {
+                        c.get("stage").and_then(|v| v.as_str()).and_then(normalize)
+                    })
+                })
+        })
+        .or_else(|| pm.get("stage").and_then(|v| v.as_str()).and_then(normalize))
+        .unwrap_or_else(|| "senior".into())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1053,6 +1271,8 @@ fn resolve_question_images(parsed: &mut ParsedQuestion, page_image_url: Option<&
 ///   "index": "p1_i0", "parsed": { ...ParsedQuestion... },
 ///   "images": [...], "page_image_url": null,
 ///   "space_id": "...", "existing_question_id": null,
+///   "suggestion_id": "...", "engine_version": "tagging-v4",
+///   "suggestion": { ...TaggingSuggestion... },
 ///   "matched": [{node_id, node_name, ai_name, score, match_type, kind}],
 ///   "unmatched": {"chapter": [], "knowledge": [], "method": []},
 ///   "saved": false
@@ -1090,8 +1310,9 @@ async fn stage_question(
         return Ok(());
     }
 
-    // 外链图片本地化（Doc2X 等）+ 占位符 → 页面图 URL
-    // 均必须在 hash 计算前，保证去重口径稳定
+    // 先把「如图」缺失的配图写回题干（可能仍是外链），再下载转存，
+    // 最后再解析一次以收集本地化后的 URL。
+    let _ = resolve_question_images(&mut parsed, page_image_url);
     localize_external_images(&mut parsed, &state.upload_dir).await;
     let image_urls = resolve_question_images(&mut parsed, page_image_url);
 
@@ -1124,63 +1345,79 @@ async fn stage_question(
         );
     }
 
-    // 三维标签匹配（章节 chapter / 知识点 knowledge / 解题方法 ability）：
-    // 纯读库预计算，结果随暂存项返回前端展示；保存时直接采用，无需重算。
-    // 未匹配项一并暂存，保存时写入 tag_candidates 候选队列。
-    let chapter_names: Vec<String> = parsed
-        .chapter_path
-        .last()
-        .map(|leaf| vec![leaf.clone()])
-        .unwrap_or_default();
-    let method_names: Vec<String> = parsed
-        .solution_methods
-        .iter()
-        .map(|m| m.name.clone())
-        .collect();
+    // 五维标签：与编辑页「AI 智能打标」同一套 Content 提取 + 收敛。
+    // 无文本模型时降级 Parsed 适配（测试环境）；打标失败不阻断暂存。
+    let auth = AuthUser {
+        id: task.creator_id,
+        username: String::new(),
+        role: "user".into(),
+        global_role: "teacher".into(),
+    };
+    let text_resolved = resolve_ai_config(&auth, state, ModelKind::Text).await.ok();
+    let text_provider = text_resolved
+        .as_ref()
+        .map(|(key, name, _, base)| create_provider(name, key, base));
+    let text_model = text_resolved.as_ref().and_then(|(_, _, m, _)| m.clone());
+    let has_text_model = text_provider.is_some();
 
-    let mut matched: Vec<serde_json::Value> = Vec::new();
-    let mut unmatched =
-        serde_json::Map::new();
-    for (kind, names, tree_kind) in [
-        ("chapter", &chapter_names, "chapter"),
-        ("knowledge", &parsed.knowledge_points, "knowledge"),
-        ("method", &method_names, "ability"),
-    ] {
-        if names.is_empty() {
-            continue;
-        }
-        match match_knowledge_nodes(&state.pool, names, Some(space_id), tree_kind).await {
-            Ok((matched_kind, unmatched_kind)) => {
-                for m in &matched_kind {
-                    // 注意：matched[].kind 使用知识树维度 tree_kind（chapter/knowledge/ability），
-                    // 前端回填据此把「解题方法」分发到 methodNodeIds；unmatched 的 key 才用
-                    // 业务维度 kind（method）供 create_tag_candidates 写 tag_candidates.kind。
-                    matched.push(serde_json::json!({
-                        "node_id": m.node_id,
-                        "node_name": m.node_name,
-                        "ai_name": m.ai_name,
-                        "tree_id": m.tree_id,
-                        "path": m.path,
-                        "depth": m.depth,
-                        "score": m.score,
-                        "match_type": m.match_type,
-                        "kind": tree_kind,
-                    }));
-                }
-                if !unmatched_kind.is_empty() {
-                    unmatched.insert(
-                        kind.to_string(),
-                        serde_json::Value::Array(
-                            unmatched_kind.iter().map(|n| serde_json::json!(n)).collect(),
-                        ),
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::warn!("任务 {} [{kind}] 标签匹配失败（不影响暂存）: {:?}", task.id, e.1);
-            }
-        }
+    let mut policy = TaggingPolicy::default();
+    policy.fail_on_persist = false;
+    if !has_text_model {
+        policy.run_llm_extract = false;
+        policy.run_llm_converge = false;
     }
+    let tagging_stage = tagging_stage_from_paper_meta(&task.paper_meta);
+    let ctx = TaggingContext {
+        user_id: task.creator_id,
+        space_id: Some(space_id),
+        question_id: None,
+        source_task_id: Some(task.id),
+        source_index: Some(question_index.to_string()),
+        stage: Some(tagging_stage.clone()),
+    };
+
+    let tagging_input = if has_text_model {
+        TaggingInput::Content {
+            content: tagging_content_from_parsed(&parsed),
+        }
+    } else {
+        TaggingInput::Parsed(Box::new(parsed.clone()))
+    };
+
+    let suggestion = match run_tagging(
+        &state.pool,
+        text_provider.as_deref(),
+        text_model.as_deref(),
+        tagging_input,
+        &ctx,
+        &policy,
+    )
+    .await
+    {
+        Ok(s) => Some(s),
+        Err(e) => {
+            tracing::warn!("任务 {} 打标失败（不影响暂存）: {:?}", task.id, e);
+            None
+        }
+    };
+
+    let (matched, unmatched, suggestion_id, engine_version, suggestion_value) =
+        if let Some(s) = suggestion {
+            let matched = s.compat_matched_nodes();
+            let unmatched = serde_json::Value::Object(s.compat_unmatched_map());
+            let sid = s.suggestion_id;
+            let ver = s.engine_version.clone();
+            let val = serde_json::to_value(&s).unwrap_or(serde_json::Value::Null);
+            (matched, unmatched, sid, Some(ver), val)
+        } else {
+            (
+                Vec::new(),
+                serde_json::json!({}),
+                None,
+                None,
+                serde_json::Value::Null,
+            )
+        };
 
     let staged_item = serde_json::json!({
         "index": question_index,
@@ -1193,6 +1430,10 @@ async fn stage_question(
         "collection_id": collection_id,
         "is_mixed": is_mixed,
         "existing_question_id": existing_question_id,
+        "suggestion_id": suggestion_id,
+        "engine_version": engine_version,
+        "suggestion": suggestion_value,
+        "tagging_stage": tagging_stage,
         "matched": matched,
         "unmatched": unmatched,
         "saved": false,
@@ -1220,7 +1461,9 @@ async fn stage_question(
     Ok(())
 }
 
-/// 未匹配标签 → tag_candidates（幂等，不阻塞题目落库；kind: chapter/knowledge/method）
+#[allow(dead_code)]
+/// 未匹配标签 → tag_candidates（幂等，不阻塞题目落库；kind: chapter/knowledge/method/pattern）
+/// 确认保存已改走 Finalizer；本函数仅保留给需要手工回填的路径。
 pub(crate) async fn create_tag_candidates(
     state: &AppState,
     task_id: Uuid,
@@ -1238,14 +1481,21 @@ pub(crate) async fn create_tag_candidates(
         let confidence = rust_decimal::Decimal::from_f32_retain(ai_confidence)
             .map(|d| d.max(rust_decimal::Decimal::ZERO))
             .unwrap_or(rust_decimal::Decimal::ZERO);
+        let target_type = match kind {
+            "method" | "core_competence" => "tag",
+            _ => "knowledge_node",
+        };
         let result = sqlx::query(
             r#"
-            INSERT INTO tag_candidates (kind, raw_name, normalized_name, ai_confidence, match_score, source_task_id, source_question_id)
-            VALUES ($1, $2, $3, $4, 0, $5, $6)
-            ON CONFLICT (source_task_id, source_question_id, normalized_name, kind) DO NOTHING
+            INSERT INTO tag_candidates (kind, target_type, raw_name, normalized_name, ai_confidence, match_score, source_task_id, source_question_id)
+            VALUES ($1, $2, $3, $4, $5, 0, $6, $7)
+            ON CONFLICT (source_task_id, source_question_id, normalized_name, kind)
+                WHERE source_task_id IS NOT NULL
+            DO NOTHING
             "#,
         )
         .bind(kind)
+        .bind(target_type)
         .bind(name)
         .bind(&normalized)
         .bind(confidence)
@@ -1577,7 +1827,7 @@ async fn run_pdf_fast_path(
             }
         };
 
-        let chunk_questions = match post_process_batch(&raw_json, &state.pool).await {
+        let mut chunk_questions = match post_process_batch(&raw_json, &state.pool).await {
             Ok(qs) => qs,
             Err((_, err)) => {
                 let msg = format!("第 {} 块后处理失败: {}", ci + 1, err["error"]);
@@ -1588,6 +1838,8 @@ async fn run_pdf_fast_path(
                 continue;
             }
         };
+        // Stage2 常丢掉 ![图](url)；从本块 OCR Markdown 把配图划回对应题目
+        assign_chunk_images(chunk, &mut chunk_questions);
 
         for (idx, q) in chunk_questions.into_iter().enumerate() {
             if idx % 5 == 0 {
@@ -1901,10 +2153,7 @@ mod tests {
     use serde_json::json;
 
     async fn test_state() -> Option<(AppState, Uuid)> {
-        let _ = dotenvy::dotenv();
-        let database_url = std::env::var("DATABASE_URL_TEST")
-            .or_else(|_| std::env::var("DATABASE_URL"))
-            .ok()?;
+        let database_url = crate::testing::database_url()?;
         let pool = db::create_pool(&database_url, 5).await;
         db::run_migrations(&pool).await;
         let state = AppState::new(
@@ -2060,18 +2309,61 @@ mod tests {
 
     #[test]
     fn test_resolve_images_placeholder_without_page_source() {
-        // 占位符但无页面图源（如快速路径）：文本保留占位符，仅返回真实 URL
+        // 占位符但无页面图源：用已收集的真实 URL 替换占位符，避免预览丢图
         let mut p = fake_parsed(None, "如图 ![配图](IMAGE_PLACEHOLDER_0)");
         p.image_urls = vec!["https://cdn.example.com/x.png".into()];
         let urls = resolve_question_images(&mut p, None);
-        assert!(p.stem.contains("IMAGE_PLACEHOLDER_0"));
+        assert!(!p.stem.contains("IMAGE_PLACEHOLDER_0"));
+        assert!(p.stem.contains("https://cdn.example.com/x.png"));
         assert_eq!(urls, vec!["https://cdn.example.com/x.png".to_string()]);
+    }
+
+    #[test]
+    fn test_resolve_images_injects_when_figure_mentioned_without_markdown() {
+        let mut p = fake_parsed(
+            None,
+            "已知全集 $U=\\mathbb{R}$，如图阴影部分表示的集合是 ( )",
+        );
+        let url = "/uploads/documents/d1/page_1.webp";
+        let urls = resolve_question_images(&mut p, Some(url));
+        assert!(p.stem.contains(&format!("![配图]({url})")), "题干应注入页面配图: {}", p.stem);
+        assert_eq!(urls, vec![url.to_string()]);
+    }
+
+    #[test]
+    fn test_resolve_images_injects_harvested_url_on_pdf_path() {
+        let mut p = fake_parsed(None, "如图所示，求阴影部分面积。");
+        p.image_urls = vec!["https://cdn.example.com/venn.png".into()];
+        let urls = resolve_question_images(&mut p, None);
+        assert!(p.stem.contains("![配图](https://cdn.example.com/venn.png)"));
+        assert_eq!(urls, vec!["https://cdn.example.com/venn.png".to_string()]);
+    }
+
+    #[test]
+    fn test_assign_chunk_images_recovers_dropped_figure() {
+        let md = "1. 已知全集，如图阴影\n![fig](https://cdn.example.com/a.png)\n2. 化简 $\\sqrt{12}$";
+        let mut qs = vec![
+            fake_parsed(Some("1"), "已知全集，如图阴影部分表示的集合是"),
+            fake_parsed(Some("2"), "化简 $\\sqrt{12}-\\sqrt{3}$"),
+        ];
+        assign_chunk_images(md, &mut qs);
+        assert_eq!(qs[0].image_urls, vec!["https://cdn.example.com/a.png".to_string()]);
+        assert!(qs[1].image_urls.is_empty(), "纯文本题不应分到配图");
+    }
+
+    #[test]
+    fn test_tagging_stage_from_paper_meta() {
+        let senior = serde_json::json!({"paper_meta": {"stage": "高中"}});
+        assert_eq!(tagging_stage_from_paper_meta(&senior), "senior");
+        let junior = serde_json::json!({"collections": [{"stage": "junior"}]});
+        assert_eq!(tagging_stage_from_paper_meta(&junior), "junior");
+        assert_eq!(tagging_stage_from_paper_meta(&serde_json::json!({})), "senior");
     }
 
     #[tokio::test]
     async fn test_stage_question_stages_without_db_write() {
         let Some((state, user_id)) = test_state().await else {
-            eprintln!("跳过：未配置 DATABASE_URL");
+            eprintln!("跳过：未配置 DATABASE_URL_TEST");
             return;
         };
         let pool = state.pool.clone();
@@ -2215,7 +2507,7 @@ mod tests {
     #[tokio::test]
     async fn test_recover_stale_tasks() {
         let Some((state, user_id)) = test_state().await else {
-            eprintln!("跳过：未配置 DATABASE_URL");
+            eprintln!("跳过：未配置 DATABASE_URL_TEST");
             return;
         };
         let pool = state.pool.clone();
@@ -2301,7 +2593,7 @@ mod tests {
     #[tokio::test]
     async fn test_stage_question_captures_unmatched_labels() {
         let Some((state, user_id)) = test_state().await else {
-            eprintln!("跳过：未配置 DATABASE_URL");
+            eprintln!("跳过：未配置 DATABASE_URL_TEST");
             return;
         };
         let pool = state.pool.clone();
@@ -2378,15 +2670,23 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("查询暂存失败");
-        let unmatched = staged
+        let unmatched_knowledge = staged
             .get("unmatched")
             .and_then(|u| u.get("knowledge"))
             .and_then(|k| k.as_array())
-            .expect("unmatched.knowledge 应存在");
-        assert!(
-            unmatched.iter().any(|n| n.as_str() == Some(&format!("完全不存在的知识点XYZ_{uid}"))),
-            "未匹配知识点应记录在暂存项 unmatched 中：{unmatched:?}"
-        );
+            .cloned()
+            .unwrap_or_default();
+        let planted = format!("完全不存在的知识点XYZ_{uid}");
+        let captured_parsed_key = unmatched_knowledge
+            .iter()
+            .any(|n| n.as_str() == Some(planted.as_str()));
+        if !captured_parsed_key {
+            // 配置了文本模型时走与编辑页相同的 Content 提取，不再沿用 OCR knowledge_points
+            assert!(
+                staged.get("suggestion").is_some() && !staged.get("suggestion").unwrap().is_null(),
+                "打标建议应写入暂存项：{staged}"
+            );
+        }
 
         // 暂存阶段不产生候选（延迟到确认保存）
         let candidates: i64 = sqlx::query_scalar(

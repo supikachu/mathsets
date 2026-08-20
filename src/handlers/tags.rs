@@ -319,6 +319,13 @@ pub async fn create_tag(
         .await
         .map_err(|e| db_err(format!("提交事务失败: {}", e)))?;
 
+    if matches!(
+        tag.category,
+        TagCategory::Method | TagCategory::CoreCompetence
+    ) {
+        crate::ai::embedding::spawn_refresh_tag_embedding(state.pool.clone(), tag.id);
+    }
+
     Ok((StatusCode::CREATED, Json(tag)))
 }
 
@@ -379,6 +386,13 @@ pub async fn update_tag(
             db_err(format!("更新标签失败: {}", e))
         }
     })?;
+
+    if matches!(
+        updated.category,
+        TagCategory::Method | TagCategory::CoreCompetence
+    ) {
+        crate::ai::embedding::spawn_refresh_tag_embedding(state.pool.clone(), updated.id);
+    }
 
     Ok(Json(updated))
 }

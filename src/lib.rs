@@ -4,6 +4,7 @@ pub mod config;
 pub mod db;
 pub mod handlers;
 pub mod models;
+pub mod testing;
 pub mod util;
 pub mod workers;
 
@@ -135,8 +136,20 @@ pub fn build_app(state: AppState) -> Router {
         )
         // V2.1.1 标签使用情况
         .route("/tags/{id}/usage", get(handlers::tag_governance::get_tag_usage))
-        // AI 智能打标 — B3 新增：LLM 提取 + pg_trgm/JSONB 三级模糊匹配
+        // AI 智能打标 — 同步回退 + 异步任务（必须在 /questions/{id} 之前）
         .route("/questions/ai-tagging", post(handlers::ai_tagging::ai_tagging))
+        .route(
+            "/questions/ai-tagging-tasks",
+            post(handlers::ai_tagging_tasks::create_tagging_task),
+        )
+        .route(
+            "/questions/ai-tagging-tasks/{id}",
+            get(handlers::ai_tagging_tasks::get_tagging_task),
+        )
+        .route(
+            "/questions/ai-tagging-tasks/{id}/cancel",
+            post(handlers::ai_tagging_tasks::cancel_tagging_task),
+        )
         // 当前用户信息
         .route("/auth/me", get(handlers::auth::me))
         // 用户中心（个人资料 + 头像 + 密码）

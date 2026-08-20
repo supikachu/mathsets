@@ -6,12 +6,12 @@
  * - 纯粹的多选树：无搜索框、无工具条、无过滤按钮，只呈现层级 + 勾选
  * - 扁平索引：根实例 DFS 一次构建 nodeIndex Map<nodeId, { parentId, childrenIds, name, namePath }>，
  *   经 provide/inject 共享给所有递归子实例；追溯复杂度 O(树深度)，杜绝逐节点递归
- * - 对称级联：勾选节点级联全选所有子孙；取消勾选级联清空所有子孙（显式 ID 存储，提交语义不变）
+ * - 可选级联：cascade=true 时勾选/取消对称级联子孙；cascade=false（章节树）只动当前节点，与 AI 选非叶语义一致
  * - 三态预计算：modelValue 变化时沿 parentId 链向上标记一次祖先集合（O(k·深度)），渲染期 O(1) 查表
  * - 层级感：每级 12px 缩进 + 浅灰虚线肘形引导线（#dcdfe6），组卷网标准文件树风格
  * - 文本策略：节点名称自然换行（white-space: normal + word-break: break-word，line-height: 20px），
  *   不做单行截断；行 Flex 顶部对齐，箭头/14px 复选框 margin-top 锚定首行文字中心
- * - 点击分离：点行（文字区）→ 级联勾选；点小箭头 → 折叠/展开；checkbox 与行同效
+ * - 点击分离：点行（文字区）→ 勾选；点小箭头 → 折叠/展开；checkbox 与行同效
  * - AI 高亮：props.highlightIds 命中行渲染浅金色微光背景（AI 打标新增节点视觉反馈）
  */
 import { ref, computed, watch, provide, inject, nextTick, onBeforeUnmount } from 'vue'
@@ -40,7 +40,7 @@ interface KtcbCtx {
   indeterminateSet: ComputedRef<Set<string>>
   expandedIds: Ref<Set<string>>
   highlightSet: ComputedRef<Set<string>>
-  /** 反向定位高亮集合（双击已选标签触发，短暂高亮定位节点） */
+  /** 反向定位高亮集合（单击已选标签触发，短暂高亮定位节点） */
   locatingSet: ComputedRef<Set<string>>
   toggle: (id: string) => void
   toggleExpand: (id: string) => void
@@ -59,7 +59,13 @@ const props = withDefaults(defineProps<{
   depth?: number
   /** AI 打标新增的节点 ID（仅根实例读取，浅金色高亮） */
   highlightIds?: string[]
-}>(), { depth: 0, highlightIds: () => [] })
+  /**
+   * 是否级联勾选子孙。
+   * - true（知识点/题型专题）：勾选非叶 = 自身 + 全部子孙
+   * - false（章节）：只勾选当前节点，可单独选非叶，与 AI 打标一致
+   */
+  cascade?: boolean
+}>(), { depth: 0, highlightIds: () => [], cascade: true })
 
 const emit = defineEmits<{
   'update:modelValue': [ids: string[]]
@@ -77,7 +83,7 @@ const expandedIds = ref<Set<string>>(new Set())
 const selectedSet = computed(() => new Set(props.modelValue))
 const highlightSet = computed(() => new Set(props.highlightIds))
 
-// 反向定位：locatingId 命中行短暂高亮（双击已选标签触发）
+// 反向定位：locatingId 命中行短暂高亮（单击已选标签触发）
 const locatingId = ref<string | null>(null)
 const locatingSet = computed(() => {
   const s = new Set<string>()
@@ -91,7 +97,7 @@ let scrollTimer: number | null = null
 
 /**
  * 反向定位：展开到指定节点并滚动至可视区居中。
- * 供父组件（编辑面板双击已选标签）通过 defineExpose 调用。
+ * 供父组件（编辑面板单击已选标签）通过 defineExpose 调用。
  * @returns 节点存在于当前树并已定位返回 true；未找到返回 false
  */
 async function expandTo(nodeId: string): Promise<boolean> {
@@ -202,16 +208,16 @@ if (parentCtx) {
     return out
   }
 
-  // 对称级联：勾选 → 自身 + 所有子孙；取消 → 自身 + 所有子孙移除
+  // 勾选：cascade 时自身 + 所有子孙；否则仅当前节点
   function toggle(id: string) {
     const meta = nodeIndex.value.get(id)
     const next = new Set(props.modelValue)
     if (next.has(id)) {
       next.delete(id)
-      if (meta) for (const d of collectDescendants(meta)) next.delete(d)
+      if (props.cascade && meta) for (const d of collectDescendants(meta)) next.delete(d)
     } else {
       next.add(id)
-      if (meta) for (const d of collectDescendants(meta)) next.add(d)
+      if (props.cascade && meta) for (const d of collectDescendants(meta)) next.add(d)
     }
     emit('update:modelValue', Array.from(next))
   }
@@ -400,7 +406,7 @@ function titleOf(node: KnowledgeNodeTreeNode): string {
   background: rgba(250, 204, 21, 0.08);
 }
 
-/* ===== 反向定位高亮（双击已选标签触发，短暂金色脉冲） ===== */
+/* ===== 反向定位高亮（单击已选标签触发，短暂金色脉冲） ===== */
 .ktcb-row--locating {
   animation: ktcb-locate-pulse 2s ease-out;
   border-radius: 6px;

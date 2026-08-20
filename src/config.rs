@@ -30,6 +30,8 @@ pub struct AiConfig {
     pub doc2x_api_key: Option<String>,
     /// Doc2X OCR 引擎 base_url（默认官方 v2 端点，裸域名，路径需含 /api/v2 前缀）
     pub doc2x_base_url: String,
+    /// 打标向量召回。生产默认开；`TAGGING_VECTOR_RECALL=0` 关闭。测试默认关。
+    pub tagging_vector_recall: bool,
 }
 
 impl AiConfig {
@@ -67,6 +69,10 @@ impl AiConfig {
                 .filter(|s| !s.is_empty()),
             doc2x_base_url: std::env::var("DOC2X_BASE_URL")
                 .unwrap_or_else(|_| "https://v2.doc2x.noedgeai.com".to_string()),
+            tagging_vector_recall: std::env::var("TAGGING_VECTOR_RECALL")
+                .ok()
+                .as_deref()
+                != Some("0"),
         }
     }
 }

@@ -35,7 +35,8 @@ pub const CORE_PARSE_RULES: &str = r#"
 - 绝对禁止自行推导公式（如把题目条件推导为结论）
 - 绝对禁止自行生成解答过程（如自己写一段解析）
 - 绝对禁止补全缺失的答案（如题目没给答案，绝不自行编造）
-【唯一例外】`knowledge_points` / `chapter_path` / `solution_methods` 是标签分类推断，不属于做题：必须根据题目内容主动推断（考查的知识点、所属章节、所用解题方法），不受上述禁止约束。
+【唯一例外】`knowledge_points` / `chapter_path` / `solution_methods` 是标签分类推断，不属于做题：必须根据题目内容主动推断（考查的知识点、所属章节、所用**通用解题方法/数学思想**），不受上述禁止约束。
+不要把题型专题名（如「凹凸反转」「隐零点」「极值点偏移」）写入 `solution_methods`；该字段只放通法（数形结合、分类讨论、换元法、待定系数法等）。
 如果原图/原文中没有答案，`correct_answer` 必须为对应题型的空结构（choice→`{"kind":"choice","value":{"options":[]}}`，fill→`{"kind":"fill","value":{"blanks":[]}}`，solution→`{"kind":"solution","value":{"subs":[]}}`），**绝不允许输出 `null`**。`analysis` 必须为 []。
 
 # 输出 JSON Schema（必须严格遵守）
@@ -67,13 +68,13 @@ pub const CORE_PARSE_RULES: &str = r#"
   "display_order": 整数展示顺序（可省略，按出现顺序）,
   "score": 分值整数（原图标注的分值，没有可省略）,
   "chapter_path": ["章节", "子章节"]（推断本题所属教材章节，由大到小，如 ["函数","函数的奇偶性"]；无法判断才为空数组）,
-  "solution_methods": [{"name":"解题方法名","confidence":0.0-1.0}]（推断本题用到的解题方法/数学思想，如 数形结合、分类讨论、待定系数法；无法判断才为空数组）
+  "solution_methods": [{"name":"通用解题方法名","confidence":0.0-1.0}]（推断本题用到的通用解题方法/数学思想，如 数形结合、分类讨论、待定系数法；不要写入题型专题名；无法判断才为空数组）
 }
 
 # 三维标签推断规则（chapter_path / solution_methods / knowledge_points）
 这三个字段是标签分类任务，不属于"做题"，必须对每一道题主动推断输出：
 1. `chapter_path`：推断题目所属教材章节，由大到小排列（如 ["函数","函数的奇偶性"]），1-3 层
-2. `solution_methods`：推断解题所用的方法/数学思想，每题 1-3 个。常见示例：数形结合、分类讨论、待定系数法、换元法、配方法、转化与化归、函数与方程思想、整体思想、构造法、反证法、归纳法、特殊值法
+2. `solution_methods`：推断解题所用的**通用方法/数学思想**，每题 1-3 个。常见示例：数形结合、分类讨论、待定系数法、换元法、配方法、转化与化归、函数与方程思想、整体思想、构造法、反证法、归纳法、特殊值法。严禁把「凹凸反转」「隐零点」「极值点偏移」等题型专题名写入本字段
 3. `knowledge_points`：推断考查的具体知识点
 【强制】三者在能判断时都必须输出，不允许因为"原文没写"就整体省略字段；确实无法判断才输出空数组。
 
@@ -131,12 +132,15 @@ pub const CORE_PARSE_RULES: &str = r#"
 - 不要把公式转义为 Unicode（如 x² 应写 $x^2$）
 
 # 配图链接提取（v1.1，解决几何题丢图）
-- 若输入 Markdown 含 `![...](url)` 真实图片链接（url 以 http/https 开头）：
+- 若输入 Markdown 含 `![...](url)` 真实图片链接（url 以 http/https 开头，或 `/uploads/...`）：
   - 必须在 stem / analysis / options 的对应内联位置保留该 Markdown 图片标记，不得丢弃或改写为纯文本
   - 将所有图片 URL 提取并去重，存入该题 `image_urls` 数组
 - 若仅为 `![配图](IMAGE_PLACEHOLDER_N)` 占位符（非真实 URL）：
   - 仍按既有规则计入 `image_placeholders`，不计入 `image_urls`
 - 即：`image_urls` 只收集真实可访问的图片 URL，占位符走 `image_placeholders`
+- 若题干/选项/解析含「如图」「见图」「下图」「图中」「图示」「图象如下」等配图指代：
+  - 禁止只保留文字而丢掉对应图片标记
+  - 必须把该题所属的 `![配图](url)` 以独立成行形式插回题干（或选项/解析中提到图的位置），并把 URL 写入 `image_urls`
 
 # 严格约束
 - 只输出 JSON，不要任何 Markdown 代码块标记
@@ -250,7 +254,8 @@ pub const STAGE2_PARSE_SYSTEM_PROMPT: &str = r#"你是一个数学题结构化�
 
 # 配图处理
 - 含 `![配图](IMAGE_PLACEHOLDER_N)` 占位符：计入该题 `image_placeholders`
-- 含 `![...](http...)` 真实图片链接：在内联位置保留标记，并把 URL 收集去重到该题 `image_urls`
+- 含 `![...](http...)` 或 `![...](/uploads/...)` 真实图片链接：在内联位置保留标记，并把 URL 收集去重到该题 `image_urls`
+- 题干含「如图」「见图」「下图」「图中」「图示」时，不得省略图片标记；找不到对应图时把该块中最邻近的图片划给该题
 "#;
 
 // ============================================================
@@ -379,11 +384,11 @@ mod tests {
 
         // 验证三维度标签为推断式（chapter/method 不再是"原文有才填"）
         assert!(CORE_PARSE_RULES.contains("推断本题所属教材章节"));
-        assert!(CORE_PARSE_RULES.contains("推断本题用到的解题方法"));
+        assert!(CORE_PARSE_RULES.contains("通用解题方法"));
         assert!(CORE_PARSE_RULES.contains("标签分类推断，不属于做题"));
-        // 三维标签推断规则专项段（method 维度输出强化）
         assert!(CORE_PARSE_RULES.contains("三维标签推断规则"));
         assert!(CORE_PARSE_RULES.contains("数形结合、分类讨论、待定系数法"));
+        assert!(CORE_PARSE_RULES.contains("严禁把「凹凸反转」"));
     }
 
     #[test]
@@ -420,6 +425,7 @@ mod tests {
         // v1.1：配图链接提取规则与 image_urls 字段
         assert!(CORE_PARSE_RULES.contains("配图链接提取"));
         assert!(CORE_PARSE_RULES.contains("image_urls"));
+        assert!(CORE_PARSE_RULES.contains("如图"));
     }
 
     #[test]

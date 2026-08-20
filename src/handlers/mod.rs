@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod ai;
 pub mod ai_tagging;
+pub mod ai_tagging_tasks;
 pub mod ai_tasks;
 pub mod auth;
 pub mod collections;

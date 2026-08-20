@@ -351,6 +351,8 @@ pub async fn create_node(
         )
     })?;
 
+    crate::ai::embedding::spawn_refresh_node_embedding(state.pool.clone(), node.id);
+
     Ok((StatusCode::CREATED, Json(node)))
 }
 
@@ -398,6 +400,8 @@ pub async fn update_node(
             Json(json!({"error": "知识点节点不存在"})),
         )
     })?;
+
+    crate::ai::embedding::spawn_refresh_node_embedding(state.pool.clone(), node.id);
 
     Ok(Json(node))
 }
