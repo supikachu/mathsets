@@ -15,7 +15,6 @@ export function useNavItems() {
     const list: NavItem[] = [
       { path: '/dashboard', label: '工作台', icon: 'grid', shortLabel: '工作台' },
       { path: '/questions', label: '题库', icon: 'file-text', shortLabel: '题库' },
-      { path: '/collections', label: '资料集合', icon: 'folder', shortLabel: '集合' },
       { path: '/profile', label: '我的', icon: 'user', shortLabel: '我的' },
     ]
     if (auth.isAdmin) {

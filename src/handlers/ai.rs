@@ -113,6 +113,77 @@ fn strip_options_residue_from_stem(q: &mut ParsedQuestion) {
     }
 }
 
+/// 选择题题干末尾用于填涂答案的空括号 → `$(\hspace{2em})$`
+///
+/// OCR 常把「的集合是 ()」写成裸括号，预览里几乎看不见空位。
+/// 只替换「最后一处、后面只剩空白或配图」的空括号，避免误伤：
+/// - 函数 `f()`、区间 `(0,1)`、题号 `(1)(2)`
+/// - 已写成 `$(\hspace{2em})$` 的括号
+/// - `$...$` 公式内部
+static CHOICE_EMPTY_PARENS_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"[（(][\s\u{00a0}\u{3000}]*[）)]").expect("作答空括号正则编译失败")
+});
+
+static STEM_TRAILING_IMG_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?s)^(?:\s|!\[[^\]]*\]\([^)]*\))*$").expect("题干尾部配图正则编译失败")
+});
+
+fn dollar_math_spans(stem: &str) -> Vec<(usize, usize)> {
+    let bytes = stem.as_bytes();
+    let mut spans = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'$' {
+            let start = i;
+            i += 1;
+            while i < bytes.len() && bytes[i] != b'$' {
+                i += 1;
+            }
+            if i < bytes.len() {
+                spans.push((start, i + 1));
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    spans
+}
+
+fn index_in_math(spans: &[(usize, usize)], idx: usize) -> bool {
+    spans.iter().any(|&(a, b)| idx >= a && idx < b)
+}
+
+fn normalize_choice_answer_blank(q: &mut ParsedQuestion) {
+    if !matches!(q.question_type.as_str(), "choice" | "multiple") {
+        return;
+    }
+    let math = dollar_math_spans(&q.stem);
+    let mut last: Option<(usize, usize)> = None;
+    for m in CHOICE_EMPTY_PARENS_RE.find_iter(&q.stem) {
+        if index_in_math(&math, m.start()) {
+            continue;
+        }
+        if m.start() > 0 {
+            if let Some(ch) = q.stem[..m.start()].chars().last() {
+                if ch.is_ascii_alphanumeric() || ch == '_' || ch == '\\' {
+                    continue;
+                }
+            }
+        }
+        last = Some((m.start(), m.end()));
+    }
+    let Some((start, end)) = last else { return };
+    if !STEM_TRAILING_IMG_RE.is_match(&q.stem[end..]) {
+        return;
+    }
+    let mut new_stem = String::with_capacity(q.stem.len() + 16);
+    new_stem.push_str(&q.stem[..start]);
+    new_stem.push_str("$(\\hspace{2em})$");
+    new_stem.push_str(&q.stem[end..]);
+    q.stem = new_stem;
+}
+
 /// solution_methods 字符串数组 → 对象数组归一化（纯函数）
 ///
 /// LLM 对 `"solution_methods": [{"name":"...","confidence":...}]` 的遵循不稳定，
@@ -211,6 +282,8 @@ pub(crate) async fn post_process_batch(
                 }
                 // 第二道防线：剥离选择题题干末尾的选项残留
                 strip_options_residue_from_stem(&mut q);
+                // 选择题作答空括号 () / （） → $(\hspace{2em})$
+                normalize_choice_answer_blank(&mut q);
                 // :::img-row 围栏闭合清洗：防 token 截断导致缺 ::: 闭合标记
                 q.sanitize_img_row_fences();
                 // 校验 analysis
@@ -1303,6 +1376,48 @@ mod tests {
         strip_options_residue_from_stem(&mut q);
         assert!(q.stem.contains("A. 1"));
         assert!(q.warnings.is_empty());
+    }
+
+    #[test]
+    fn replaces_trailing_empty_parens_with_hspace() {
+        let mut q = make_choice("已知全集 $U=R$，如图阴影部分表示的集合是 ()", true);
+        normalize_choice_answer_blank(&mut q);
+        assert_eq!(
+            q.stem,
+            "已知全集 $U=R$，如图阴影部分表示的集合是 $(\\hspace{2em})$"
+        );
+    }
+
+    #[test]
+    fn replaces_fullwidth_empty_parens_before_stem_image() {
+        let mut q = make_choice("下列图象可能是（　）\n![配图](/uploads/questions/a.jpg)", true);
+        normalize_choice_answer_blank(&mut q);
+        assert!(q.stem.starts_with("下列图象可能是$(\\hspace{2em})$"));
+        assert!(q.stem.contains("![配图](/uploads/questions/a.jpg)"));
+    }
+
+    #[test]
+    fn does_not_replace_function_call_parens() {
+        let mut q = make_choice("已知 $f(x)=x$，则 $f()$ 的值是", true);
+        normalize_choice_answer_blank(&mut q);
+        assert_eq!(q.stem, "已知 $f(x)=x$，则 $f()$ 的值是");
+    }
+
+    #[test]
+    fn does_not_replace_subquestion_numbers() {
+        let mut q = make_choice("阅读材料。\n(1) 求值；(2) 求范围。", true);
+        normalize_choice_answer_blank(&mut q);
+        assert!(q.stem.contains("(1)"));
+        assert!(q.stem.contains("(2)"));
+        assert!(!q.stem.contains("\\hspace{2em}"));
+    }
+
+    #[test]
+    fn skips_fill_question_empty_parens() {
+        let mut q = make_choice("填空：()", true);
+        q.question_type = "fill".into();
+        normalize_choice_answer_blank(&mut q);
+        assert_eq!(q.stem, "填空：()");
     }
 
     // -----------------------------------------------------------------------

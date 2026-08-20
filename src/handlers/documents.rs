@@ -23,8 +23,8 @@ use crate::auth::middleware::AuthUser;
 use crate::auth::permissions::is_admin_user;
 use crate::handlers::ai::{map_ai_error, resolve_ai_config, ModelKind};
 use crate::models::document::{
-    is_valid_document_type, validate_confirm, AiClassification, AiClassificationRaw,
-    ConfirmDocumentRequest, Document,
+    document_type_compat, is_valid_source_category, source_kind_matches_category, validate_confirm,
+    AiClassification, AiClassificationRaw, ConfirmDocumentRequest, Document,
 };
 use crate::AppState;
 
@@ -663,13 +663,17 @@ async fn run_classification(
         }
     }
 
-    // ── 归一化：非法类型 / 低置信 → unknown（前端强制用户选择） ──
-    let mut document_type = best.document_type;
-    if !is_valid_document_type(&document_type) || best.confidence < CLASSIFY_CONFIDENCE_THRESHOLD {
-        document_type = "unknown".to_string();
+    // ── 归一化：非法/低置信 → practice/in_class（不再卡在 unknown） ──
+    let (mut category, mut kind) = best.resolve_source();
+    if best.confidence < CLASSIFY_CONFIDENCE_THRESHOLD {
+        category = "practice".into();
+        kind = "in_class".into();
     }
+    let document_type = document_type_compat(&category, &kind);
 
     Ok(AiClassification {
+        source_category: category,
+        source_kind: kind,
         document_type,
         title: best.title,
         confidence: best.confidence,
@@ -702,8 +706,9 @@ fn parse_classification(raw: &str) -> Result<AiClassificationRaw, String> {
 }
 
 fn classification_confident(raw: &AiClassificationRaw) -> bool {
-    is_valid_document_type(&raw.document_type)
-        && raw.document_type != "unknown"
+    let (c, k) = raw.resolve_source();
+    is_valid_source_category(&c)
+        && source_kind_matches_category(&c, &k)
         && raw.confidence >= CLASSIFY_CONFIDENCE_THRESHOLD
 }
 
@@ -717,11 +722,10 @@ fn auth_for(doc: &Document) -> crate::auth::middleware::AuthUser {
     }
 }
 
-/// POST /api/v1/ai/documents/{id}/confirm — 用户确认资料类型 + 元数据快照
+/// POST /api/v1/ai/documents/{id}/confirm — 用户确认/更新来源（可后置，不阻塞 OCR）
 ///
-/// 校验规则（计划书 §6.1/§四）：exam/mock_exam 必填 paper_meta.title；
-/// mixed 必填 ≥1 个集合；other 必填 type_label；unknown 不允许提交。
-/// 非试卷类型未提供 collections 时自动补默认单集合。
+/// 级联：source_category + source_kind；create_paper=true 时需 paper_meta.title。
+/// 练习/其他/不建卷：不建 Collection，题目为独立题。
 pub async fn confirm_document(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthUser>,
@@ -741,7 +745,6 @@ pub async fn confirm_document(
         ));
     }
 
-    // 1. 业务校验（白名单 / 分类型必填 / 集合归一化）
     let normalized = validate_confirm(&req).map_err(|msg| {
         (
             StatusCode::BAD_REQUEST,
@@ -749,7 +752,6 @@ pub async fn confirm_document(
         )
     })?;
 
-    // 2. 显式关联已有试卷时校验存在性
     if let Some(paper_id) = req.paper_meta.as_ref().and_then(|m| m.paper_id) {
         let exists: Option<Uuid> = sqlx::query_scalar("SELECT id FROM papers WHERE id = $1")
             .bind(paper_id)
@@ -764,11 +766,19 @@ pub async fn confirm_document(
         }
     }
 
-    // 3. 组装元数据快照（Worker 阶段 1 读取）
-    let paper_meta = req.paper_meta.clone().map(|m| serde_json::to_value(m).unwrap_or(json!(null)));
+    let paper_meta = req
+        .paper_meta
+        .clone()
+        .map(|m| serde_json::to_value(m).unwrap_or(json!(null)));
     let collections = serde_json::to_value(&normalized.collections).unwrap_or(json!([]));
     let mut metadata = doc.metadata.clone();
     if let Some(obj) = metadata.as_object_mut() {
+        obj.insert(
+            "source_category".into(),
+            json!(normalized.source_category),
+        );
+        obj.insert("source_kind".into(), json!(normalized.source_kind));
+        obj.insert("create_paper".into(), json!(normalized.create_paper));
         if let Some(pm) = paper_meta {
             obj.insert("paper_meta".into(), pm);
         }
@@ -776,14 +786,16 @@ pub async fn confirm_document(
         obj.insert("user_confirmed".into(), json!(true));
     }
 
-    // 4. 标题：试卷类型取 paper_meta.title；否则取用户 title 或首个集合标题
-    let title = if normalized.is_paper {
+    let title = if normalized.create_paper {
         req.paper_meta.as_ref().map(|m| m.title.trim().to_string())
     } else {
-        req.title
-            .clone()
-            .filter(|t| !t.trim().is_empty())
-            .or_else(|| normalized.collections.first().map(|c| c.title.clone()))
+        req.title.clone().filter(|t| !t.trim().is_empty())
+    };
+
+    // 识别进行中也可 confirm：仅在非 parsing/done 时标 confirmed；parsing 保持 parsing
+    let next_status = match doc.status.as_str() {
+        "parsing" | "done" | "failed" | "cancelled" => doc.status.clone(),
+        _ => "confirmed".to_string(),
     };
 
     sqlx::query(
@@ -791,29 +803,94 @@ pub async fn confirm_document(
         UPDATE documents
         SET document_type = $2, type_label = $3, title = $4,
             source_type = $5, sub_source_type = $6,
-            metadata = $7, status = 'confirmed', updated_at = NOW()
+            metadata = $7, status = $8, updated_at = NOW()
         WHERE id = $1
         "#,
     )
     .bind(doc.id)
-    .bind(&req.document_type)
+    .bind(&normalized.document_type)
     .bind(&req.type_label)
     .bind(&title)
     .bind(&req.source_type)
     .bind(&req.sub_source_type)
     .bind(&metadata)
+    .bind(&next_status)
     .execute(&state.pool)
     .await
     .map_err(|e| db_err(format!("保存确认信息失败: {e}")))?;
 
+    // create_paper 且尚无 paper：解析可能已结束，在此补建
+    let mut created_or_linked_paper: Option<Uuid> = None;
+    if normalized.create_paper {
+        let existing: Option<Uuid> =
+            sqlx::query_scalar("SELECT id FROM papers WHERE document_id = $1 LIMIT 1")
+                .bind(doc.id)
+                .fetch_optional(&state.pool)
+                .await
+                .map_err(|e| db_err(format!("查询试卷失败: {e}")))?;
+        if let Some(pid) = existing {
+            created_or_linked_paper = Some(pid);
+        } else if let Some(ref meta) = req.paper_meta {
+            if let Some(pid) = meta.paper_id {
+                created_or_linked_paper = Some(pid);
+            } else if !meta.title.trim().is_empty() {
+                let paper_id = Uuid::new_v4();
+                let now = chrono::Utc::now();
+                sqlx::query(
+                    r#"
+                    INSERT INTO papers (id, title, description, subject, grade, total_score, duration_minutes,
+                        status, creator_id, created_at, updated_at, version,
+                        year, stage, semester, region_province, region_city, school_name,
+                        source_type, sub_source_type, document_id, metadata)
+                    VALUES ($1, $2, NULL, $3, $4, 0, NULL, 'draft', $5, $6, $6, 1,
+                        $7, $8, $9, $10, $11, $12, $13, $14, $15, '{}')
+                    "#,
+                )
+                .bind(paper_id)
+                .bind(meta.title.trim())
+                .bind(meta.subject.clone().unwrap_or_else(|| "数学".into()))
+                .bind(&meta.grade)
+                .bind(auth.id)
+                .bind(now)
+                .bind(meta.year)
+                .bind(&meta.stage)
+                .bind(&meta.semester)
+                .bind(&meta.region_province)
+                .bind(&meta.region_city)
+                .bind(&meta.school_name)
+                .bind(&meta.source_type)
+                .bind(&meta.sub_source_type)
+                .bind(doc.id)
+                .execute(&state.pool)
+                .await
+                .map_err(|e| db_err(format!("创建试卷失败: {e}")))?;
+                created_or_linked_paper = Some(paper_id);
+            }
+        }
+        if let Some(pid) = created_or_linked_paper {
+            if let Some(obj) = metadata.as_object_mut() {
+                obj.insert("linked_paper_id".into(), json!(pid.to_string()));
+            }
+            let _ = sqlx::query("UPDATE documents SET metadata = $2, updated_at = NOW() WHERE id = $1")
+                .bind(doc.id)
+                .bind(&metadata)
+                .execute(&state.pool)
+                .await;
+        }
+    }
+
     tracing::info!(
-        "Document {} 确认: type={} title={:?} collections={}",
+        "Document {} 确认: {}/{} create_paper={} title={:?}",
         doc.id,
-        req.document_type,
+        normalized.source_category,
+        normalized.source_kind,
+        normalized.create_paper,
         title,
-        normalized.collections.len()
     );
 
     let updated = load_document(&state.pool, doc.id).await?.unwrap();
-    Ok(Json(json!({ "data": updated })))
+    Ok(Json(json!({
+        "data": updated,
+        "paper_id": created_or_linked_paper,
+    })))
 }

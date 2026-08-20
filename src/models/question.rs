@@ -347,8 +347,12 @@ pub struct QuestionQuery {
     pub region: Option<String>,
     /// 试卷来源类型
     pub source_type: Option<String>,
-    /// 资料类型（题目来源 Document 的 document_type）
+    /// 资料类型（兼容：Document.document_type 或 metadata）
     pub document_type: Option<String>,
+    /// 来源大类：paper | practice | other（题目 metadata）
+    pub source_category: Option<String>,
+    /// 来源子类 slug（题目 metadata）
+    pub source_kind: Option<String>,
     /// 集合 ID（题目属于该集合）
     pub collection_id: Option<Uuid>,
 }

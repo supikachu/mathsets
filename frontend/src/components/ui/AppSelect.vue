@@ -171,19 +171,20 @@ onBeforeUnmount(() => {
   justify-content: space-between;
   gap: 6px;
   width: 100%;
-  padding: 7px 12px;
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  background: var(--bg-input);
+  padding: 0 11px;
+  border: 1px solid color-mix(in srgb, var(--text-primary, #1d1d1f) 9%, transparent);
+  border-radius: 9px;
+  background: var(--bg-card, #fff);
   color: var(--text-primary);
   font-size: 13px;
   font-family: inherit;
   line-height: 1.4;
   cursor: pointer;
-  transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
   text-align: left;
   box-sizing: border-box;
-  min-height: 36px;
+  min-height: 38px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.025);
 }
 
 .app-select-trigger:hover:not(.disabled) {
@@ -255,17 +256,20 @@ onBeforeUnmount(() => {
   position: fixed;
   z-index: 10000;
   min-width: max-content;
-  max-height: 240px;
+  max-height: 280px;
   overflow-y: auto;
-  padding: 4px;
-  background: var(--bg-card);
-  border: 1px solid var(--border-color);
-  border-radius: 10px;
+  padding: 6px;
+  color: var(--text-primary, #1d1d1f);
+  background: color-mix(in srgb, var(--bg-card, #fff) 86%, transparent);
+  border: 1px solid color-mix(in srgb, var(--text-primary, #1d1d1f) 8%, transparent);
+  border-radius: 12px;
   box-shadow:
-    0 4px 24px rgba(0, 0, 0, 0.08),
-    0 1px 4px rgba(0, 0, 0, 0.06);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
+    0 0 0 0.5px rgba(0, 0, 0, 0.04),
+    0 10px 40px rgba(0, 0, 0, 0.14),
+    0 2px 8px rgba(0, 0, 0, 0.06);
+  backdrop-filter: saturate(180%) blur(28px);
+  -webkit-backdrop-filter: saturate(180%) blur(28px);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
 }
 
 [data-theme='dark'] .app-select-popover {
@@ -281,35 +285,37 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   width: 100%;
-  padding: 8px 12px;
+  min-height: 32px;
+  padding: 7px 10px;
   border: none;
-  border-radius: 6px;
+  border-radius: 8px;
   background: transparent;
   color: var(--text-primary);
   font-size: 13px;
   font-family: inherit;
-  line-height: 1.4;
+  line-height: 1.3;
   cursor: pointer;
-  transition: background 0.12s, color 0.12s;
+  transition: background 0.12s ease, color 0.12s ease;
   text-align: left;
   white-space: nowrap;
 }
 
 .app-select-option:hover {
-  background: #f5f5f7;
+  background: color-mix(in srgb, var(--text-primary, #1d1d1f) 6%, transparent);
 }
 
 [data-theme='dark'] .app-select-option:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .app-select-option.selected {
-  color: var(--accent);
+  color: var(--accent, #0071e3);
   font-weight: 600;
+  background: color-mix(in srgb, var(--accent, #0071e3) 10%, transparent);
 }
 
 .app-select-option.selected:hover {
-  background: var(--accent-light);
+  background: color-mix(in srgb, var(--accent, #0071e3) 16%, transparent);
 }
 
 .option-check {

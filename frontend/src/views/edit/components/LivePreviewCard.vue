@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, ref, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { AppIcon } from '@/components/ui'
 import LatexRender, { type ImageClickPayload } from '@/components/LatexRender.vue'
-import { useOptionsLayout } from '@/composables/useOptionsLayout'
+import QuestionOptions from '@/components/QuestionOptions.vue'
 
 const props = defineProps<{
   form: {
@@ -23,20 +23,47 @@ const emit = defineEmits<{
   (e: 'image-click', payload: ImageClickPayload): void
 }>()
 
-// Writable options layout tracking
-const previewOptionsContainerRef = ref<HTMLElement | null>(null)
 const previewOptions = computed(() => {
   if (!Array.isArray(props.form.options)) return []
   return props.form.options.filter(o => o.content)
 })
 
-const { layout: previewLayout } = useOptionsLayout(previewOptionsContainerRef, previewOptions, '.paper-opt')
+const highlightLabels = computed(() => {
+  const ans = props.form.correctAnswer
+  if (Array.isArray(ans)) return ans.filter(Boolean)
+  return ans ? [ans] : []
+})
 
-const optionsLayout = computed(() => {
-  if (previewOptions.value.some(opt => opt.content.includes('!['))) return '1col'
-  if (previewLayout.value === 'grid-4') return '4col'
-  if (previewLayout.value === 'grid-2') return '2col'
-  return '1col'
+const previewRootRef = ref<HTMLElement | null>(null)
+const optionsRef = ref<InstanceType<typeof QuestionOptions> | null>(null)
+let visibilityObserver: IntersectionObserver | null = null
+
+function schedulePreviewLayout() {
+  nextTick(() => {
+    setTimeout(() => optionsRef.value?.computeLayout(), 280)
+  })
+}
+
+watch(
+  () => [props.form.stem, props.form.options, props.form.question_type],
+  () => schedulePreviewLayout(),
+  { deep: true },
+)
+
+onMounted(() => {
+  const root = previewRootRef.value
+  if (!root) return
+  visibilityObserver = new IntersectionObserver((entries) => {
+    if (entries.some(e => e.isIntersecting && e.intersectionRatio > 0)) {
+      schedulePreviewLayout()
+    }
+  }, { threshold: 0.01 })
+  visibilityObserver.observe(root)
+})
+
+onBeforeUnmount(() => {
+  visibilityObserver?.disconnect()
+  visibilityObserver = null
 })
 
 const typeOptions = [
@@ -59,11 +86,6 @@ watch(() => previewSolutions.value.length, (newLen) => {
     activeSolution.value = Math.max(0, newLen - 1)
   }
 })
-
-function isOptionCorrect(label: string): boolean {
-  if (Array.isArray(props.form.correctAnswer)) return props.form.correctAnswer.includes(label)
-  return props.form.correctAnswer === label
-}
 
 const hasCorrectAnswer = computed(() => {
   if (Array.isArray(props.form.correctAnswer)) return props.form.correctAnswer.length > 0
@@ -105,7 +127,7 @@ function splitSolution(text: string): { body: string; conclusion: string } {
 </script>
 
 <template>
-  <div class="preview-col border-none bg-transparent">
+  <div ref="previewRootRef" class="preview-col border-none bg-transparent">
     <div class="preview-col-inner p-0">
       <!-- 骨架屏（无输入时） -->
       <div v-if="!form.stem && !form.solutions.some(s => s.trim()) && form.options.every(o => !o.content)" class="preview-skeleton">
@@ -141,28 +163,15 @@ function splitSolution(text: string): { body: string; conclusion: string } {
           />
         </div>
 
-        <!-- 选择题选项 -->
-        <div v-if="form.question_type === 'choice' && previewOptions.length" ref="previewOptionsContainerRef" class="paper-options" :class="'paper-options-' + optionsLayout">
-          <div
-            v-for="opt in previewOptions"
-            :key="opt.label"
-            class="paper-opt"
-            :class="{ correct: isOptionCorrect(opt.label) }"
-          >
-            <!-- 选项标号独立成元素，与内容分离，由父级 flex align-items:center 实现垂直居中 -->
-            <!-- 标号用 LatexRender 渲染 $\mathrm{A.}$ 保持数学罗马体字体样式 -->
-            <span class="paper-opt-letter"><LatexRender :text="`$\\mathrm{${opt.label}.}$`" :inline="true" /></span>
-            <!-- 选项内容（图片/公式/文本）单独渲染，便于 flex 居中与图片尺寸控制 -->
-            <div class="paper-opt-content">
-              <LatexRender
-                :text="opt.content"
-                :inline="true"
-                :mode="imageEditable ? 'editable' : 'readonly'"
-                @image-click="emit('image-click', $event)"
-              />
-            </div>
-          </div>
-        </div>
+        <!-- 选择题选项：与题库列表卡片同一套 QuestionOptions 智能 4/2/1 列 -->
+        <QuestionOptions
+          v-if="form.question_type === 'choice' && previewOptions.length"
+          ref="optionsRef"
+          :options="previewOptions"
+          :image-editable="imageEditable"
+          :highlight-labels="highlightLabels"
+          @image-click="emit('image-click', $event)"
+        />
 
         <!-- 答案 & 解析 -->
         <div class="paper-answer-block">
@@ -287,92 +296,6 @@ function splitSolution(text: string): { body: string; conclusion: string } {
 
 [data-theme='dark'] .paper-stem {
   color: #f5f5f7;
-}
-
-.paper-options {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px 24px;
-  margin-bottom: 14px;
-}
-
-/* 4列横排 — 短选项紧凑排列 */
-.paper-options-4col {
-  grid-template-columns: repeat(4, 1fr);
-  gap: 12px;
-}
-
-/* 2列双排 — 默认布局 */
-.paper-options-2col {
-  grid-template-columns: repeat(2, 1fr);
-  gap: 12px 24px;
-}
-
-/* 1列竖排 — 长选项或含图片 */
-.paper-options-1col {
-  grid-template-columns: 1fr;
-  gap: 8px;
-}
-
-.paper-opt {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 13px;
-  line-height: 1.7;
-  color: #3a3a3c;
-  padding: 4px 0;
-  font-family: var(--font-cn-isolated);
-}
-
-.paper-opt.correct {
-  color: var(--accent);
-}
-
-[data-theme='dark'] .paper-opt {
-  color: #d1d1d6;
-}
-
-.paper-opt-letter {
-  font-weight: 600;
-  flex-shrink: 0;
-  margin-right: 8px;
-  font-family: var(--font-cn-isolated);
-}
-
-/* 选项内容容器：flex: 1 占满剩余宽度，min-width:0 防止内容溢出 */
-.paper-opt-content {
-  flex: 1;
-  min-width: 0;
-  /* 自身也用 flex 居中，确保内部 LatexRender 的图片垂直居中 */
-  display: flex;
-  align-items: center;
-}
-
-/* 穿透清除 LatexRender 最后元素 margin-bottom，避免 flex 居中视觉偏移 */
-.paper-opt-content :deep(.latex-render > p:last-child),
-.paper-opt-content :deep(.latex-render p) {
-  margin-bottom: 0 !important;
-  margin-top: 0 !important;
-}
-
-.paper-opt-content :deep(.latex-render img) {
-  margin-bottom: 0 !important;
-  vertical-align: middle;
-}
-
-/* 选项内图片样式
- * 特异性必须高于 .latex-render img.latex-img.img-inline (0,3,1) 才能覆盖 max-height: 1.5em
- * 用 .paper-opt .latex-render 前缀提升到 (0,4,1) */
-.paper-opt .latex-render img.latex-img,
-.paper-opt .latex-render img.latex-img.img-inline {
-  max-height: none;          /* 覆盖 img-inline 的 1.5em 和旧规则的 80px */
-  max-width: 100%;            /* 容器宽度兜底，大图等比缩放 */
-  height: auto;
-  width: auto;
-  display: block;            /* 块级独占一行，避免被压成行内 */
-  margin: 4px 0;
-  border-radius: 4px;
 }
 
 /* 答案/解析区块 */

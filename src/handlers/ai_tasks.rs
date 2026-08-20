@@ -151,7 +151,7 @@ pub async fn submit_parse_task(
     Extension(auth): Extension<AuthUser>,
     Json(req): Json<SubmitParseTaskRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<serde_json::Value>)> {
-    // 1. Document 必须存在且已确认
+    // 1. Document 必须存在；OCR 先行：uploaded/classifying/classified/confirmed 均可建任务
     let doc = sqlx::query_as::<_, (Uuid, String, Option<String>, serde_json::Value, Option<String>)>(
         "SELECT id, status, document_type, metadata, mime FROM documents WHERE id = $1",
     )
@@ -162,12 +162,13 @@ pub async fn submit_parse_task(
     .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "资料不存在"}))))?;
 
     let (doc_id, doc_status, doc_type, doc_metadata, doc_mime) = doc;
-    if doc_status != "confirmed" {
+    const ALLOWED_PARSE_STATUSES: &[&str] = &["uploaded", "classifying", "classified", "confirmed"];
+    if !ALLOWED_PARSE_STATUSES.contains(&doc_status.as_str()) {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(json!({
-                "error": "资料尚未确认类型，请先完成资料类型确认",
-                "code": "ERR_DOCUMENT_NOT_CONFIRMED"
+                "error": format!("当前资料状态（{doc_status}）不允许开始解析"),
+                "code": "ERR_DOCUMENT_STATUS"
             })),
         ));
     }
@@ -235,9 +236,12 @@ pub async fn submit_parse_task(
         }
     }
 
-    // 4. paper_meta 输入快照：从 documents.metadata 复制（计划书 §六 输入快照原则）
+    // 4. 输入快照：来源级联 + 可选建卷（OCR 先行时可能尚未 confirm）
     let paper_meta_snapshot = json!({
         "document_type": doc_type,
+        "source_category": doc_metadata.get("source_category").cloned().unwrap_or(json!(null)),
+        "source_kind": doc_metadata.get("source_kind").cloned().unwrap_or(json!(null)),
+        "create_paper": doc_metadata.get("create_paper").cloned().unwrap_or(json!(false)),
         "title": doc_metadata.get("title").cloned().unwrap_or(json!(null)),
         "paper_meta": doc_metadata.get("paper_meta").cloned().unwrap_or(json!(null)),
         "collections": doc_metadata.get("collections").cloned().unwrap_or(json!([])),

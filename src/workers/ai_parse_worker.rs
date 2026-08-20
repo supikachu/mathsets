@@ -250,10 +250,12 @@ async fn execute_task(state: &AppState, task: &AiParseTask) -> Result<TaskOutcom
     .ok_or_else(|| TaskFailure { retryable: false, message: "Document 不存在".into() })?;
 
     let (doc_status, doc_type, _doc_title, doc_metadata) = doc;
-    if doc_status != "confirmed" {
+    // OCR 先行：uploaded/classifying/classified/confirmed 均可执行
+    const ALLOWED: &[&str] = &["uploaded", "classifying", "classified", "confirmed", "parsing"];
+    if !ALLOWED.contains(&doc_status.as_str()) {
         return Err(TaskFailure {
             retryable: false,
-            message: "Document 尚未确认资料类型".into(),
+            message: format!("Document 状态不允许解析: {doc_status}"),
         });
     }
 
@@ -344,21 +346,38 @@ async fn execute_task(state: &AppState, task: &AiParseTask) -> Result<TaskOutcom
     .await
     .map_err(|e| TaskFailure { retryable: false, message: format!("创建个人空间失败: {e}") })?;
 
-    // ── Stage 2：容器（Paper / QuestionCollection） ────────────────
+    // ── Stage 2：容器（仅 create_paper=true 时建 Paper；默认独立题不建集合） ──
     let pm = &task.paper_meta;
+    // 优先读文档最新 metadata（confirm 可能在解析中后置）
+    let live_create = doc_metadata
+        .get("create_paper")
+        .and_then(|v| v.as_bool())
+        .or_else(|| pm.get("create_paper").and_then(|v| v.as_bool()))
+        .unwrap_or(false);
+    let source_category = doc_metadata
+        .get("source_category")
+        .and_then(|v| v.as_str())
+        .or_else(|| pm.get("source_category").and_then(|v| v.as_str()))
+        .unwrap_or("practice");
     let document_type = pm
         .get("document_type")
         .and_then(|v| v.as_str())
-        .unwrap_or(doc_type.as_deref().unwrap_or("unknown"))
+        .or(doc_type.as_deref())
+        .unwrap_or("practice:in_class")
         .to_string();
-    let is_paper = is_paper_type(&document_type);
-    let is_mixed = document_type == "mixed";
+    let create_paper = crate::models::document::should_create_paper(source_category, live_create)
+        || (live_create && is_paper_type(&document_type));
+    let is_mixed = false; // 方案 A：不再支持 mixed 多集合
 
-    let (paper_id, collection_ids): (Option<Uuid>, Vec<Uuid>) = if is_paper {
+    let (paper_id, collection_ids): (Option<Uuid>, Vec<Uuid>) = if create_paper {
         // Paper：显式关联 > document_id 幂等复用 > 新建
-        let explicit_paper: Option<Uuid> = pm
+        let paper_meta_src = doc_metadata
             .get("paper_meta")
-            .and_then(|m| m.get("paper_id"))
+            .cloned()
+            .or_else(|| pm.get("paper_meta").cloned())
+            .unwrap_or(serde_json::Value::Null);
+        let explicit_paper: Option<Uuid> = paper_meta_src
+            .get("paper_id")
             .and_then(|v| v.as_str())
             .and_then(|s| Uuid::parse_str(s).ok());
         if let Some(pid) = explicit_paper {
@@ -384,76 +403,19 @@ async fn execute_task(state: &AppState, task: &AiParseTask) -> Result<TaskOutcom
             match existing {
                 Some(pid) => (Some(pid), vec![]),
                 None => {
-                    let pid = create_paper_from_meta(state, &auth, doc_id, pm).await?;
+                    // 合并 live paper_meta 到快照
+                    let mut snap = pm.clone();
+                    if let Some(obj) = snap.as_object_mut() {
+                        obj.insert("paper_meta".into(), paper_meta_src);
+                    }
+                    let pid = create_paper_from_meta(state, &auth, doc_id, &snap).await?;
                     (Some(pid), vec![])
                 }
             }
         }
     } else {
-        // QuestionCollection：复用键 (document_id, title)；无快照 → 默认单集合
-        let mut ids = Vec::new();
-        let collections = pm
-            .get("collections")
-            .and_then(|c| c.as_array())
-            .cloned()
-            .unwrap_or_default();
-        if collections.is_empty() {
-            let default_title = pm
-                .get("title")
-                .and_then(|t| t.as_str())
-                .filter(|t| !t.trim().is_empty())
-                .unwrap_or("默认题目集合");
-            let col = get_or_create_collection(
-                &state.pool,
-                task.creator_id,
-                doc_id,
-                default_title,
-                &document_type,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-            .await
-            .map_err(|e| TaskFailure { retryable: false, message: e })?;
-            ids.push(col.id);
-        } else {
-            for c in &collections {
-                let title = c.get("title").and_then(|t| t.as_str()).unwrap_or("未命名集合");
-                let ctype = c.get("collection_type").and_then(|t| t.as_str()).unwrap_or("other");
-                let type_label = c.get("type_label").and_then(|t| t.as_str());
-                let source_type = c.get("source_type").and_then(|t| t.as_str());
-                let subject = c.get("subject").and_then(|t| t.as_str());
-                let stage = c.get("stage").and_then(|t| t.as_str());
-                let grade = c.get("grade").and_then(|t| t.as_str());
-                let semester = c.get("semester").and_then(|t| t.as_str());
-                let chapter_id = c
-                    .get("chapter_id")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| Uuid::parse_str(s).ok());
-                let col = get_or_create_collection(
-                    &state.pool,
-                    task.creator_id,
-                    doc_id,
-                    title,
-                    ctype,
-                    type_label,
-                    source_type,
-                    subject,
-                    stage,
-                    grade,
-                    semester,
-                    chapter_id,
-                )
-                .await
-                .map_err(|e| TaskFailure { retryable: false, message: e })?;
-                ids.push(col.id);
-            }
-        }
-        (None, ids)
+        // 独立题：不建 Paper / Collection
+        (None, vec![])
     };
 
     // ── Stage 3：OCR 解析 → 逐题落库 ────────────────────────────────

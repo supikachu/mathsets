@@ -290,7 +290,7 @@ export function parseMarkdownToQuestion(md: string): ParsedQuestion {
     question_type: questionType as 'choice' | 'fill' | 'solution',
     sub_type: subType,
     difficulty,
-    stem,
+    stem: normalizeChoiceAnswerBlank(stem, questionType),
     options: options ?? undefined,
     correct_answer: correctAnswer,
     analysis,
@@ -301,4 +301,32 @@ export function parseMarkdownToQuestion(md: string): ParsedQuestion {
     image_urls: [],
     kp_matches: [],
   }
+}
+
+/** 选择题题干末尾作答空括号 () / （） → $(\hspace{2em})$ */
+export function normalizeChoiceAnswerBlank(stem: string, questionType?: string): string {
+  if (questionType && questionType !== 'choice' && questionType !== 'multiple') return stem
+  const emptyParens = /[（(][\s\u00a0\u3000]*[）)]/g
+  const mathSpans: [number, number][] = []
+  for (let i = 0; i < stem.length; i++) {
+    if (stem[i] !== '$') continue
+    const start = i
+    i++
+    while (i < stem.length && stem[i] !== '$') i++
+    if (i < stem.length) mathSpans.push([start, i + 1])
+  }
+  const inMath = (idx: number) => mathSpans.some(([a, b]) => idx >= a && idx < b)
+  let last: { start: number; end: number } | null = null
+  emptyParens.lastIndex = 0
+  let m: RegExpExecArray | null
+  while ((m = emptyParens.exec(stem)) !== null) {
+    if (inMath(m.index)) continue
+    const before = m.index > 0 ? stem[m.index - 1] : ''
+    if (/[A-Za-z0-9_\\]/.test(before)) continue
+    last = { start: m.index, end: m.index + m[0].length }
+  }
+  if (!last) return stem
+  const rest = stem.slice(last.end)
+  if (!/^(?:\s|!\[[^\]]*\]\([^)]*\))*$/.test(rest)) return stem
+  return stem.slice(0, last.start) + '$(\\hspace{2em})$' + rest
 }

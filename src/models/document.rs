@@ -2,7 +2,8 @@
 // V2.1.1 资料类型扩展：Document 数据模型
 //
 // 方案 A（TD-3）：documents.id 即文件实体 ID，不设 file_id 列。
-// document_type 为 TEXT + 白名单校验（TD-2），详见计划书 §四/§五。
+// 来源改为「大类 source_category + 子类 source_kind」级联；
+// document_type 列保留作兼容（写入 category:kind 或旧值映射）。
 // ===========================================================================
 
 use chrono::{DateTime, Utc};
@@ -11,10 +12,42 @@ use sqlx::FromRow;
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
-// 类型白名单（TD-2：TEXT + 后端校验，不用 PG enum）
+// 来源级联白名单（TEXT + 后端校验）
 // ---------------------------------------------------------------------------
 
-/// DocumentType：文件整体是什么（16 类）
+/// 来源大类
+pub const SOURCE_CATEGORIES: [&str; 3] = ["paper", "practice", "other"];
+
+/// 试卷子类
+pub const PAPER_KINDS: [&str; 7] = [
+    "monthly_test",
+    "unit_test",
+    "stage_test",
+    "midterm",
+    "final",
+    "gaokao",
+    "mock",
+];
+
+/// 练习子类
+pub const PRACTICE_KINDS: [&str; 5] = [
+    "preview",
+    "class_example",
+    "in_class",
+    "homework",
+    "unit_review",
+];
+
+/// 其他子类
+pub const OTHER_KINDS: [&str; 5] = [
+    "special",
+    "workbook",
+    "textbook_example",
+    "lecture",
+    "wrong_question",
+];
+
+/// 旧扁平 DocumentType（兼容读 / 映射）
 pub const DOCUMENT_TYPES: [&str; 16] = [
     "exam",
     "mock_exam",
@@ -34,7 +67,7 @@ pub const DOCUMENT_TYPES: [&str; 16] = [
     "other",
 ];
 
-/// CollectionType：这一组题是什么（不含 exam/mock_exam/mixed/unknown/other 除外）
+/// CollectionType（保留；方案 A 下练习/其他不再自动建集合）
 pub const COLLECTION_TYPES: [&str; 12] = [
     "class_exercise",
     "class_example",
@@ -50,20 +83,85 @@ pub const COLLECTION_TYPES: [&str; 12] = [
     "other",
 ];
 
+pub fn is_valid_source_category(c: &str) -> bool {
+    SOURCE_CATEGORIES.contains(&c)
+}
+
+pub fn is_valid_source_kind(kind: &str) -> bool {
+    PAPER_KINDS.contains(&kind) || PRACTICE_KINDS.contains(&kind) || OTHER_KINDS.contains(&kind)
+}
+
+pub fn source_kind_matches_category(category: &str, kind: &str) -> bool {
+    match category {
+        "paper" => PAPER_KINDS.contains(&kind),
+        "practice" => PRACTICE_KINDS.contains(&kind),
+        "other" => OTHER_KINDS.contains(&kind),
+        _ => false,
+    }
+}
+
 pub fn is_valid_document_type(t: &str) -> bool {
     DOCUMENT_TYPES.contains(&t)
+        || is_valid_source_kind(t)
+        || t.contains(':')
+            && t.split_once(':')
+                .is_some_and(|(c, k)| is_valid_source_category(c) && source_kind_matches_category(c, k))
 }
 
 pub fn is_valid_collection_type(t: &str) -> bool {
     COLLECTION_TYPES.contains(&t)
 }
 
-/// 是否"试卷类"资料类型（confirm 后创建 Paper 而非 Collection）
-pub fn is_paper_type(t: &str) -> bool {
-    matches!(t, "exam" | "mock_exam")
+/// 旧 document_type → (category, kind)
+pub fn map_legacy_document_type(t: &str) -> (String, String) {
+    match t {
+        "exam" => ("paper".into(), "monthly_test".into()),
+        "mock_exam" => ("paper".into(), "mock".into()),
+        "preview_exercise" => ("practice".into(), "preview".into()),
+        "class_example" => ("practice".into(), "class_example".into()),
+        "class_exercise" => ("practice".into(), "in_class".into()),
+        "homework" => ("practice".into(), "homework".into()),
+        "unit_exercise" => ("practice".into(), "unit_review".into()),
+        "chapter_exercise" | "special_training" => ("other".into(), "special".into()),
+        "exercise_book" => ("other".into(), "workbook".into()),
+        "textbook_example" => ("other".into(), "textbook_example".into()),
+        "teaching_material" => ("other".into(), "lecture".into()),
+        "wrong_question" => ("other".into(), "wrong_question".into()),
+        "mixed" | "unknown" | "other" | "" => ("practice".into(), "in_class".into()),
+        // 已是新 slug
+        k if PAPER_KINDS.contains(&k) => ("paper".into(), k.into()),
+        k if PRACTICE_KINDS.contains(&k) => ("practice".into(), k.into()),
+        k if OTHER_KINDS.contains(&k) => ("other".into(), k.into()),
+        // category:kind
+        s if s.contains(':') => {
+            let (c, k) = s.split_once(':').unwrap();
+            if is_valid_source_category(c) && source_kind_matches_category(c, k) {
+                (c.into(), k.into())
+            } else {
+                ("practice".into(), "in_class".into())
+            }
+        }
+        _ => ("practice".into(), "in_class".into()),
+    }
 }
 
-/// 非试卷 document_type → 默认 collection_type 映射（同名；other → other）
+/// 兼容列写入值：`paper:mock` 形式
+pub fn document_type_compat(category: &str, kind: &str) -> String {
+    format!("{category}:{kind}")
+}
+
+/// 是否应创建试卷实体：大类为试卷且 create_paper=true
+pub fn should_create_paper(category: &str, create_paper: bool) -> bool {
+    category == "paper" && create_paper
+}
+
+/// 旧 is_paper_type：兼容 exam/mock_exam 与 paper:*
+pub fn is_paper_type(t: &str) -> bool {
+    matches!(t, "exam" | "mock_exam")
+        || t.starts_with("paper:")
+        || PAPER_KINDS.contains(&t)
+}
+
 pub fn default_collection_type_for(document_type: &str) -> Option<&'static str> {
     COLLECTION_TYPES.iter().find(|t| **t == document_type).copied()
 }
@@ -82,19 +180,18 @@ pub struct Document {
     pub file_size: Option<i64>,
     pub mime: Option<String>,
     pub page_count: i32,
-    /// 业务资料类型（AI 推荐 → 用户确认后落库；confirmed 前为 NULL）
+    /// 兼容列：新写入为 `category:kind`；旧行为扁平 16 类
     pub document_type: Option<String>,
-    /// document_type = 'other' 时的自定义类型名
+    /// document_type = 'other' 时的自定义类型名（旧）
     pub type_label: Option<String>,
     pub title: Option<String>,
     pub source_type: Option<String>,
     pub sub_source_type: Option<String>,
     /// uploaded/classifying/classified/confirmed/parsing/done/failed/cancelled
     pub status: String,
-    /// AI 分类结果：{document_type,title,confidence,reason,level,checked_pages}
+    /// AI 分类结果
     pub ai_classification: Option<serde_json::Value>,
-    /// 扩展信息：confirm 后保存 paper_meta 快照与 collections 快照；
-    /// 上传后保存 pages 文件清单 ["page_1.webp", ...]
+    /// 扩展信息：paper_meta / collections / source_category / source_kind / create_paper / pages
     pub metadata: serde_json::Value,
     /// TD-1：PDF 转换引擎标识（pdfjs / doc2x / mineru）
     pub conversion_engine: Option<String>,
@@ -120,46 +217,60 @@ pub struct PaperMetaInput {
     pub school_name: Option<String>,
     pub source_type: Option<String>,
     pub sub_source_type: Option<String>,
-    /// 用户显式选择"关联已有试卷"（计划书 §6.1 复用规则 (b)）
+    /// 用户显式选择"关联已有试卷"
     pub paper_id: Option<Uuid>,
 }
 
-/// Collection 元数据（用户确认时输入，Worker 落库 question_collections 用）
+/// Collection 元数据（保留兼容；方案 A 下默认不建集合）
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CollectionMetaInput {
     pub title: String,
     pub collection_type: String,
-    /// collection_type = 'other' 时的自定义名
     pub type_label: Option<String>,
     pub source_type: Option<String>,
     pub subject: Option<String>,
     pub stage: Option<String>,
     pub grade: Option<String>,
     pub semester: Option<String>,
-    /// 章节（知识树节点，可选）
     pub chapter_id: Option<Uuid>,
 }
 
-/// POST /ai/documents/{id}/confirm 请求体
+/// POST /ai/documents/{id}/confirm 请求体（级联来源）
 #[derive(Debug, Deserialize)]
 pub struct ConfirmDocumentRequest {
-    /// 最终资料类型（白名单内；unknown 不允许提交，前端必须让用户选择）
-    pub document_type: String,
-    /// document_type = 'other' 时必填
+    /// 来源大类：paper | practice | other（优先）
+    #[serde(default)]
+    pub source_category: Option<String>,
+    /// 来源子类 slug
+    #[serde(default)]
+    pub source_kind: Option<String>,
+    /// 是否创建试卷实体（仅 paper 有效）
+    #[serde(default)]
+    pub create_paper: Option<bool>,
+    /// 兼容旧前端：扁平 document_type
+    #[serde(default)]
+    pub document_type: Option<String>,
     pub type_label: Option<String>,
     pub title: Option<String>,
     pub source_type: Option<String>,
     pub sub_source_type: Option<String>,
-    /// exam / mock_exam 必填
+    /// create_paper=true 时必填 title（或关联 paper_id）
     pub paper_meta: Option<PaperMetaInput>,
-    /// mixed 必填（≥1 个集合壳）；其他非试卷类型可省略（自动建默认单集合）
+    /// 兼容旧 mixed；方案 A 下通常为空
     pub collections: Option<Vec<CollectionMetaInput>>,
 }
 
-/// AI 分类原始输出（LLM 返回，未含 level/checked_pages）
+/// AI 分类原始输出
 #[derive(Debug, Deserialize, Clone)]
 pub struct AiClassificationRaw {
-    pub document_type: String,
+    /// 新字段
+    #[serde(default)]
+    pub source_category: Option<String>,
+    #[serde(default)]
+    pub source_kind: Option<String>,
+    /// 旧字段兼容
+    #[serde(default)]
+    pub document_type: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]
@@ -171,111 +282,128 @@ pub struct AiClassificationRaw {
 /// AI 分类最终结果（入库 ai_classification JSONB）
 #[derive(Debug, Clone, Serialize)]
 pub struct AiClassification {
+    pub source_category: String,
+    pub source_kind: String,
+    /// 兼容列同步值
     pub document_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     pub confidence: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    /// 命中的检测层级 1/2/3
     pub level: i32,
-    /// 实际检查的页数
     pub checked_pages: i32,
+}
+
+impl AiClassificationRaw {
+    /// 归一化为 (category, kind)；非法/低置信 → practice/in_class
+    pub fn resolve_source(&self) -> (String, String) {
+        if let (Some(c), Some(k)) = (&self.source_category, &self.source_kind) {
+            let c = c.trim();
+            let k = k.trim();
+            if is_valid_source_category(c) && source_kind_matches_category(c, k) {
+                return (c.into(), k.into());
+            }
+        }
+        if let Some(dt) = &self.document_type {
+            return map_legacy_document_type(dt.trim());
+        }
+        ("practice".into(), "in_class".into())
+    }
 }
 
 // ---------------------------------------------------------------------------
 // 校验
 // ---------------------------------------------------------------------------
 
-/// confirm 请求校验；返回 (paper_meta, collections) 归一化后的结构
 pub struct ConfirmNormalized {
-    /// 归一化后的 collections 列表（非试卷类型为空时自动补默认单集合）
+    pub source_category: String,
+    pub source_kind: String,
+    pub create_paper: bool,
+    /// 兼容写入 documents.document_type
+    pub document_type: String,
     pub collections: Vec<CollectionMetaInput>,
-    /// 是否试卷类型（exam / mock_exam）
+    /// 是否应创建/关联试卷
     pub is_paper: bool,
 }
 
-/// 校验 confirm 请求，返回归一化结果；Err 为给前端的错误信息
+/// 校验 confirm 请求
 pub fn validate_confirm(req: &ConfirmDocumentRequest) -> Result<ConfirmNormalized, String> {
-    let doc_type = req.document_type.trim();
-    if !is_valid_document_type(doc_type) {
-        return Err(format!("未知资料类型: {doc_type}"));
-    }
-    if doc_type == "unknown" {
-        return Err("无法自动判断资料类型，请先选择资料类型".to_string());
-    }
-    if doc_type == "other" {
-        let label = req.type_label.as_deref().unwrap_or("").trim();
-        if label.is_empty() {
-            return Err("选择「其他」类型时必须填写自定义类型名（type_label）".to_string());
-        }
-    }
+    let (category, kind) = resolve_confirm_source(req)?;
 
-    let is_paper = is_paper_type(doc_type);
+    let create_paper = req.create_paper.unwrap_or(false) && category == "paper";
+    let document_type = document_type_compat(&category, &kind);
 
-    // 试卷类型：必须提供 paper_meta.title
-    if is_paper {
+    // 创建试卷：需 paper_meta.title 或关联 paper_id
+    if create_paper {
         let meta = req
             .paper_meta
             .as_ref()
-            .ok_or_else(|| "正式试卷 / 模拟试卷必须填写试卷信息（paper_meta）".to_string())?;
-        if meta.title.trim().is_empty() {
-            return Err("试卷名称（paper_meta.title）不能为空".to_string());
+            .ok_or_else(|| "创建试卷时请填写试卷信息（paper_meta）".to_string())?;
+        let has_link = meta.paper_id.is_some();
+        if !has_link && meta.title.trim().is_empty() {
+            return Err("创建试卷时名称不能为空".to_string());
         }
         return Ok(ConfirmNormalized {
+            source_category: category,
+            source_kind: kind,
+            create_paper: true,
+            document_type,
             collections: vec![],
             is_paper: true,
         });
     }
 
-    // mixed：必须提供 ≥1 个集合
-    if doc_type == "mixed" {
-        let collections = req
-            .collections
-            .as_ref()
-            .ok_or_else(|| "混合资料必须至少提供一个题目集合（collections）".to_string())?;
-        if collections.is_empty() {
-            return Err("混合资料必须至少提供一个题目集合（collections）".to_string());
-        }
-        validate_collections(collections)?;
-        return Ok(ConfirmNormalized {
-            collections: collections.clone(),
-            is_paper: false,
-        });
-    }
-
-    // 其他非试卷类型：collections 可省略 → 自动补默认单集合
-    let mut collections = req.collections.clone().unwrap_or_default();
+    // 试卷但不建卷、练习、其他：独立题，不建集合
+    let collections = req.collections.clone().unwrap_or_default();
     if !collections.is_empty() {
         validate_collections(&collections)?;
-    } else {
-        let default_type = default_collection_type_for(doc_type)
-            .ok_or_else(|| format!("资料类型 {doc_type} 无法映射到默认集合类型"))?;
-        collections.push(CollectionMetaInput {
-            title: req
-                .title
-                .clone()
-                .filter(|t| !t.trim().is_empty())
-                .unwrap_or_else(|| "默认题目集合".to_string()),
-            collection_type: default_type.to_string(),
-            type_label: if default_type == "other" {
-                req.type_label.clone()
-            } else {
-                None
-            },
-            source_type: req.source_type.clone(),
-            subject: None,
-            stage: None,
-            grade: None,
-            semester: None,
-            chapter_id: None,
-        });
     }
 
     Ok(ConfirmNormalized {
+        source_category: category,
+        source_kind: kind,
+        create_paper: false,
+        document_type,
         collections,
         is_paper: false,
     })
+}
+
+fn resolve_confirm_source(req: &ConfirmDocumentRequest) -> Result<(String, String), String> {
+    if let (Some(c), Some(k)) = (&req.source_category, &req.source_kind) {
+        let c = c.trim();
+        let k = k.trim();
+        if !is_valid_source_category(c) {
+            return Err(format!("未知来源大类: {c}"));
+        }
+        if !source_kind_matches_category(c, k) {
+            return Err(format!("子类 {k} 不属于大类 {c}"));
+        }
+        return Ok((c.into(), k.into()));
+    }
+    // 兼容旧扁平 document_type
+    if let Some(dt) = req.document_type.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if dt == "unknown" {
+            return Err("无法自动判断资料类型，请先选择资料类型".to_string());
+        }
+        if dt == "mixed" {
+            return Err("已不再支持混合资料类型，请选择试卷/练习/其他".to_string());
+        }
+        if dt == "other" {
+            // 旧 other 需 type_label；映射到 other/special
+            let label = req.type_label.as_deref().unwrap_or("").trim();
+            if label.is_empty() {
+                return Err("选择「其他」类型时必须填写自定义类型名（type_label）".to_string());
+            }
+            return Ok(("other".into(), "special".into()));
+        }
+        if is_valid_document_type(dt) || is_valid_source_kind(dt) {
+            return Ok(map_legacy_document_type(dt));
+        }
+        return Err(format!("未知资料类型: {dt}"));
+    }
+    Err("请选择来源大类与子类".to_string())
 }
 
 fn validate_collections(collections: &[CollectionMetaInput]) -> Result<(), String> {
@@ -305,44 +433,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_document_type_whitelist() {
-        assert!(is_valid_document_type("exam"));
-        assert!(is_valid_document_type("mixed"));
-        assert!(is_valid_document_type("unknown"));
-        assert!(is_valid_document_type("other"));
-        assert!(!is_valid_document_type("quiz"));
-        assert!(!is_valid_document_type(""));
+    fn test_source_cascade_whitelist() {
+        assert!(is_valid_source_category("paper"));
+        assert!(source_kind_matches_category("paper", "mock"));
+        assert!(source_kind_matches_category("practice", "in_class"));
+        assert!(source_kind_matches_category("other", "lecture"));
+        assert!(!source_kind_matches_category("paper", "homework"));
     }
 
     #[test]
-    fn test_collection_type_whitelist() {
-        assert!(is_valid_collection_type("class_exercise"));
-        assert!(is_valid_collection_type("other"));
-        // 试卷/混合/未知不是集合类型
-        assert!(!is_valid_collection_type("exam"));
-        assert!(!is_valid_collection_type("mixed"));
-        assert!(!is_valid_collection_type("unknown"));
+    fn test_legacy_mapping() {
+        assert_eq!(map_legacy_document_type("mock_exam"), ("paper".into(), "mock".into()));
+        assert_eq!(map_legacy_document_type("class_exercise"), ("practice".into(), "in_class".into()));
+        assert_eq!(map_legacy_document_type("wrong_question"), ("other".into(), "wrong_question".into()));
+        assert_eq!(map_legacy_document_type("unknown"), ("practice".into(), "in_class".into()));
     }
 
     #[test]
-    fn test_paper_type_detection() {
-        assert!(is_paper_type("exam"));
-        assert!(is_paper_type("mock_exam"));
-        assert!(!is_paper_type("homework"));
-    }
-
-    #[test]
-    fn test_default_collection_mapping() {
-        assert_eq!(default_collection_type_for("homework"), Some("homework"));
-        assert_eq!(default_collection_type_for("other"), Some("other"));
-        assert_eq!(default_collection_type_for("exam"), None);
-        assert_eq!(default_collection_type_for("mixed"), None);
-    }
-
-    #[test]
-    fn test_validate_confirm_exam_requires_title() {
+    fn test_validate_confirm_cascade_practice_no_collection() {
         let req = ConfirmDocumentRequest {
-            document_type: "exam".into(),
+            source_category: Some("practice".into()),
+            source_kind: Some("in_class".into()),
+            create_paper: Some(false),
+            document_type: None,
+            type_label: None,
+            title: Some("练习".into()),
+            source_type: None,
+            sub_source_type: None,
+            paper_meta: None,
+            collections: None,
+        };
+        let n = validate_confirm(&req).unwrap();
+        assert!(!n.is_paper);
+        assert!(!n.create_paper);
+        assert!(n.collections.is_empty());
+        assert_eq!(n.document_type, "practice:in_class");
+    }
+
+    #[test]
+    fn test_validate_confirm_create_paper_requires_title() {
+        let req = ConfirmDocumentRequest {
+            source_category: Some("paper".into()),
+            source_kind: Some("midterm".into()),
+            create_paper: Some(true),
+            document_type: None,
             type_label: None,
             title: None,
             source_type: None,
@@ -353,14 +487,17 @@ mod tests {
         assert!(validate_confirm(&req).is_err());
 
         let req2 = ConfirmDocumentRequest {
-            document_type: "exam".into(),
+            source_category: Some("paper".into()),
+            source_kind: Some("midterm".into()),
+            create_paper: Some(true),
+            document_type: None,
             type_label: None,
             title: None,
             source_type: None,
             sub_source_type: None,
             paper_meta: Some(PaperMetaInput {
-                title: "2025高一数学期中考试".into(),
-                year: None,
+                title: "2025高一数学期中".into(),
+                year: Some(2025),
                 stage: None,
                 grade: None,
                 subject: None,
@@ -375,102 +512,79 @@ mod tests {
             collections: None,
         };
         let n = validate_confirm(&req2).unwrap();
-        assert!(n.is_paper);
+        assert!(n.is_paper && n.create_paper);
     }
 
     #[test]
-    fn test_validate_confirm_mixed_requires_collections() {
+    fn test_validate_confirm_paper_without_create() {
         let req = ConfirmDocumentRequest {
-            document_type: "mixed".into(),
+            source_category: Some("paper".into()),
+            source_kind: Some("mock".into()),
+            create_paper: Some(false),
+            document_type: None,
             type_label: None,
             title: None,
             source_type: None,
-            sub_source_type: None,
-            paper_meta: None,
-            collections: None,
-        };
-        assert!(validate_confirm(&req).is_err());
-
-        let req2 = ConfirmDocumentRequest {
-            document_type: "mixed".into(),
-            type_label: None,
-            title: None,
-            source_type: None,
-            sub_source_type: None,
-            paper_meta: None,
-            collections: Some(vec![CollectionMetaInput {
-                title: "课堂练习".into(),
-                collection_type: "class_exercise".into(),
-                type_label: None,
-                source_type: None,
-                subject: None,
+            sub_source_type: Some("一模".into()),
+            paper_meta: Some(PaperMetaInput {
+                title: "".into(),
+                year: None,
                 stage: None,
                 grade: None,
+                subject: None,
                 semester: None,
-                chapter_id: None,
-            }]),
-        };
-        assert!(validate_confirm(&req2).is_ok());
-    }
-
-    #[test]
-    fn test_validate_confirm_other_requires_label() {
-        let req = ConfirmDocumentRequest {
-            document_type: "other".into(),
-            type_label: None,
-            title: None,
-            source_type: None,
-            sub_source_type: None,
-            paper_meta: None,
-            collections: None,
-        };
-        assert!(validate_confirm(&req).is_err());
-
-        let req2 = ConfirmDocumentRequest {
-            document_type: "other".into(),
-            type_label: Some("校本资料".into()),
-            title: Some("导数专题".into()),
-            source_type: None,
-            sub_source_type: None,
-            paper_meta: None,
-            collections: None,
-        };
-        let n = validate_confirm(&req2).unwrap();
-        assert!(!n.is_paper);
-        assert_eq!(n.collections.len(), 1);
-        assert_eq!(n.collections[0].collection_type, "other");
-        assert_eq!(n.collections[0].type_label.as_deref(), Some("校本资料"));
-    }
-
-    #[test]
-    fn test_validate_confirm_unknown_rejected() {
-        let req = ConfirmDocumentRequest {
-            document_type: "unknown".into(),
-            type_label: None,
-            title: None,
-            source_type: None,
-            sub_source_type: None,
-            paper_meta: None,
-            collections: None,
-        };
-        assert!(validate_confirm(&req).is_err());
-    }
-
-    #[test]
-    fn test_validate_confirm_default_collection_auto_fill() {
-        let req = ConfirmDocumentRequest {
-            document_type: "class_exercise".into(),
-            type_label: None,
-            title: Some("二次函数课堂练习".into()),
-            source_type: Some("teacher_created".into()),
-            sub_source_type: None,
-            paper_meta: None,
+                region_province: None,
+                region_city: None,
+                school_name: None,
+                source_type: None,
+                sub_source_type: Some("一模".into()),
+                paper_id: None,
+            }),
             collections: None,
         };
         let n = validate_confirm(&req).unwrap();
-        assert_eq!(n.collections.len(), 1);
-        assert_eq!(n.collections[0].title, "二次函数课堂练习");
-        assert_eq!(n.collections[0].collection_type, "class_exercise");
-        assert_eq!(n.collections[0].source_type.as_deref(), Some("teacher_created"));
+        assert!(!n.create_paper);
+        assert!(!n.is_paper);
+    }
+
+    #[test]
+    fn test_validate_confirm_legacy_exam_compat() {
+        let req = ConfirmDocumentRequest {
+            source_category: None,
+            source_kind: None,
+            create_paper: Some(true),
+            document_type: Some("exam".into()),
+            type_label: None,
+            title: None,
+            source_type: None,
+            sub_source_type: None,
+            paper_meta: Some(PaperMetaInput {
+                title: "卷".into(),
+                year: None,
+                stage: None,
+                grade: None,
+                subject: None,
+                semester: None,
+                region_province: None,
+                region_city: None,
+                school_name: None,
+                source_type: None,
+                sub_source_type: None,
+                paper_id: None,
+            }),
+            collections: None,
+        };
+        // create_paper + legacy exam → mapped to paper, create_paper true
+        // but resolve maps exam→paper/monthly_test; create_paper only if category==paper
+        let n = validate_confirm(&req).unwrap();
+        assert_eq!(n.source_category, "paper");
+        assert!(n.create_paper);
+    }
+
+    #[test]
+    fn test_should_create_paper() {
+        assert!(should_create_paper("paper", true));
+        assert!(!should_create_paper("paper", false));
+        assert!(!should_create_paper("practice", true));
     }
 }

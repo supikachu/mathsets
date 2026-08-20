@@ -295,6 +295,8 @@ export interface QuestionQuery {
   region?: string
   source_type?: string
   document_type?: string
+  source_category?: string
+  source_kind?: string
   collection_id?: string
 }
 
@@ -1425,7 +1427,9 @@ export type DocumentStatus =
   | 'cancelled'
 
 export interface AiClassification {
-  document_type: DocumentType
+  source_category?: string
+  source_kind?: string
+  document_type: DocumentType | string
   title?: string
   confidence: number
   reason?: string
@@ -1481,7 +1485,11 @@ export interface CollectionMetaInput {
 }
 
 export interface ConfirmDocumentRequest {
-  document_type: DocumentType
+  source_category?: string
+  source_kind?: string
+  create_paper?: boolean
+  /** @deprecated 兼容旧调用 */
+  document_type?: DocumentType | string
   type_label?: string
   title?: string
   source_type?: string
@@ -1513,7 +1521,7 @@ export const documentApi = {
     )
   },
   confirm(id: string, body: ConfirmDocumentRequest) {
-    return client.post<{ data: DocumentMeta }>(`/ai/documents/${id}/confirm`, body)
+    return client.post<{ data: DocumentMeta; paper_id?: string | null }>(`/ai/documents/${id}/confirm`, body)
   },
   list() {
     return client.get<{ data: DocumentMeta[] }>('/ai/documents')

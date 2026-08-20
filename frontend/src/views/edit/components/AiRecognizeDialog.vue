@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, nextTick } from 'vue'
+import { ref, watch, nextTick, computed, onBeforeUnmount } from 'vue'
 import {
   documentApi,
   collectionApi,
@@ -14,15 +14,20 @@ import {
   type TaggingMatch,
   type TaggingUnmatched,
 } from '@/api/client'
-import { AppButton, AppModal, AppConfirm, AppIcon } from '@/components/ui'
+import { AppButton, AppModal, AppConfirm, AppIcon, AppBadge } from '@/components/ui'
+import LatexRender from '@/components/LatexRender.vue'
+import QuestionOptions from '@/components/QuestionOptions.vue'
+import { typeLabel, typeBadgeColor, diffLabel, diffBadgeColor } from '@/utils/questionDisplay'
 import { useToast } from '@/composables/useToast'
 import { useAiParsePolling } from '@/composables/useAiParsePolling'
-import { parseMarkdownToQuestion, RECOMMENDED_PROMPT } from '@/utils/parseMarkdown'
+import { parseMarkdownToQuestion, RECOMMENDED_PROMPT, normalizeChoiceAnswerBlank } from '@/utils/parseMarkdown'
 import { compressImage, blobToFile } from '@/utils/imageCompressor'
 import { withBackoffRetry } from '@/utils/concurrency'
 import { pdfToImages, type PdfPageImage } from '@/utils/pdfToImages'
 import { clearBatchSnapshot, hasUnfinishedSnapshot, type BatchSnapshot } from '@/utils/batchSnapshot'
-import DocumentTypeConfirmStep from './DocumentTypeConfirmStep.vue'
+import { loadAiSourceFile, saveAiSourceFile } from '@/utils/aiSourceFile'
+import { displaySourceLabel } from '@/utils/questionSource'
+import SourceCascadeBar from './SourceCascadeBar.vue'
 import TaskProgressPanel from './TaskProgressPanel.vue'
 import QuestionGroupingStep, { type GroupQuestion } from './QuestionGroupingStep.vue'
 
@@ -32,8 +37,11 @@ const knowledgeNodeIds = defineModel<string[]>('knowledgeNodeIds', { required: t
 const chapterNodeIds = defineModel<string[]>('chapterNodeIds', { default: () => [] })
 const methodNodeIds = defineModel<string[]>('methodNodeIds', { default: () => [] })
 const aiGeneratedFields = defineModel<Set<string>>('aiGeneratedFields', { required: true })
+const aiSessionActive = defineModel<boolean>('aiSessionActive', { default: false })
 
 const props = defineProps<{
+  /** 新建页内嵌为与「手动录题」并列的模块，不再套弹窗 */
+  embedded?: boolean
   form: {
     stem: string
     question_type: string
@@ -59,15 +67,24 @@ const props = defineProps<{
     knowledgeNodeIds: string[]
     hasUnsaved: boolean
   }
+  /** 编辑页回写的题目快照：返回识别后卡片展示最新内容 */
+  editedSnapshots?: any[]
+  /** 识别预览「全部保存」进行中 */
+  savingAll?: boolean
 }>()
 
 const emit = defineEmits<{
   (e: 'applied'): void
-  // 批量识别成功后，把所有题目一次性抛给父组件进入多题工作台
+  // 识别完成即把题目装进父组件工作台（不切页）；点卡片再进入对应题编辑
   (e: 'batch-parsed', questions: ParsedQuestion[]): void
+  (e: 'open-question', index: number): void
+  (e: 'save-all'): void
+  (e: 'source-updated', state: import('@/utils/questionSource').QuestionSourceState): void
 }>()
 
 const toast = useToast()
+/** 当前识别会话的来源状态（保存题目时写入 metadata） */
+const sourceState = ref<import('@/utils/questionSource').QuestionSourceState | null>(null)
 
 // AI Mode tab: 'markdown' | 'image' | 'pdf'（图片与 PDF 各走独立通道）
 const aiMode = ref<'markdown' | 'image' | 'pdf'>('markdown')
@@ -76,6 +93,21 @@ const aiError = ref('')
 const aiParsing = ref(false)
 const aiResult = ref<ParsedQuestion | null>(null)
 const promptCopied = ref(false)
+const previewQuestions = ref<ParsedQuestion[]>([])
+const ocrFileName = ref('')
+const sourcePreviewUrl = ref('')
+const sourceKind = ref<'markdown' | 'pdf' | 'image'>('markdown')
+let markdownParseTimer: ReturnType<typeof setTimeout> | undefined
+
+watch(
+  [sourcePreviewUrl, previewQuestions, aiResult],
+  () => {
+    aiSessionActive.value = Boolean(
+      sourcePreviewUrl.value || previewQuestions.value.length || aiResult.value,
+    )
+  },
+  { immediate: true },
+)
 
 // V2.1.1 资料流程状态：idle（选文件）→ uploading（上传+分类中）→ confirm（确认类型）
 // → progress（解析中）→ grouping（Mixed 分组）
@@ -132,22 +164,251 @@ async function copyPrompt() {
   }
 }
 
-function doAiParse() {
-  if (!aiText.value.trim()) {
-    toast.warning('请输入题目文本')
+function parseMarkdownNow(text: string) {
+  if (!text.trim()) {
+    if (previewQuestions.value.length === 0) {
+      aiResult.value = null
+      aiError.value = ''
+    }
     return
   }
-  aiError.value = ''
-  aiResult.value = null
+  try {
+    aiResult.value = parseMarkdownToQuestion(text)
+    aiError.value = ''
+    previewQuestions.value = []
+  } catch (e: any) {
+    aiResult.value = null
+    aiError.value = e.message || 'Markdown 解析失败'
+  }
+}
+
+function doAiParse() {
+  if (!aiText.value.trim()) {
+    toast.warning('请粘贴 Markdown，或将图片 / PDF 拖到左侧识别')
+    return
+  }
   aiParsing.value = true
   try {
-    // Markdown 模式：纯前端解析（不调用后端）
-    aiResult.value = parseMarkdownToQuestion(aiText.value)
-  } catch (e: any) {
-    aiError.value = e.message || 'Markdown 解析失败'
+    parseMarkdownNow(aiText.value)
+    if (!aiResult.value && aiError.value) toast.warning(aiError.value)
   } finally {
     aiParsing.value = false
   }
+}
+
+watch(aiText, (text) => {
+  if (docFlowState.value !== 'idle') return
+  if (markdownParseTimer) clearTimeout(markdownParseTimer)
+  markdownParseTimer = setTimeout(() => parseMarkdownNow(text), 280)
+})
+
+const previewCards = computed(() => {
+  const snapshots = props.editedSnapshots ?? []
+  if (previewQuestions.value.length) {
+    return previewQuestions.value.map((q, i) => overlayParsedFromSnapshot(q, snapshots[i]))
+  }
+  if (snapshots.length) {
+    return snapshots.map((s) => overlayParsedFromSnapshot(parsedStubFromSnapshot(s), s))
+  }
+  return aiResult.value ? [aiResult.value] : []
+})
+
+const previewCount = computed(() => previewCards.value.length)
+const unsavedPreviewCount = computed(() =>
+  (props.editedSnapshots ?? []).filter((s) => s && (!s.saved || s.hasUnsaved)).length,
+)
+const canSaveAll = computed(() => (props.editedSnapshots?.length ?? 0) > 0)
+
+type RightPaneTab = 'source' | 'preview'
+const rightPaneTab = ref<RightPaneTab>('source')
+
+const sourceTabHint = computed(() => {
+  const s = sourceState.value
+  if (!s) return ''
+  return displaySourceLabel(s.source_category, s.source_kind)
+})
+
+watch(previewCount, (n, prev) => {
+  if (n > 0 && !prev) rightPaneTab.value = 'preview'
+})
+
+watch(currentDoc, (doc) => {
+  if (doc && previewCount.value === 0) rightPaneTab.value = 'source'
+})
+function cardSaved(idx: number) {
+  return Boolean(props.editedSnapshots?.[idx]?.saved)
+}
+
+const progressStripPct = computed(() => {
+  const t = pollTask.value
+  if (!t) return 35
+  if (t.total_pages && t.current_page != null) {
+    return Math.min(95, Math.round((t.current_page / Math.max(t.total_pages, 1)) * 100))
+  }
+  if (t.total_count > 0) {
+    return Math.min(95, Math.round((t.processed_count / t.total_count) * 100))
+  }
+  return 40
+})
+
+const showOriginalSource = computed(() => Boolean(sourcePreviewUrl.value))
+
+function cardKnowledgePoints(q: ParsedQuestion): string[] {
+  if (q.knowledge_points?.length) return q.knowledge_points.filter(Boolean)
+  return (q.kp_matches || [])
+    .map(m => m.matched_name || m.ai_name)
+    .filter((name): name is string => Boolean(name))
+}
+
+function cardQuestionType(q: ParsedQuestion): string {
+  if (q.question_type === 'choice' && (q.sub_type === 'multi' || q.sub_type === 'multiple')) {
+    return 'multiple'
+  }
+  return q.question_type
+}
+
+function parsedStubFromSnapshot(s: any): ParsedQuestion {
+  const qType = s?.question_type || 'choice'
+  return {
+    question_type: qType,
+    sub_type: s?.sub_type || '',
+    difficulty: s?.difficulty || 'medium',
+    stem: s?.stem || '',
+    options: Array.isArray(s?.options) ? s.options : [],
+    correct_answer: { kind: 'choice', value: { options: [] } },
+    analysis: [],
+    knowledge_points: [],
+    confidence: 0,
+    warnings: [],
+    image_placeholders: [],
+    image_urls: [],
+    kp_matches: [],
+  }
+}
+
+/** 用编辑页快照覆盖识别卡片上的题干/选项等，返回识别后能看到刚改过的内容 */
+function overlayParsedFromSnapshot(q: ParsedQuestion, s: any): ParsedQuestion {
+  if (!s) return q
+  const options = Array.isArray(s.options)
+    ? s.options.map((o: any) => ({ label: o.label, content: o.content || '' }))
+    : q.options
+  let correct_answer = q.correct_answer
+  const qType = s.question_type || q.question_type
+  if (qType === 'choice' || qType === 'multiple') {
+    const opts = Array.isArray(s.correctAnswer)
+      ? s.correctAnswer
+      : (s.correctAnswer ? [s.correctAnswer] : [])
+    correct_answer = { kind: 'choice', value: { options: opts } }
+  } else if (qType === 'fill' && Array.isArray(s.blanks)) {
+    correct_answer = { kind: 'fill', value: { blanks: s.blanks } }
+  } else if (qType === 'solution' && Array.isArray(s.sub_answers)) {
+    correct_answer = {
+      kind: 'solution',
+      value: { subs: s.sub_answers.map((content: string, i: number) => ({ sub_id: i + 1, content })) },
+    }
+  }
+  const analysis = Array.isArray(s.solutions)
+    ? s.solutions.filter((x: string) => x?.trim()).map((content: string) => ({ title: '', content }))
+    : q.analysis
+  const kpFromNodes = s.nodeNames && typeof s.nodeNames === 'object'
+    ? Object.values(s.nodeNames as Record<string, string>).filter(Boolean)
+    : []
+  return {
+    ...q,
+    stem: normalizeChoiceAnswerBlank(s.stem ?? q.stem, qType),
+    question_type: qType,
+    sub_type: s.sub_type ?? q.sub_type,
+    difficulty: s.difficulty ?? q.difficulty,
+    options,
+    correct_answer,
+    analysis,
+    knowledge_points: kpFromNodes.length ? kpFromNodes : q.knowledge_points,
+  }
+}
+
+function revokeSourcePreview() {
+  if (sourcePreviewUrl.value) {
+    URL.revokeObjectURL(sourcePreviewUrl.value)
+    sourcePreviewUrl.value = ''
+  }
+}
+
+function setSourceFile(file: File) {
+  revokeSourcePreview()
+  aiImageFile.value = file
+  ocrFileName.value = file.name
+  sourceKind.value = isPdfFile(file) ? 'pdf' : 'image'
+  sourcePreviewUrl.value = URL.createObjectURL(file)
+  void saveAiSourceFile(file, sourceKind.value)
+}
+
+function fileFromClipboardEvent(e: ClipboardEvent): File | null {
+  const items = e.clipboardData?.items
+  if (!items) return null
+  for (const item of items) {
+    if (item.kind !== 'file') continue
+    const file = item.getAsFile()
+    if (file && (isPdfFile(file) || file.type.startsWith('image/'))) return file
+  }
+  return null
+}
+
+function onEditorPaste(e: ClipboardEvent) {
+  const file = fileFromClipboardEvent(e)
+  if (!file) return
+  e.preventDefault()
+  startFileParse(file)
+}
+
+function clearEditor() {
+  if (docFlowState.value !== 'idle') {
+    toast.warning('正在识别中，请先取消任务')
+    return
+  }
+  aiText.value = ''
+  aiResult.value = null
+  aiError.value = ''
+  previewQuestions.value = []
+  ocrFileName.value = ''
+  aiImageFile.value = null
+  sourceKind.value = 'markdown'
+  revokeSourcePreview()
+}
+
+function openPreviewCard(index: number) {
+  if (props.savingAll) return
+  // 刚识别完走 previewQuestions；返回后再恢复草稿时只剩 editedSnapshots
+  const hasBatch = previewQuestions.value.length > 0 || (props.editedSnapshots?.length ?? 0) > 0
+  if (hasBatch) {
+    emit('open-question', index)
+    if (!props.embedded) show.value = false
+    return
+  }
+  if (aiResult.value) applyAiResult()
+}
+
+/** 从 IndexedDB 回填离开页面前缓存的 PDF/图片原稿（不重新识别） */
+async function restoreOriginalSource() {
+  if (sourcePreviewUrl.value) return true
+  const cached = await loadAiSourceFile()
+  if (!cached) return false
+  setSourceFile(cached.file)
+  return true
+}
+
+function presentParsedQuestions(questions: ParsedQuestion[], message: string) {
+  previewQuestions.value = questions
+  aiResult.value = questions[0] ?? null
+  // 识别完成只结束进度，保留 currentDoc / 试卷信息，避免切回「试卷信息」时表单被卸载清空
+  docFlowState.value = 'idle'
+  resetPolling()
+  groupingQuestions.value = []
+  groupingCollections.value = []
+  pdfDirectActive.value = false
+  pdfFallbackReason.value = ''
+  pdfFallbackSubmitting.value = false
+  toast.success(message)
+  emit('batch-parsed', questions)
 }
 
 function applyAiResult() {
@@ -254,6 +515,13 @@ function handleFileDrop(e: DragEvent) {
   if (file) startFileParse(file)
 }
 
+function onEditorDragLeave(e: DragEvent) {
+  const current = e.currentTarget as HTMLElement
+  const related = e.relatedTarget as Node | null
+  if (related && current.contains(related)) return
+  aiUploadAreaHover.value = false
+}
+
 function handleFileSelect(e: Event) {
   const file = (e.target as HTMLInputElement).files?.[0]
   if (file) startFileParse(file)
@@ -276,6 +544,9 @@ async function startFileParse(file: File) {
 }
 
 function doStartFileParse(file: File) {
+  setSourceFile(file)
+  previewQuestions.value = []
+  aiResult.value = null
   if (isPdfFile(file)) {
     aiMode.value = 'pdf'
     doStartPdfParse(file)
@@ -371,7 +642,7 @@ async function compressToPage(file: File): Promise<File[]> {
   return [new File([compressed], `upload.${ext}`, { type: mimeType })]
 }
 
-/** 上传页图集 → 触发 AI 分类 → 进入类型确认步骤 */
+/** 上传后立刻解析；分类并行预填来源条（不阻塞 OCR） */
 async function uploadAndClassify(pages: File[], isPdf: boolean, originalPdf?: File) {
   docFlowState.value = 'uploading'
   aiBatchProgress.value = { current: 0, total: pages.length, text: '正在上传资料（最多 30 页）…' }
@@ -382,17 +653,30 @@ async function uploadAndClassify(pages: File[], isPdf: boolean, originalPdf?: Fi
     }),
   )
   const doc = res.data.data
+  currentDoc.value = doc
 
-  aiBatchProgress.value = { current: 1, total: 1, text: 'AI 正在识别资料类型…' }
-  const cls = await withBackoffRetry(() => documentApi.classify(doc.id))
-  currentDoc.value = cls.data.data
-  docFlowState.value = 'confirm'
-  aiBatchProgress.value = { current: 0, total: 0, text: '' }
+  // OCR 先行：立刻建解析任务
+  const parseMode = isPdf || docFlowKind.value === 'pdf' ? 'pdf_direct' : undefined
+  pdfDirectActive.value = parseMode === 'pdf_direct'
+  await startTask(doc.id, parseMode)
+
+  // 分类并行，仅预填来源条
+  void (async () => {
+    try {
+      const cls = await withBackoffRetry(() => documentApi.classify(doc.id))
+      if (currentDoc.value?.id === doc.id) {
+        currentDoc.value = cls.data.data
+      }
+    } catch (e: any) {
+      console.warn('[AiRecognizeDialog] 分类建议失败（不影响识别）:', e?.message)
+    }
+  })()
 }
 
 function resetDocFlow() {
   docFlowState.value = 'idle'
   currentDoc.value = null
+  sourceState.value = null
   aiBatchProgress.value = { current: 0, total: 0, text: '' }
   resetPolling()
   groupingQuestions.value = []
@@ -402,9 +686,7 @@ function resetDocFlow() {
   pdfFallbackSubmitting.value = false
 }
 
-/** 用户确认资料类型 → 创建解析任务（P0-C）
- *  PDF 通道以 pdf_direct 模式建任务：仅直连解析，失败回 pdf_fallback 让用户选择回退；
- *  图片通道缺省模式（自动降级，与既有行为一致） */
+/** 后置确认来源（不启动解析；解析已在上传后开始） */
 async function onConfirmDoc(body: ConfirmDocumentRequest) {
   const doc = currentDoc.value
   if (!doc) return
@@ -412,18 +694,31 @@ async function onConfirmDoc(body: ConfirmDocumentRequest) {
   try {
     const res = await documentApi.confirm(doc.id, body)
     currentDoc.value = res.data.data
-    toast.success('资料类型已确认，开始解析')
-    const parseMode = docFlowKind.value === 'pdf' ? 'pdf_direct' : undefined
-    pdfDirectActive.value = parseMode === 'pdf_direct'
-    await startTask(doc.id, parseMode)
+    const paperId = (res.data as any).paper_id as string | undefined
+      || res.data.data?.metadata?.linked_paper_id
+    if (paperId && sourceState.value) {
+      sourceState.value = {
+        ...sourceState.value,
+        paper_meta: {
+          ...(sourceState.value.paper_meta || { title: '' }),
+          paper_id: paperId,
+        },
+      }
+      emit('source-updated', sourceState.value)
+    }
   } catch (e: any) {
-    toast.error(e?.response?.data?.error || e?.message || '确认失败')
+    toast.error(e?.response?.data?.error || e?.message || '保存来源失败')
   } finally {
     docConfirming.value = false
   }
 }
 
-/** 创建解析任务并进入进度页 */
+function onSourceState(state: import('@/utils/questionSource').QuestionSourceState) {
+  sourceState.value = state
+  emit('source-updated', state)
+}
+
+/** 创建解析任务并进入进度态（左侧保留原文） */
 async function startTask(documentId: string, parseMode?: 'pdf_direct' | 'page') {
   docFlowState.value = 'progress'
   await startPolling(documentId, parseMode)
@@ -521,7 +816,7 @@ function stagedToParsed(s: AiStagedQuestion, taskId: string): ParsedQuestion {
     question_type: p.question_type ?? 'solution',
     sub_type: p.sub_type,
     difficulty: p.difficulty,
-    stem: p.stem ?? '',
+    stem: normalizeChoiceAnswerBlank(p.stem ?? '', p.question_type ?? 'solution'),
     options: p.options,
     correct_answer: (p.correct_answer ?? { kind: 'solution', value: { subs: [] } }) as any,
     analysis: Array.isArray(p.analysis) ? p.analysis : [],
@@ -566,11 +861,6 @@ watch(pollTask, async (t) => {
       return
     }
     const questions = staged.map(s => stagedToParsed(s, t.id))
-    // 暂存链路下题目未落库，Mixed 分组改为在工作台保存时按暂存项 collection_id 归组；
-    // 分组交互（batchAddQuestions 依赖已落库题目）在确认入库前不再适用。
-    emit('batch-parsed', questions)
-    resetDocFlow()
-    show.value = false
     const unmatchedCount = staged.reduce((n, s) => {
       if (Array.isArray(s.suggestion?.unmatched)) return n + s.suggestion!.unmatched!.length
       const u = s.unmatched || {}
@@ -579,13 +869,13 @@ watch(pollTask, async (t) => {
     const dupCount = staged.filter(s => s.existing_question_id).length
     const base =
       t.status === 'partial_success'
-        ? `部分成功：${t.success_count} 题待确认（${t.failed_count} 题失败）`
-        : `成功识别 ${questions.length} 道题，已进入批量录入工作台（确认保存后入库）`
+        ? `部分成功：识别到 ${t.success_count} 题（${t.failed_count} 题失败），请在右侧预览`
+        : `成功识别 ${questions.length} 道题，点击右侧卡片进入编辑`
     const extra = [
       unmatchedCount > 0 ? `${unmatchedCount} 个未匹配项，确认保存后提交审核` : '',
       dupCount > 0 ? `${dupCount} 题与题库已有内容重复` : '',
     ].filter(Boolean).join('；')
-    toast.success(extra ? `${base}；${extra}` : base)
+    presentParsedQuestions(questions, extra ? `${base}；${extra}` : base)
   } else if (t.status === 'failed') {
     const errMsg = t.error_message || taskError.value || '解析失败'
     // PDF 直连模式失败（PDF_DIRECT_FAILED 前缀）→ 不回到确认页，
@@ -619,10 +909,7 @@ function onGroupingComplete() {
       toast.error('题目加载失败')
       return
     }
-    emit('batch-parsed', parsed)
-    resetDocFlow()
-    show.value = false
-    toast.success(`已完成分组，${parsed.length} 道题进入批量录入工作台`)
+    presentParsedQuestions(parsed, `已完成分组，${parsed.length} 道题；点击右侧卡片进入编辑`)
   })
 }
 
@@ -630,15 +917,12 @@ function onGroupingComplete() {
 async function reclassifyDoc() {
   const doc = currentDoc.value
   if (!doc) return
-  docFlowState.value = 'uploading'
   aiBatchProgress.value = { current: 1, total: 1, text: 'AI 正在重新识别资料类型…' }
   try {
     const cls = await withBackoffRetry(() => documentApi.classify(doc.id))
     currentDoc.value = cls.data.data
-    docFlowState.value = 'confirm'
   } catch (e: any) {
     toast.error(e?.response?.data?.error || e?.message || '重新识别失败')
-    docFlowState.value = 'confirm'
   } finally {
     aiBatchProgress.value = { current: 0, total: 0, text: '' }
   }
@@ -675,10 +959,11 @@ async function restoreFromSnapshot() {
   const questions = pendingSnapshotRestore.questions
   pendingSnapshotRestore = null
 
-  // 直接 emit，进入多题工作台
+  // 恢复后直接进入对应题的编辑页
   show.value = false
   emit('batch-parsed', questions)
-  toast.success(`已恢复 ${questions.length} 道题，进入批量录入工作台`)
+  emit('open-question', 0)
+  toast.success(`已恢复 ${questions.length} 道题`)
   await clearBatchSnapshot()
 }
 
@@ -690,224 +975,291 @@ defineExpose({
   triggerFileParse: (file: File) => {
     show.value = true
     startFileParse(file)
+  },
+  restoreOriginalSource,
+  getSourceState: () => sourceState.value,
+})
+
+onBeforeUnmount(() => {
+  if (markdownParseTimer) clearTimeout(markdownParseTimer)
+  // 离开页面前把内存里的原稿再写一遍 IndexedDB，覆盖「上传时尚未落盘」的旧会话
+  const keepDraft = Boolean(
+    sessionStorage.getItem('q-batch-draft-new-ai') || sessionStorage.getItem('q-batch-draft-new'),
+  )
+  if (keepDraft && aiImageFile.value) {
+    void saveAiSourceFile(aiImageFile.value, sourceKind.value === 'pdf' ? 'pdf' : 'image')
   }
+  revokeSourcePreview()
 })
 </script>
 
 <template>
-  <div>
-    <!-- AI 智能识别弹窗 -->
-    <!-- width 固定 680px：三个 Tab（Markdown/图片/PDF）切换时外框尺寸完全一致 -->
-    <AppModal v-model="show" title="AI 智能识别" width="680px">
-      <div class="ai-dialog-body">
-        <!-- 输入区 -->
-        <div v-if="!aiResult" class="ai-input-section">
-          <!-- 模式切换 Tab（图片 / PDF 各走独立解析通道） -->
-          <div class="ai-mode-tabs">
-            <button :class="{ active: aiMode === 'markdown' }" @click="aiMode = 'markdown'">Markdown 粘贴</button>
-            <button :class="{ active: aiMode === 'image' }" @click="aiMode = 'image'">图片识别</button>
-            <button :class="{ active: aiMode === 'pdf' }" @click="aiMode = 'pdf'">PDF 识别</button>
-          </div>
-
-          <!-- Markdown 模式：引导卡片（折叠式提示词） -->
-          <div v-if="aiMode === 'markdown'" class="ai-guide-card">
-            <!-- 步骤指示 -->
-            <div class="ai-guide-steps">
-              <div class="ai-guide-step">
-                <span class="ai-step-num">1</span>
-                <span class="ai-step-text">复制下方标准提示词并发送给 AI</span>
+  <div :class="{ 'ai-embed-root': embedded }">
+    <!-- 新建页 embedded：铺满模块区；编辑已有题仍走弹窗 -->
+    <component
+      :is="embedded ? 'div' : AppModal"
+      :class="embedded ? 'ai-embed-shell' : undefined"
+      v-bind="embedded ? {} : { modelValue: show, title: 'AI 智能识别', width: '960px' }"
+      @update:model-value="(v: boolean) => { show = v }"
+    >
+      <div class="ai-dialog-body is-split" :class="{ 'is-embed': embedded }">
+        <div class="ai-split">
+          <!-- 左侧：Markdown 粘贴 + 图片/PDF 拖放 OCR -->
+          <section class="ai-split-pane">
+            <header class="ai-split-head">
+              <span class="ai-split-title">{{ showOriginalSource ? '原文' : '标记好的内容' }}</span>
+              <div class="ai-split-head-actions">
+                <button type="button" class="ai-icon-btn" @click="copyPrompt">{{ promptCopied ? '已复制' : '复制 Prompt' }}</button>
+                <button type="button" class="ai-icon-btn" @click="fileInputRef?.click()">上传文件</button>
+                <button type="button" class="ai-icon-btn" @click="clearEditor">清空</button>
               </div>
-              <div class="ai-guide-step">
-                <span class="ai-step-num">2</span>
-                <span class="ai-step-text">将 AI 生成的 Markdown 粘贴到下方文本框</span>
-              </div>
-            </div>
-
-            <!-- 折叠的提示词详情 -->
-            <details class="ai-prompt-details">
-              <summary class="ai-prompt-summary">
-                <span class="ai-prompt-summary-text">
-                  <AppIcon name="chevron-down" :size="14" />
-                  <span>查看完整提示词</span>
-                </span>
-              </summary>
-              <div class="ai-prompt-preview">{{ RECOMMENDED_PROMPT }}</div>
-            </details>
-
-            <!-- 一键复制按钮（含成功态视觉反馈） -->
-            <AppButton
-              class="ai-copy-btn"
-              :variant="promptCopied ? 'success' : 'primary'"
-              size="md"
-              @click="copyPrompt"
+            </header>
+            <div
+              class="ai-split-body"
+              :class="{ dragover: aiUploadAreaHover }"
+              @dragover.prevent="aiUploadAreaHover = true"
+              @dragleave.prevent="onEditorDragLeave"
+              @drop.prevent="handleFileDrop"
             >
-              <AppIcon :name="promptCopied ? 'check-circle' : 'copy'" :size="16" />
-              {{ promptCopied ? '已复制，去粘贴到 AI' : '一键复制标准 Prompt' }}
-            </AppButton>
-          </div>
-
-          <!-- 图片/PDF 上传区（V2.1.1：上传 → 分类 → 确认类型 → 解析）；
-               idle 态按 tab 区分通道，非 idle 态两个通道共用流程状态机 -->
-          <div v-if="aiMode === 'image' || aiMode === 'pdf'" class="ai-upload-section">
-            <!-- ① 选文件（图片：图片 OCR 通道；PDF：优先直连解析） -->
-            <template v-if="docFlowState === 'idle'">
-              <div
-                class="ai-upload-area"
-                :class="{ dragover: aiUploadAreaHover }"
-                @dragover.prevent="aiUploadAreaHover = true"
-                @dragleave.prevent="aiUploadAreaHover = false"
-                @drop.prevent="handleFileDrop"
-                @click="fileInputRef?.click()"
-              >
-                <AppIcon name="upload" :size="48" />
-                <template v-if="aiMode === 'pdf'">
-                  <p class="ai-upload-hint">点击或拖拽上传 PDF 文件</p>
-                  <p class="ai-upload-sub">将优先尝试 PDF 直连解析，失败后可选择拆分图片逐页识别</p>
-                </template>
-                <template v-else>
-                  <p class="ai-upload-hint">点击或拖拽上传图片文件</p>
-                  <p class="ai-upload-sub">支持 JPEG / PNG / WebP</p>
-                </template>
-                <input
-                  ref="fileInputRef"
-                  type="file"
-                  :accept="aiMode === 'pdf' ? 'application/pdf' : 'image/*'"
-                  style="display:none"
-                  @change="handleFileSelect"
+              <textarea
+                v-show="!showOriginalSource"
+                v-model="aiText"
+                class="ai-split-editor"
+                placeholder="粘贴已标记的 Markdown，或将图片 / PDF 拖到此处识别…"
+                @paste="onEditorPaste"
+              />
+              <div v-if="showOriginalSource" class="ai-source-preview">
+                <iframe
+                  v-if="sourceKind === 'pdf'"
+                  class="ai-source-frame"
+                  :src="sourcePreviewUrl"
+                  title="PDF 原稿"
+                />
+                <img
+                  v-else
+                  class="ai-source-image"
+                  :src="sourcePreviewUrl"
+                  :alt="ocrFileName || '上传的图片原稿'"
                 />
               </div>
-              <div class="ai-actions">
-                <AppButton variant="ghost" @click="show = false">取消</AppButton>
+              <input
+                ref="fileInputRef"
+                type="file"
+                accept="image/*,application/pdf,.pdf"
+                style="display:none"
+                @change="handleFileSelect"
+              />
+              <div v-if="aiUploadAreaHover" class="ai-drop-mask">
+                <AppIcon name="upload" :size="28" />
+                <p>松开即可 OCR 识别</p>
               </div>
-            </template>
-
-            <!-- ② 上传 + 分类中 -->
-            <template v-else-if="docFlowState === 'uploading'">
-              <div v-if="aiBatchProgress.total > 0" class="ai-batch-progress">
-                <div class="ai-progress-bar">
-                  <div class="ai-progress-fill" :style="{ width: (aiBatchProgress.current / aiBatchProgress.total * 100) + '%' }"></div>
-                </div>
-                <span>{{ aiBatchProgress.text }}</span>
-              </div>
-              <div class="ai-actions">
-                <AppButton variant="ghost" @click="resetDocFlow">取消</AppButton>
-              </div>
-            </template>
-
-            <!-- ③ PDF 直连失败 → 用户选择是否拆页 OCR 回退 -->
-            <template v-else-if="docFlowState === 'pdf_fallback'">
-              <div class="pdf-fallback-card">
-                <div class="pdf-fallback-icon"><AppIcon name="alert" :size="28" /></div>
-                <h4 class="pdf-fallback-title">PDF 直连解析失败</h4>
-                <p v-if="pdfFallbackReason" class="pdf-fallback-reason">{{ pdfFallbackReason }}</p>
-                <p class="pdf-fallback-hint">是否继续将 PDF 拆分为图片，逐页 OCR 识别？</p>
-                <div class="ai-actions">
+              <!-- 有原文时：仅上传中/失败回退用遮罩；解析进度用细条，不挡 PDF -->
+              <div
+                v-if="docFlowState === 'uploading' || docFlowState === 'pdf_fallback' || docFlowState === 'grouping' || (docFlowState === 'progress' && !showOriginalSource)"
+                class="ai-flow-mask"
+              >
+                <template v-if="docFlowState === 'uploading'">
+                  <div v-if="aiBatchProgress.total > 0" class="ai-batch-progress">
+                    <div class="ai-progress-bar">
+                      <div class="ai-progress-fill" :style="{ width: (aiBatchProgress.current / aiBatchProgress.total * 100) + '%' }"></div>
+                    </div>
+                    <span>{{ aiBatchProgress.text }}</span>
+                  </div>
                   <AppButton variant="ghost" @click="resetDocFlow">取消</AppButton>
-                  <AppButton variant="primary" :loading="pdfFallbackSubmitting" @click="fallbackToPageOcr">
-                    <AppIcon name="sparkles" :size="16" /> 继续拆分图片识别
-                  </AppButton>
-                </div>
+                </template>
+                <template v-else-if="docFlowState === 'pdf_fallback'">
+                  <div class="pdf-fallback-card">
+                    <h4 class="pdf-fallback-title">PDF 直连解析失败</h4>
+                    <p v-if="pdfFallbackReason" class="pdf-fallback-reason">{{ pdfFallbackReason }}</p>
+                    <p class="pdf-fallback-hint">是否继续将 PDF 拆分为图片，逐页 OCR 识别？</p>
+                    <div class="ai-actions">
+                      <AppButton variant="ghost" @click="resetDocFlow">取消</AppButton>
+                      <AppButton variant="primary" :loading="pdfFallbackSubmitting" @click="fallbackToPageOcr">
+                        继续拆分图片识别
+                      </AppButton>
+                    </div>
+                  </div>
+                </template>
+                <template v-else-if="docFlowState === 'progress'">
+                  <TaskProgressPanel
+                    :task="pollTask"
+                    :status-text="taskStatusText"
+                    :cancelling="cancelling"
+                    @cancel="onCancelTask"
+                  />
+                  <div v-if="!isPolling && !pollTask" class="ai-batch-progress">
+                    <div class="ai-progress-bar">
+                      <div class="ai-progress-fill" :style="{ width: '100%' }"></div>
+                    </div>
+                    <span>{{ taskStatusText || '提交中…' }}</span>
+                  </div>
+                </template>
+                <template v-else-if="docFlowState === 'grouping'">
+                  <QuestionGroupingStep
+                    :questions="groupingQuestions"
+                    :collections="groupingCollections"
+                    @complete="onGroupingComplete"
+                  />
+                </template>
               </div>
-            </template>
-
-            <!-- ④ 资料类型确认 -->
-            <template v-else-if="docFlowState === 'confirm' && currentDoc">
-              <DocumentTypeConfirmStep
-                :doc="currentDoc"
-                :loading="docConfirming"
-                @confirm="onConfirmDoc"
-                @back="resetDocFlow"
-                @reclassify="reclassifyDoc"
-              />
-            </template>
-
-            <!-- ⑤ 解析进度 -->
-            <template v-else-if="docFlowState === 'progress'">
-              <TaskProgressPanel
-                :task="pollTask"
-                :status-text="taskStatusText"
-                :cancelling="cancelling"
-                @cancel="onCancelTask"
-              />
-              <div v-if="!isPolling && !pollTask" class="ai-batch-progress">
+              <div
+                v-else-if="docFlowState === 'progress' && showOriginalSource"
+                class="ai-progress-strip"
+              >
                 <div class="ai-progress-bar">
-                  <div class="ai-progress-fill" :style="{ width: '100%' }"></div>
+                  <div
+                    class="ai-progress-fill"
+                    :style="{ width: progressStripPct + '%' }"
+                  />
                 </div>
-                <span>{{ taskStatusText || '提交中…' }}</span>
+                <span class="ai-progress-strip-text">{{ taskStatusText || '识别中…' }}</span>
+                <AppButton variant="ghost" size="sm" :loading="cancelling" @click="onCancelTask">取消</AppButton>
               </div>
-            </template>
-
-            <!-- ⑥ Mixed 题目分组 -->
-            <template v-else-if="docFlowState === 'grouping'">
-              <QuestionGroupingStep
-                :questions="groupingQuestions"
-                :collections="groupingCollections"
-                @complete="onGroupingComplete"
-              />
-            </template>
-          </div>
-
-          <!-- Markdown 模式：文本输入区 -->
-          <template v-if="aiMode === 'markdown'">
-            <p class="ai-hint">粘贴 AI 按推荐格式输出的 Markdown，系统将自动解析并填入表单。</p>
-            <textarea
-              v-model="aiText"
-              class="ai-textarea"
-              rows="10"
-              placeholder="在此粘贴 AI 输出的 Markdown..."
-            ></textarea>
-            <div v-if="aiError" class="ai-error">{{ aiError }}</div>
-            <div class="ai-actions">
-              <AppButton variant="ghost" @click="show = false">取消</AppButton>
-              <AppButton variant="primary" :loading="aiParsing" @click="doAiParse">
-                <AppIcon name="sparkles" :size="16" /> {{ aiParsing ? '解析中…' : '开始识别' }}
+            </div>
+            <footer class="ai-split-foot">
+              <span v-if="ocrFileName" class="ai-file-chip">{{ ocrFileName }}</span>
+              <span v-else class="ai-split-hint">支持 Markdown、截图、图片、PDF</span>
+              <div v-if="aiError" class="ai-error">{{ aiError }}</div>
+              <AppButton
+                v-if="!showOriginalSource"
+                variant="primary"
+                size="sm"
+                :loading="aiParsing"
+                :disabled="!aiText.trim() || docFlowState !== 'idle'"
+                @click="doAiParse"
+              >
+                开始识别
               </AppButton>
-            </div>
-          </template>
-        </div>
+            </footer>
+          </section>
 
-        <!-- 结果预览 -->
-        <div v-else-if="aiResult" class="ai-result-section">
-          <div class="ai-result-meta">
-            <span class="ai-result-type">{{ ({ choice: '选择题', fill: '填空题', solution: '解答题' } as Record<string, string>)[aiResult.question_type] }}</span>
-          </div>
-          <div v-if="aiResult.warnings.length" class="ai-warnings">
-            <div v-for="(w, i) in aiResult.warnings" :key="i" class="ai-warning-item">⚠ {{ w }}</div>
-          </div>
-          <div class="ai-result-preview">
-            <div class="ai-preview-block">
-              <div class="ai-preview-label">题干</div>
-              <div class="ai-preview-content">{{ aiResult.stem }}</div>
-            </div>
-            <div v-if="aiResult.options?.length" class="ai-preview-block">
-              <div class="ai-preview-label">选项</div>
-              <div v-for="opt in aiResult.options" :key="opt.label" class="ai-preview-option">
-                <span class="ai-opt-label">{{ opt.label }}.</span> {{ opt.content }}
+          <!-- 右侧：试卷信息 / 题目预览 可切换 -->
+          <section class="ai-split-pane">
+            <header class="ai-split-head">
+              <div class="ai-pane-tabs" role="tablist" aria-label="右侧内容">
+                <button
+                  type="button"
+                  role="tab"
+                  class="ai-pane-tab"
+                  :class="{ active: rightPaneTab === 'source' }"
+                  :aria-selected="rightPaneTab === 'source'"
+                  @click="rightPaneTab = 'source'"
+                >
+                  试卷信息
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  class="ai-pane-tab"
+                  :class="{ active: rightPaneTab === 'preview' }"
+                  :aria-selected="rightPaneTab === 'preview'"
+                  @click="rightPaneTab = 'preview'"
+                >
+                  题目预览
+                  <span v-if="previewCount > 0" class="ai-tab-count">{{ previewCount }}</span>
+                </button>
+              </div>
+              <div class="ai-split-head-actions">
+                <AppButton
+                  v-if="canSaveAll && rightPaneTab === 'preview'"
+                  variant="primary"
+                  size="sm"
+                  :loading="savingAll"
+                  :disabled="savingAll || unsavedPreviewCount === 0"
+                  @click="emit('save-all')"
+                >
+                  <AppIcon name="save" :size="14" />
+                  {{ unsavedPreviewCount === 0 ? '已全部保存' : (unsavedPreviewCount === previewCount ? '全部保存' : `保存剩余 ${unsavedPreviewCount} 题`) }}
+                </AppButton>
+              </div>
+            </header>
+            <div class="ai-split-body ai-preview-body">
+              <div v-show="rightPaneTab === 'source'" class="ai-source-pane">
+                <SourceCascadeBar
+                  v-if="currentDoc"
+                  variant="panel"
+                  :doc="currentDoc"
+                  :saving="docConfirming"
+                  @confirm="onConfirmDoc"
+                  @update:state="onSourceState"
+                />
+                <div v-else class="ai-preview-empty">
+                  <span class="ai-empty-kicker">试卷信息</span>
+                  <p>上传文件后即可在此填写来源与试卷属性</p>
+                </div>
+                <button
+                  v-if="currentDoc?.ai_classification"
+                  type="button"
+                  class="ai-reclassify-link"
+                  @click="reclassifyDoc"
+                >重新识别来源</button>
+              </div>
+              <div v-show="rightPaneTab === 'preview'" class="ai-preview-pane">
+                <button
+                  v-if="currentDoc && sourceTabHint"
+                  type="button"
+                  class="ai-source-summary"
+                  @click="rightPaneTab = 'source'"
+                >
+                  <span>{{ sourceTabHint }}</span>
+                  <span>编辑</span>
+                </button>
+                <div
+                  v-if="previewCount === 0"
+                  class="ai-preview-empty"
+                >
+                  <span class="ai-empty-kicker">题目预览</span>
+                  <p>{{ docFlowState === 'idle' && !currentDoc ? '识别完成后将在此展示题目卡片' : '识别中，完成后将在此展示' }}</p>
+                </div>
+                <div v-else class="ai-q-card-list">
+                  <p class="ai-preview-hint">点卡片进入该题编辑；校对完成后可一次性全部保存</p>
+                  <article
+                    v-for="(card, idx) in previewCards"
+                    :key="idx"
+                    class="ai-q-card"
+                    :class="{ 'is-saved': cardSaved(idx) }"
+                    role="button"
+                    tabindex="0"
+                    @click="openPreviewCard(idx)"
+                    @keydown.enter.prevent="openPreviewCard(idx)"
+                  >
+                    <span class="ai-q-index">第 {{ idx + 1 }} 题</span>
+                    <span v-if="cardSaved(idx)" class="ai-q-saved">已保存</span>
+                    <div class="ai-q-card-header">
+                      <div class="ai-q-card-tags">
+                        <AppBadge :color="typeBadgeColor(cardQuestionType(card))" class="flex-shrink-0">
+                          {{ typeLabel(cardQuestionType(card)) }}
+                        </AppBadge>
+                        <span v-if="card.difficulty" class="ai-q-ghost-tag flex-shrink-0">
+                          <span class="ai-q-dot" :class="`ai-q-dot--${diffBadgeColor(card.difficulty)}`"></span>
+                          {{ diffLabel(card.difficulty) }}
+                        </span>
+                      </div>
+                    </div>
+                    <div class="ai-q-card-body">
+                      <div class="ai-q-stem">
+                        <LatexRender :text="card.stem" />
+                      </div>
+                      <QuestionOptions
+                        v-if="(card.question_type === 'choice' || card.question_type === 'multiple') && card.options?.length"
+                        :options="card.options"
+                      />
+                    </div>
+                    <div v-if="cardKnowledgePoints(card).length" class="ai-q-kps">
+                      <span
+                        v-for="kp in cardKnowledgePoints(card).slice(0, 4)"
+                        :key="kp"
+                        class="ai-q-kp"
+                      >{{ kp }}</span>
+                    </div>
+                  </article>
+                </div>
               </div>
             </div>
-            <div class="ai-preview-block">
-              <div class="ai-preview-label">答案</div>
-              <div class="ai-preview-content">
-                <span v-if="aiResult.correct_answer.kind === 'choice'">{{ aiResult.correct_answer.value.options?.join(', ') }}</span>
-                <span v-else-if="aiResult.correct_answer.kind === 'fill'">{{ aiResult.correct_answer.value.blanks?.map(b => b.answer).join('、') }}</span>
-                <span v-else>{{ aiResult.correct_answer.value.subs?.map(s => s.content).join('；') }}</span>
-              </div>
-            </div>
-            <div class="ai-preview-block">
-              <div class="ai-preview-label">解析（{{ aiResult.analysis.length }} 种解法）</div>
-              <div v-for="(a, i) in aiResult.analysis" :key="i" class="ai-preview-analysis">
-                <strong>{{ a.title }}</strong>
-                <div>{{ a.content }}</div>
-              </div>
-            </div>
-          </div>
-          <div class="ai-actions">
-            <AppButton variant="ghost" @click="aiResult = null">返回修改</AppButton>
-            <AppButton variant="primary" @click="applyAiResult"><AppIcon name="check" :size="16" /> 应用到表单</AppButton>
-          </div>
+          </section>
         </div>
       </div>
-    </AppModal>
+    </component>
 
     <!-- 快照覆盖警告 -->
     <AppConfirm
@@ -932,15 +1284,581 @@ defineExpose({
 
 <style scoped>
 /* ===== AI 智能识别弹窗 ===== */
+.ai-embed-root {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.ai-embed-shell {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: transparent;
+  border: none;
+  overflow: hidden;
+  padding: 0;
+}
+
 .ai-dialog-body {
   display: flex;
   flex-direction: column;
   gap: 16px;
-  /* 统一固定高度（≥380px 保底）：Tab 切换时外框不随内容抽搐；
-     宽度由 AppModal width="680px" 统一控制，高度取三 Tab 最高的
-     Markdown 模式，图片/PDF 模式由 Dropzone flex:1 填满剩余空间 */
   height: 520px;
   min-height: 380px;
+}
+
+.ai-dialog-body.is-embed,
+.ai-dialog-body.is-split {
+  height: auto;
+  min-height: 0;
+  flex: 1;
+  gap: 0;
+  container-type: inline-size;
+  container-name: ai-workspace;
+}
+
+.ai-dialog-body.is-split:not(.is-embed) {
+  height: 560px;
+  min-height: 560px;
+}
+
+.ai-split {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1.08fr) minmax(280px, 0.92fr);
+  gap: 14px;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+}
+
+@container ai-workspace (max-width: 920px) {
+  .ai-split {
+    grid-template-columns: minmax(0, 0.92fr) minmax(300px, 1.08fr);
+    gap: 10px;
+  }
+}
+
+@container ai-workspace (max-width: 760px) {
+  .ai-split {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(180px, 34%) minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  .ai-split-pane {
+    border-radius: 14px;
+  }
+}
+
+@container ai-workspace (max-width: 520px) {
+  .ai-split {
+    grid-template-rows: minmax(160px, 28%) minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .ai-split-head {
+    padding: 8px 10px;
+  }
+
+  .ai-pane-tabs {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .ai-source-pane {
+    padding: 10px 10px 14px;
+  }
+}
+
+.ai-split-pane {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-card, #fff);
+  border: 1px solid color-mix(in srgb, var(--text-primary, #1d1d1f) 8%, transparent);
+  border-radius: 18px;
+  overflow: hidden;
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.03),
+    0 10px 28px rgba(0, 0, 0, 0.04);
+}
+
+.ai-split-head {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--bg-card, #fff) 72%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--text-primary, #1d1d1f) 6%, transparent);
+  backdrop-filter: saturate(180%) blur(16px);
+  flex-wrap: wrap;
+}
+
+.ai-split-title {
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+}
+
+.ai-pane-tabs {
+  display: inline-grid;
+  grid-template-columns: 1fr 1fr;
+  min-width: min(210px, 100%);
+  flex: 1 1 180px;
+  max-width: 280px;
+  padding: 3px;
+  background: color-mix(in srgb, var(--text-primary, #1d1d1f) 7%, transparent);
+  border-radius: 10px;
+}
+
+.ai-pane-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary, #6e6e73);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  cursor: pointer;
+  transition: background 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.ai-pane-tab.active {
+  color: var(--text-primary, #1d1d1f);
+  background: var(--bg-card, #fff);
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.08),
+    0 2px 8px rgba(0, 0, 0, 0.05);
+}
+
+.ai-tab-count {
+  min-width: 16px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--accent, #0071e3);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+}
+
+[data-theme='dark'] .ai-pane-tab.active {
+  background: var(--bg-elevated, #3a3a3c);
+}
+
+[data-theme='dark'] .ai-progress-strip {
+  background: rgba(28, 28, 30, 0.78);
+}
+
+.ai-split-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.ai-icon-btn {
+  border: none;
+  background: transparent;
+  color: var(--accent, #0071e3);
+  font-size: 12px;
+  font-weight: 550;
+  padding: 5px 9px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.ai-icon-btn:hover {
+  background: color-mix(in srgb, var(--accent, #0071e3) 10%, transparent);
+}
+
+.ai-qcount {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--success, #16a34a);
+  background: var(--success-light, rgba(22, 163, 74, 0.12));
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.ai-split-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.ai-split-body.dragover {
+  outline: 2px dashed var(--accent, #3b82f6);
+  outline-offset: -8px;
+}
+
+.ai-split-editor {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  border: none;
+  resize: none;
+  padding: 14px 16px;
+  font-size: 14px;
+  line-height: 1.65;
+  font-family: ui-monospace, 'SF Mono', Consolas, monospace;
+  background: transparent;
+  color: var(--text-primary);
+}
+
+.ai-split-editor:focus {
+  outline: none;
+}
+
+.ai-drop-mask,
+.ai-flow-mask {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 16px;
+  overflow: auto;
+}
+
+.ai-drop-mask {
+  background: color-mix(in srgb, var(--bg-primary) 82%, transparent);
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 600;
+  pointer-events: none;
+}
+
+.ai-flow-mask {
+  background: var(--bg-card, var(--bg-primary));
+  align-items: stretch;
+}
+
+.ai-split-foot {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px 10px;
+  border-top: 1px solid color-mix(in srgb, var(--text-primary, #1d1d1f) 6%, transparent);
+  background: color-mix(in srgb, var(--bg-card, #fff) 78%, transparent);
+}
+
+.ai-split-foot-end {
+  justify-content: flex-end;
+}
+
+.ai-split-hint {
+  flex: 1;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.ai-file-chip {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-preview-body {
+  overflow: auto;
+  background: var(--bg-muted, #f5f5f7);
+}
+
+.ai-source-pane,
+.ai-preview-pane {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.ai-source-pane {
+  padding: 12px 14px 16px;
+}
+
+.ai-source-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 12px 14px 0;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--bg-card, #fff);
+  color: var(--text-primary, #1d1d1f);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+
+.ai-source-summary span:last-child {
+  color: var(--accent, #0071e3);
+  font-weight: 550;
+}
+
+.ai-reclassify-link {
+  align-self: flex-end;
+  margin-top: 8px;
+  border: none;
+  background: none;
+  font-size: 12px;
+  color: var(--accent, #0071e3);
+  cursor: pointer;
+  padding: 0 2px;
+}
+
+.ai-progress-strip {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 10px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid color-mix(in srgb, var(--text-primary, #1d1d1f) 8%, transparent);
+  border-radius: 14px;
+  backdrop-filter: saturate(180%) blur(18px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+}
+
+.ai-progress-strip .ai-progress-bar {
+  flex: 1;
+  height: 6px;
+}
+
+.ai-progress-strip-text {
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.ai-source-preview {
+  flex: 1;
+  min-height: 0;
+  background: var(--bg-muted, #e8eaed);
+}
+
+.ai-source-frame {
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: #525659;
+}
+
+.ai-source-image {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+}
+
+.ai-preview-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 24px;
+  color: var(--text-secondary, #6e6e73);
+  font-size: 14px;
+  text-align: center;
+}
+
+.ai-empty-kicker {
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-tertiary, #86868b);
+}
+
+.ai-preview-empty p {
+  margin: 0;
+  max-width: 220px;
+  line-height: 1.5;
+}
+
+.ai-q-card-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 14px 16px;
+}
+
+.ai-preview-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-secondary, #6e6e73);
+}
+
+.ai-q-card {
+  position: relative;
+  background: var(--bg-card, #fff);
+  border-radius: 16px;
+  border: 1px solid color-mix(in srgb, var(--text-primary, #1d1d1f) 6%, transparent);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  cursor: pointer;
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
+}
+
+.ai-q-card:hover,
+.ai-q-card:focus-visible {
+  transform: translateY(-1px);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.08);
+  outline: none;
+}
+
+.ai-q-index {
+  position: absolute;
+  top: 0;
+  left: 0;
+  padding: 5px 12px 5px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--text-tertiary, #86868b);
+  background: color-mix(in srgb, var(--text-primary, #1d1d1f) 5%, transparent);
+  border-radius: 16px 0 10px 0;
+  pointer-events: none;
+}
+
+.ai-q-saved {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--success, #16a34a);
+  background: var(--success-light, rgba(22, 163, 74, 0.12));
+  padding: 2px 8px;
+  border-radius: 999px;
+  pointer-events: none;
+}
+
+.ai-q-card.is-saved {
+  border-color: rgba(22, 163, 74, 0.35);
+}
+
+.ai-q-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 26px 16px 10px;
+  border-bottom: 1px solid var(--divider, var(--border));
+}
+
+.ai-q-card-tags {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.ai-q-ghost-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.ai-q-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.ai-q-dot--green { background: var(--success); }
+.ai-q-dot--yellow { background: var(--warning); }
+.ai-q-dot--red { background: var(--danger); }
+
+.ai-q-card-body {
+  padding: 14px 16px 12px;
+}
+
+.ai-q-stem {
+  font-size: 14.5px;
+  line-height: 1.75;
+  color: var(--text-primary);
+}
+
+.ai-q-stem :deep(.katex) {
+  font-size: 1.02em;
+}
+
+.ai-q-card :deep(.q-option-content) {
+  overflow-x: auto;
+  white-space: nowrap;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.ai-q-card :deep(.q-option-content::-webkit-scrollbar) {
+  display: none;
+}
+
+.ai-q-kps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 16px 14px;
+}
+
+.ai-q-kp {
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--bg-muted, var(--bg-input));
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+[data-theme='dark'] .ai-q-card {
+  border-color: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+[data-theme='dark'] .ai-q-card:hover,
+[data-theme='dark'] .ai-q-card:focus-visible {
+  border-color: rgba(10, 132, 255, 0.4);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+[data-theme='dark'] .ai-q-index {
+  background: rgba(148, 163, 184, 0.12);
 }
 
 /* 输入区（Tab + 内容）：撑满主体，供内部 flex:1 元素分配剩余空间 */
@@ -1267,7 +2185,7 @@ defineExpose({
 
 /* 批量进度 */
 .ai-batch-progress { display: flex; align-items: center; gap: 12px; }
-.ai-progress-bar { flex: 1; height: 8px; background: var(--bg-input); border-radius: 4px; overflow: hidden; }
-.ai-progress-fill { height: 100%; background: var(--accent); transition: width 0.3s; border-radius: 4px; }
+.ai-progress-bar { flex: 1; height: 6px; background: color-mix(in srgb, var(--text-primary, #1d1d1f) 8%, transparent); border-radius: 999px; overflow: hidden; }
+.ai-progress-fill { height: 100%; background: var(--accent, #0071e3); transition: width 0.3s; border-radius: 999px; }
 .ai-batch-progress span { font-size: 13px; color: var(--text-secondary); white-space: nowrap; }
 </style>

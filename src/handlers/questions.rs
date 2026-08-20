@@ -812,7 +812,12 @@ fn apply_question_filters<'a>(
         builder.push(")");
     }
     if let Some(ref document_type) = query.document_type {
-        builder.push(" AND (EXISTS (SELECT 1 FROM paper_questions pq \
+        // 兼容旧 JOIN + 新 metadata（独立题）
+        builder.push(" AND (q.metadata->>'document_type' = ");
+        builder.push_bind(document_type);
+        builder.push(" OR q.metadata->>'source_kind' = ");
+        builder.push_bind(document_type);
+        builder.push(" OR EXISTS (SELECT 1 FROM paper_questions pq \
                       JOIN papers p ON p.id = pq.paper_id \
                       JOIN documents d ON d.id = p.document_id \
                       WHERE pq.question_id = q.id AND d.document_type = ");
@@ -823,6 +828,14 @@ fn apply_question_filters<'a>(
                       WHERE cq.question_id = q.id AND d.document_type = ");
         builder.push_bind(document_type);
         builder.push("))");
+    }
+    if let Some(ref source_category) = query.source_category {
+        builder.push(" AND q.metadata->>'source_category' = ");
+        builder.push_bind(source_category);
+    }
+    if let Some(ref source_kind) = query.source_kind {
+        builder.push(" AND q.metadata->>'source_kind' = ");
+        builder.push_bind(source_kind);
     }
     if let Some(ref collection_id) = query.collection_id {
         builder.push(" AND EXISTS (SELECT 1 FROM collection_questions cq \

@@ -115,6 +115,7 @@ pub const CORE_PARSE_RULES: &str = r#"
   "在直角坐标系中，抛物线 $y = ax^2 + bx + c$ 经过点 $A(1, 2)$。\n(1) 已知 $a = 1$，求 $b$、$c$ 的值；\n(2) 若函数在 $[1, 2]$ 上单调递增，求 $a$ 的范围。"
 - 大背景与小问之间用 `\n` 分隔，各小问之间也用 `\n` 分隔
 - 不要在 stem 中使用 <br> 或其他 HTML 标签，只用 `\n`
+- 选择题题干末尾用于填答案的空括号（如「…的是 ()」「…的集合是（ ）」）必须写成 `$(\hspace{2em})$`，不要保留裸 `()` / `（）`。函数 `f()`、区间、题号 `(1)(2)` 不要改
 
 # 多解法识别
 - 文本中出现「解法一」「解法二」或「方法 1」「方法 2」 → 拆为 analysis 数组多项
@@ -263,41 +264,29 @@ pub const STAGE2_PARSE_SYSTEM_PROMPT: &str = r#"你是一个数学题结构化�
 // ------------------------------------------------------------
 // Level 1：文本模型，输入=文件名
 // Level 2/3：视觉模型，输入=文件名 + 页面图（前 1 / 前 3 页）
-// 输出统一 JSON：{document_type, title, confidence, reason}
+// 输出统一 JSON：{source_category, source_kind, title, confidence, reason}
 // ============================================================
 
-/// 分类输出 JSON Schema 说明（两种 prompt 共用）
+/// 分类输出 JSON Schema（大类 + 子类级联）
 const CLASSIFY_OUTPUT_SCHEMA: &str = r#"**输出格式（严格 JSON，不要 markdown 代码块，不要任何解释文字）**：
 {
-  "document_type": "<枚举值>",
+  "source_category": "paper | practice | other",
+  "source_kind": "<子类 slug>",
   "title": "<资料标题，简洁中文>",
   "confidence": 0.0 到 1.0 的小数,
   "reason": "<一句话判断理由>"
 }
 
-**document_type 枚举（只能输出下列值之一）**：
-exam 正式试卷（含期中/期末/月考/联考等正式考试卷）
-mock_exam 模拟试卷（一模/二模/模拟卷等）
-class_exercise 课堂练习
-class_example 课堂例题
-homework 课后作业
-preview_exercise 课前预习
-textbook_example 教材例题
-teaching_material 教学讲义/教学资料
-exercise_book 教辅练习
-chapter_exercise 章节练习
-unit_exercise 单元练习
-special_training 专题训练
-wrong_question 错题整理
-mixed 混合资料（同一文件含多类资料）
-unknown 无法判断
+**source_category / source_kind 枚举**：
+- paper（试卷）：monthly_test 月测 | unit_test 单元测 | stage_test 阶段测 | midterm 期中 | final 期末 | gaokao 高考真题 | mock 模拟题
+- practice（练习）：preview 课前预习 | class_example 课堂例题 | in_class 随堂练习 | homework 课后作业 | unit_review 单元复习
+- other（其他）：special 专题资料 | workbook 教辅练习 | textbook_example 教材例题 | lecture 讲义 | wrong_question 错题
 
 **关键规则**：
-1. 仅凭现有信息无法判断类型时，document_type 必须输出 unknown，confidence 必须低于 0.6
-2. 只有当 confidence >= 0.6 时才能输出 unknown 以外的具体类型
-3. title 无法确定时用文件名（去掉扩展名）
-4. 包含"姓名/班级/学号/得分栏"且题量大的 → exam；包含"例题"字样 → class_example
-5. 资料类型与知识点无关：不要因为内容涉及某个章节就输出 chapter_exercise，要看资料标题与用途"#;
+1. 信息不足时：source_category=practice，source_kind=in_class，confidence < 0.6
+2. title 无法确定时用文件名（去掉扩展名）
+3. 有得分栏/密封线/大题分值 → paper；含「例题」→ practice/class_example；含「作业」→ practice/homework
+4. 看资料标题与用途，不要仅因知识点章节名输出 special"#;
 
 /// 资料类型分类 Prompt（Level 1，文本模式：输入=文件名，完整系统提示词）
 pub const AI_CLASSIFY_DOCUMENT_PROMPT_TEXT: &str = r#"你是一名教研资料分类助手。根据用户上传的文件名判断这份资料属于什么业务类型。

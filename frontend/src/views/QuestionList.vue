@@ -746,6 +746,14 @@ import { useQuestionBasket } from '@/composables/useQuestionBasket'
 import { useToast } from '@/composables/useToast'
 import { useSpaceStore } from '@/stores/space'
 import {
+  SOURCE_CATEGORY_LABELS,
+  PAPER_KIND_OPTIONS,
+  PRACTICE_KIND_OPTIONS,
+  OTHER_KIND_OPTIONS,
+  sourceKindLabel,
+  sourceCategoryLabel,
+} from '@/utils/questionSource'
+import {
   typeLabel,
   typeBadgeColor,
   diffLabel,
@@ -1175,27 +1183,18 @@ const filters = reactive({
   docType: '全部',
 })
 
-/// V2.1.1 资料类型选项（与后端 document_type 白名单对齐）
+/// V2.1.1 资料类型选项（来源大类 + 子类）
 const docTypeOptions: { value: string; label: string }[] = [
-  { value: 'exam', label: '正式试卷' },
-  { value: 'mock_exam', label: '模拟试卷' },
-  { value: 'class_exercise', label: '课堂练习' },
-  { value: 'class_example', label: '课堂例题' },
-  { value: 'homework', label: '课后作业' },
-  { value: 'preview_exercise', label: '课前预习' },
-  { value: 'textbook_example', label: '教材例题' },
-  { value: 'teaching_material', label: '教学讲义/资料' },
-  { value: 'exercise_book', label: '教辅练习' },
-  { value: 'chapter_exercise', label: '章节练习' },
-  { value: 'unit_exercise', label: '单元练习' },
-  { value: 'special_training', label: '专题训练' },
-  { value: 'wrong_question', label: '错题整理' },
-  { value: 'mixed', label: '混合资料' },
-  { value: 'other', label: '其他' },
+  ...Object.entries(SOURCE_CATEGORY_LABELS).map(([value, label]) => ({ value, label })),
+  ...PAPER_KIND_OPTIONS.map((o) => ({ value: o.value, label: `试卷 · ${o.label}` })),
+  ...PRACTICE_KIND_OPTIONS.map((o) => ({ value: o.value, label: `练习 · ${o.label}` })),
+  ...OTHER_KIND_OPTIONS.map((o) => ({ value: o.value, label: `其他 · ${o.label}` })),
 ]
 
-const docTypeLabel = (value: string): string =>
-  docTypeOptions.find(o => o.value === value)?.label ?? value
+const docTypeLabel = (value: string): string => {
+  if (value in SOURCE_CATEGORY_LABELS) return sourceCategoryLabel(value)
+  return sourceKindLabel(value) || docTypeOptions.find(o => o.value === value)?.label || value
+}
 
 // 级联逻辑：source 切换非"高考模拟"时，重置 subSource 并隐藏子行
 const showSubSource = computed(() => filters.source === '高考模拟')
@@ -1267,7 +1266,21 @@ function applyFilters() {
     高考真题: 'exam', 高考模拟: 'mock_exam', 期中: 'midterm', 期末: 'final', 月考: 'daily', 其他: 'other',
   }
   query.source_type = filters.source === '全部' ? undefined : sourceMap[filters.source]
-  query.document_type = filters.docType === '全部' ? undefined : filters.docType
+  // 大类 → source_category；子类 → source_kind；兼容旧 document_type
+  const dt = filters.docType
+  if (dt === '全部') {
+    query.document_type = undefined
+    query.source_category = undefined
+    query.source_kind = undefined
+  } else if (dt === 'paper' || dt === 'practice' || dt === 'other') {
+    query.source_category = dt
+    query.source_kind = undefined
+    query.document_type = undefined
+  } else {
+    query.source_kind = dt
+    query.source_category = undefined
+    query.document_type = dt
+  }
   page.value = 1
   fetchList()
 }
