@@ -435,17 +435,22 @@ onMounted(async () => {
 
         <!-- 试卷模式：考试类型列表 -->
         <div v-if="isPapersMode" class="kt-nav-list">
-          <button
+          <div
             v-for="kind in PAPER_KIND_OPTIONS"
             :key="kind.value"
-            type="button"
-            class="kt-nav-row kt-kind-row"
+            class="kt-nav-row"
             :class="{ selected: selectedSourceKind === kind.value }"
             @click="selectPaperKind(kind.value)"
           >
-            <span class="row-dot" />
+            <span class="row-expand">
+              <AppIcon
+                name="chevron-right"
+                class="row-expand-icon"
+                :size="12"
+              />
+            </span>
             <span class="row-name">{{ kind.label }}</span>
-          </button>
+          </div>
         </div>
 
         <!-- 树列表 -->
@@ -818,14 +823,6 @@ onMounted(async () => {
 
 .kt-nav-row:hover {
   background: var(--bg-hover); /* hover:bg-gray-50 柔和反馈 */
-}
-
-button.kt-kind-row {
-  width: 100%;
-  border: none;
-  background: transparent;
-  text-align: left;
-  font: inherit;
 }
 
 .kt-nav-row.selected {

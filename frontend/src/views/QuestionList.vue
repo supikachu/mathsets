@@ -2246,7 +2246,7 @@ onBeforeUnmount(() => {
 
 /* 选中态：仅品牌蓝文字，无背景 */
 .ql-mtag.active {
-  color: #1890ff;
+  color: var(--accent);
   font-weight: 600;
   background: transparent;
   border: none;
