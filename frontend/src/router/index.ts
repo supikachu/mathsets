@@ -36,6 +36,11 @@ const router = createRouter({
           component: () => import('@/views/QuestionList.vue'),
         },
         {
+          path: 'papers/:id',
+          name: 'PaperDetail',
+          component: () => import('@/views/PaperDetail.vue'),
+        },
+        {
           path: 'questions/new',
           name: 'QuestionNew',
           component: () => import('@/views/QuestionEdit.vue'),

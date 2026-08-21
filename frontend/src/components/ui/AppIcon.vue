@@ -253,6 +253,23 @@ withDefaults(
       <rect x="9" y="9" width="12" height="12" rx="2" />
       <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
     </template>
+    <template v-else-if="name === 'download'">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <path d="m7 10 5 5 5-5M12 15V3" />
+    </template>
+    <template v-else-if="name === 'share'">
+      <circle cx="18" cy="5" r="3" />
+      <circle cx="6" cy="12" r="3" />
+      <circle cx="18" cy="19" r="3" />
+      <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
+      <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
+    </template>
+    <template v-else-if="name === 'chart'">
+      <path d="M18 20V10M12 20V4M6 20v-6" />
+    </template>
+    <template v-else-if="name === 'flag'">
+      <path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1zM4 22v-7" />
+    </template>
 
     <!-- Account / Profile -->
     <template v-else-if="name === 'lock'">

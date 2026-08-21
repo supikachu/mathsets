@@ -355,6 +355,15 @@ pub struct QuestionQuery {
     pub source_kind: Option<String>,
     /// 集合 ID（题目属于该集合）
     pub collection_id: Option<Uuid>,
+    /// 试卷 ID（题目被该试卷引用；列表按卷内 display_order 排序）
+    pub paper_id: Option<Uuid>,
+}
+
+/// 题目列表中的关联试卷摘要
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuestionPaperBrief {
+    pub id: Uuid,
+    pub title: String,
 }
 
 /// 题目列表响应项
@@ -371,6 +380,10 @@ pub struct QuestionSummary {
     pub updated_at: DateTime<Utc>,
     pub version: i32,
     pub space_id: Uuid,
+    /// 关联试卷（列表接口二次填充；FromRow 跳过）
+    #[sqlx(skip)]
+    #[serde(default)]
+    pub papers: Vec<QuestionPaperBrief>,
 }
 
 impl From<Question> for QuestionSummary {
@@ -387,6 +400,7 @@ impl From<Question> for QuestionSummary {
             updated_at: q.updated_at,
             version: q.version,
             space_id: q.space_id,
+            papers: vec![],
         }
     }
 }

@@ -7,7 +7,7 @@ use axum_extra::extract::Query;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::ai::tagging::{
@@ -21,7 +21,7 @@ use crate::auth::permissions::{
 };
 use crate::models::question::{
     AiCreateMeta, CreateQuestionRequest, KnowledgeNodeSummary, Question, QuestionDetail,
-    QuestionQuery, QuestionStatus, QuestionSummary, QuestionType, RejectRequest,
+    QuestionPaperBrief, QuestionQuery, QuestionStatus, QuestionSummary, QuestionType, RejectRequest,
     SubmitReviewRequest, TagSummary, TransferQuestionRequest, UpdateQuestionRequest,
     is_answer_empty, refresh_system_flags,
 };
@@ -611,16 +611,60 @@ pub async fn list_questions(
     apply_access_filters(&mut builder, &auth, &query);
     apply_question_filters(&mut builder, &query);
 
-    builder.push(" ORDER BY q.updated_at DESC LIMIT ");
+    if let Some(paper_id) = query.paper_id {
+        builder.push(
+            " ORDER BY (SELECT pq.display_order FROM paper_questions pq \
+              WHERE pq.question_id = q.id AND pq.paper_id = ",
+        );
+        builder.push_bind(paper_id);
+        builder.push(" LIMIT 1) ASC NULLS LAST, q.updated_at DESC LIMIT ");
+    } else {
+        builder.push(" ORDER BY q.updated_at DESC LIMIT ");
+    }
     builder.push_bind(page_size as i64);
     builder.push(" OFFSET ");
     builder.push_bind(offset as i64);
 
-    let questions = builder
+    let mut questions = builder
         .build_query_as::<QuestionSummary>()
         .fetch_all(&state.pool)
         .await
         .map_err(|e| db_err(format!("查询题目失败: {}", e)))?;
+
+    // 批量填充关联试卷（避免列表 N+1；有关联时卡片展示试卷名）
+    if !questions.is_empty() {
+        let qids: Vec<Uuid> = questions.iter().map(|q| q.id).collect();
+        #[derive(sqlx::FromRow)]
+        struct PaperLinkRow {
+            question_id: Uuid,
+            paper_id: Uuid,
+            title: String,
+        }
+        let links = sqlx::query_as::<_, PaperLinkRow>(
+            r#"
+            SELECT pq.question_id, p.id AS paper_id, p.title
+            FROM paper_questions pq
+            JOIN papers p ON p.id = pq.paper_id
+            WHERE pq.question_id = ANY($1)
+            ORDER BY pq.display_order, pq.sort_order, pq.created_at
+            "#,
+        )
+        .bind(&qids)
+        .fetch_all(&state.pool)
+        .await
+        .map_err(|e| db_err(format!("查询题目关联试卷失败: {}", e)))?;
+
+        let mut by_qid: HashMap<Uuid, Vec<QuestionPaperBrief>> = HashMap::new();
+        for row in links {
+            by_qid.entry(row.question_id).or_default().push(QuestionPaperBrief {
+                id: row.paper_id,
+                title: row.title,
+            });
+        }
+        for q in &mut questions {
+            q.papers = by_qid.remove(&q.id).unwrap_or_default();
+        }
+    }
 
     Ok(Json(PageResult {
         items: questions,
@@ -843,6 +887,12 @@ fn apply_question_filters<'a>(
         builder.push_bind(collection_id);
         builder.push(")");
     }
+    if let Some(paper_id) = query.paper_id {
+        builder.push(" AND EXISTS (SELECT 1 FROM paper_questions pq \
+                      WHERE pq.question_id = q.id AND pq.paper_id = ");
+        builder.push_bind(paper_id);
+        builder.push(")");
+    }
     // 待补全筛选（T2-6）— 必须用 `@>` 包含操作符命中 GIN 索引
     // `->>` 会将 JSONB 转为 text，绕过 GIN 索引退化为 Seq Scan
     if let Some(ref flag) = query.system_flag {
@@ -868,7 +918,7 @@ fn apply_question_filters<'a>(
 ///
 /// - 校验任务归属（本人或管理员）
 /// - 按 `staged_index` 从 `progress.staged_questions` 定位暂存项
-/// - 已保存的暂存项拒绝重复提交
+/// - 已保存的暂存项原样返回（create 侧做幂等：返回已有题目，不 409）
 async fn load_ai_staged_item(
     pool: &sqlx::PgPool,
     meta: &AiCreateMeta,
@@ -896,7 +946,10 @@ async fn load_ai_staged_item(
         .and_then(|v| v.as_array())
         .and_then(|arr| {
             arr.iter().find(|item| {
-                item.get("index").and_then(|i| i.as_str()) == Some(meta.staged_index.as_str())
+                item.get("index")
+                    .and_then(staged_index_key)
+                    .as_deref()
+                    == Some(meta.staged_index.as_str())
             })
         })
         .cloned()
@@ -907,14 +960,70 @@ async fn load_ai_staged_item(
             )
         })?;
 
-    if staged.get("saved").and_then(|v| v.as_bool()).unwrap_or(false) {
-        return Err((
-            StatusCode::CONFLICT,
-            Json(json!({"error": "该题目已保存，请勿重复提交"})),
-        ));
-    }
-
     Ok(staged)
+}
+
+fn paper_id_from_staged(staged: &serde_json::Value) -> Option<Uuid> {
+    staged
+        .get("paper_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+}
+
+/// OCR 先行时 Stage 2 可能尚未建卷，保存题目时按任务所属资料补查试卷
+async fn lookup_paper_id_for_parse_task(
+    pool: &sqlx::PgPool,
+    task_id: Uuid,
+) -> Result<Option<Uuid>, (StatusCode, Json<serde_json::Value>)> {
+    sqlx::query_scalar(
+        r#"
+        SELECT p.id
+        FROM ai_parse_tasks t
+        JOIN papers p ON p.document_id = t.document_id
+        WHERE t.id = $1
+        ORDER BY p.updated_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(task_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| db_err(format!("查询试卷失败: {e}")))
+}
+
+async fn resolve_paper_ids_for_create(
+    pool: &sqlx::PgPool,
+    req: &CreateQuestionRequest,
+    staged: Option<&serde_json::Value>,
+) -> Result<Vec<Uuid>, (StatusCode, Json<serde_json::Value>)> {
+    let mut ids = req.paper_ids.clone().unwrap_or_default();
+    if !ids.is_empty() {
+        return Ok(ids);
+    }
+    if let Some(pid) = staged.and_then(paper_id_from_staged) {
+        ids.push(pid);
+        return Ok(ids);
+    }
+    if let Some(meta) = &req.ai_meta {
+        if let Some(pid) = lookup_paper_id_for_parse_task(pool, meta.task_id).await? {
+            ids.push(pid);
+        }
+    }
+    Ok(ids)
+}
+
+fn staged_index_key(v: &serde_json::Value) -> Option<String> {
+    v.as_str()
+        .map(|s| s.to_string())
+        .or_else(|| v.as_i64().map(|n| n.to_string()))
+        .or_else(|| v.as_u64().map(|n| n.to_string()))
+}
+
+fn staged_saved_question_id(staged: &serde_json::Value) -> Option<Uuid> {
+    staged
+        .get("saved_question_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
 }
 
 /// 标记 AI 暂存项已保存：写 saved/saved_question_id + 幂等映射（index → 题目 ID）
@@ -1057,9 +1166,39 @@ pub async fn create_question(
         return Err((StatusCode::FORBIDDEN, Json(json!({"error": "无权在该空间创建题目"}))));
     }
 
-    // ── AI 智能录入：加载暂存项（校验归属 + 未保存），容器关联/候选/标记据此完成 ──
+    // ── AI 智能录入：加载暂存项（校验归属）；已保存则幂等返回已有题目 ──
     let ai_staged: Option<serde_json::Value> = match &req.ai_meta {
-        Some(meta) => Some(load_ai_staged_item(&state.pool, meta, &auth_user).await?),
+        Some(meta) => {
+            let staged = load_ai_staged_item(&state.pool, meta, &auth_user).await?;
+            let already = staged
+                .get("saved")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if already {
+                if let Some(qid) = staged_saved_question_id(&staged) {
+                    let question = sqlx::query_as::<_, Question>("SELECT * FROM questions WHERE id = $1")
+                        .bind(qid)
+                        .fetch_optional(&state.pool)
+                        .await
+                        .map_err(|e| db_err(format!("查询已保存题目失败: {}", e)))?
+                        .ok_or_else(|| {
+                            (
+                                StatusCode::CONFLICT,
+                                Json(json!({"error": "该题目已保存，请勿重复提交"})),
+                            )
+                        })?;
+                    let detail = build_detail(&state.pool, &auth_user, question, None)
+                        .await
+                        .map_err(|e| db_err(format!("构建详情失败: {}", e)))?;
+                    return Ok((StatusCode::OK, Json(detail)));
+                }
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(json!({"error": "该题目已保存，请勿重复提交"})),
+                ));
+            }
+            Some(staged)
+        }
         None => None,
     };
 
@@ -1183,9 +1322,11 @@ pub async fn create_question(
         apply_legacy_staged_matches(&mut tx, id, staged).await?;
     }
 
-    // 同步题目 ↔ 试卷关联（全量覆盖）
-    if let Some(ref paper_ids) = req.paper_ids {
-        sync_question_papers(&mut tx, id, paper_ids)
+    // 同步题目 ↔ 试卷关联。AI 录入时前端可能尚未带上 paper_id
+    //（解析先于确认），从暂存项或资料对应试卷补齐。
+    let paper_ids = resolve_paper_ids_for_create(&state.pool, &req, ai_staged.as_ref()).await?;
+    if !paper_ids.is_empty() {
+        sync_question_papers(&mut tx, id, &paper_ids)
             .await
             .map_err(|e| db_err(format!("关联试卷失败: {}", e)))?;
     }
@@ -1206,10 +1347,10 @@ pub async fn create_question(
             .get("parsed")
             .and_then(|p| serde_json::from_value(p.clone()).ok());
 
-        let paper_id = staged
-            .get("paper_id")
-            .and_then(|v| v.as_str())
-            .and_then(|s| Uuid::parse_str(s).ok());
+        let paper_id = paper_ids
+            .first()
+            .copied()
+            .or_else(|| paper_id_from_staged(staged));
         let collection_id = staged
             .get("collection_id")
             .and_then(|v| v.as_str())

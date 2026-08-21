@@ -24,7 +24,7 @@ use crate::auth::permissions::is_admin_user;
 use crate::handlers::ai::{map_ai_error, resolve_ai_config, ModelKind};
 use crate::models::document::{
     document_type_compat, is_valid_source_category, source_kind_matches_category, validate_confirm,
-    AiClassification, AiClassificationRaw, ConfirmDocumentRequest, Document,
+    AiClassification, AiClassificationRaw, ConfirmDocumentRequest, Document, PaperMetaInput,
 };
 use crate::AppState;
 
@@ -56,6 +56,195 @@ fn db_err(msg: impl Into<String>) -> (StatusCode, Json<serde_json::Value>) {
             "code": "ERR_INTERNAL_SERVER"
         })),
     )
+}
+
+/// 将试卷表单同步到 papers：同 document 已有试卷则更新元数据，否则新建。
+/// 显式关联其他试卷时只返回该 id，不改写对方字段。
+pub(crate) async fn sync_paper_for_document(
+    pool: &sqlx::PgPool,
+    creator_id: Uuid,
+    doc_id: Uuid,
+    meta: &PaperMetaInput,
+    fallback_source_kind: &str,
+) -> Result<Uuid, sqlx::Error> {
+    let source_type = meta.resolved_source_type(fallback_source_kind);
+    let subject = meta
+        .subject
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("数学")
+        .to_string();
+    let title = meta.title.trim();
+
+    if let Some(pid) = meta.paper_id {
+        let owned: Option<Uuid> =
+            sqlx::query_scalar("SELECT id FROM papers WHERE id = $1 AND document_id = $2")
+                .bind(pid)
+                .bind(doc_id)
+                .fetch_optional(pool)
+                .await?;
+        if owned.is_some() && !title.is_empty() {
+            update_paper_from_meta(pool, pid, meta, &subject, source_type.as_deref()).await?;
+        }
+        return Ok(pid);
+    }
+
+    let existing: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM papers WHERE document_id = $1 LIMIT 1")
+            .bind(doc_id)
+            .fetch_optional(pool)
+            .await?;
+    if let Some(pid) = existing {
+        if !title.is_empty() {
+            update_paper_from_meta(pool, pid, meta, &subject, source_type.as_deref()).await?;
+        }
+        return Ok(pid);
+    }
+
+    if title.is_empty() {
+        return Err(sqlx::Error::Protocol("试卷名称不能为空".into()));
+    }
+
+    let paper_id = Uuid::new_v4();
+    let now = chrono::Utc::now();
+    sqlx::query(
+        r#"
+        INSERT INTO papers (id, title, description, subject, grade, total_score, duration_minutes,
+            status, creator_id, created_at, updated_at, version,
+            year, stage, semester, region_province, region_city, school_name,
+            source_type, sub_source_type, document_id, metadata)
+        VALUES ($1, $2, NULL, $3, $4, 0, NULL, 'draft', $5, $6, $6, 1,
+            $7, $8, $9, $10, $11, $12, $13, $14, $15, '{}')
+        "#,
+    )
+    .bind(paper_id)
+    .bind(title)
+    .bind(&subject)
+    .bind(&meta.grade)
+    .bind(creator_id)
+    .bind(now)
+    .bind(meta.year)
+    .bind(&meta.stage)
+    .bind(&meta.semester)
+    .bind(&meta.region_province)
+    .bind(&meta.region_city)
+    .bind(&meta.school_name)
+    .bind(&source_type)
+    .bind(&meta.sub_source_type)
+    .bind(doc_id)
+    .execute(pool)
+    .await?;
+    tracing::info!("为 Document {doc_id} 创建试卷 {paper_id}（{title}）");
+    Ok(paper_id)
+}
+
+/// 解析可能先于确认：把后置建卷的 paper_id 写回尚未带卷的暂存题
+async fn backfill_staged_paper_id(
+    pool: &sqlx::PgPool,
+    doc_id: Uuid,
+    paper_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        UPDATE ai_parse_tasks
+        SET progress = jsonb_set(
+              progress,
+              '{staged_questions}',
+              (
+                SELECT COALESCE(jsonb_agg(
+                  CASE
+                    WHEN COALESCE(elem->>'paper_id', '') = ''
+                    THEN elem || jsonb_build_object('paper_id', $2::text)
+                    ELSE elem
+                  END
+                  ORDER BY ord
+                ), '[]'::jsonb)
+                FROM jsonb_array_elements(COALESCE(progress->'staged_questions', '[]'::jsonb))
+                  WITH ORDINALITY AS t(elem, ord)
+              )
+            ),
+            updated_at = NOW()
+        WHERE document_id = $1
+          AND progress ? 'staged_questions'
+        "#,
+    )
+    .bind(doc_id)
+    .bind(paper_id.to_string())
+    .execute(pool)
+    .await?;
+
+    let saved_ids: Vec<Uuid> = sqlx::query_scalar(
+        r#"
+        SELECT DISTINCT (elem->>'saved_question_id')::uuid
+        FROM ai_parse_tasks t,
+             jsonb_array_elements(COALESCE(t.progress->'staged_questions', '[]'::jsonb)) elem
+        WHERE t.document_id = $1
+          AND COALESCE(elem->>'saved_question_id', '') <> ''
+        "#,
+    )
+    .bind(doc_id)
+    .fetch_all(pool)
+    .await?;
+    for qid in saved_ids {
+        sqlx::query(
+            r#"
+            INSERT INTO paper_questions (id, paper_id, question_id, sort_order, score, section, created_at)
+            VALUES ($1, $2, $3, 0, 0, NULL, NOW())
+            ON CONFLICT (paper_id, question_id) DO NOTHING
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(paper_id)
+        .bind(qid)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
+async fn update_paper_from_meta(
+    pool: &sqlx::PgPool,
+    paper_id: Uuid,
+    meta: &PaperMetaInput,
+    subject: &str,
+    source_type: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    let title = meta.title.trim();
+    sqlx::query(
+        r#"
+        UPDATE papers SET
+            title = CASE WHEN $1 <> '' THEN $1 ELSE title END,
+            subject = COALESCE($2, subject),
+            grade = COALESCE($3, grade),
+            year = COALESCE($4, year),
+            stage = COALESCE($5, stage),
+            semester = COALESCE($6, semester),
+            region_province = COALESCE($7, region_province),
+            region_city = COALESCE($8, region_city),
+            school_name = COALESCE($9, school_name),
+            source_type = COALESCE($10, source_type),
+            sub_source_type = COALESCE($11, sub_source_type),
+            updated_at = NOW(),
+            version = version + 1
+        WHERE id = $12
+        "#,
+    )
+    .bind(title)
+    .bind(subject)
+    .bind(&meta.grade)
+    .bind(meta.year)
+    .bind(&meta.stage)
+    .bind(&meta.semester)
+    .bind(&meta.region_province)
+    .bind(&meta.region_city)
+    .bind(&meta.school_name)
+    .bind(source_type)
+    .bind(&meta.sub_source_type)
+    .bind(paper_id)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 /// 读取页面文件并 base64 编码（用于视觉分类）
@@ -766,9 +955,14 @@ pub async fn confirm_document(
         }
     }
 
-    let paper_meta = req
-        .paper_meta
-        .clone()
+    let mut paper_meta_input = req.paper_meta.clone();
+    if let Some(ref mut m) = paper_meta_input {
+        if m.source_type.as_deref().map(str::trim).unwrap_or("").is_empty() {
+            m.source_type = Some(normalized.source_kind.clone());
+        }
+    }
+    let paper_meta = paper_meta_input
+        .as_ref()
         .map(|m| serde_json::to_value(m).unwrap_or(json!(null)));
     let collections = serde_json::to_value(&normalized.collections).unwrap_or(json!([]));
     let mut metadata = doc.metadata.clone();
@@ -787,10 +981,15 @@ pub async fn confirm_document(
     }
 
     let title = if normalized.create_paper {
-        req.paper_meta.as_ref().map(|m| m.title.trim().to_string())
+        paper_meta_input.as_ref().map(|m| m.title.trim().to_string())
     } else {
         req.title.clone().filter(|t| !t.trim().is_empty())
     };
+    let doc_source_type = req
+        .source_type
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| Some(normalized.source_kind.clone()));
 
     // 识别进行中也可 confirm：仅在非 parsing/done 时标 confirmed；parsing 保持 parsing
     let next_status = match doc.status.as_str() {
@@ -811,7 +1010,7 @@ pub async fn confirm_document(
     .bind(&normalized.document_type)
     .bind(&req.type_label)
     .bind(&title)
-    .bind(&req.source_type)
+    .bind(&doc_source_type)
     .bind(&req.sub_source_type)
     .bind(&metadata)
     .bind(&next_status)
@@ -819,53 +1018,21 @@ pub async fn confirm_document(
     .await
     .map_err(|e| db_err(format!("保存确认信息失败: {e}")))?;
 
-    // create_paper 且尚无 paper：解析可能已结束，在此补建
+    // create_paper：解析中途可能已建空卷，此处新建或回写最新表单
     let mut created_or_linked_paper: Option<Uuid> = None;
     if normalized.create_paper {
-        let existing: Option<Uuid> =
-            sqlx::query_scalar("SELECT id FROM papers WHERE document_id = $1 LIMIT 1")
-                .bind(doc.id)
-                .fetch_optional(&state.pool)
-                .await
-                .map_err(|e| db_err(format!("查询试卷失败: {e}")))?;
-        if let Some(pid) = existing {
-            created_or_linked_paper = Some(pid);
-        } else if let Some(ref meta) = req.paper_meta {
-            if let Some(pid) = meta.paper_id {
-                created_or_linked_paper = Some(pid);
-            } else if !meta.title.trim().is_empty() {
-                let paper_id = Uuid::new_v4();
-                let now = chrono::Utc::now();
-                sqlx::query(
-                    r#"
-                    INSERT INTO papers (id, title, description, subject, grade, total_score, duration_minutes,
-                        status, creator_id, created_at, updated_at, version,
-                        year, stage, semester, region_province, region_city, school_name,
-                        source_type, sub_source_type, document_id, metadata)
-                    VALUES ($1, $2, NULL, $3, $4, 0, NULL, 'draft', $5, $6, $6, 1,
-                        $7, $8, $9, $10, $11, $12, $13, $14, $15, '{}')
-                    "#,
+        if let Some(ref meta) = paper_meta_input {
+            created_or_linked_paper = Some(
+                sync_paper_for_document(
+                    &state.pool,
+                    auth.id,
+                    doc.id,
+                    meta,
+                    &normalized.source_kind,
                 )
-                .bind(paper_id)
-                .bind(meta.title.trim())
-                .bind(meta.subject.clone().unwrap_or_else(|| "数学".into()))
-                .bind(&meta.grade)
-                .bind(auth.id)
-                .bind(now)
-                .bind(meta.year)
-                .bind(&meta.stage)
-                .bind(&meta.semester)
-                .bind(&meta.region_province)
-                .bind(&meta.region_city)
-                .bind(&meta.school_name)
-                .bind(&meta.source_type)
-                .bind(&meta.sub_source_type)
-                .bind(doc.id)
-                .execute(&state.pool)
                 .await
-                .map_err(|e| db_err(format!("创建试卷失败: {e}")))?;
-                created_or_linked_paper = Some(paper_id);
-            }
+                .map_err(|e| db_err(format!("同步试卷失败: {e}")))?,
+            );
         }
         if let Some(pid) = created_or_linked_paper {
             if let Some(obj) = metadata.as_object_mut() {
@@ -876,6 +1043,7 @@ pub async fn confirm_document(
                 .bind(&metadata)
                 .execute(&state.pool)
                 .await;
+            let _ = backfill_staged_paper_id(&state.pool, doc.id, pid).await;
         }
     }
 

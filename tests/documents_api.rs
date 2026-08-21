@@ -21,17 +21,21 @@ use uuid::Uuid;
 // ---------------------------------------------------------------------------
 
 async fn create_test_app() -> Option<axum::Router> {
+    create_test_app_with_pool().await.map(|(app, _)| app)
+}
+
+async fn create_test_app_with_pool() -> Option<(axum::Router, sqlx::PgPool)> {
     let database_url = mathset::testing::database_url()?;
     let pool = db::create_pool(&database_url, 5).await;
     db::run_migrations(&pool).await;
     let state = AppState::new(
-        pool,
+        pool.clone(),
         "test-secret-for-integration-tests".to_string(),
         24,
         mathset::config::AiConfig::from_env(),
         "./uploads".to_string(),
     );
-    Some(build_app(state))
+    Some((build_app(state), pool))
 }
 
 async fn request(
@@ -428,4 +432,176 @@ async fn test_document_permissions_and_classify_404() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_confirm_create_paper_then_update_metadata() {
+    let Some(mut app) = create_test_app().await else {
+        eprintln!("跳过：未配置 DATABASE_URL_TEST");
+        return;
+    };
+    let token = register_and_login(&mut app).await;
+    let (_, body) = upload_multipart(&mut app, &token, "pages").await;
+    let doc_id = body["data"]["id"].as_str().unwrap().to_string();
+    let base = format!("/api/v1/ai/documents/{doc_id}");
+
+    // 第一次确认：仅标题（模拟用户刚打开「创建试卷」）
+    let (status, body) = post_auth(
+        &mut app,
+        &format!("{base}/confirm"),
+        json!({
+            "source_category": "paper",
+            "source_kind": "final",
+            "create_paper": true,
+            "paper_meta": { "title": "未命名资料" }
+        }),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let paper_id = body["paper_id"].as_str().expect("应创建试卷").to_string();
+
+    let (status, paper) = get_auth(&mut app, &format!("/api/v1/papers/{paper_id}"), &token).await;
+    assert_eq!(status, StatusCode::OK, "{paper}");
+    assert_eq!(paper["title"], "未命名资料");
+    assert!(paper["year"].is_null());
+    assert!(paper["stage"].is_null());
+
+    // 第二次确认：回写完整试卷信息（此前会因已有卷而跳过）
+    let (status, body) = post_auth(
+        &mut app,
+        &format!("{base}/confirm"),
+        json!({
+            "source_category": "paper",
+            "source_kind": "final",
+            "create_paper": true,
+            "paper_meta": {
+                "title": "宁波市 2025 期末九校联考高一数学",
+                "year": 2025,
+                "stage": "senior",
+                "grade": "高一",
+                "subject": "数学",
+                "semester": "second",
+                "region_province": "浙江",
+                "region_city": "宁波市"
+            }
+        }),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["paper_id"], paper_id);
+
+    let (status, paper) = get_auth(&mut app, &format!("/api/v1/papers/{paper_id}"), &token).await;
+    assert_eq!(status, StatusCode::OK, "{paper}");
+    assert_eq!(paper["title"], "宁波市 2025 期末九校联考高一数学");
+    assert_eq!(paper["year"], 2025);
+    assert_eq!(paper["stage"], "senior");
+    assert_eq!(paper["grade"], "高一");
+    assert_eq!(paper["semester"], "second");
+    assert_eq!(paper["region_province"], "浙江");
+    assert_eq!(paper["region_city"], "宁波市");
+    assert_eq!(paper["source_type"], "final");
+
+    let (status, listed) = get_auth(
+        &mut app,
+        "/api/v1/papers?stage=senior&subject=数学",
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let items = listed["items"].as_array().expect("试卷列表");
+    assert!(
+        items.iter().any(|p| p["id"] == paper_id),
+        "学段筛选应能命中已回写的试卷: {listed}"
+    );
+}
+
+#[tokio::test]
+async fn test_ai_save_question_links_paper_created_after_staging() {
+    let Some((mut app, pool)) = create_test_app_with_pool().await else {
+        eprintln!("跳过：未配置 DATABASE_URL_TEST");
+        return;
+    };
+    let token = register_and_login(&mut app).await;
+    let (_, body) = upload_multipart(&mut app, &token, "pages").await;
+    let doc_id = body["data"]["id"].as_str().unwrap().to_string();
+    let creator_id: Uuid = sqlx::query_scalar("SELECT creator_id FROM documents WHERE id = $1")
+        .bind(Uuid::parse_str(&doc_id).unwrap())
+        .fetch_one(&pool)
+        .await
+        .expect("查询资料创建者");
+
+    // 模拟 OCR 先行：暂存题 paper_id 为空，之后用户才确认建卷
+    let task_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO ai_parse_tasks (id, creator_id, raw_text, status, document_id, progress, created_at, updated_at)
+        VALUES ($1, $2, '', 'success', $3, $4, NOW(), NOW())
+        "#,
+    )
+    .bind(task_id)
+    .bind(creator_id)
+    .bind(Uuid::parse_str(&doc_id).unwrap())
+    .bind(json!({
+        "staged_questions": [{
+            "index": "p1_i0",
+            "parsed": {
+                "question_type": "solution",
+                "difficulty": "medium",
+                "stem": "已知集合 A",
+                "correct_answer": {"kind": "solution", "value": {"subs": []}},
+                "analysis": [],
+                "knowledge_points": [],
+                "confidence": 0.9
+            },
+            "paper_id": null,
+            "saved": false
+        }]
+    }))
+    .execute(&pool)
+    .await
+    .expect("写入暂存任务");
+
+    let (status, body) = post_auth(
+        &mut app,
+        &format!("/api/v1/ai/documents/{doc_id}/confirm"),
+        json!({
+            "source_category": "paper",
+            "source_kind": "midterm",
+            "create_paper": true,
+            "paper_meta": {
+                "title": "杭州学军中学2025学年第一学期期中考试高一数学试卷",
+                "year": 2025,
+                "stage": "senior",
+                "grade": "高一",
+                "subject": "数学"
+            }
+        }),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let paper_id = body["paper_id"].as_str().expect("应创建试卷").to_string();
+
+    // 前端此时可能仍传空 paper_ids（来源条尚未带回 paper_id）
+    let (status, qbody) = post_auth(
+        &mut app,
+        "/api/v1/questions",
+        json!({
+            "stem": "已知集合 A",
+            "question_type": "solution",
+            "difficulty": 3,
+            "paper_ids": [],
+            "ai_meta": { "task_id": task_id, "staged_index": "p1_i0" }
+        }),
+        &token,
+    )
+    .await;
+    assert!(status.is_success(), "保存识别题失败: {status} {qbody}");
+
+    let (status, paper) = get_auth(&mut app, &format!("/api/v1/papers/{paper_id}"), &token).await;
+    assert_eq!(status, StatusCode::OK, "{paper}");
+    let questions = paper["questions"].as_array().expect("试卷题目列表");
+    assert_eq!(questions.len(), 1, "保存后应关联到试卷: {paper}");
 }

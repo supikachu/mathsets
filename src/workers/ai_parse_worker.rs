@@ -401,7 +401,15 @@ async fn execute_task(state: &AppState, task: &AiParseTask) -> Result<TaskOutcom
                     .await
                     .map_err(|e| TaskFailure { retryable: false, message: format!("查询试卷失败: {e}") })?;
             match existing {
-                Some(pid) => (Some(pid), vec![]),
+                Some(pid) => {
+                    // 已有卷：用最新表单补齐空字段（confirm 可能后置）
+                    let mut snap = pm.clone();
+                    if let Some(obj) = snap.as_object_mut() {
+                        obj.insert("paper_meta".into(), paper_meta_src);
+                    }
+                    let _ = create_paper_from_meta(state, &auth, doc_id, &snap).await;
+                    (Some(pid), vec![])
+                }
                 None => {
                     // 合并 live paper_meta 到快照
                     let mut snap = pm.clone();
@@ -737,52 +745,42 @@ async fn create_paper_from_meta(
     doc_id: Uuid,
     pm: &serde_json::Value,
 ) -> Result<Uuid, TaskFailure> {
-    let meta = pm.get("paper_meta").cloned().unwrap_or(serde_json::Value::Null);
-    let title = meta
-        .get("title")
-        .and_then(|t| t.as_str())
-        .filter(|t| !t.trim().is_empty())
-        .ok_or_else(|| TaskFailure {
+    let meta_val = pm.get("paper_meta").cloned().unwrap_or(serde_json::Value::Null);
+    let mut meta: crate::models::document::PaperMetaInput = serde_json::from_value(meta_val)
+        .map_err(|_| TaskFailure {
             retryable: false,
             message: "试卷元数据缺少 title".into(),
         })?;
+    if meta.title.trim().is_empty() {
+        return Err(TaskFailure {
+            retryable: false,
+            message: "试卷元数据缺少 title".into(),
+        });
+    }
+    let source_kind = pm
+        .get("source_kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if meta.source_type.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        meta.source_type = if source_kind.is_empty() {
+            None
+        } else {
+            Some(source_kind.to_string())
+        };
+    }
 
-    let id = Uuid::new_v4();
-    let now = chrono::Utc::now();
-    let g = |k: &str| meta.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
-    let year = meta.get("year").and_then(|v| v.as_i64()).map(|v| v as i32);
-
-    sqlx::query(
-        r#"
-        INSERT INTO papers (id, title, description, subject, grade, total_score, duration_minutes,
-            status, creator_id, created_at, updated_at, version,
-            year, stage, semester, region_province, region_city, school_name,
-            source_type, sub_source_type, document_id, metadata)
-        VALUES ($1, $2, NULL, $3, $4, 0, NULL, 'draft', $5, $6, $6, 1,
-            $7, $8, $9, $10, $11, $12, $13, $14, $15, '{}')
-        "#,
+    crate::handlers::documents::sync_paper_for_document(
+        &state.pool,
+        auth.id,
+        doc_id,
+        &meta,
+        source_kind,
     )
-    .bind(id)
-    .bind(title)
-    .bind(g("subject").unwrap_or_else(|| "数学".into()))
-    .bind(g("grade"))
-    .bind(auth.id)
-    .bind(now)
-    .bind(year)
-    .bind(g("stage"))
-    .bind(g("semester"))
-    .bind(g("region_province"))
-    .bind(g("region_city"))
-    .bind(g("school_name"))
-    .bind(g("source_type"))
-    .bind(g("sub_source_type"))
-    .bind(doc_id)
-    .execute(&state.pool)
     .await
-    .map_err(|e| TaskFailure { retryable: false, message: format!("创建试卷失败: {e}") })?;
-
-    tracing::info!("Worker 为 Document {doc_id} 创建试卷 {id}（{title}）");
-    Ok(id)
+    .map_err(|e| TaskFailure {
+        retryable: false,
+        message: format!("创建试卷失败: {e}"),
+    })
 }
 
 // ---------------------------------------------------------------------------

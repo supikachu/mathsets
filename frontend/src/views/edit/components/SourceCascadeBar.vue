@@ -68,6 +68,8 @@ const paperForm = ref({
 
 const paperBriefs = ref<PaperBrief[]>([])
 const expanded = ref(props.variant === 'panel')
+/** 本资料已创建/关联的试卷（与「关联已有试卷」下拉分开，避免 emit 冲掉 paper_id） */
+const linkedPaperId = ref('')
 let debounceTimer: ReturnType<typeof setTimeout> | null = null
 let seeding = false
 let seededDocId: string | null = null
@@ -157,6 +159,8 @@ function seedFromDoc(doc: DocumentMeta | null, mode: 'replace' | 'suggest' = 're
       subSource.value = pm.sub_source_type || doc.sub_source_type || ''
       userTouched = false
     }
+    const linked = (meta.linked_paper_id as string) || pm.paper_id || ''
+    if (linked) linkedPaperId.value = linked
     seededDocId = doc.id
   } finally {
     seeding = false
@@ -182,6 +186,15 @@ watch(
   () => props.doc?.ai_classification,
   () => {
     if (props.doc) seedFromDoc(props.doc, 'suggest')
+  },
+)
+watch(
+  () => props.doc?.metadata?.linked_paper_id,
+  (id) => {
+    if (typeof id === 'string' && id) {
+      linkedPaperId.value = id
+      emitState()
+    }
   },
 )
 
@@ -231,6 +244,7 @@ function buildBody(): ConfirmDocumentRequest {
     source_kind: kind.value,
     create_paper: category.value === 'paper' && createPaper.value,
     title: title.value.trim() || undefined,
+    source_type: kind.value,
     sub_source_type: showSubSource.value ? (subSource.value.trim() || undefined) : undefined,
   }
   if (category.value === 'paper') {
@@ -244,6 +258,7 @@ function buildBody(): ConfirmDocumentRequest {
       region_province: canonicalProvince(paperForm.value.regionProvince) || undefined,
       region_city: paperForm.value.regionCity.trim() || undefined,
       school_name: paperForm.value.schoolName.trim() || undefined,
+      source_type: kind.value,
       sub_source_type: showSubSource.value ? (subSource.value.trim() || undefined) : undefined,
       paper_id: paperForm.value.paperId || undefined,
     }
@@ -253,13 +268,16 @@ function buildBody(): ConfirmDocumentRequest {
 
 function emitState() {
   const body = buildBody()
+  const paperId = body.paper_meta?.paper_id || linkedPaperId.value || undefined
   emit('update:state', {
     source_category: category.value,
     source_kind: kind.value,
     create_paper: Boolean(body.create_paper),
     title: body.title,
     sub_source_type: body.sub_source_type,
-    paper_meta: body.paper_meta as any,
+    paper_meta: body.paper_meta
+      ? { ...body.paper_meta, paper_id: paperId } as any
+      : (paperId ? { title: title.value, paper_id: paperId } as any : undefined),
   })
 }
 

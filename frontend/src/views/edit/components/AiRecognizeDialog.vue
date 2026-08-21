@@ -215,7 +215,7 @@ const previewCards = computed(() => {
 
 const previewCount = computed(() => previewCards.value.length)
 const unsavedPreviewCount = computed(() =>
-  (props.editedSnapshots ?? []).filter((s) => s && (!s.saved || s.hasUnsaved)).length,
+  (props.editedSnapshots ?? []).filter((s) => s && !s.saved).length,
 )
 const canSaveAll = computed(() => (props.editedSnapshots?.length ?? 0) > 0)
 
@@ -429,9 +429,14 @@ function doApplyAiResult(q: ParsedQuestion) {
   props.form.solutions = ['']
   aiGeneratedFields.value = new Set()
 
-  // Set fields
-  props.form.question_type = q.question_type
-  props.form.sub_type = q.sub_type || ''
+  // Set fields — multiple 在编辑态映射为 choice + sub_type=multi
+  if (q.question_type === 'multiple') {
+    props.form.question_type = 'choice'
+    props.form.sub_type = 'multi'
+  } else {
+    props.form.question_type = q.question_type
+    props.form.sub_type = q.sub_type || ''
+  }
   aiGeneratedFields.value.add('question_type')
 
   props.form.stem = q.stem
@@ -445,11 +450,11 @@ function doApplyAiResult(q: ParsedQuestion) {
     aiGeneratedFields.value.add('difficulty')
   }
 
-  if (q.question_type === 'choice' && q.options) {
+  if ((q.question_type === 'choice' || q.question_type === 'multiple') && q.options) {
     props.form.options = q.options.map(o => ({ label: o.label, content: o.content }))
     if (q.correct_answer.kind === 'choice' && q.correct_answer.value.options) {
       const opts = q.correct_answer.value.options
-      if (q.sub_type === 'multi' || opts.length > 1) {
+      if (q.question_type === 'multiple' || q.sub_type === 'multi' || opts.length > 1) {
         props.form.sub_type = 'multi'
         props.form.correctAnswer = opts
       } else {
@@ -852,6 +857,18 @@ function stagedToParsed(s: AiStagedQuestion, taskId: string): ParsedQuestion {
 watch(pollTask, async (t) => {
   if (!t) return
   if (t.status === 'success' || t.status === 'partial_success') {
+    const src = sourceState.value
+    if (src?.create_paper && currentDoc.value) {
+      void onConfirmDoc({
+        source_category: src.source_category,
+        source_kind: src.source_kind,
+        create_paper: true,
+        title: src.title,
+        source_type: src.source_kind,
+        sub_source_type: src.sub_source_type,
+        paper_meta: src.paper_meta,
+      })
+    }
     pdfDirectActive.value = false
     // 暂存链路：题目尚未落库，从 staged_questions 构建待确认列表（跳过已保存/跨页合并项）
     const staged = (t.staged_questions ?? []).filter(s => !s.saved && !s.merged_into)

@@ -190,6 +190,9 @@ pub struct PaperQuestionItem {
     pub stem: String,
     pub question_type: String,
     pub difficulty: String,
+    pub options: Option<serde_json::Value>,
+    pub correct_answer: Option<serde_json::Value>,
+    pub analysis: Option<String>,
 }
 
 /// 创建试卷请求（V2.1.1：支持元数据 + document_id 幂等复用键）

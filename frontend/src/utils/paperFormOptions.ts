@@ -36,6 +36,17 @@ export function gradesForStage(stage?: string | null): { label: string; value: s
   return []
 }
 
+/** 试卷筛选：年级+学期组合（高一上学期 → grade=高一, semester=first） */
+export function gradeSemesterOptions(stage?: string | null): { label: string; grade: string; semester: string }[] {
+  const grades = gradesForStage(stage)
+  const out: { label: string; grade: string; semester: string }[] = []
+  for (const g of grades) {
+    out.push({ label: `${g.label}上学期`, grade: g.value, semester: 'first' })
+    out.push({ label: `${g.label}下学期`, grade: g.value, semester: 'second' })
+  }
+  return out
+}
+
 export const CITY_OPTIONS: Record<string, string[]> = {
   北京: ['东城区', '西城区', '朝阳区', '海淀区', '丰台区', '石景山区', '通州区', '昌平区', '大兴区'],
   上海: ['黄浦区', '徐汇区', '静安区', '浦东新区', '杨浦区', '闵行区', '宝山区', '嘉定区', '松江区'],

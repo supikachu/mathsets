@@ -16,6 +16,7 @@ import {
   type KnowledgeTreeKind,
   type KnowledgeNodeTreeNode,
 } from '@/api/client'
+import { PAPER_KIND_OPTIONS } from '@/utils/questionSource'
 import {
   unwrapTreeResponse,
   getKnowledgeTreeList,
@@ -30,20 +31,26 @@ const props = withDefaults(
     treeId?: string
     /** 面板全局开关（由父组件 Header Toggle 控制，Notion/Linear 风格） */
     open?: boolean
+    /** 父组件控制的浏览对象：questions 切回章节树，papers 进入试卷类型列表 */
+    view?: 'questions' | 'papers'
+    /** 试卷模式下当前选中的考试类型（空=全部） */
+    selectedSourceKind?: string
   }>(),
-  { selectedId: '', treeId: '', open: true },
+  { selectedId: '', treeId: '', open: true, view: 'questions', selectedSourceKind: '' },
 )
 
 const emit = defineEmits<{
   select: [nodeId: string]
   /** 学段或学科切换时通知父组件（父组件需据此刷新题目列表） */
   contextChange: [payload: { stage: string; subject: string }]
+  viewChange: [view: 'questions' | 'papers']
+  sourceKindSelect: [kind: string]
 }>()
 
 // ─── 学段 / 学科 / 模式 联动状态 ───────────────────────────────────────
 type Stage = 'junior' | 'senior'
 type Subject = 'math' | 'physics'
-type TreeMode = 'chapter' | 'knowledge' | 'method'
+type TreeMode = 'chapter' | 'knowledge' | 'method' | 'papers'
 
 const STAGES: { key: Stage; label: string }[] = [
   { key: 'junior', label: '初中' },
@@ -54,10 +61,11 @@ const SUBJECTS: { key: Subject; label: string }[] = [
   { key: 'physics', label: '物理' },
 ]
 /** 模式 → 后端 KnowledgeTreeKind 映射；method Tab 对应 kind=ability（题型专题树） */
-const MODES: { key: TreeMode; label: string; kind: KnowledgeTreeKind | null }[] = [
-  { key: 'chapter', label: '章节', kind: 'chapter' },
-  { key: 'knowledge', label: '知识点', kind: 'knowledge' },
-  { key: 'method', label: '题型专题', kind: 'ability' },
+const MODES: { key: TreeMode; label: string; shortLabel: string; kind: KnowledgeTreeKind | null }[] = [
+  { key: 'chapter', label: '章节', shortLabel: '章节', kind: 'chapter' },
+  { key: 'knowledge', label: '知识点', shortLabel: '知识点', kind: 'knowledge' },
+  { key: 'method', label: '题型专题', shortLabel: '专题', kind: 'ability' },
+  { key: 'papers', label: '试卷', shortLabel: '试卷', kind: null },
 ]
 
 const currentStage = ref<Stage>(
@@ -108,14 +116,17 @@ const SUBJECT_CODE: Record<Subject, string> = {
   math: 'math',
   physics: 'physics',
 }
-const MODE_CODE: Record<TreeMode, string> = {
+const MODE_CODE: Record<Exclude<TreeMode, 'papers'>, string> = {
   chapter: 'chapter',
   knowledge: 'knowledge',
   method: 'method',
 }
 
+const isPapersMode = computed(() => treeMode.value === 'papers')
+
 /** 期望的 tree code，如 'math_chapter_high'（高中数学章节树） */
 const expectedCode = computed(() => {
+  if (treeMode.value === 'papers') return ''
   const subj = SUBJECT_CODE[currentSubject.value]
   const mode = MODE_CODE[treeMode.value]
   const stage = STAGE_CODE[currentStage.value]
@@ -184,6 +195,11 @@ function selectNode(id: string) {
 function selectAll() {
   internalSelected.value = ''
   emit('select', '')
+  if (isPapersMode.value) emit('sourceKindSelect', '')
+}
+
+function selectPaperKind(kind: string) {
+  emit('sourceKindSelect', kind)
 }
 
 function isSelected(id: string): boolean {
@@ -204,6 +220,12 @@ function setSubject(s: Subject) {
 function setMode(m: TreeMode) {
   if (treeMode.value === m) return
   treeMode.value = m
+  const view = m === 'papers' ? 'papers' : 'questions'
+  emit('viewChange', view)
+  if (m === 'papers') {
+    emit('sourceKindSelect', '')
+    emit('select', '')
+  }
 }
 
 // ─── 数据加载 ─────────────────────────────────────────────────────────
@@ -288,26 +310,43 @@ watch(activeTreeId, () => {
 watch([currentStage, currentSubject], () => {
   internalSelected.value = ''
   expandedIds.value = new Set()
+  emit('select', '') // 通知父组件：上下文变了，右侧列表需重载
+  if (treeMode.value === 'papers') return
   // 关键：先置 loading=true，再清 activeTreeId。
   // 这样 loadTreeData 的早退分支（清 treeData）被 loading 遮挡，不会闪现"暂无知识树"空状态。
   loading.value = true
   activeTreeId.value = ''
-  emit('select', '') // 通知父组件：上下文变了，右侧列表需重载
   loadTrees()
 })
 
-// 分类视角切换（章节/知识点/题型专题）：仅重新加载左侧树，不影响右侧列表
-// 右侧列表保持当前数据，直到用户明确点击新树上的某个节点
-watch(treeMode, () => {
+// 分类视角切换：试卷模式不拉树；切回题目三 Tab 才加载对应树
+watch(treeMode, (mode) => {
   expandedIds.value = new Set()
+  if (mode === 'papers') {
+    loading.value = false
+    activeTreeId.value = ''
+    treeData.value = []
+    return
+  }
   loading.value = true
   activeTreeId.value = ''
-  // 不 emit('select', ...) —— 分类视角切换不应触发右侧列表重载
-  // 不清 internalSelected —— 旧选中 ID 在新树中无匹配节点，自然无高亮；切回原模式时恢复高亮
   loadTrees()
 })
 
+watch(
+  () => props.view,
+  (view) => {
+    if (view === 'papers' && treeMode.value !== 'papers') {
+      treeMode.value = 'papers'
+    } else if (view === 'questions' && treeMode.value === 'papers') {
+      treeMode.value = 'chapter'
+    }
+  },
+  { immediate: true },
+)
+
 onMounted(async () => {
+  if (treeMode.value === 'papers') return
   await loadTrees()
   if (activeTreeId.value) await loadTreeData()
 })
@@ -325,7 +364,7 @@ onMounted(async () => {
       <header class="kt-nav-header">
         <div class="kt-nav-title">
           <AppIcon name="list" :size="14" />
-          <span>知识树导航</span>
+          <span>{{ isPapersMode ? '试卷导航' : '知识树导航' }}</span>
         </div>
       </header>
 
@@ -375,9 +414,10 @@ onMounted(async () => {
               :class="{ active: treeMode === m.key }"
               role="tab"
               :aria-selected="treeMode === m.key"
+              :title="m.label"
               @click="setMode(m.key)"
             >
-              {{ m.label }}
+              {{ m.shortLabel }}
             </button>
           </div>
         </div>
@@ -386,15 +426,30 @@ onMounted(async () => {
         <button
           type="button"
           class="kt-nav-all"
-          :class="{ active: !internalSelected }"
+          :class="{ active: isPapersMode ? !selectedSourceKind : !internalSelected }"
           @click="selectAll"
         >
           <AppIcon name="list" :size="14" class="kt-nav-all-icon" />
-          <span>全部题目</span>
+          <span>{{ isPapersMode ? '全部试卷' : '全部题目' }}</span>
         </button>
 
+        <!-- 试卷模式：考试类型列表 -->
+        <div v-if="isPapersMode" class="kt-nav-list">
+          <button
+            v-for="kind in PAPER_KIND_OPTIONS"
+            :key="kind.value"
+            type="button"
+            class="kt-nav-row kt-kind-row"
+            :class="{ selected: selectedSourceKind === kind.value }"
+            @click="selectPaperKind(kind.value)"
+          >
+            <span class="row-dot" />
+            <span class="row-name">{{ kind.label }}</span>
+          </button>
+        </div>
+
         <!-- 树列表 -->
-        <div class="kt-nav-list">
+        <div v-else class="kt-nav-list">
           <div v-if="loading" class="kt-nav-loading">加载中…</div>
           <AppEmpty v-else-if="flatList.length === 0" :description="emptyHint" />
           <template v-else>
@@ -640,16 +695,17 @@ onMounted(async () => {
 
 .kt-mode-item {
   flex: 1;
-  padding: 6px 12px;
+  padding: 6px 2px;
   border: none;
   border-radius: 9999px;
   background: transparent;
   color: var(--text-muted);
-  font-size: 11.5px;
+  font-size: 11px;
   font-weight: 500;
   cursor: pointer;
   transition: transform 0.22s ease;
   text-align: center;
+  white-space: nowrap;
 }
 
 .kt-mode-item:hover:not(.active) {
@@ -762,6 +818,14 @@ onMounted(async () => {
 
 .kt-nav-row:hover {
   background: var(--bg-hover); /* hover:bg-gray-50 柔和反馈 */
+}
+
+button.kt-kind-row {
+  width: 100%;
+  border: none;
+  background: transparent;
+  text-align: left;
+  font: inherit;
 }
 
 .kt-nav-row.selected {

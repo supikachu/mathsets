@@ -126,6 +126,19 @@ export function mapLegacyDocumentType(t: string): { category: SourceCategory; ki
   }
 }
 
+/** 试卷卡片/筛选展示：code 与中文互认 */
+export function displayPaperSource(sourceType?: string | null, sub?: string | null): string {
+  const raw = (sourceType || '').trim()
+  const subRaw = (sub || '').trim()
+  const isMock = raw === 'mock' || raw === '高考模拟' || raw === '模拟题' || raw === 'mock_exam'
+  if (isMock && subRaw) return subRaw
+  if (raw) {
+    const label = sourceKindLabel(raw)
+    return label || subRaw
+  }
+  return subRaw
+}
+
 export function displaySourceLabel(category?: string | null, kind?: string | null, legacy?: string | null): string {
   if (category && kind) {
     return `${sourceCategoryLabel(category)} · ${sourceKindLabel(kind)}`

@@ -34,38 +34,7 @@ pub async fn list_papers(
     let mut count_builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
         "SELECT COUNT(*) FROM papers p WHERE 1=1",
     );
-    if let Some(ref status) = query.status {
-        count_builder.push(" AND p.status = ").push_bind(status.clone());
-    }
-    if let Some(ref subject) = query.subject {
-        count_builder.push(" AND p.subject = ").push_bind(subject.clone());
-    }
-    if let Some(year) = query.year {
-        count_builder.push(" AND p.year = ").push_bind(year);
-    }
-    if let Some(ref stage) = query.stage {
-        count_builder.push(" AND p.stage = ").push_bind(stage.clone());
-    }
-    if let Some(ref semester) = query.semester {
-        count_builder.push(" AND p.semester = ").push_bind(semester.clone());
-    }
-    if let Some(ref region) = query.region {
-        count_builder
-            .push(" AND (p.region_province = ")
-            .push_bind(region.clone())
-            .push(" OR p.region_city = ")
-            .push_bind(region.clone())
-            .push(")");
-    }
-    if let Some(ref source_type) = query.source_type {
-        count_builder.push(" AND p.source_type = ").push_bind(source_type.clone());
-    }
-    if let Some(ref document_type) = query.document_type {
-        count_builder
-            .push(" AND EXISTS (SELECT 1 FROM documents d WHERE d.id = p.document_id AND d.document_type = ")
-            .push_bind(document_type.clone())
-            .push(")");
-    }
+    apply_paper_filters(&mut count_builder, &query);
     let total: i64 = count_builder
         .build_query_scalar()
         .fetch_one(&state.pool)
@@ -87,40 +56,7 @@ pub async fn list_papers(
         "#,
     );
 
-    // 筛选（使用参数绑定，避免 SQL 注入）
-    if let Some(ref status) = query.status {
-        query_builder.push(" AND p.status = ").push_bind(status.clone());
-    }
-    if let Some(ref subject) = query.subject {
-        query_builder.push(" AND p.subject = ").push_bind(subject.clone());
-    }
-    // ── V2.1.1 元数据组合过滤 ──
-    if let Some(year) = query.year {
-        query_builder.push(" AND p.year = ").push_bind(year);
-    }
-    if let Some(ref stage) = query.stage {
-        query_builder.push(" AND p.stage = ").push_bind(stage.clone());
-    }
-    if let Some(ref semester) = query.semester {
-        query_builder.push(" AND p.semester = ").push_bind(semester.clone());
-    }
-    if let Some(ref region) = query.region {
-        query_builder
-            .push(" AND (p.region_province = ")
-            .push_bind(region.clone())
-            .push(" OR p.region_city = ")
-            .push_bind(region.clone())
-            .push(")");
-    }
-    if let Some(ref source_type) = query.source_type {
-        query_builder.push(" AND p.source_type = ").push_bind(source_type.clone());
-    }
-    if let Some(ref document_type) = query.document_type {
-        query_builder
-            .push(" AND EXISTS (SELECT 1 FROM documents d WHERE d.id = p.document_id AND d.document_type = ")
-            .push_bind(document_type.clone())
-            .push(")");
-    }
+    apply_paper_filters(&mut query_builder, &query);
 
     query_builder
         .push(" ORDER BY p.updated_at DESC LIMIT ")
@@ -291,7 +227,8 @@ pub async fn get_paper(
         r#"
         SELECT pq.id, pq.paper_id, pq.question_id, pq.sort_order, pq.score, pq.section,
                pq.question_no, pq.display_order, pq.created_at,
-               q.stem, q.question_type::text, q.difficulty::text
+               q.stem, q.question_type::text, q.difficulty::text,
+               q.options, q.correct_answer, q.analysis
         FROM paper_questions pq
         JOIN questions q ON q.id = pq.question_id
         WHERE pq.paper_id = $1
@@ -335,6 +272,9 @@ pub async fn get_paper(
                 stem: q.stem,
                 question_type: q.question_type,
                 difficulty: q.difficulty,
+                options: q.options,
+                correct_answer: q.correct_answer,
+                analysis: q.analysis,
             })
             .collect(),
         year: paper.year,
@@ -814,6 +754,9 @@ struct PaperQuestionRow {
     stem: String,
     question_type: String,
     difficulty: String,
+    options: Option<serde_json::Value>,
+    correct_answer: Option<serde_json::Value>,
+    analysis: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -824,11 +767,110 @@ pub struct PaperListQuery {
     pub subject: Option<String>,
     // ── V2.1.1 元数据组合过滤（P1 检索） ──
     pub year: Option<i32>,
+    /// 更早以前：year < year_lt（与 year 同时存在时以 year 为准）
+    pub year_lt: Option<i32>,
     pub stage: Option<String>,
+    pub grade: Option<String>,
     pub semester: Option<String>,
     pub region: Option<String>,
     pub source_type: Option<String>,
+    pub sub_source_type: Option<String>,
     pub document_type: Option<String>,
+    pub keyword: Option<String>,
+}
+
+/// 来源码与中文/历史别名互认，避免 OCR 写中文、列表筛 code 对不上
+fn source_type_aliases(raw: &str) -> Vec<String> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return Vec::new();
+    }
+    const GROUPS: &[&[&str]] = &[
+        &["monthly_test", "月测", "月考", "daily"],
+        &["unit_test", "单元测", "单元测试"],
+        &["stage_test", "阶段测", "阶段检测"],
+        &["midterm", "期中"],
+        &["final", "期末"],
+        &["gaokao", "高考真题", "exam"],
+        &["mock", "模拟题", "高考模拟", "mock_exam"],
+    ];
+    for group in GROUPS {
+        if group.iter().any(|a| *a == s) {
+            return group.iter().map(|a| (*a).to_string()).collect();
+        }
+    }
+    vec![s.to_string()]
+}
+
+fn subject_aliases(raw: &str) -> Vec<String> {
+    match raw.trim() {
+        "math" | "数学" => vec!["math".into(), "数学".into()],
+        "physics" | "物理" => vec!["physics".into(), "物理".into()],
+        other => vec![other.to_string()],
+    }
+}
+
+fn apply_paper_filters<'a>(
+    builder: &mut sqlx::QueryBuilder<'a, sqlx::Postgres>,
+    query: &'a PaperListQuery,
+) {
+    if let Some(ref status) = query.status {
+        builder.push(" AND p.status = ").push_bind(status.clone());
+    }
+    if let Some(ref subject) = query.subject {
+        let aliases = subject_aliases(subject);
+        builder.push(" AND p.subject = ANY(").push_bind(aliases).push(")");
+    }
+    if let Some(year) = query.year {
+        builder.push(" AND p.year = ").push_bind(year);
+    } else if let Some(year_lt) = query.year_lt {
+        builder.push(" AND p.year IS NOT NULL AND p.year < ").push_bind(year_lt);
+    }
+    if let Some(ref stage) = query.stage {
+        builder.push(" AND p.stage = ").push_bind(stage.clone());
+    }
+    if let Some(ref grade) = query.grade {
+        builder.push(" AND p.grade = ").push_bind(grade.clone());
+    }
+    if let Some(ref semester) = query.semester {
+        builder.push(" AND p.semester = ").push_bind(semester.clone());
+    }
+    if let Some(ref region) = query.region {
+        builder
+            .push(" AND (p.region_province = ")
+            .push_bind(region.clone())
+            .push(" OR p.region_city = ")
+            .push_bind(region.clone())
+            .push(")");
+    }
+    if let Some(ref source_type) = query.source_type {
+        let aliases = source_type_aliases(source_type);
+        builder.push(" AND (p.source_type = ANY(");
+        builder.push_bind(aliases.clone());
+        builder.push(") OR p.sub_source_type = ANY(");
+        builder.push_bind(aliases);
+        builder.push("))");
+    }
+    if let Some(ref sub) = query.sub_source_type {
+        builder.push(" AND p.sub_source_type = ").push_bind(sub.clone());
+    }
+    if let Some(ref document_type) = query.document_type {
+        builder
+            .push(" AND EXISTS (SELECT 1 FROM documents d WHERE d.id = p.document_id AND d.document_type = ")
+            .push_bind(document_type.clone())
+            .push(")");
+    }
+    if let Some(ref keyword) = query.keyword {
+        let trimmed = keyword.trim();
+        if !trimmed.is_empty() {
+            let pat = format!("%{trimmed}%");
+            builder.push(" AND (p.title ILIKE ");
+            builder.push_bind(pat.clone());
+            builder.push(" OR COALESCE(p.school_name, '') ILIKE ");
+            builder.push_bind(pat);
+            builder.push(")");
+        }
+    }
 }
 
 /// 获取试卷详情（内部使用）
@@ -860,7 +902,8 @@ async fn get_paper_internal(
         r#"
         SELECT pq.id, pq.paper_id, pq.question_id, pq.sort_order, pq.score, pq.section,
                pq.question_no, pq.display_order, pq.created_at,
-               q.stem, q.question_type::text, q.difficulty::text
+               q.stem, q.question_type::text, q.difficulty::text,
+               q.options, q.correct_answer, q.analysis
         FROM paper_questions pq
         JOIN questions q ON q.id = pq.question_id
         WHERE pq.paper_id = $1
@@ -904,6 +947,9 @@ async fn get_paper_internal(
                 stem: q.stem,
                 question_type: q.question_type,
                 difficulty: q.difficulty,
+                options: q.options,
+                correct_answer: q.correct_answer,
+                analysis: q.analysis,
             })
             .collect(),
         year: paper.year,

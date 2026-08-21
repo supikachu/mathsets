@@ -420,7 +420,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick, defineAsyncComponent } from 'vue'
 import { useRoute, useRouter, onBeforeRouteLeave } from 'vue-router'
-import { questionApi, spaceApi, tagsApi, paperApi, type SpaceMemberInfo, type Tag, type ParsedQuestion, type TaggingUnmatched, type TaggingMatch } from '@/api/client'
+import { questionApi, spaceApi, tagsApi, paperApi, aiTaskApi, type SpaceMemberInfo, type Tag, type ParsedQuestion, type TaggingUnmatched, type TaggingMatch } from '@/api/client'
 import { AppButton, AppBadge, AppModal, AppConfirm, AppIcon } from '@/components/ui'
 import { useToast } from '@/composables/useToast'
 import { getKnowledgeTreeList } from '@/composables/useKnowledgeTreeCache'
@@ -434,6 +434,7 @@ import {
   applySourceStateToQuestionFields,
   normalizeSubjectCode,
   resolvePaperIdsFromSource,
+  displayPaperSource,
   type QuestionFormSourceFields,
   type QuestionSourceState,
 } from '@/utils/questionSource'
@@ -532,6 +533,18 @@ const manualLaneLocked = computed(() =>
   isNew && entryMode.value === 'manual' && !editingFromAiCard.value && manualHasContent.value,
 )
 
+function persistSlotMeta(prev: any, formUnsaved: boolean) {
+  const saved = Boolean(prev?.saved)
+  return {
+    saved,
+    savedQid: prev?.savedQid,
+    // 已落库题的 hasUnsaved 只跟本题自己走，避免当前 form 的脏标记污染整批草稿
+    hasUnsaved: saved ? Boolean(prev?.hasUnsaved && formUnsaved) : Boolean(prev?.hasUnsaved || formUnsaved),
+    aiMeta: prev?.aiMeta,
+    existingQuestionId: prev?.existingQuestionId,
+  }
+}
+
 function persistCurrentQuestionSlot() {
   const list = questionList.value
   const idx = activeIndex.value
@@ -539,11 +552,7 @@ function persistCurrentQuestionSlot() {
   const prev = list[idx]
   list[idx] = {
     ...captureFormSnapshot(),
-    saved: prev?.saved ?? false,
-    savedQid: prev?.savedQid,
-    hasUnsaved: (prev?.hasUnsaved && !prev?.saved) || form.hasUnsaved,
-    aiMeta: prev?.aiMeta,
-    existingQuestionId: prev?.existingQuestionId,
+    ...persistSlotMeta(prev, form.hasUnsaved),
   }
 }
 
@@ -685,6 +694,35 @@ function isFullyPersistedBatch(list: any[] | undefined | null): boolean {
   return withStem.every((q: any) => q.saved && !q.hasUnsaved)
 }
 
+/** 用解析任务的 saved / saved_question_id 校正本地草稿，避免已落库题被当成未保存 */
+async function reconcileAiSavedFlags(list: any[]): Promise<any[]> {
+  const taskIds = [...new Set(
+    list.map((q: any) => q?.aiMeta?.task_id).filter((id: unknown): id is string => typeof id === 'string' && id.length > 0),
+  )]
+  if (taskIds.length === 0) return list
+  const savedByIndex = new Map<string, string>()
+  await Promise.all(taskIds.map(async (taskId) => {
+    try {
+      const { data } = await aiTaskApi.getParseTask(taskId)
+      for (const s of data.staged_questions ?? []) {
+        if (!s?.saved || !s.saved_question_id) continue
+        savedByIndex.set(`${taskId}:${String(s.index)}`, s.saved_question_id)
+      }
+    } catch {
+      /* 任务查询失败时保持本地标记 */
+    }
+  }))
+  if (savedByIndex.size === 0) return list
+  return list.map((q: any) => {
+    const taskId = q?.aiMeta?.task_id
+    const staged = q?.aiMeta?.staged_index
+    if (!taskId || staged == null) return q
+    const qid = savedByIndex.get(`${taskId}:${String(staged)}`)
+    if (!qid) return q
+    return { ...q, saved: true, savedQid: q.savedQid || qid, hasUnsaved: false }
+  })
+}
+
 function migrateLegacyNewDraftKeys() {
   if (!isNew) return
   try {
@@ -718,11 +756,7 @@ function saveAiDraft() {
       if (i === idx && editingFromAiCard.value) {
         return {
           ...captureFormSnapshot(),
-          saved: cur?.saved ?? false,
-          savedQid: cur?.savedQid,
-          hasUnsaved: (cur?.hasUnsaved && !cur?.saved) || form.hasUnsaved,
-          aiMeta: cur?.aiMeta,
-          existingQuestionId: cur?.existingQuestionId,
+          ...persistSlotMeta(cur, form.hasUnsaved),
         }
       }
       return JSON.parse(JSON.stringify(q))
@@ -766,12 +800,7 @@ function saveBatchDraft() {
         // 当前题：用最新 form 快照，保留 saved/savedQid 元信息
         return {
           ...captureFormSnapshot(),
-          saved: cur?.saved ?? false,
-          savedQid: cur?.savedQid,
-          hasUnsaved: (cur?.hasUnsaved && !cur?.saved) || form.hasUnsaved,
-          // 保留暂存链路元信息：草稿恢复后仍能携带 ai_meta 落库
-          aiMeta: cur?.aiMeta,
-          existingQuestionId: cur?.existingQuestionId,
+          ...persistSlotMeta(cur, form.hasUnsaved),
         }
       }
       return JSON.parse(JSON.stringify(q))
@@ -1473,10 +1502,14 @@ function buildPayloadFromSource(src: any, extra?: {
 
   let outPaperIds = extra?.paperIds ?? paperIds.value
   if (srcState) {
-    outPaperIds = resolvePaperIdsFromSource(srcState)
+    const fromSource = resolvePaperIdsFromSource(srcState)
+    if (fromSource.length) outPaperIds = fromSource
   }
 
-  const qType = src.question_type === 'multiple' ? 'choice' : (src.question_type || 'choice')
+  // 编辑态用 choice + sub_type=multi；落库用独立枚举 multiple，避免详情页只能靠答案个数猜题型
+  const rawType = src.question_type || 'choice'
+  const isMultiChoice = rawType === 'multiple' || src.sub_type === 'multi' || src.sub_type === 'multiple'
+  const qType = isMultiChoice ? 'multiple' : rawType
   const payload: any = {
     stem: src.stem,
     question_type: qType,
@@ -1502,6 +1535,7 @@ function buildPayloadFromSource(src: any, extra?: {
   }
   switch (qType) {
     case 'choice':
+    case 'multiple':
       payload.options = (src.options || []).filter((o: { content?: string }) => o.content?.trim())
       if (Array.isArray(src.correctAnswer)) {
         payload.correct_answer = src.correctAnswer
@@ -1588,7 +1622,7 @@ async function handleSave(submitAfter: boolean) {
   if (!form.stem.trim()) { toast.warning('请输入题干'); return }
   // 异步补全机制：保存草稿允许答案/解析为空（后端 system_flags.pending_answer 自动标记）
   // 仅在「提交审核」动作时才进行非空校验，由后端校验门兜底（ERR_ANSWER_INCOMPLETE 等）
-  if (submitAfter && form.question_type === 'choice' && !hasCorrectAnswer.value) {
+  if (submitAfter && (form.question_type === 'choice' || form.question_type === 'multiple') && !hasCorrectAnswer.value) {
     toast.warning('请选择正确答案')
     return
   }
@@ -1685,6 +1719,23 @@ async function handleSave(submitAfter: boolean) {
     // axum 0.8 Json 拒绝响应体可能是纯字符串（非 JSON 对象），需多级兜底
     const errData = e.response?.data || e.data
     const errMsg = typeof errData === 'string' ? errData : (errData?.error || errData?.message)
+
+    const alreadySaved = status === 409 && String(errMsg || '').includes('已保存')
+    if (alreadySaved && (isNew || questionList.value.length > 1)) {
+      const qid = questionList.value[activeIndex.value]?.savedQid
+        || (typeof errData === 'object' && errData ? (errData.id || errData.data?.id) : null)
+      if (qid && markCurrentSaved(String(qid))) return
+      const cur = questionList.value[activeIndex.value]
+      if (cur) {
+        cur.saved = true
+        cur.hasUnsaved = false
+      }
+      form.hasUnsaved = false
+      saveAiDraft()
+      toast.success('该题已在题库中，已同步状态')
+      return
+    }
+
     toast.error(errMsg || e.message || '保存失败')
 
     // 409 业务冲突（如"当前状态不允许编辑"）：题目状态已被其他人/流程变更
@@ -1759,6 +1810,14 @@ async function handleSaveAllRecognized() {
         }
         ok++
       } catch (e: any) {
+        const status = e.response?.status || e.status
+        const errData = e.response?.data || e.data
+        const errMsg = typeof errData === 'string' ? errData : (errData?.error || errData?.message || '')
+        if (status === 409 && String(errMsg).includes('已保存')) {
+          list[i] = { ...q, saved: true, hasUnsaved: false }
+          ok++
+          continue
+        }
         console.error(`[handleSaveAllRecognized] 第 ${i + 1} 题保存失败:`, e)
         failed.push(i + 1)
       }
@@ -1931,7 +1990,7 @@ function applyStoredManualDraft(): boolean {
   }
 }
 
-function restoreDraft() {
+async function restoreDraft() {
   migrateLegacyNewDraftKeys()
   // 新建页默认停在 AI：只恢复识别草稿；手动草稿等用户点「手动录题」再取
   try {
@@ -1942,6 +2001,7 @@ function restoreDraft() {
       if ((batchDraft?.mode === 'batch' || batchDraft?.mode === 'ai')
           && Array.isArray(batchDraft.questionList)
           && batchDraft.questionList.length > 0) {
+        batchDraft.questionList = await reconcileAiSavedFlags(batchDraft.questionList)
         if (isFullyPersistedBatch(batchDraft.questionList)) {
           clearAiDraft()
           void clearBatchSnapshot()
@@ -1978,6 +2038,15 @@ async function doRestoreDraft() {
   if (pendingBatchDraft) {
     try {
       questionList.value = JSON.parse(JSON.stringify(pendingBatchDraft.questionList))
+      questionList.value = await reconcileAiSavedFlags(questionList.value)
+      if (isFullyPersistedBatch(questionList.value)) {
+        clearAiDraft()
+        void clearBatchSnapshot()
+        pendingBatchDraft = null
+        restoreDialog.value = false
+        toast.info('这些题目已全部保存，无需恢复')
+        return
+      }
       const idx = Math.min(pendingBatchDraft.activeIndex || 0, questionList.value.length - 1)
       activeIndex.value = idx
       if (pendingBatchDraft.aiSource) {
@@ -2156,12 +2225,18 @@ async function loadQuestion() {
     const d = res.data
     const meta = (d.metadata || {}) as Record<string, any>
     form.stem = d.stem
-    form.question_type = d.question_type
+    // 库内 multiple → 编辑态 choice + sub_type=multi（表单控件按 choice 渲染）
+    if (d.question_type === 'multiple') {
+      form.question_type = 'choice'
+      form.sub_type = 'multi'
+    } else {
+      form.question_type = d.question_type
+      form.sub_type = (d as any).sub_type || meta.sub_type || ''
+    }
     form.difficulty = difficultyNumToString(d.difficulty)
     form.default_score = d.default_score
     form.grade = meta.grade || ''
     form.semester = d.semester || undefined
-    form.sub_type = (d as any).sub_type || ''
     form.difficulty_coefficient = d.difficulty_score ?? 0.5
     form.grade_semester = meta.grade_semester || ''
     form.year = meta.year || ''
@@ -2258,7 +2333,7 @@ async function loadQuestion() {
     form.solutionAnswer = ''
     form.sub_answers = ['']
     form.gradingSteps = []
-    if (d.question_type === 'choice' && d.options) {
+    if ((d.question_type === 'choice' || d.question_type === 'multiple') && d.options) {
       let opts = d.options
       if (typeof opts === 'string') { try { opts = JSON.parse(opts) } catch { opts = [] } }
       if (Array.isArray(opts)) {
@@ -2270,7 +2345,7 @@ async function loadQuestion() {
         })
       }
       if (Array.isArray(d.correct_answer)) {
-        if ((d as any).sub_type === 'multi' || d.correct_answer.length > 1) {
+        if (d.question_type === 'multiple' || form.sub_type === 'multi' || (d as any).sub_type === 'multi' || d.correct_answer.length > 1) {
           form.sub_type = 'multi'
           form.correctAnswer = d.correct_answer as string[]
         } else {
@@ -2622,12 +2697,14 @@ function parsedQuestionToSnapshot(q: ParsedQuestion): any {
   let blanks: { position: number; answer: string }[] = [{ position: 1, answer: '' }]
   let sub_answers: string[] = ['']
 
-  if (q.question_type === 'choice' && q.correct_answer.kind === 'choice' && q.correct_answer.value.options) {
-    const opts = q.correct_answer.value.options
-    if (q.sub_type === 'multi' || opts.length > 1) {
-      correctAnswer = opts
-    } else {
-      correctAnswer = opts[0] || ''
+  if (q.question_type === 'choice' || q.question_type === 'multiple') {
+    if (q.correct_answer.kind === 'choice' && q.correct_answer.value.options) {
+      const opts = q.correct_answer.value.options
+      if (q.question_type === 'multiple' || q.sub_type === 'multi' || opts.length > 1) {
+        correctAnswer = opts
+      } else {
+        correctAnswer = opts[0] || ''
+      }
     }
   } else if (q.question_type === 'fill' && q.correct_answer.kind === 'fill' && q.correct_answer.value.blanks) {
     blanks = q.correct_answer.value.blanks.map(b => ({ position: b.position, answer: b.answer }))
@@ -2698,10 +2775,20 @@ function parsedQuestionToSnapshot(q: ParsedQuestion): any {
     difficultyCoefficientOut = [0.9, 0.75, 0.55, 0.35, 0.2][diffStars - 1] ?? 0.55
   }
 
+  // 编辑态统一用 choice + sub_type；tagging / 识别可能直接给出 multiple
+  const rawType = q.tagging_question_type || q.question_type || 'choice'
+  const isMulti =
+    rawType === 'multiple'
+    || q.sub_type === 'multi'
+    || q.sub_type === 'multiple'
+    || (Array.isArray(correctAnswer) && correctAnswer.length > 1)
+  const questionType = isMulti || rawType === 'choice' ? 'choice' : rawType
+  const subType = isMulti ? 'multi' : (q.sub_type || '')
+
   return {
-    stem: normalizeChoiceAnswerBlank(q.stem ?? '', q.question_type),
-    question_type: q.tagging_question_type || q.question_type,
-    sub_type: q.sub_type || '',
+    stem: normalizeChoiceAnswerBlank(q.stem ?? '', questionType),
+    question_type: questionType,
+    sub_type: subType,
     difficulty,
     difficulty_coefficient: difficultyCoefficientOut,
     default_score: 5,
@@ -2714,7 +2801,7 @@ function parsedQuestionToSnapshot(q: ParsedQuestion): any {
     region_city: '',
     source_type: '',
     sub_source_type: '',
-    options: q.question_type === 'choice' && q.options
+    options: (rawType === 'choice' || rawType === 'multiple') && q.options
       ? q.options.map(o => ({ label: o.label, content: o.content }))
       : [
           { label: 'A', content: '' },
@@ -2754,7 +2841,7 @@ function parsedQuestionToSnapshot(q: ParsedQuestion): any {
 }
 
 // 接收 AI 批量识别结果：只装进工作台，不立刻切到手动录题（点卡片再进）
-function handleBatchParsed(questions: ParsedQuestion[]) {
+async function handleBatchParsed(questions: ParsedQuestion[]) {
   if (!questions || questions.length === 0) {
     toast.warning('未识别到任何题目')
     return
@@ -2762,7 +2849,14 @@ function handleBatchParsed(questions: ParsedQuestion[]) {
 
   isSwitchingTab.value = true
   try {
-    questionList.value = questions.map(q => parsedQuestionToSnapshot(q))
+    questionList.value = await reconcileAiSavedFlags(questions.map(q => parsedQuestionToSnapshot(q)))
+    if (isFullyPersistedBatch(questionList.value)) {
+      clearAiDraft()
+      void clearBatchSnapshot()
+      toast.info('这些题目已全部保存')
+      isSwitchingTab.value = false
+      return
+    }
     activeIndex.value = 0
     applyFormSnapshot(questionList.value[0])
     returnToAiOnBack.value = true
@@ -2822,12 +2916,21 @@ onMounted(() => {
 
   // 单题/批量草稿恢复：批量草稿优先 → 单题草稿回退
   loadQuestion().then(() => {
-    if (!isNew) restoreDraft()
+    if (!isNew) void restoreDraft()
   })
-  if (isNew) restoreDraft()
+  if (isNew) void restoreDraft()
 })
 
 onMounted(async () => {
+  const hasDraft = Boolean(
+    sessionStorage.getItem(getBatchDraftKey())
+    || sessionStorage.getItem('q-batch-draft-new-ai')
+    || sessionStorage.getItem('q-batch-draft-new'),
+  )
+  if (hasDraft) {
+    void clearBatchSnapshot()
+    return
+  }
   const snapshot = await hasUnfinishedSnapshot()
   if (snapshot) {
     if (aiDialogRef.value) {
@@ -2836,6 +2939,30 @@ onMounted(async () => {
       // 异步组件尚未挂载，缓存等待 watch 触发
       pendingSnapshotRestore.value = snapshot
     }
+  }
+})
+
+onMounted(async () => {
+  if (!isNew) return
+  const qid = route.query.paperId
+  if (typeof qid !== 'string' || !qid) return
+  paperIds.value = [qid]
+  try {
+    const { data: p } = await paperApi.get(qid)
+    if (!form.year && p.year != null) form.year = String(p.year)
+    if (!form.grade && p.grade) form.grade = p.grade
+    if (!form.semester && p.semester) form.semester = p.semester
+    if (!form.region_province && p.region_province) form.region_province = p.region_province
+    if (!form.region_city && p.region_city) form.region_city = p.region_city
+    if (!form.source_type && p.source_type) {
+      form.source_type = displayPaperSource(p.source_type, null) || p.source_type
+    }
+    if (!form.sub_source_type && p.sub_source_type) form.sub_source_type = p.sub_source_type
+    if (p.stage === 'junior' || p.stage === 'senior') form.stage = p.stage
+    const subj = normalizeSubjectCode(p.subject)
+    if (subj) form.subject = subj
+  } catch {
+    /* 补录预填失败不阻塞录入 */
   }
 })
 

@@ -171,6 +171,11 @@ export const authApi = {
 // ===========================================================================
 
 /// 题目列表项（B2：移除 grade，difficulty 改为 number，新增 grade_level）
+export interface QuestionPaperBrief {
+  id: string
+  title: string
+}
+
 export interface QuestionSummary {
   id: string
   stem: string
@@ -186,6 +191,8 @@ export interface QuestionSummary {
   updated_at: string
   version: number
   space_id: string
+  /// 关联试卷（有则列表卡片展示试卷名）
+  papers?: QuestionPaperBrief[]
 }
 
 /// 题目详情（B2：新增 stem_text/images/metadata/exam_type/cognitive_level 等，
@@ -298,6 +305,7 @@ export interface QuestionQuery {
   source_category?: string
   source_kind?: string
   collection_id?: string
+  paper_id?: string
 }
 
 /// 自建标签输入（B2：category 改为 enum，新增 parent_id）
@@ -498,7 +506,111 @@ export interface QuestionSourceItem {
   document_type: string | null
 }
 
+export type PaperStatus = 'draft' | 'published' | 'archived'
+
+export interface PaperListQuery {
+  page?: number
+  page_size?: number
+  status?: PaperStatus | string
+  subject?: string
+  year?: number
+  year_lt?: number
+  stage?: string
+  grade?: string
+  semester?: string
+  region?: string
+  source_type?: string
+  sub_source_type?: string
+  document_type?: string
+  keyword?: string
+}
+
+export interface PaperSummary {
+  id: string
+  title: string
+  description: string | null
+  subject: string
+  grade: string | null
+  total_score: number
+  duration_minutes: number | null
+  status: PaperStatus
+  creator_id: string | null
+  creator_name: string | null
+  created_at: string
+  updated_at: string
+  version: number
+  question_count: number
+  year: number | null
+  stage: string | null
+  semester: string | null
+  region_province: string | null
+  region_city: string | null
+  school_name: string | null
+  source_type: string | null
+  sub_source_type: string | null
+  document_id: string | null
+  metadata: Record<string, unknown>
+}
+
+export interface PaperQuestionItemDetail {
+  id: string
+  question_id: string
+  sort_order: number
+  score: number
+  section: string | null
+  question_no: string | null
+  display_order: number
+  stem: string
+  question_type: string
+  difficulty: string
+  options?: { label: string; content: string }[] | null
+  correct_answer?: unknown
+  analysis?: string | null
+}
+
+export interface PaperDetail {
+  id: string
+  title: string
+  description: string | null
+  subject: string
+  grade: string | null
+  total_score: number
+  duration_minutes: number | null
+  status: PaperStatus
+  creator_id: string | null
+  creator_name: string | null
+  created_at: string
+  updated_at: string
+  version: number
+  questions: PaperQuestionItemDetail[]
+  year: number | null
+  stage: string | null
+  semester: string | null
+  region_province: string | null
+  region_city: string | null
+  school_name: string | null
+  source_type: string | null
+  sub_source_type: string | null
+  document_id: string | null
+  metadata: Record<string, unknown>
+}
+
+function unwrapPaperList(
+  data: PageResult<PaperSummary> | PaperSummary[],
+): { items: PaperSummary[]; total: number } {
+  if (Array.isArray(data)) return { items: data, total: data.length }
+  return { items: data?.items ?? [], total: data?.total ?? 0 }
+}
+
 export const paperApi = {
+  async list(params?: PaperListQuery) {
+    const res = await client.get<PageResult<PaperSummary> | PaperSummary[]>('/papers', { params })
+    const { items, total } = unwrapPaperList(res.data as any)
+    return { ...res, data: items, total }
+  },
+  get(id: string) {
+    return client.get<PaperDetail>(`/papers/${id}`)
+  },
   /// 试卷轻量列表（仅 id + title，供下拉选择）
   listBrief() {
     return client.get<PaperBrief[]>('/papers/brief')

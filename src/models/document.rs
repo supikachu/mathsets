@@ -221,6 +221,25 @@ pub struct PaperMetaInput {
     pub paper_id: Option<Uuid>,
 }
 
+impl PaperMetaInput {
+    /// 试卷类型：表单 source_type，否则回退到来源子类（如 final / midterm）
+    pub fn resolved_source_type(&self, fallback_kind: &str) -> Option<String> {
+        self.source_type
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .or_else(|| {
+                let k = fallback_kind.trim();
+                if k.is_empty() {
+                    None
+                } else {
+                    Some(k.to_string())
+                }
+            })
+    }
+}
+
 /// Collection 元数据（保留兼容；方案 A 下默认不建集合）
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CollectionMetaInput {
@@ -586,5 +605,26 @@ mod tests {
         assert!(should_create_paper("paper", true));
         assert!(!should_create_paper("paper", false));
         assert!(!should_create_paper("practice", true));
+    }
+
+    #[test]
+    fn test_resolved_source_type_fallback() {
+        let mut m = PaperMetaInput {
+            title: "卷".into(),
+            year: None,
+            stage: None,
+            grade: None,
+            subject: None,
+            semester: None,
+            region_province: None,
+            region_city: None,
+            school_name: None,
+            source_type: None,
+            sub_source_type: None,
+            paper_id: None,
+        };
+        assert_eq!(m.resolved_source_type("final").as_deref(), Some("final"));
+        m.source_type = Some("midterm".into());
+        assert_eq!(m.resolved_source_type("final").as_deref(), Some("midterm"));
     }
 }

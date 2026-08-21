@@ -86,7 +86,7 @@
 
             <!-- 选择题选项 -->
             <div
-              v-if="q?.question_type === 'choice' && optionList.length"
+              v-if="(q?.question_type === 'choice' || q?.question_type === 'multiple') && optionList.length"
               ref="optionsContainer"
               class="paper-options"
               :class="optionLayoutClass"
@@ -112,7 +112,7 @@
               <div v-if="hasAnswer" class="answer-card">
                 <div class="card-section-title">参考答案</div>
                 <!-- 选择题答案：统一 $\mathrm{...}$ 格式 KaTeX 渲染 -->
-                <div v-if="q?.question_type === 'choice' && correctLabels.length" class="card-answer-content">
+                <div v-if="(q?.question_type === 'choice' || q?.question_type === 'multiple') && correctLabels.length" class="card-answer-content">
                   <LatexRender :text="`$\\mathrm{${correctLabels.join('')}}$`" :inline="true" />
                 </div>
                 <!-- 填空题答案 -->
@@ -629,9 +629,11 @@ function isCorrect(label: string): boolean {
 }
 
 const isMultiChoice = computed(() => {
-  if (q.value?.question_type !== 'choice') return false
+  if (!q.value) return false
+  if (q.value.question_type === 'multiple') return true
+  if (q.value.question_type !== 'choice') return false
   if ((q.value as any)?.sub_type === 'multi') return true
-  const ans = q.value?.correct_answer
+  const ans = q.value.correct_answer
   return Array.isArray(ans) && ans.length > 1
 })
 
