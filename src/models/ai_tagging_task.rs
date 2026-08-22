@@ -54,6 +54,11 @@ pub struct AiTaggingTask {
     pub content: String,
     /// junior | senior（对应树 code 后缀 _junior / _high）
     pub stage: Option<String>,
+    /// 解析任务入队打标时回写暂存用
+    pub parse_task_id: Option<Uuid>,
+    pub source_index: Option<String>,
+    /// 解析阶段已产出的信号（TaggingSignals）；足够时打标可跳过 LLM 提取
+    pub parsed_signals: Option<serde_json::Value>,
     pub status: String,
     pub retry_count: i32,
     pub error_message: Option<String>,
@@ -69,5 +74,6 @@ pub struct AiTaggingTask {
 }
 
 pub const TAGGING_TASK_COLUMNS: &str = "id, creator_id, space_id, question_id, input_hash, content, stage, \
+     parse_task_id, source_index, parsed_signals, \
      status, retry_count, error_message, suggestion_id, locked_at, worker_id, heartbeat_at, \
      started_at, completed_at, cancel_requested_at, created_at, updated_at";

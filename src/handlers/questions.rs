@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use crate::ai::tagging::{
     apply_tagging_suggestion, confirmation_or_legacy, insert_confirmed_candidates,
+    repair_applied_suggestion_links,
 };
 use crate::auth::middleware::AuthUser;
 use crate::auth::permissions::{
@@ -370,7 +371,7 @@ pub(crate) async fn build_detail(
 ) -> Result<QuestionDetail, sqlx::Error> {
     // 关联数据查询失败时记录日志而非静默吞错（fix：旧实现 unwrap_or_default
     // 会把 SQL 错误吞成空数组，导致 tags/knowledge_nodes 在接口里"神秘消失"）
-    let kns = match get_question_knowledge_nodes(pool, question.id).await {
+    let mut kns = match get_question_knowledge_nodes(pool, question.id).await {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(
@@ -381,7 +382,7 @@ pub(crate) async fn build_detail(
             Vec::new()
         }
     };
-    let tags = match get_question_tags(pool, question.id).await {
+    let mut tags = match get_question_tags(pool, question.id).await {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(
@@ -392,6 +393,24 @@ pub(crate) async fn build_detail(
             Vec::new()
         }
     };
+    if kns.is_empty() && tags.is_empty() {
+        match repair_applied_suggestion_links(pool, question.id).await {
+            Ok(true) => {
+                if let Ok(v) = get_question_knowledge_nodes(pool, question.id).await {
+                    kns = v;
+                }
+                if let Ok(v) = get_question_tags(pool, question.id).await {
+                    tags = v;
+                }
+            }
+            Ok(false) => {}
+            Err(e) => tracing::warn!(
+                "build_detail: 补写题目 {} 打标关联失败: {}",
+                question.id,
+                e
+            ),
+        }
+    }
     let reviewer_ids = match list_reviewers(pool, question.id).await {
         Ok(v) => v,
         Err(e) => {

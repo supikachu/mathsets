@@ -9,6 +9,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, watch } from 'vue'
 import katex from 'katex'
+import { sanitizeQuestionMarkup } from '@/utils/parseMarkdown'
 
 export interface ImageConfig {
   width?: number
@@ -361,6 +362,44 @@ function renderKatex(formula: string, displayMode: boolean): string {
   }
 }
 
+function renderMarkdownTables(html: string): string {
+  const lines = html.split('\n')
+  const out: string[] = []
+  const isSep = (line: string) =>
+    /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line)
+  const isRow = (line: string) => /^\s*\|.*\|\s*$/.test(line)
+  const splitRow = (line: string) => {
+    const trimmed = line.trim().replace(/^\|/, '').replace(/\|$/, '')
+    return trimmed.split('|').map((c) => c.trim())
+  }
+
+  let i = 0
+  while (i < lines.length) {
+    if (i + 1 < lines.length && isRow(lines[i]) && isSep(lines[i + 1])) {
+      const header = splitRow(lines[i])
+      i += 2
+      const body: string[][] = []
+      while (i < lines.length && isRow(lines[i]) && !isSep(lines[i])) {
+        body.push(splitRow(lines[i]))
+        i++
+      }
+      const cell = (text: string, tag: 'th' | 'td') => `<${tag}>${text}</${tag}>`
+      let table = '<table class="latex-table"><thead><tr>'
+      table += header.map((c) => cell(c, 'th')).join('')
+      table += '</tr></thead><tbody>'
+      for (const row of body) {
+        table += `<tr>${row.map((c) => cell(c, 'td')).join('')}</tr>`
+      }
+      table += '</tbody></table>'
+      out.push(table)
+      continue
+    }
+    out.push(lines[i])
+    i++
+  }
+  return out.join('\n')
+}
+
 function render() {
   if (!container.value) return
   const text = props.text || ''
@@ -374,7 +413,7 @@ function render() {
 
   // ---- 阶段 1: 提取公式，留下纯字母数字占位符 ----
   const mathStore: { formula: string; displayMode: boolean }[] = []
-  let html = text
+  let html = sanitizeQuestionMarkup(text)
 
   html = html.replace(/\$\$([\s\S]+?)\$\$/g, (_, formula) => {
     const i = mathStore.length
@@ -412,6 +451,8 @@ function render() {
     /!\[([^\]]*)\]\(([^)]+)\)(?:\{([^}]*)\})?/g,
     (match, alt, urlField, configStr) => processImageTag(match, alt, urlField, configStr),
   )
+
+  html = renderMarkdownTables(html)
 
   // 处理换行
   if (props.subQuestionBadge && !props.inline) {
@@ -525,6 +566,26 @@ onBeforeUnmount(() => {
 .latex-render .katex-error {
   color: #e74c3c;
   border-bottom: 1px dashed #e74c3c;
+}
+
+.latex-render .latex-table {
+  border-collapse: collapse;
+  margin: 10px 0;
+  font-size: 13px;
+  line-height: 1.45;
+  max-width: 100%;
+}
+
+.latex-render .latex-table th,
+.latex-render .latex-table td {
+  border: 1px solid color-mix(in srgb, var(--text-primary, #1d1d1f) 16%, transparent);
+  padding: 5px 10px;
+  text-align: center;
+}
+
+.latex-render .latex-table th {
+  background: color-mix(in srgb, var(--text-primary, #1d1d1f) 6%, transparent);
+  font-weight: 600;
 }
 
 /* 行间公式（$$...$$）：左对齐+缩进，提升长篇推导的阅读连贯性 */

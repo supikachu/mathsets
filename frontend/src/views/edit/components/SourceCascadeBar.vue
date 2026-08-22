@@ -3,13 +3,15 @@
  * 来源级联条：大类 → 子类；试卷可填卷信息 +「同时创建试卷」
  * 变更 debounce 后 emit confirm，不阻塞 OCR。
  */
-import { ref, watch, computed, onMounted } from 'vue'
+import { ref, watch, computed, onMounted, nextTick } from 'vue'
 import { AppIcon, AppSelect } from '@/components/ui'
 import {
   paperApi,
   type DocumentMeta,
   type ConfirmDocumentRequest,
   type PaperBrief,
+  type AiClassification,
+  type AiPaperMetaSuggestion,
 } from '@/api/client'
 import {
   SOURCE_CATEGORY_LABELS,
@@ -74,6 +76,7 @@ let debounceTimer: ReturnType<typeof setTimeout> | null = null
 let seeding = false
 let seededDocId: string | null = null
 let userTouched = false
+let lastSentKey = ''
 
 const isPanel = computed(() => props.variant === 'panel')
 const kindOptions = computed(() => kindsForCategory(category.value))
@@ -95,6 +98,56 @@ const paperSelectOptions = computed(() => paperBriefs.value.map((p) => ({ label:
 function pickNonEmpty(current: string, incoming?: string | null) {
   if (current.trim()) return current
   return incoming ?? ''
+}
+
+function pickSuggest(current: string, incoming?: string | null) {
+  return pickNonEmpty(current, incoming)
+}
+
+function applyAiPaperFields(
+  ai: AiClassification | null | undefined,
+  incomingTitle: string,
+  mode: 'replace' | 'suggest',
+) {
+  if (!ai) return
+  const suggest = mode === 'suggest'
+    if (ai.create_paper != null && (!suggest || !userTouched)) {
+    createPaper.value = ai.create_paper
+  }
+  const pm: AiPaperMetaSuggestion | undefined = ai.paper_meta
+  if (!pm && !ai.title) return
+
+  const nextTitle = suggest
+    ? pickSuggest(title.value, pm?.title || ai.title || incomingTitle)
+    : (pm?.title || ai.title || incomingTitle)
+  title.value = nextTitle
+
+  if (category.value !== 'paper') return
+
+  paperForm.value = {
+    title: suggest
+      ? pickSuggest(paperForm.value.title, pm?.title || ai.title || incomingTitle)
+      : (pm?.title || ai.title || incomingTitle),
+    year: suggest
+      ? pickSuggest(paperForm.value.year, pm?.year != null ? String(pm.year) : '')
+      : (pm?.year != null ? String(pm.year) : ''),
+    stage: suggest ? pickSuggest(paperForm.value.stage, pm?.stage) : (pm?.stage || ''),
+    grade: suggest ? pickSuggest(paperForm.value.grade, pm?.grade) : (pm?.grade || ''),
+    subject: suggest
+      ? pickSuggest(paperForm.value.subject, pm?.subject) || '数学'
+      : (pm?.subject || '数学'),
+    semester: suggest ? pickSuggest(paperForm.value.semester, pm?.semester) : (pm?.semester || ''),
+    regionProvince: suggest
+      ? pickSuggest(paperForm.value.regionProvince, canonicalProvince(pm?.region_province))
+      : canonicalProvince(pm?.region_province),
+    regionCity: suggest ? pickSuggest(paperForm.value.regionCity, pm?.region_city) : (pm?.region_city || ''),
+    schoolName: suggest ? pickSuggest(paperForm.value.schoolName, pm?.school_name) : (pm?.school_name || ''),
+    paperId: paperForm.value.paperId,
+  }
+  if (pm?.sub_source_type) {
+    subSource.value = suggest ? pickSuggest(subSource.value, pm.sub_source_type) : pm.sub_source_type
+  }
+  if (createPaper.value || isPanel.value) expanded.value = true
 }
 
 function seedFromDoc(doc: DocumentMeta | null, mode: 'replace' | 'suggest' = 'replace') {
@@ -124,25 +177,12 @@ function seedFromDoc(doc: DocumentMeta | null, mode: 'replace' | 'suggest' = 're
       || ''
 
     if (mode === 'suggest' && sameDoc && userTouched) {
-      createPaper.value = createPaper.value || Boolean(meta.create_paper)
-      title.value = pickNonEmpty(title.value, incomingTitle)
-      paperForm.value = {
-        title: pickNonEmpty(paperForm.value.title, pm.title || incomingTitle),
-        year: pickNonEmpty(paperForm.value.year, pm.year != null ? String(pm.year) : ''),
-        stage: pickNonEmpty(paperForm.value.stage, pm.stage),
-        grade: pickNonEmpty(paperForm.value.grade, pm.grade),
-        subject: pickNonEmpty(paperForm.value.subject, pm.subject) || '数学',
-        semester: pickNonEmpty(paperForm.value.semester, pm.semester),
-        regionProvince: pickNonEmpty(paperForm.value.regionProvince, canonicalProvince(pm.region_province)),
-        regionCity: pickNonEmpty(paperForm.value.regionCity, pm.region_city),
-        schoolName: pickNonEmpty(paperForm.value.schoolName, pm.school_name),
-        paperId: pickNonEmpty(paperForm.value.paperId, pm.paper_id),
-      }
-      subSource.value = pickNonEmpty(subSource.value, pm.sub_source_type || doc.sub_source_type)
+      createPaper.value = createPaper.value || Boolean(meta.create_paper) || Boolean(ai?.create_paper)
+      applyAiPaperFields(ai, incomingTitle, 'suggest')
     } else {
       category.value = cat || 'practice'
       kind.value = k || defaultKindForCategory(category.value)
-      createPaper.value = Boolean(meta.create_paper)
+      createPaper.value = ai?.create_paper ?? (Boolean(meta.create_paper) || defaultCreatePaper(kind.value))
       title.value = incomingTitle
       paperForm.value = {
         title: pm.title || incomingTitle,
@@ -158,12 +198,15 @@ function seedFromDoc(doc: DocumentMeta | null, mode: 'replace' | 'suggest' = 're
       }
       subSource.value = pm.sub_source_type || doc.sub_source_type || ''
       userTouched = false
+      applyAiPaperFields(ai, incomingTitle, 'replace')
     }
     const linked = (meta.linked_paper_id as string) || pm.paper_id || ''
     if (linked) linkedPaperId.value = linked
     seededDocId = doc.id
   } finally {
-    seeding = false
+    void nextTick().then(() => {
+      seeding = false
+    })
   }
   emitState()
 }
@@ -183,9 +226,10 @@ watch(
   },
 )
 watch(
-  () => props.doc?.ai_classification,
-  () => {
-    if (props.doc) seedFromDoc(props.doc, 'suggest')
+  () => JSON.stringify(props.doc?.ai_classification ?? null),
+  (next, prev) => {
+    if (!props.doc || next === prev) return
+    seedFromDoc(props.doc, 'suggest')
   },
 )
 watch(
@@ -281,6 +325,10 @@ function emitState() {
   })
 }
 
+function confirmKey(body: ConfirmDocumentRequest): string {
+  return JSON.stringify(body)
+}
+
 function scheduleConfirm() {
   if (seeding) return
   userTouched = true
@@ -288,10 +336,14 @@ function scheduleConfirm() {
   if (!props.doc) return
   if (debounceTimer) clearTimeout(debounceTimer)
   debounceTimer = setTimeout(() => {
+    if (seeding) return
     const body = buildBody()
     if (body.create_paper && !body.paper_meta?.paper_id && !body.paper_meta?.title?.trim()) {
       return
     }
+    const key = confirmKey(body)
+    if (key === lastSentKey) return
+    lastSentKey = key
     emit('confirm', body)
   }, 600)
 }
@@ -682,18 +734,39 @@ watch(createPaper, (enabled) => {
 
 .sc-paper-card,
 .sc-material-card {
-  overflow: hidden;
+  overflow: visible;
   background: var(--bg-muted, #f5f5f7);
   border-radius: 13px;
 }
 
 .sc-paper-main {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px 16px;
   padding: 13px 14px;
-  flex-wrap: wrap;
+}
+
+.sc-paper-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sc-paper-title {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--text-primary, #1d1d1f);
+}
+
+.sc-paper-desc {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-secondary, #6e6e73);
+  white-space: normal;
 }
 
 .sc-grid {
@@ -704,25 +777,6 @@ watch(createPaper, (enabled) => {
 
 .sc-field-wide {
   grid-column: 1 / -1;
-}
-
-.sc-paper-copy {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.sc-paper-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-primary, #1d1d1f);
-}
-
-.sc-paper-desc {
-  font-size: 11px;
-  line-height: 1.35;
-  color: var(--text-secondary, #6e6e73);
 }
 
 .sc-switch {
@@ -953,9 +1007,17 @@ watch(createPaper, (enabled) => {
     gap: 12px;
   }
 
-  .sc-section-hint,
-  .sc-paper-desc {
+  .sc-section-hint {
     display: none;
+  }
+
+  .source-cascade:not(.is-panel) .sc-paper-desc {
+    display: none;
+  }
+
+  .source-cascade.is-panel .sc-paper-desc {
+    font-size: 10.5px;
+    line-height: 1.45;
   }
 
   .sc-segmented {

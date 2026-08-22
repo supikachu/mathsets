@@ -47,7 +47,7 @@ async fn request(
 
     let response = app.oneshot(req).await.unwrap();
     let status = response.status();
-    let body_bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+    let body_bytes = axum::body::to_bytes(response.into_body(), 8 * 1024 * 1024)
         .await
         .unwrap();
     let json: Value =
@@ -78,7 +78,7 @@ async fn request_auth(
 
     let response = app.oneshot(req).await.unwrap();
     let status = response.status();
-    let body_bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+    let body_bytes = axum::body::to_bytes(response.into_body(), 8 * 1024 * 1024)
         .await
         .unwrap();
     let json: Value =
@@ -300,6 +300,11 @@ async fn test_register_preserves_ability_tree_kind() {
     let database_url = mathset::testing::database_url()
         .expect("DATABASE_URL_TEST 未设置，请配置独立测试库");
     let pool = mathset::db::create_pool(&database_url, 5).await;
+    // 清掉本用例历史残留（此前失败时只插不删，全局树会指数膨胀）
+    let _ = sqlx::query("DELETE FROM knowledge_trees WHERE code LIKE 'tp\\_%' ESCAPE '\\'")
+        .execute(&pool)
+        .await;
+
     let tree_id = Uuid::new_v4();
     let code = format!("tp_{}", tree_id.simple());
     sqlx::query(
@@ -315,7 +320,33 @@ async fn test_register_preserves_ability_tree_kind() {
     .expect("插入全局 ability 树失败");
 
     let token = register_and_login(&mut app).await;
-    let (status, body) = get_auth(&mut app, "/api/v1/knowledge-trees", &token).await;
+    // 按 code 查库：列表接口未传 space_id 时会倒出全库树，脏库下会撑爆测试读 body 上限
+    let rows: Vec<(Option<Uuid>, String)> = sqlx::query_as(
+        "SELECT space_id, kind::text FROM knowledge_trees WHERE code = $1",
+    )
+    .bind(&code)
+    .fetch_all(&pool)
+    .await
+    .expect("查询复制结果失败");
+    assert!(
+        rows.iter().any(|(s, _)| s.is_none()),
+        "应保留全局树: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|(s, _)| s.is_some()),
+        "注册应复制出空间副本: {rows:?}"
+    );
+    assert!(
+        rows.iter().all(|(_, k)| k == "ability"),
+        "复制后 kind 必须保持 ability: {rows:?}"
+    );
+
+    let (status, body) = get_auth(
+        &mut app,
+        "/api/v1/knowledge-trees?kind=ability",
+        &token,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "列出知识树失败: {:?}", body);
     let trees = body
         .as_array()
@@ -323,8 +354,8 @@ async fn test_register_preserves_ability_tree_kind() {
         .expect("知识树列表应为数组");
     let copies: Vec<_> = trees.iter().filter(|t| t["code"] == code).collect();
     assert!(
-        copies.len() >= 2,
-        "应同时看到全局树与空间副本，实际: {:?}",
+        !copies.is_empty(),
+        "列表应能看到刚插入的 ability 树，实际: {:?}",
         copies
     );
     for t in &copies {
@@ -1038,6 +1069,51 @@ async fn test_ai_settings_save_and_get() {
         "GET 响应不应包含明文 api_key"
     );
     assert_eq!(body["model_text"], "deepseek-chat");
+}
+
+#[tokio::test]
+async fn test_ai_settings_custom_openrouter() {
+    let mut app = match create_test_app().await {
+        Some(app) => app,
+        None => return,
+    };
+    let token = register_and_login(&mut app).await;
+
+    let (status, body) = put_auth(
+        &mut app,
+        "/api/v1/ai/settings",
+        json!({
+            "provider": "openrouter",
+            "api_key": "sk-or-v1-fake",
+            "model_text": "qwen/qwen3-8b:free",
+            "llm_base_url": "https://openrouter.ai/api/v1/"
+        }),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "保存自定义配置失败: {:?}", body);
+    assert_eq!(body["provider"], "custom");
+    assert_eq!(body["has_api_key"], true);
+    assert_eq!(body["model_text"], "qwen/qwen3-8b:free");
+    assert_eq!(body["llm_base_url"], "https://openrouter.ai/api/v1");
+    assert!(body.get("api_key").is_none());
+
+    let (status, body) = get_auth(&mut app, "/api/v1/ai/settings", &token).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["provider"], "custom");
+    assert_eq!(body["llm_base_url"], "https://openrouter.ai/api/v1");
+
+    let (status, body) = put_auth(
+        &mut app,
+        "/api/v1/ai/settings",
+        json!({
+            "provider": "custom",
+            "llm_base_url": "not-a-url"
+        }),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "非法 URL 应拒绝: {:?}", body);
 }
 
 #[tokio::test]

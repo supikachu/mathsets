@@ -12,8 +12,8 @@ use uuid::Uuid;
 /// success / partial_success / failed / cancelled
 /// 历史值 completed 保留兼容，API 读出时映射为 success。
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq)]
-#[sqlx(type_name = "ai_task_status", rename_all = "lowercase")]
-#[serde(rename_all = "lowercase")]
+#[sqlx(type_name = "ai_task_status", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum AiTaskStatus {
     /// 排队中，等待 worker 拾取
     Pending,
@@ -156,6 +156,8 @@ pub struct TaskStatusResponse {
     pub completed_at: Option<DateTime<Utc>>,
 
     // 结果关联（懒查询填充）
+    /// 来源资料 ID（恢复识别页「试卷信息」时按此拉取 Document）
+    pub document_id: Option<Uuid>,
     pub paper_id: Option<Uuid>,
     pub collection_ids: Vec<Uuid>,
     /// 任务产出（已确认保存）的题目 ID 列表（按解析顺序）
@@ -168,4 +170,24 @@ pub struct TaskStatusResponse {
     /// collection_id, is_mixed, existing_question_id, matched[], unmatched{},
     /// order?, merged_into?, saved, saved_question_id?}`
     pub staged_questions: Vec<serde_json::Value>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AiTaskStatus;
+
+    #[test]
+    fn test_partial_success_serializes_as_snake_case() {
+        let json = serde_json::to_string(&AiTaskStatus::PartialSuccess).unwrap();
+        assert_eq!(json, "\"partial_success\"");
+        let back: AiTaskStatus = serde_json::from_str("\"partial_success\"").unwrap();
+        assert_eq!(back, AiTaskStatus::PartialSuccess);
+    }
+
+    #[test]
+    fn test_other_statuses_remain_lowercase_words() {
+        assert_eq!(serde_json::to_string(&AiTaskStatus::Failed).unwrap(), "\"failed\"");
+        assert_eq!(serde_json::to_string(&AiTaskStatus::Success).unwrap(), "\"success\"");
+        assert_eq!(serde_json::to_string(&AiTaskStatus::Processing).unwrap(), "\"processing\"");
+    }
 }

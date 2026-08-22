@@ -88,9 +88,12 @@ const SUBJECT_LABELS = ['数学', '物理', '化学', '生物', '英语', '语�
 // ─── 表单状态 ────────────────────────────────────────────────────────────
 /// AI 推荐类型（unknown 不预选，强制用户选择）
 const aiType = computed(() => props.doc.ai_classification?.document_type ?? null)
-const selectedType = ref<DocumentType | null>(
-  aiType.value && aiType.value !== 'unknown' ? aiType.value : null,
-)
+/// ai_classification.document_type 是模型自由输出，需按白名单收窄；表外的值一律不预选
+function toDocumentType(v: string | null | undefined): DocumentType | null {
+  if (!v || v === 'unknown') return null
+  return v in DOCUMENT_TYPE_LABELS ? (v as DocumentType) : null
+}
+const selectedType = ref<DocumentType | null>(toDocumentType(aiType.value))
 const typeLabel = ref('')
 const title = ref(
   props.doc.ai_classification?.title

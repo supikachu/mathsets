@@ -131,14 +131,25 @@ impl TaggingMatchType {
 /// 打标输入：编辑页题文 或 录题已解析结构
 #[derive(Debug, Clone)]
 pub enum TaggingInput {
-    Content { content: String },
+    Content {
+        content: String,
+    },
     Parsed(Box<ParsedQuestion>),
+    /// 题文 + 解析阶段已产出的信号。
+    ///
+    /// 解析阶段（Stage2）已让 LLM 给出知识点 / 章节 / 解法，打标再对同一段题文重抽一遍
+    /// 关键词纯属重复劳动。信号足够时直接复用，省掉一次 LLM 往返；过弱则回退到对
+    /// `content` 做 LLM 提取，与 `Content` 路径完全一致。
+    ContentWithSignals {
+        content: String,
+        signals: Box<TaggingSignals>,
+    },
 }
 
 impl TaggingInput {
     pub fn content_preview(&self) -> &str {
         match self {
-            Self::Content { content } => content,
+            Self::Content { content } | Self::ContentWithSignals { content, .. } => content,
             Self::Parsed(q) => q.stem.as_str(),
         }
     }

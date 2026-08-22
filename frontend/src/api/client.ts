@@ -1179,6 +1179,8 @@ export interface ParsedQuestion {
   tagging_question_type?: string | null
   /** junior | senior，OCR worker 打标时使用的学段 */
   tagging_stage?: 'junior' | 'senior' | null
+  /** pending：题目已出，打标尚未回写；此时 tagging_matches 为空，保存会丢标签 */
+  tagging_status?: 'pending' | 'done' | 'failed' | null
 }
 
 export interface AiSettings {
@@ -1191,6 +1193,7 @@ export interface AiSettings {
   has_doc2x_key: boolean
   mineru_endpoint: string | null
   has_mineru_key: boolean
+  llm_base_url: string | null
 }
 
 export const aiApi = {
@@ -1206,6 +1209,7 @@ export const aiApi = {
     doc2x_api_key?: string
     mineru_endpoint?: string
     mineru_api_key?: string
+    llm_base_url?: string
   }) {
     return client.put<AiSettings>('/ai/settings', data)
   },
@@ -1213,6 +1217,14 @@ export const aiApi = {
   testOcrConnection(data: { provider: string; api_key?: string; endpoint?: string }) {
     return client.post<{ ok: boolean; latency_ms: number; message: string }>(
       '/ai/ocr/test-connection',
+      data,
+      { timeout: 15000 },
+    )
+  },
+  /// 文本模型连接测试（自定义 / OpenRouter）
+  testLlmConnection(data: { api_key?: string; endpoint?: string }) {
+    return client.post<{ ok: boolean; latency_ms: number; message: string }>(
+      '/ai/llm/test-connection',
       data,
       { timeout: 15000 },
     )
@@ -1410,6 +1422,8 @@ export interface AiParseTaskDetail {
   current_question_no: string | null
   started_at: string | null
   completed_at: string | null
+  /// 来源资料 ID（恢复识别页试卷信息）
+  document_id?: string | null
   /// 结果关联
   paper_id: string | null
   collection_ids: string[]
@@ -1452,6 +1466,8 @@ export interface AiStagedQuestion {
   } | null
   /** OCR worker 打标时使用的学段，与编辑页 AI 智能打标一致 */
   tagging_stage?: 'junior' | 'senior' | null
+  /** pending：题目已出，打标尚未回写 */
+  tagging_status?: 'pending' | 'done' | 'failed' | null
 }
 
 export interface AiStagedMatch {
@@ -1487,6 +1503,13 @@ export const aiTaskApi = {
   },
   cancelParseTask(task_id: string) {
     return client.post<{ message: string }>(`/ai/parse-task/${task_id}/cancel`, {})
+  },
+  /// 题目全部确认保存后终止残留打标任务：建议已无落点，继续跑只会白耗额度
+  cancelParseTagging(task_id: string) {
+    return client.post<{ cancelled: number; cancelling: number }>(
+      `/ai/parse-task/${task_id}/cancel-tagging`,
+      {},
+    )
   },
 }
 
@@ -1538,6 +1561,20 @@ export type DocumentStatus =
   | 'failed'
   | 'cancelled'
 
+export interface AiPaperMetaSuggestion {
+  title?: string
+  year?: number
+  stage?: string
+  grade?: string
+  subject?: string
+  semester?: string
+  region_province?: string
+  region_city?: string
+  school_name?: string
+  source_type?: string
+  sub_source_type?: string
+}
+
 export interface AiClassification {
   source_category?: string
   source_kind?: string
@@ -1547,6 +1584,8 @@ export interface AiClassification {
   reason?: string
   level: number
   checked_pages: number
+  create_paper?: boolean
+  paper_meta?: AiPaperMetaSuggestion
 }
 
 export interface DocumentMeta {
@@ -1613,7 +1652,7 @@ export interface ConfirmDocumentRequest {
 export const documentApi = {
   /// 上传页面图片集（PDF 前端渲染为页图后上传）
   /// pdf：原始 PDF 二进制（可选），后端保留供 Doc2X/MinerU 整档直传 OCR 快速路径
-  upload(pages: File[], meta: { file_name?: string; file_type?: string; pdf?: File }) {
+  upload(pages: File[], meta: { file_name?: string; file_type?: string; pdf?: File }, signal?: AbortSignal) {
     const formData = new FormData()
     for (const page of pages) {
       formData.append('pages', page)
@@ -1623,13 +1662,14 @@ export const documentApi = {
     if (meta.pdf) formData.append('pdf', meta.pdf)
     return client.post<{ data: DocumentMeta }>('/ai/documents', formData, {
       timeout: 120000,
+      signal,
     })
   },
-  classify(id: string) {
+  classify(id: string, signal?: AbortSignal) {
     return client.post<{ data: DocumentMeta; ai_classification: AiClassification }>(
       `/ai/documents/${id}/classify`,
       {},
-      { timeout: 120000 },
+      { timeout: 120000, signal },
     )
   },
   confirm(id: string, body: ConfirmDocumentRequest) {

@@ -1,7 +1,7 @@
 //! 统一 TaggingEngine：提取 → 召回 → 确定性匹配 / 模糊收敛 → 建议
 
 use sha2::{Digest, Sha256};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::ai::cleaner::clean_and_parse;
@@ -68,7 +68,7 @@ pub async fn run_tagging(
     policy: &TaggingPolicy,
 ) -> Result<TaggingSuggestion, TaggingError> {
     let content_for_hash = match &input {
-        TaggingInput::Content { content } => {
+        TaggingInput::Content { content } | TaggingInput::ContentWithSignals { content, .. } => {
             if content.trim().is_empty() {
                 return Err(TaggingError::EmptyContent);
             }
@@ -82,16 +82,30 @@ pub async fn run_tagging(
         ),
     };
     let input_hash = sha256_hex(&content_for_hash);
-    let input_kind = match &input {
-        TaggingInput::Content { .. } => "content",
-        TaggingInput::Parsed(_) => "parsed",
-    };
 
     let extract_started = Instant::now();
+    // input_kind 记录实际走的提取路径，便于对比复用信号与 LLM 重抽的打标质量
+    let mut input_kind = match &input {
+        TaggingInput::Content { .. } | TaggingInput::ContentWithSignals { .. } => "content",
+        TaggingInput::Parsed(_) => "parsed",
+    };
     let signals = match &input {
         TaggingInput::Content { content } => {
             if !policy.run_llm_extract {
                 TaggingSignals::default()
+            } else {
+                let Some(provider) = provider else {
+                    return Err(TaggingError::ExtractParse("未配置文本模型".into()));
+                };
+                extract_signals(provider, content, model).await?
+            }
+        }
+        TaggingInput::ContentWithSignals { content, signals } => {
+            if reuse_parsed_signals() && parsed_signals_strong_enough(signals) {
+                input_kind = "parsed_signals";
+                (**signals).clone()
+            } else if !policy.run_llm_extract {
+                (**signals).clone()
             } else {
                 let Some(provider) = provider else {
                     return Err(TaggingError::ExtractParse("未配置文本模型".into()));
@@ -106,7 +120,9 @@ pub async fn run_tagging(
     let extract_ms = extract_started.elapsed().as_millis() as u64;
 
     let question_content = match &input {
-        TaggingInput::Content { content } => content.clone(),
+        TaggingInput::Content { content } | TaggingInput::ContentWithSignals { content, .. } => {
+            content.clone()
+        }
         TaggingInput::Parsed(q) => q.stem.clone(),
     };
 
@@ -207,7 +223,12 @@ pub async fn run_tagging(
                 menu
             );
             match provider
-                .parse_text_with_prompt(&payload, AI_CONVERGE_PROMPT, model)
+                .parse_text_with_prompt_timeout(
+                    &payload,
+                    AI_CONVERGE_PROMPT,
+                    model,
+                    Some(converge_timeout()),
+                )
                 .await
             {
                 Ok(raw) => match clean_and_parse::<AiConvergeResult>(&raw) {
@@ -364,6 +385,22 @@ pub async fn run_tagging(
     Ok(suggestion)
 }
 
+/// 收敛调用的超时上限（秒），`TAGGING_CONVERGE_TIMEOUT_SECS` 可覆盖。
+///
+/// 收敛只需从候选菜单里挑几个 ID，输出很短。Provider 的全局超时在 OpenRouter 档位是
+/// 240s，实测有调用打满后报 body TimedOut，白等 4 分钟且产出为零。默认 180s 先把最坏
+/// 情况的浪费砍掉；换成非推理的打标模型后收敛通常在 10s 内，可下调到 60s。
+const CONVERGE_TIMEOUT_SECS: u64 = 180;
+
+fn converge_timeout() -> Duration {
+    let secs = std::env::var("TAGGING_CONVERGE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(CONVERGE_TIMEOUT_SECS)
+        .clamp(10, 600);
+    Duration::from_secs(secs)
+}
+
 async fn extract_signals(
     provider: &dyn AiProvider,
     content: &str,
@@ -379,7 +416,10 @@ async fn extract_signals(
     })
 }
 
-/// 与编辑页 `buildTaggingContent` 对齐：题干 + 选项 + 答案 + 解析。
+/// 与编辑页 `buildTaggingContent` 对齐：题干 + 选项 + 答案 + 解析（截断）。
+/// 解析卷六种解法全文会拖垮提取模型，打标只需要题意与解法要点。
+const TAGGING_ANALYSIS_MAX_CHARS: usize = 500;
+
 pub fn tagging_content_from_parsed(q: &ParsedQuestion) -> String {
     let mut parts: Vec<String> = Vec::new();
     if !q.stem.trim().is_empty() {
@@ -405,7 +445,14 @@ pub fn tagging_content_from_parsed(q: &ParsedQuestion) -> String {
         .filter(|s| !s.trim().is_empty())
         .collect();
     if !analysis.is_empty() {
-        parts.push(format!("解析：{}", analysis.join("\n")));
+        let joined = analysis.join("\n");
+        let clipped: String = joined.chars().take(TAGGING_ANALYSIS_MAX_CHARS).collect();
+        let suffix = if joined.chars().count() > TAGGING_ANALYSIS_MAX_CHARS {
+            "…"
+        } else {
+            ""
+        };
+        parts.push(format!("解析：{clipped}{suffix}"));
     }
     parts.join("\n\n")
 }
@@ -452,6 +499,25 @@ fn answer_text_from_parsed(q: &ParsedQuestion) -> Option<String> {
             }
         }
     }
+}
+
+/// 是否允许复用解析阶段信号；`TAGGING_REUSE_PARSED_SIGNALS=0` 关闭。
+///
+/// 关闭后 `ContentWithSignals` 退化为与 `Content` 完全相同的行为。
+fn reuse_parsed_signals() -> bool {
+    std::env::var("TAGGING_REUSE_PARSED_SIGNALS")
+        .map(|v| v.trim() != "0")
+        .unwrap_or(true)
+}
+
+/// 解析阶段信号是否足以驱动召回。
+///
+/// 章节与知识点是打标的主干，两者齐备才认为够用。解析阶段不产出题型（pattern）与核心
+/// 素养（competence），复用信号会让这两维空缺——这是省掉一次 LLM 往返换来的代价，
+/// 需要这两维时把 `TAGGING_REUSE_PARSED_SIGNALS` 设为 0。
+fn parsed_signals_strong_enough(s: &TaggingSignals) -> bool {
+    let non_blank = |v: &Vec<String>| v.iter().any(|k| !k.trim().is_empty());
+    non_blank(&s.knowledge_keys) && non_blank(&s.chapter_keys)
 }
 
 pub fn signals_from_parsed(q: &ParsedQuestion) -> TaggingSignals {
@@ -1041,5 +1107,40 @@ mod tests {
         assert!(content.contains("A. $A \\cap B$"));
         assert!(content.contains("参考答案：B"));
         assert!(content.contains("解析：数形结合。"));
+    }
+
+    #[test]
+    fn tagging_content_truncates_long_analysis() {
+        let long = "解".repeat(800);
+        let q = ParsedQuestion {
+            question_type: "solution".into(),
+            sub_type: None,
+            difficulty: None,
+            stem: "题干".into(),
+            options: None,
+            correct_answer: None,
+            analysis: vec![crate::ai::types::AnalysisMethod {
+                title: "解法一".into(),
+                content: long.clone(),
+            }],
+            knowledge_points: vec![],
+            confidence: 0.9,
+            warnings: vec![],
+            image_placeholders: vec![],
+            image_urls: vec![],
+            kp_matches: vec![],
+            question_no: None,
+            display_order: None,
+            score: None,
+            chapter_path: vec![],
+            solution_methods: vec![],
+        };
+        let content = tagging_content_from_parsed(&q);
+        assert!(content.contains("题干"));
+        assert!(content.contains("解析："));
+        assert!(content.ends_with('…'));
+        let parsed_part = content.split("解析：").nth(1).unwrap();
+        assert!(parsed_part.chars().count() <= TAGGING_ANALYSIS_MAX_CHARS + 1);
+        assert!(!content.contains(&long));
     }
 }

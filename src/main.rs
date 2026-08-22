@@ -61,6 +61,13 @@ async fn main() {
         tracing::info!("📁 题目配图目录就绪: {:?}", upload_questions_dir);
     }
 
+    let upload_ocr_dir = std::path::Path::new(&config.upload_dir).join("ocr");
+    if let Err(e) = std::fs::create_dir_all(&upload_ocr_dir) {
+        tracing::warn!("创建 OCR 结果目录失败 {:?}: {}", upload_ocr_dir, e);
+    } else {
+        tracing::info!("📁 OCR 结果目录就绪: {:?}", upload_ocr_dir);
+    }
+
     // 构建共享状态
     let state = mathset::AppState::new(
         pool,

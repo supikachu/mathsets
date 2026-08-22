@@ -21,30 +21,71 @@ export interface PoolResult<R> {
 const INITIAL_BACKOFF_MS = 2000
 const MAX_RETRIES = 3
 
+/** axios / fetch / AbortController 取消 */
+export function isAbortError(e: unknown): boolean {
+  const err = e as { code?: string; name?: string } | null
+  return (
+    err?.code === 'ERR_CANCELED' ||
+    err?.name === 'CanceledError' ||
+    err?.name === 'AbortError'
+  )
+}
+
+function abortError(signal?: AbortSignal): Error {
+  if (signal?.reason instanceof Error) return signal.reason
+  const err = new Error('Aborted')
+  err.name = 'AbortError'
+  return err
+}
+
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(abortError(signal))
+      return
+    }
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(abortError(signal))
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
 /**
  * 指数退避重试（补丁六前端）
  *
- * 拦截 HTTP 429（Too Many Requests）和 5xx 服务器错误，
- * 延迟 2s → 4s → 8s 后自动重试，仅在重试 3 次均失败后抛出。
+ * 拦截 HTTP 429（Too Many Requests），延迟 2s → 4s → 8s 后自动重试，
+ * 仅在重试 3 次均失败后抛出。传入 AbortSignal 时取消会立刻停止等待与重试。
  */
-export async function withBackoffRetry<T>(fn: () => Promise<T>, retries = MAX_RETRIES): Promise<T> {
+export async function withBackoffRetry<T>(
+  fn: () => Promise<T>,
+  retries = MAX_RETRIES,
+  signal?: AbortSignal,
+): Promise<T> {
   let lastError: unknown
   for (let attempt = 0; attempt <= retries; attempt++) {
+    if (signal?.aborted) throw abortError(signal)
     try {
       return await fn()
     } catch (e: any) {
       lastError = e
+      if (isAbortError(e) || signal?.aborted) throw e
       const status = e?.response?.status
       // 仅对 429（限流）进行退避重试 — 5xx 等其他错误重试无意义，反而让用户等更久
       const shouldRetry = status === 429
       if (!shouldRetry || attempt === retries) {
         throw e
       }
-      const delay = INITIAL_BACKOFF_MS * Math.pow(2, attempt)
+      const wait = INITIAL_BACKOFF_MS * Math.pow(2, attempt)
       console.warn(
-        `请求被限流 (HTTP 429)，${delay / 1000}s 后重试 (${attempt + 1}/${retries})`,
+        `请求被限流 (HTTP 429)，${wait / 1000}s 后重试 (${attempt + 1}/${retries})`,
       )
-      await new Promise((resolve) => setTimeout(resolve, delay))
+      await delay(wait, signal)
     }
   }
   throw lastError

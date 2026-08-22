@@ -88,6 +88,7 @@ pub const CORE_PARSE_RULES: &str = r#"
 【严禁数据冗余】`stem`（题干）字段中**绝对不能**包含选项内容。
 - 选择题（choice / multiple）：提取 `stem` 时必须在遇到 'A.'、'A、'、'A)'、'(A)' 等选项前缀时**立即截断**，选项前缀及其后所有选项文本一律不得进入 `stem`
 - 所有选项内容只能存放在 `options` 数组中，绝不允许在 `stem` 中重复出现（否则前端会题干区与选项区重复渲染两次）
+- 每个选项必须是完整对象 `{"label":"A","content":"..."}`，禁止写成 `{"label":"A","..."}`（漏掉 content 键）
 - 示例：原文 "下列结论正确的是\nA. $x>0$\nB. $x<0$\nC. $x=0$\nD. $x\ne0$" →
   `stem` 只保留 "下列结论正确的是"；A/B/C/D 四项全部进 `options` 数组
 - 填空题/解答题不涉及选项，不受此规则约束
@@ -114,7 +115,9 @@ pub const CORE_PARSE_RULES: &str = r#"
 - 示例：
   "在直角坐标系中，抛物线 $y = ax^2 + bx + c$ 经过点 $A(1, 2)$。\n(1) 已知 $a = 1$，求 $b$、$c$ 的值；\n(2) 若函数在 $[1, 2]$ 上单调递增，求 $a$ 的范围。"
 - 大背景与小问之间用 `\n` 分隔，各小问之间也用 `\n` 分隔
-- 不要在 stem 中使用 <br> 或其他 HTML 标签，只用 `\n`
+- 不要在 stem 中使用 <br> 或其他 HTML 标签，只用真正的换行
+- JSON 字符串里的换行必须是真实换行，禁止把两个字符「反斜杠 + n」当作正文写进 stem（不要出现可见的 \n）
+- 表格必须用 Markdown 表格语法（| 表头 |），禁止输出 `<table>` `<tr>` `<td>` 等 HTML
 - 选择题题干末尾用于填答案的空括号（如「…的是 ()」「…的集合是（ ）」）必须写成 `$(\hspace{2em})$`，不要保留裸 `()` / `（）`。函数 `f()`、区间、题号 `(1)(2)` 不要改
 
 # 多解法识别
@@ -225,7 +228,7 @@ pub const QWEN_VL_OCR_PROMPT: &str = r#"你是一个数学题图片 OCR 引擎�
 - 只输出 Markdown 文本，绝对不要输出 JSON、不要输出任何 ``` 代码块标记
 - 行内公式用 $...$，块级公式用 $$...$$
 - 多道题用题号或序号分隔，保留原文题号（如「1.」「(1)」「①」）与选项标号（A. B. C. D.）
-- 表格用 Markdown 表格语法
+- 表格用 Markdown 表格语法（| 列 |），禁止输出 HTML `<table>`
 
 # 图文混排
 - 若含几何图形、函数图象、坐标系、表格等无法用文本和 LaTeX 表达的内容：
@@ -257,6 +260,19 @@ pub const STAGE2_PARSE_SYSTEM_PROMPT: &str = r#"你是一个数学题结构化�
 - 含 `![配图](IMAGE_PLACEHOLDER_N)` 占位符：计入该题 `image_placeholders`
 - 含 `![...](http...)` 或 `![...](/uploads/...)` 真实图片链接：在内联位置保留标记，并把 URL 收集去重到该题 `image_urls`
 - 题干含「如图」「见图」「下图」「图中」「图示」时，不得省略图片标记；找不到对应图时把该块中最邻近的图片划给该题
+
+# 切题
+- 输入里每一道独立题号（如 15. / 16.）必须各占 questions 数组一项，禁止把下一题并入上一题的 stem 或 analysis
+- 本块只解析输入中出现的题目，不要补块外题号或臆造未出现的题
+- analysis 只摘录该题解析；过长时保题干与答案完整，解法可截到已写出的部分，但 JSON 必须闭合
+"#;
+
+/// 解析卷 Stage2 附加约束：优先闭合 JSON，缩短超长解法
+pub const STAGE2_ANALYSIS_SLIM_RULES: &str = r#"
+# 解析卷输出约束
+- stem / options / correct_answer 必须完整提取
+- 每个 analysis.content 不超过 600 字；超出则保留该解法要点并在 warnings 加入「解析已缩短」
+- 禁止把多道题的解析写进同一题
 "#;
 
 // ============================================================
@@ -274,7 +290,20 @@ const CLASSIFY_OUTPUT_SCHEMA: &str = r#"**输出格式（严格 JSON，不要 ma
   "source_kind": "<子类 slug>",
   "title": "<资料标题，简洁中文>",
   "confidence": 0.0 到 1.0 的小数,
-  "reason": "<一句话判断理由>"
+  "reason": "<一句话判断理由>",
+  "create_paper": true 或 false,
+  "paper_meta": {
+    "title": "<试卷名称，去掉扩展名后的规范标题>",
+    "year": 2026,
+    "stage": "junior | senior",
+    "grade": "七年级 | 八年级 | 九年级 | 高一 | 高二 | 高三",
+    "subject": "数学 | 物理",
+    "semester": "first | second | full_year",
+    "region_province": "<省份，不含「省」字亦可>",
+    "region_city": "<城市，不含「市」字亦可>",
+    "school_name": "<学校全称，如能识别>",
+    "sub_source_type": "一模 | 二模 | 三模"
+  }
 }
 
 **source_category / source_kind 枚举**：
@@ -283,10 +312,18 @@ const CLASSIFY_OUTPUT_SCHEMA: &str = r#"**输出格式（严格 JSON，不要 ma
 - other（其他）：special 专题资料 | workbook 教辅练习 | textbook_example 教材例题 | lecture 讲义 | wrong_question 错题
 
 **关键规则**：
-1. 信息不足时：source_category=practice，source_kind=in_class，confidence < 0.6
-2. title 无法确定时用文件名（去掉扩展名）
+1. 信息不足时：source_category=practice，source_kind=in_class，confidence < 0.6；paper_meta 可省略或字段留空
+2. title 无法确定时用文件名（去掉扩展名）；paper_meta.title 默认同 title
 3. 有得分栏/密封线/大题分值 → paper；含「例题」→ practice/class_example；含「作业」→ practice/homework
-4. 看资料标题与用途，不要仅因知识点章节名输出 special"#;
+4. 看资料标题与用途，不要仅因知识点章节名输出 special
+5. **从文件名推断试卷字段**（仅 source_category=paper 时填写 paper_meta，其余类别省略 paper_meta）：
+   - 「高考」「新课标」「全国卷」「选考」→ gaokao，stage=senior，create_paper=true
+   - 「一模/二模/三模/模拟」→ mock，并写入 sub_source_type
+   - 「期中」→ midterm；「期末」→ final；「月测」→ monthly_test
+   - 「高一/高二/高三」→ stage=senior + 对应 grade；「初一/初二/初三」或「七年级…」→ stage=junior
+   - 文件名中的 4 位年份写入 year
+   - 省份城市、学校名能从文件名识别则填写，识别不出则省略该字段
+6. create_paper：paper 类且为 midterm/final/gaokao/mock 时建议 true，其余 paper 默认 false"#;
 
 /// 资料类型分类 Prompt（Level 1，文本模式：输入=文件名，完整系统提示词）
 pub const AI_CLASSIFY_DOCUMENT_PROMPT_TEXT: &str = r#"你是一名教研资料分类助手。根据用户上传的文件名判断这份资料属于什么业务类型。
@@ -342,6 +379,14 @@ pub static AI_CLASSIFY_FULL_PROMPT_VISION: LazyLock<String> = LazyLock::new(|| {
 /// 用于两阶段流水线第二步：把 OCR Markdown 解析为 `{"questions":[...]}`。
 pub static STAGE2_PARSE_FULL_PROMPT: LazyLock<String> = LazyLock::new(|| {
     format!("{}{}", STAGE2_PARSE_SYSTEM_PROMPT, CORE_PARSE_RULES)
+});
+
+/// 解析卷 Stage2：完整规则 + 缩短 analysis
+pub static STAGE2_PARSE_SLIM_PROMPT: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{}{}{}",
+        STAGE2_PARSE_SYSTEM_PROMPT, CORE_PARSE_RULES, STAGE2_ANALYSIS_SLIM_RULES
+    )
 });
 
 #[cfg(test)]
@@ -422,6 +467,8 @@ mod tests {
         // Stage 2 输出批量数组 + 含核心规则
         assert!(STAGE2_PARSE_FULL_PROMPT.contains("`questions` 数组"));
         assert!(STAGE2_PARSE_FULL_PROMPT.contains("image_urls"));
+        assert!(STAGE2_PARSE_FULL_PROMPT.contains("本块只解析输入中出现的题目"));
+        assert!(STAGE2_PARSE_SLIM_PROMPT.contains("解析卷输出约束"));
         // Stage 1 Qwen-VL OCR 输出纯 Markdown（非 JSON）
         assert!(QWEN_VL_OCR_PROMPT.contains("只输出 Markdown 文本"));
         assert!(QWEN_VL_OCR_PROMPT.contains("IMAGE_PLACEHOLDER_N"));

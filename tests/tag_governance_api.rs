@@ -11,6 +11,10 @@ use serde_json::{json, Value};
 use tower::ServiceExt;
 use uuid::Uuid;
 
+fn unique_name(prefix: &str) -> String {
+    format!("{prefix}_{}", Uuid::new_v4().simple())
+}
+
 async fn create_test_app() -> Option<(axum::Router, sqlx::PgPool)> {
     let database_url = mathset::testing::database_url()?;
     let pool = db::create_pool(&database_url, 5).await;
@@ -185,11 +189,12 @@ async fn test_candidate_review_four_branches() {
     sqlx::query(
         r#"
         INSERT INTO knowledge_nodes (id, tree_id, path, depth, name, is_active, status, source, created_at, updated_at)
-        VALUES ($1, $2, 'a_b', 1, '二次函数', TRUE, 'active', 'system', NOW(), NOW())
+        VALUES ($1, $2, 'a_b', 1, $3, TRUE, 'active', 'system', NOW(), NOW())
         "#,
     )
     .bind(target_id)
     .bind(tree_id)
+    .bind(unique_name("二次函数"))
     .execute(&pool)
     .await
     .expect("插入节点失败");
@@ -214,10 +219,14 @@ async fn test_candidate_review_four_branches() {
         .expect("插入候选失败");
         id
     }
-    let c_new = make_candidate(&pool, "参数分离法", q_uuid).await;
-    let c_alias = make_candidate(&pool, "二次函数的图像", q_uuid).await;
-    let c_merge = make_candidate(&pool, "二次函数的最值问题", q_uuid).await;
-    let c_reject = make_candidate(&pool, "无关术语", q_uuid).await;
+    let name_new = unique_name("参数分离法");
+    let name_alias = unique_name("二次函数的图像");
+    let name_merge = unique_name("二次函数的最值问题");
+    let name_reject = unique_name("无关术语");
+    let c_new = make_candidate(&pool, &name_new, q_uuid).await;
+    let c_alias = make_candidate(&pool, &name_alias, q_uuid).await;
+    let c_merge = make_candidate(&pool, &name_merge, q_uuid).await;
+    let c_reject = make_candidate(&pool, &name_reject, q_uuid).await;
 
     // 非管理员 → 403
     let (t2, _) = register_and_login(&mut app).await;
@@ -235,7 +244,7 @@ async fn test_candidate_review_four_branches() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["candidate"]["raw_name"], "参数分离法");
+    assert_eq!(body["candidate"]["raw_name"], name_new);
     assert!(body["source_stem"].is_string());
     assert!(body["source_question"]["stem"].is_string());
     assert!(body["source_question"]["question_type"].is_string());
@@ -247,7 +256,7 @@ async fn test_candidate_review_four_branches() {
     let (status, body) = post_auth(
         &mut app,
         &format!("/api/v1/admin/tag-candidates/{c_new}/approve"),
-        json!({ "action": "new_node", "tree_id": tree_id, "name": "参数分离法" }),
+        json!({ "action": "new_node", "tree_id": tree_id, "name": name_new }),
         &admin_token,
     )
     .await;
@@ -286,7 +295,7 @@ async fn test_candidate_review_four_branches() {
             .await
             .expect("查询别名失败");
     assert!(
-        aliases.to_string().contains("二次函数的图像"),
+        aliases.to_string().contains(&name_alias),
         "别名应写入: {aliases}"
     );
 
@@ -728,7 +737,7 @@ async fn test_candidate_kind_tree_mismatch_rejected() {
         &pool,
         "chapter",
         "knowledge_node",
-        "人教A版高一上",
+        &unique_name("人教A版高一上"),
         Uuid::parse_str(&q).unwrap(),
     )
     .await;
@@ -756,13 +765,14 @@ async fn test_candidate_parent_must_belong_to_tree() {
     let (admin_token, _) = register_admin(&mut app, &pool).await;
     let tree_a = insert_tree(&pool, "knowledge").await;
     let tree_b = insert_tree(&pool, "knowledge").await;
-    let parent = insert_node(&pool, tree_a, "函数", "fn_a").await;
+    let parent = insert_node(&pool, tree_a, &unique_name("函数"), &format!("fn{}", Uuid::new_v4().simple())).await;
     let q = create_question(&mut app, &admin_token, "父节点树校验题").await;
+    let node_name = unique_name("二次函数");
     let cid = insert_candidate(
         &pool,
         "knowledge",
         "knowledge_node",
-        "二次函数",
+        &node_name,
         Uuid::parse_str(&q).unwrap(),
     )
     .await;
@@ -770,7 +780,7 @@ async fn test_candidate_parent_must_belong_to_tree() {
     let (status, body) = post_auth(
         &mut app,
         &format!("/api/v1/admin/tag-candidates/{cid}/approve"),
-        json!({ "action": "new_node", "tree_id": tree_b, "parent_id": parent, "name": "二次函数" }),
+        json!({ "action": "new_node", "tree_id": tree_b, "parent_id": parent, "name": node_name }),
         &admin_token,
     )
     .await;
@@ -792,7 +802,7 @@ async fn test_method_candidate_creates_tag_and_reject_persists_reason() {
     let q_uuid = Uuid::parse_str(&q).unwrap();
     let unique = format!("参数分离_{}", Uuid::new_v4().simple());
     let c_new = insert_candidate(&pool, "method", "tag", &unique, q_uuid).await;
-    let c_reject = insert_candidate(&pool, "method", "tag", "应拒绝的方法", q_uuid).await;
+    let c_reject = insert_candidate(&pool, "method", "tag", &unique_name("应拒绝的方法"), q_uuid).await;
 
     let (status, body) = post_auth(
         &mut app,
@@ -859,7 +869,7 @@ async fn test_approve_does_not_increment_count_when_relation_exists() {
     };
     let (admin_token, _) = register_admin(&mut app, &pool).await;
     let tree_id = insert_tree(&pool, "knowledge").await;
-    let node_id = insert_node(&pool, tree_id, "二次函数", "quad").await;
+    let node_id = insert_node(&pool, tree_id, &unique_name("二次函数"), &format!("q{}", Uuid::new_v4().simple())).await;
     let q = create_question(&mut app, &admin_token, "计数幂等题").await;
     let q_uuid = Uuid::parse_str(&q).unwrap();
     sqlx::query(
@@ -875,7 +885,7 @@ async fn test_approve_does_not_increment_count_when_relation_exists() {
         .fetch_one(&pool)
         .await
         .expect("查询计数失败");
-    let cid = insert_candidate(&pool, "knowledge", "knowledge_node", "二次函数图像", q_uuid).await;
+    let cid = insert_candidate(&pool, "knowledge", "knowledge_node", &unique_name("二次函数图像"), q_uuid).await;
 
     let (status, body) = post_auth(
         &mut app,

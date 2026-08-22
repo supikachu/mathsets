@@ -279,22 +279,27 @@ async fn test_document_confirm_validation_branches() {
     let doc_id = body["data"]["id"].as_str().unwrap().to_string();
     let base = format!("/api/v1/ai/documents/{doc_id}");
 
-    // exam 缺 paper_meta → 400
+    // create_paper=true 但缺 paper_meta → 400
     let (status, body) = post_auth(
         &mut app,
         &format!("{base}/confirm"),
-        json!({ "document_type": "exam" }),
+        json!({
+            "source_category": "paper",
+            "source_kind": "monthly_test",
+            "create_paper": true
+        }),
         &token,
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 
-    // exam 带 paper_meta.title → 200，快照落库
+    // 旧扁平 exam 兼容写入 paper:monthly_test；未开 create_paper 时不强制 paper_meta
     let (status, body) = post_auth(
         &mut app,
         &format!("{base}/confirm"),
         json!({
             "document_type": "exam",
+            "create_paper": true,
             "paper_meta": {
                 "title": "2025高一数学期中考试",
                 "year": 2025,
@@ -315,7 +320,7 @@ async fn test_document_confirm_validation_branches() {
     assert_eq!(status, StatusCode::OK, "{body}");
     let doc = &body["data"];
     assert_eq!(doc["status"], "confirmed");
-    assert_eq!(doc["document_type"], "exam");
+    assert_eq!(doc["document_type"], "paper:monthly_test");
     assert_eq!(doc["metadata"]["paper_meta"]["title"], "2025高一数学期中考试");
     assert_eq!(doc["title"], "2025高一数学期中考试");
 
@@ -339,7 +344,7 @@ async fn test_document_confirm_validation_branches() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
-    // other 带 type_label → 200
+    // other 带 type_label → 200，映射 other:special
     let (status, body) = post_auth(
         &mut app,
         &format!("{base}/confirm"),
@@ -349,12 +354,9 @@ async fn test_document_confirm_validation_branches() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["data"]["type_label"], "校本资料");
-    // 自动补默认单集合
-    let collections = body["data"]["metadata"]["collections"].as_array().unwrap();
-    assert_eq!(collections.len(), 1);
-    assert_eq!(collections[0]["collection_type"], "other");
+    assert_eq!(body["data"]["document_type"], "other:special");
 
-    // mixed 缺 collections → 400
+    // mixed 已废弃 → 400
     let (status, _) = post_auth(
         &mut app,
         &format!("{base}/confirm"),
@@ -364,8 +366,7 @@ async fn test_document_confirm_validation_branches() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
-    // mixed 带集合 → 200
-    let (status, body) = post_auth(
+    let (status, _) = post_auth(
         &mut app,
         &format!("{base}/confirm"),
         json!({
@@ -378,11 +379,9 @@ async fn test_document_confirm_validation_branches() {
         &token,
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let collections = body["data"]["metadata"]["collections"].as_array().unwrap();
-    assert_eq!(collections.len(), 2);
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 
-    // 非试卷类型自动补默认单集合（class_exercise）
+    // 旧 class_exercise → practice:in_class；方案 A 不再自动建集合
     let (status, body) = post_auth(
         &mut app,
         &format!("{base}/confirm"),
@@ -391,10 +390,8 @@ async fn test_document_confirm_validation_branches() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    let collections = body["data"]["metadata"]["collections"].as_array().unwrap();
-    assert_eq!(collections.len(), 1);
-    assert_eq!(collections[0]["title"], "二次函数课堂练习");
-    assert_eq!(collections[0]["collection_type"], "class_exercise");
+    assert_eq!(body["data"]["document_type"], "practice:in_class");
+    assert_eq!(body["data"]["title"], "二次函数课堂练习");
 }
 
 #[tokio::test]

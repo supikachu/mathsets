@@ -4,6 +4,7 @@ import {
   documentApi,
   collectionApi,
   questionApi,
+  aiTaskApi,
   type ParsedQuestion,
   type DocumentMeta,
   type ConfirmDocumentRequest,
@@ -22,11 +23,11 @@ import { useToast } from '@/composables/useToast'
 import { useAiParsePolling } from '@/composables/useAiParsePolling'
 import { parseMarkdownToQuestion, RECOMMENDED_PROMPT, normalizeChoiceAnswerBlank } from '@/utils/parseMarkdown'
 import { compressImage, blobToFile } from '@/utils/imageCompressor'
-import { withBackoffRetry } from '@/utils/concurrency'
+import { withBackoffRetry, isAbortError } from '@/utils/concurrency'
 import { pdfToImages, type PdfPageImage } from '@/utils/pdfToImages'
 import { clearBatchSnapshot, hasUnfinishedSnapshot, type BatchSnapshot } from '@/utils/batchSnapshot'
 import { loadAiSourceFile, saveAiSourceFile } from '@/utils/aiSourceFile'
-import { displaySourceLabel } from '@/utils/questionSource'
+import { displaySourceLabel, type QuestionSourceState } from '@/utils/questionSource'
 import SourceCascadeBar from './SourceCascadeBar.vue'
 import TaskProgressPanel from './TaskProgressPanel.vue'
 import QuestionGroupingStep, { type GroupQuestion } from './QuestionGroupingStep.vue'
@@ -77,14 +78,16 @@ const emit = defineEmits<{
   (e: 'applied'): void
   // 识别完成即把题目装进父组件工作台（不切页）；点卡片再进入对应题编辑
   (e: 'batch-parsed', questions: ParsedQuestion[]): void
+  (e: 'tagging-ready', questions: ParsedQuestion[]): void
   (e: 'open-question', index: number): void
   (e: 'save-all'): void
-  (e: 'source-updated', state: import('@/utils/questionSource').QuestionSourceState): void
+  (e: 'source-updated', state: QuestionSourceState): void
+  (e: 'document-updated', doc: DocumentMeta | null): void
 }>()
 
 const toast = useToast()
 /** 当前识别会话的来源状态（保存题目时写入 metadata） */
-const sourceState = ref<import('@/utils/questionSource').QuestionSourceState | null>(null)
+const sourceState = ref<QuestionSourceState | null>(null)
 
 // AI Mode tab: 'markdown' | 'image' | 'pdf'（图片与 PDF 各走独立通道）
 const aiMode = ref<'markdown' | 'image' | 'pdf'>('markdown')
@@ -121,9 +124,27 @@ const pdfDirectActive = ref(false)
 const pdfFallbackReason = ref('')
 // 回退任务提交中
 const pdfFallbackSubmitting = ref(false)
+/** 解析失败后停留在预览空态，避免只闪一下 toast 后看起来像「没结果」 */
+const parseFailMessage = ref('')
 const currentDoc = ref<DocumentMeta | null>(null)
+/** 同一解析任务只首次灌入预览，后续轮询只合并标签 */
+const presentedParseTaskId = ref('')
 const docConfirming = ref(false)
 const cancelling = ref(false)
+let lastConfirmKey = ''
+/** 取消解析时中止并行 classify / 上传重试，避免限速后后台继续打模型 */
+let backgroundAiAbort: AbortController | null = null
+
+function abortBackgroundAi() {
+  backgroundAiAbort?.abort()
+  backgroundAiAbort = null
+}
+
+function beginBackgroundAi(): AbortSignal {
+  abortBackgroundAi()
+  backgroundAiAbort = new AbortController()
+  return backgroundAiAbort.signal
+}
 
 // 解析任务轮询
 const {
@@ -134,6 +155,8 @@ const {
   startPolling,
   cancel: cancelTask,
   reset: resetPolling,
+  stopPolling,
+  resumePolling,
 } = useAiParsePolling()
 
 // Mixed 分组状态
@@ -233,7 +256,12 @@ watch(previewCount, (n, prev) => {
 })
 
 watch(currentDoc, (doc) => {
-  if (doc && previewCount.value === 0) rightPaneTab.value = 'source'
+  emit('document-updated', doc)
+  const hasPreview =
+    previewCount.value > 0
+    || previewQuestions.value.length > 0
+    || (props.editedSnapshots?.length ?? 0) > 0
+  if (doc && !hasPreview) rightPaneTab.value = 'source'
 })
 function cardSaved(idx: number) {
   return Boolean(props.editedSnapshots?.[idx]?.saved)
@@ -253,11 +281,47 @@ const progressStripPct = computed(() => {
 
 const showOriginalSource = computed(() => Boolean(sourcePreviewUrl.value))
 
-function cardKnowledgePoints(q: ParsedQuestion): string[] {
-  if (q.knowledge_points?.length) return q.knowledge_points.filter(Boolean)
-  return (q.kp_matches || [])
-    .map(m => m.matched_name || m.ai_name)
-    .filter((name): name is string => Boolean(name))
+/** 打标尚未回写：此时卡片上只有 OCR 推断的名称，保存不会带上标签 */
+function cardTaggingPending(q: ParsedQuestion): boolean {
+  return q.tagging_status === 'pending'
+}
+
+/**
+ * 卡片知识点标签。
+ *
+ * `confirmed` 表示该名称背后有知识树节点 UUID，能随保存落库；
+ * OCR 推断的裸名称（`knowledge_points`）没有 UUID，属性面板读不到、保存也不会写入，
+ * 必须区分展示，否则会误导用户以为打标已完成。
+ */
+function cardKnowledgePoints(q: ParsedQuestion): { name: string; confirmed: boolean }[] {
+  const confirmed = new Set<string>()
+  for (const m of q.tagging_matches ?? []) {
+    if (m.target_type !== 'knowledge_node' || !m.target_id) continue
+    const name = (m.target_name || m.ai_name || '').trim()
+    if (name) confirmed.add(name)
+  }
+  if (confirmed.size === 0) {
+    for (const m of q.kp_matches ?? []) {
+      if (!m.matched_id) continue
+      const name = (m.matched_name || m.ai_name || '').trim()
+      if (name) confirmed.add(name)
+    }
+  }
+  if (confirmed.size > 0) {
+    return [...confirmed].map(name => ({ name, confirmed: true }))
+  }
+
+  const unconfirmed = new Set<string>()
+  for (const name of q.knowledge_points ?? []) {
+    const t = (name || '').trim()
+    if (t) unconfirmed.add(t)
+  }
+  for (const m of q.kp_matches ?? []) {
+    if (m.matched_id) continue
+    const t = (m.ai_name || '').trim()
+    if (t) unconfirmed.add(t)
+  }
+  return [...unconfirmed].map(name => ({ name, confirmed: false }))
 }
 
 function cardQuestionType(q: ParsedQuestion): string {
@@ -269,6 +333,9 @@ function cardQuestionType(q: ParsedQuestion): string {
 
 function parsedStubFromSnapshot(s: any): ParsedQuestion {
   const qType = s?.question_type || 'choice'
+  const names = s?.nodeNames && typeof s.nodeNames === 'object'
+    ? Object.values(s.nodeNames as Record<string, string>).filter(Boolean)
+    : []
   return {
     question_type: qType,
     sub_type: s?.sub_type || '',
@@ -277,12 +344,15 @@ function parsedStubFromSnapshot(s: any): ParsedQuestion {
     options: Array.isArray(s?.options) ? s.options : [],
     correct_answer: { kind: 'choice', value: { options: [] } },
     analysis: [],
-    knowledge_points: [],
+    knowledge_points: names,
     confidence: 0,
     warnings: [],
     image_placeholders: [],
     image_urls: [],
     kp_matches: [],
+    tagging_matches: Array.isArray(s?.taggingMatches) ? s.taggingMatches : [],
+    tagging_suggestion_id: s?.taggingSuggestionId || null,
+    ai_meta: s?.aiMeta,
   }
 }
 
@@ -315,13 +385,16 @@ function overlayParsedFromSnapshot(q: ParsedQuestion, s: any): ParsedQuestion {
     : []
   return {
     ...q,
-    stem: normalizeChoiceAnswerBlank(s.stem ?? q.stem, qType),
+    stem: normalizeChoiceAnswerBlank(s.stem ?? q.stem, qType, Boolean(options?.length)),
     question_type: qType,
     sub_type: s.sub_type ?? q.sub_type,
     difficulty: s.difficulty ?? q.difficulty,
     options,
     correct_answer,
     analysis,
+    tagging_matches: Array.isArray(s.taggingMatches) && s.taggingMatches.length
+      ? s.taggingMatches
+      : q.tagging_matches,
     knowledge_points: kpFromNodes.length ? kpFromNodes : q.knowledge_points,
   }
 }
@@ -396,12 +469,207 @@ async function restoreOriginalSource() {
   return true
 }
 
-function presentParsedQuestions(questions: ParsedQuestion[], message: string) {
+type AiPaperSessionRestore = {
+  document?: DocumentMeta | null
+  source?: QuestionSourceState | null
+  taskId?: string | null
+}
+
+function overlaySourceOnDoc(doc: DocumentMeta, source: QuestionSourceState): DocumentMeta {
+  const paperMeta = source.paper_meta
+    || doc.metadata?.paper_meta
+    || doc.ai_classification?.paper_meta
+  const title = source.title || source.paper_meta?.title || doc.title
+  return {
+    ...doc,
+    title,
+    metadata: {
+      ...(doc.metadata || {}),
+      source_category: source.source_category,
+      source_kind: source.source_kind,
+      create_paper: source.create_paper,
+      title: source.title,
+      paper_meta: paperMeta,
+    },
+    ai_classification: {
+      document_type: doc.ai_classification?.document_type || doc.document_type || 'exam',
+      confidence: doc.ai_classification?.confidence ?? 1,
+      level: doc.ai_classification?.level ?? 1,
+      checked_pages: doc.ai_classification?.checked_pages ?? 0,
+      ...doc.ai_classification,
+      source_category: source.source_category,
+      source_kind: source.source_kind,
+      create_paper: source.create_paper,
+      title: source.title || doc.ai_classification?.title,
+      paper_meta: paperMeta || doc.ai_classification?.paper_meta,
+    },
+  }
+}
+
+function stubDocFromSource(source: QuestionSourceState, fileName?: string): DocumentMeta {
+  const title = source.title || source.paper_meta?.title || null
+  return overlaySourceOnDoc({
+    id: 'restored-local',
+    creator_id: '',
+    file_name: fileName || `${title || '未命名资料'}.pdf`,
+    file_size: null,
+    mime: null,
+    page_count: 0,
+    document_type: null,
+    type_label: null,
+    title,
+    source_type: source.source_kind,
+    sub_source_type: source.sub_source_type || null,
+    status: 'classified',
+    ai_classification: null,
+    metadata: {},
+    conversion_engine: null,
+    created_at: '',
+    updated_at: '',
+  }, source)
+}
+
+async function fetchDocById(id: string): Promise<DocumentMeta | null> {
+  if (!id || id === 'restored-local') return null
+  try {
+    const res = await documentApi.get(id)
+    return res.data.data
+  } catch {
+    return null
+  }
+}
+
+async function fetchDocByTaskId(taskId: string): Promise<DocumentMeta | null> {
+  try {
+    const { data } = await aiTaskApi.getParseTask(taskId)
+    if (!data.document_id) return null
+    return await fetchDocById(data.document_id)
+  } catch {
+    return null
+  }
+}
+
+async function fetchDocByFileName(fileName?: string): Promise<DocumentMeta | null> {
+  const name = fileName?.trim()
+  if (!name) return null
+  try {
+    const res = await documentApi.list()
+    const docs = res.data.data || []
+    const byTime = (a: DocumentMeta, b: DocumentMeta) =>
+      String(b.updated_at || '').localeCompare(String(a.updated_at || ''))
+    const exact = docs.filter(d => d.file_name === name)
+    if (exact.length) return [...exact].sort(byTime)[0]
+    const stem = name.replace(/\.[^.]+$/, '')
+    const loose = docs.filter(d => (d.file_name || '').replace(/\.[^.]+$/, '') === stem)
+    if (loose.length) return [...loose].sort(byTime)[0]
+  } catch {
+    /* ignore */
+  }
+  return null
+}
+
+function applyStagedPreview(staged: AiStagedQuestion[], taskId: string, emitReady: boolean) {
+  const questions = staged.map(s => stagedToParsed(s, taskId))
+  previewQuestions.value = questions
+  if (questions[0]) aiResult.value = questions[0]
+  rightPaneTab.value = 'preview'
+  if (emitReady) emit('tagging-ready', questions)
+}
+
+/** 离开后再恢复：从解析任务重建题目预览，并继续轮询未完成的打标 */
+async function restorePreviewFromParseTask(taskId: string) {
+  if (!taskId) return
+  try {
+    const { data } = await aiTaskApi.getParseTask(taskId)
+    const staged = (data.staged_questions ?? []).filter(s => !s.saved && !s.merged_into)
+    if (!staged.length) return
+    presentedParseTaskId.value = data.id
+    applyStagedPreview(staged, taskId, true)
+    const taggingPending = staged.some(s => s.tagging_status === 'pending')
+    if (taggingPending) {
+      await resumePolling(taskId)
+    }
+  } catch (e) {
+    console.warn('[AiRecognizeDialog] 恢复识别预览失败', e)
+  }
+}
+
+/** 恢复「试卷信息」：资料元数据 + 来源级联。有 taskId 时同时重建题目预览。 */
+async function restorePaperSession(opts: AiPaperSessionRestore) {
+  if (opts.source) sourceState.value = opts.source
+
+  let doc: DocumentMeta | null = null
+  const cachedId = opts.document?.id
+  if (cachedId) doc = await fetchDocById(cachedId)
+  if (!doc && opts.document?.id === 'restored-local') doc = opts.document
+  if (!doc && opts.document) doc = opts.document
+  if (!doc && opts.taskId) doc = await fetchDocByTaskId(opts.taskId)
+  if (!doc) doc = await fetchDocByFileName(ocrFileName.value)
+
+  if (opts.source) {
+    doc = doc ? overlaySourceOnDoc(doc, opts.source) : stubDocFromSource(opts.source, ocrFileName.value)
+  }
+  if (doc) currentDoc.value = doc
+  if (opts.taskId) await restorePreviewFromParseTask(opts.taskId)
+}
+
+function mergeStagedTagging(staged: AiStagedQuestion[], taskId: string) {
+  const pendingCount = staged.filter(s => s.tagging_status === 'pending').length
+  if (!previewQuestions.value.length || previewQuestions.value.length !== staged.length) {
+    if (staged.length) applyStagedPreview(staged, taskId, true)
+    if (pendingCount === 0) resetPolling()
+    return
+  }
+  const byIndex = new Map(staged.map(s => [s.index, s]))
+  let changed = false
+  previewQuestions.value = previewQuestions.value.map((q) => {
+    const idx = q.ai_meta?.staged_index
+    if (idx == null || idx === '') return q
+    const s = byIndex.get(idx)
+    if (!s) return q
+    if (s.tagging_status === 'pending') return q
+    const sid = s.suggestion_id || s.suggestion?.suggestion_id || null
+    if (q.tagging_suggestion_id && q.tagging_suggestion_id === sid && (q.tagging_matches?.length ?? 0) > 0) {
+      return q
+    }
+    const next = stagedToParsed(s, taskId)
+    changed = true
+    return {
+      ...q,
+      kp_matches: next.kp_matches,
+      tagging_suggestion_id: next.tagging_suggestion_id,
+      tagging_unmatched: next.tagging_unmatched,
+      tag_matches: next.tag_matches,
+      tagging_matches: next.tagging_matches,
+      grade_level: next.grade_level,
+      cognitive_level: next.cognitive_level,
+      tagging_difficulty: next.tagging_difficulty,
+      tagging_question_type: next.tagging_question_type,
+      tagging_stage: next.tagging_stage,
+      // 必须一并更新，否则卡片会一直显示「标签识别中」、保存守卫也永远拦着
+      tagging_status: next.tagging_status,
+      warnings: (q.warnings ?? []).filter(w => w !== '标签识别中，完成后自动回填'),
+    }
+  })
+  if (aiResult.value?.ai_meta?.staged_index) {
+    const cur = previewQuestions.value.find(q => q.ai_meta?.staged_index === aiResult.value?.ai_meta?.staged_index)
+    if (cur) aiResult.value = cur
+  }
+  if (changed) emit('tagging-ready', previewQuestions.value)
+  if (pendingCount === 0) {
+    resetPolling()
+  }
+}
+
+function presentParsedQuestions(questions: ParsedQuestion[], message: string, keepPolling = false) {
   previewQuestions.value = questions
   aiResult.value = questions[0] ?? null
+  parseFailMessage.value = ''
   // 识别完成只结束进度，保留 currentDoc / 试卷信息，避免切回「试卷信息」时表单被卸载清空
   docFlowState.value = 'idle'
-  resetPolling()
+  if (!keepPolling) {
+    resetPolling()
+  }
   groupingQuestions.value = []
   groupingCollections.value = []
   pdfDirectActive.value = false
@@ -439,7 +707,7 @@ function doApplyAiResult(q: ParsedQuestion) {
   }
   aiGeneratedFields.value.add('question_type')
 
-  props.form.stem = q.stem
+  props.form.stem = normalizeChoiceAnswerBlank(q.stem, q.question_type, Boolean(q.options?.length))
   aiGeneratedFields.value.add('stem')
 
   if (q.difficulty) {
@@ -580,8 +848,9 @@ async function doStartImageParse(file: File) {
   aiImageFile.value = file
   try {
     const pages = await compressToPage(file)
-    await uploadAndClassify(pages, false, undefined)
+    await uploadAndClassify(pages, false, undefined, file.name)
   } catch (e: any) {
+    if (isAbortError(e)) return
     toast.error(e?.message || '图片解析失败')
     resetDocFlow()
   }
@@ -598,8 +867,9 @@ async function doStartPdfParse(file: File) {
       toast.error('未能生成页面图片')
       return
     }
-    await uploadAndClassify(pages, true, file)
+    await uploadAndClassify(pages, true, file, file.name)
   } catch (e: any) {
+    if (isAbortError(e)) return
     toast.error(e?.message || 'PDF 解析失败')
     resetDocFlow()
   }
@@ -648,15 +918,26 @@ async function compressToPage(file: File): Promise<File[]> {
 }
 
 /** 上传后立刻解析；分类并行预填来源条（不阻塞 OCR） */
-async function uploadAndClassify(pages: File[], isPdf: boolean, originalPdf?: File) {
+async function uploadAndClassify(pages: File[], isPdf: boolean, originalPdf?: File, originalFileName?: string) {
+  parseFailMessage.value = ''
   docFlowState.value = 'uploading'
   aiBatchProgress.value = { current: 0, total: pages.length, text: '正在上传资料（最多 30 页）…' }
-  const res = await withBackoffRetry(() =>
-    documentApi.upload(pages, {
-      file_type: isPdf ? 'pdf' : 'image',
-      pdf: originalPdf,
-    }),
+  const signal = beginBackgroundAi()
+  const fileName = originalFileName?.trim()
+    || originalPdf?.name
+    || aiImageFile.value?.name
+    || undefined
+  const res = await withBackoffRetry(
+    () =>
+      documentApi.upload(pages, {
+        file_name: fileName,
+        file_type: isPdf ? 'pdf' : 'image',
+        pdf: originalPdf,
+      }, signal),
+    3,
+    signal,
   )
+  if (signal.aborted) return
   const doc = res.data.data
   currentDoc.value = doc
 
@@ -664,21 +945,51 @@ async function uploadAndClassify(pages: File[], isPdf: boolean, originalPdf?: Fi
   const parseMode = isPdf || docFlowKind.value === 'pdf' ? 'pdf_direct' : undefined
   pdfDirectActive.value = parseMode === 'pdf_direct'
   await startTask(doc.id, parseMode)
+  if (signal.aborted) return
 
-  // 分类并行，仅预填来源条
+  // 分类并行，仅预填来源条。不套前端 429 退避：后端 send_chat 已重试，
+  // 再套一层会在取消解析后继续 POST /classify。
   void (async () => {
     try {
-      const cls = await withBackoffRetry(() => documentApi.classify(doc.id))
-      if (currentDoc.value?.id === doc.id) {
-        currentDoc.value = cls.data.data
-      }
+      const cls = await documentApi.classify(doc.id, signal)
+      if (signal.aborted || currentDoc.value?.id !== doc.id) return
+      currentDoc.value = cls.data.data
     } catch (e: any) {
+      if (isAbortError(e) || signal.aborted) return
       console.warn('[AiRecognizeDialog] 分类建议失败（不影响识别）:', e?.message)
     }
   })()
 }
 
+function humanizeParseError(raw: string): string {
+  const s = raw.toLowerCase()
+  if (s.includes('insufficient balance') || s.includes('http 402') || raw.includes('余额不足')) {
+    return 'AI 服务余额不足，请充值后再试'
+  }
+  if (s.includes('http 401') || s.includes('invalid api key') || s.includes('incorrect api key')) {
+    return 'AI API Key 无效或已过期，请到设置页检查'
+  }
+  if (s.includes('http 403')) {
+    return 'AI 服务拒绝访问，请检查密钥权限'
+  }
+  if (raw.includes('免费档不可用')) {
+    return '该 Gemini 模型在免费档不可用，请改用 Flash 或开通付费'
+  }
+  if (raw.includes('RPD') || raw.includes('太平洋时间') || raw.includes('今日请求次数已用尽')) {
+    return 'Gemini 免费额度今日请求次数已用尽，将于太平洋时间午夜重置'
+  }
+  if (s.includes('http 429') || s.includes('rate limit') || raw.includes('速率限制') || raw.includes('请求过于频繁')) {
+    return 'AI 服务请求过于频繁（已达速率限制），请稍后再试'
+  }
+  if (s.includes('provider returned error') || s.includes('stealth') || raw.includes('Ox Alpha')) {
+    return 'OpenRouter 上游（Ox Alpha / Stealth）暂时拒绝了请求，请确认模型 ID 为 stealth/ox-alpha 后重试'
+  }
+  const oneLine = raw.replace(/\s+/g, ' ').trim()
+  return oneLine.length > 180 ? `${oneLine.slice(0, 180)}…` : oneLine
+}
+
 function resetDocFlow() {
+  abortBackgroundAi()
   docFlowState.value = 'idle'
   currentDoc.value = null
   sourceState.value = null
@@ -689,18 +1000,34 @@ function resetDocFlow() {
   pdfDirectActive.value = false
   pdfFallbackReason.value = ''
   pdfFallbackSubmitting.value = false
+  parseFailMessage.value = ''
+  presentedParseTaskId.value = ''
+  lastConfirmKey = ''
 }
 
 /** 后置确认来源（不启动解析；解析已在上传后开始） */
 async function onConfirmDoc(body: ConfirmDocumentRequest) {
   const doc = currentDoc.value
   if (!doc) return
+  if (docConfirming.value) return
+  const key = JSON.stringify(body)
+  if (key === lastConfirmKey) return
+  lastConfirmKey = key
   docConfirming.value = true
   try {
     const res = await documentApi.confirm(doc.id, body)
-    currentDoc.value = res.data.data
+    const next = res.data.data
     const paperId = (res.data as any).paper_id as string | undefined
-      || res.data.data?.metadata?.linked_paper_id
+      || next?.metadata?.linked_paper_id
+    const prevLinked = currentDoc.value?.metadata?.linked_paper_id
+    const prevConfirmed = currentDoc.value?.metadata?.user_confirmed
+    // 避免整对象替换触发来源条回种，从而再次 confirm
+    if (
+      next
+      && (paperId !== prevLinked || next.metadata?.user_confirmed !== prevConfirmed)
+    ) {
+      currentDoc.value = next
+    }
     if (paperId && sourceState.value) {
       sourceState.value = {
         ...sourceState.value,
@@ -712,13 +1039,14 @@ async function onConfirmDoc(body: ConfirmDocumentRequest) {
       emit('source-updated', sourceState.value)
     }
   } catch (e: any) {
+    lastConfirmKey = ''
     toast.error(e?.response?.data?.error || e?.message || '保存来源失败')
   } finally {
     docConfirming.value = false
   }
 }
 
-function onSourceState(state: import('@/utils/questionSource').QuestionSourceState) {
+function onSourceState(state: QuestionSourceState) {
   sourceState.value = state
   emit('source-updated', state)
 }
@@ -745,8 +1073,15 @@ async function fallbackToPageOcr() {
 /** 取消解析（已识别的题目保留在库中） */
 async function onCancelTask() {
   cancelling.value = true
+  abortBackgroundAi()
   try {
     await cancelTask()
+    pdfDirectActive.value = false
+    stopPolling()
+    if (docFlowState.value === 'progress') {
+      toast.warning('解析已取消')
+      docFlowState.value = 'confirm'
+    }
   } finally {
     cancelling.value = false
   }
@@ -821,13 +1156,12 @@ function stagedToParsed(s: AiStagedQuestion, taskId: string): ParsedQuestion {
     question_type: p.question_type ?? 'solution',
     sub_type: p.sub_type,
     difficulty: p.difficulty,
-    stem: normalizeChoiceAnswerBlank(p.stem ?? '', p.question_type ?? 'solution'),
+    stem: normalizeChoiceAnswerBlank(p.stem ?? '', p.question_type ?? 'solution', Boolean(p.options?.length)),
     options: p.options,
     correct_answer: (p.correct_answer ?? { kind: 'solution', value: { subs: [] } }) as any,
     analysis: Array.isArray(p.analysis) ? p.analysis : [],
     knowledge_points: Array.isArray(p.knowledge_points) ? p.knowledge_points : [],
     confidence: typeof p.confidence === 'number' ? p.confidence : 0,
-    warnings: Array.isArray(p.warnings) ? p.warnings : [],
     image_placeholders: Array.isArray(p.image_placeholders) ? p.image_placeholders : [],
     image_urls: Array.isArray(s.images) ? s.images : [],
     kp_matches: (s.matched ?? []).map(m => ({
@@ -850,6 +1184,10 @@ function stagedToParsed(s: AiStagedQuestion, taskId: string): ParsedQuestion {
       ? s.tagging_stage
       : null,
     existing_question_id: s.existing_question_id ?? null,
+    tagging_status: s.tagging_status ?? null,
+    warnings: s.tagging_status === 'pending'
+      ? [...(Array.isArray(p.warnings) ? p.warnings : []), '标签识别中，完成后自动回填']
+      : (Array.isArray(p.warnings) ? p.warnings : []),
   }
 }
 
@@ -857,23 +1195,19 @@ function stagedToParsed(s: AiStagedQuestion, taskId: string): ParsedQuestion {
 watch(pollTask, async (t) => {
   if (!t) return
   if (t.status === 'success' || t.status === 'partial_success') {
-    const src = sourceState.value
-    if (src?.create_paper && currentDoc.value) {
-      void onConfirmDoc({
-        source_category: src.source_category,
-        source_kind: src.source_kind,
-        create_paper: true,
-        title: src.title,
-        source_type: src.source_kind,
-        sub_source_type: src.sub_source_type,
-        paper_meta: src.paper_meta,
-      })
+    const staged = (t.staged_questions ?? []).filter(s => !s.saved && !s.merged_into)
+    if (presentedParseTaskId.value === t.id) {
+      mergeStagedTagging(staged, t.id)
+      return
     }
+    presentedParseTaskId.value = t.id
     pdfDirectActive.value = false
     // 暂存链路：题目尚未落库，从 staged_questions 构建待确认列表（跳过已保存/跨页合并项）
-    const staged = (t.staged_questions ?? []).filter(s => !s.saved && !s.merged_into)
     if (staged.length === 0) {
-      toast.warning('未识别到有效题目')
+      stopPolling()
+      parseFailMessage.value = '未识别到有效题目'
+      rightPaneTab.value = 'preview'
+      toast.warning(parseFailMessage.value)
       docFlowState.value = 'confirm'
       return
     }
@@ -884,17 +1218,20 @@ watch(pollTask, async (t) => {
       return n + Object.values(u).reduce((a, arr) => a + (arr?.length ?? 0), 0)
     }, 0)
     const dupCount = staged.filter(s => s.existing_question_id).length
+    const taggingPending = staged.filter(s => s.tagging_status === 'pending').length
     const base =
       t.status === 'partial_success'
         ? `部分成功：识别到 ${t.success_count} 题（${t.failed_count} 题失败），请在右侧预览`
         : `成功识别 ${questions.length} 道题，点击右侧卡片进入编辑`
     const extra = [
+      taggingPending > 0 ? `${taggingPending} 题标签识别中` : '',
       unmatchedCount > 0 ? `${unmatchedCount} 个未匹配项，确认保存后提交审核` : '',
       dupCount > 0 ? `${dupCount} 题与题库已有内容重复` : '',
     ].filter(Boolean).join('；')
-    presentParsedQuestions(questions, extra ? `${base}；${extra}` : base)
+    presentParsedQuestions(questions, extra ? `${base}；${extra}` : base, taggingPending > 0)
   } else if (t.status === 'failed') {
     const errMsg = t.error_message || taskError.value || '解析失败'
+    stopPolling()
     // PDF 直连模式失败（PDF_DIRECT_FAILED 前缀）→ 不回到确认页，
     // 进入 pdf_fallback 让用户选择是否拆页 OCR 重试
     if (pdfDirectActive.value && errMsg.startsWith('PDF_DIRECT_FAILED')) {
@@ -902,11 +1239,14 @@ watch(pollTask, async (t) => {
       pdfFallbackReason.value = errMsg.replace(/^PDF_DIRECT_FAILED:?\s*/, '')
       docFlowState.value = 'pdf_fallback'
     } else {
-      toast.error(errMsg)
+      parseFailMessage.value = humanizeParseError(errMsg)
+      rightPaneTab.value = 'preview'
+      toast.error(parseFailMessage.value)
       docFlowState.value = 'confirm'
     }
   } else if (t.status === 'cancelled') {
     pdfDirectActive.value = false
+    stopPolling()
     toast.warning('解析已取消，未保存任何题目')
     docFlowState.value = 'confirm'
   }
@@ -934,11 +1274,14 @@ function onGroupingComplete() {
 async function reclassifyDoc() {
   const doc = currentDoc.value
   if (!doc) return
+  const signal = beginBackgroundAi()
   aiBatchProgress.value = { current: 1, total: 1, text: 'AI 正在重新识别资料类型…' }
   try {
-    const cls = await withBackoffRetry(() => documentApi.classify(doc.id))
+    const cls = await documentApi.classify(doc.id, signal)
+    if (signal.aborted) return
     currentDoc.value = cls.data.data
   } catch (e: any) {
+    if (isAbortError(e) || signal.aborted) return
     toast.error(e?.response?.data?.error || e?.message || '重新识别失败')
   } finally {
     aiBatchProgress.value = { current: 0, total: 0, text: '' }
@@ -976,6 +1319,11 @@ async function restoreFromSnapshot() {
   const questions = pendingSnapshotRestore.questions
   pendingSnapshotRestore = null
 
+  const taskId = questions[0]?.ai_meta?.task_id
+  if (taskId) {
+    await restorePaperSession({ taskId })
+  }
+
   // 恢复后直接进入对应题的编辑页
   show.value = false
   emit('batch-parsed', questions)
@@ -994,10 +1342,15 @@ defineExpose({
     startFileParse(file)
   },
   restoreOriginalSource,
+  restorePaperSession,
+  restorePreviewFromParseTask,
   getSourceState: () => sourceState.value,
+  getCurrentDoc: () => currentDoc.value,
+  getPreviewQuestions: () => previewQuestions.value,
 })
 
 onBeforeUnmount(() => {
+  abortBackgroundAi()
   if (markdownParseTimer) clearTimeout(markdownParseTimer)
   // 离开页面前把内存里的原稿再写一遍 IndexedDB，覆盖「上传时尚未落盘」的旧会话
   const keepDraft = Boolean(
@@ -1006,6 +1359,8 @@ onBeforeUnmount(() => {
   if (keepDraft && aiImageFile.value) {
     void saveAiSourceFile(aiImageFile.value, sourceKind.value === 'pdf' ? 'pdf' : 'image')
   }
+  if (currentDoc.value) emit('document-updated', currentDoc.value)
+  if (sourceState.value) emit('source-updated', sourceState.value)
   revokeSourcePreview()
 })
 </script>
@@ -1224,9 +1579,13 @@ onBeforeUnmount(() => {
                 <div
                   v-if="previewCount === 0"
                   class="ai-preview-empty"
+                  :class="{ 'is-error': Boolean(parseFailMessage) }"
                 >
-                  <span class="ai-empty-kicker">题目预览</span>
-                  <p>{{ docFlowState === 'idle' && !currentDoc ? '识别完成后将在此展示题目卡片' : '识别中，完成后将在此展示' }}</p>
+                  <span class="ai-empty-kicker">{{ parseFailMessage ? '识别失败' : '题目预览' }}</span>
+                  <p>{{
+                    parseFailMessage
+                      || (docFlowState === 'progress' ? '识别中，完成后将在此展示' : '识别完成后将在此展示题目卡片')
+                  }}</p>
                 </div>
                 <div v-else class="ai-q-card-list">
                   <p class="ai-preview-hint">点卡片进入该题编辑；校对完成后可一次性全部保存</p>
@@ -1262,12 +1621,22 @@ onBeforeUnmount(() => {
                         :options="card.options"
                       />
                     </div>
-                    <div v-if="cardKnowledgePoints(card).length" class="ai-q-kps">
+                    <div
+                      v-if="cardTaggingPending(card) || cardKnowledgePoints(card).length"
+                      class="ai-q-kps"
+                    >
+                      <span v-if="cardTaggingPending(card)" class="ai-q-kp ai-q-kp--pending">
+                        标签识别中…
+                      </span>
                       <span
                         v-for="kp in cardKnowledgePoints(card).slice(0, 4)"
-                        :key="kp"
+                        :key="kp.name"
                         class="ai-q-kp"
-                      >{{ kp }}</span>
+                        :class="{ 'ai-q-kp--unconfirmed': !kp.confirmed }"
+                        :title="kp.confirmed
+                          ? '已匹配知识树节点，保存时会一并写入'
+                          : 'AI 初步识别，尚未匹配到知识树节点，保存不会带上此标签'"
+                      >{{ kp.name }}</span>
                     </div>
                   </article>
                 </div>
@@ -1726,6 +2095,15 @@ onBeforeUnmount(() => {
   line-height: 1.5;
 }
 
+.ai-preview-empty.is-error .ai-empty-kicker,
+.ai-preview-empty.is-error p {
+  color: var(--danger, #c0392b);
+}
+
+.ai-preview-empty.is-error p {
+  max-width: 280px;
+}
+
 .ai-q-card-list {
   display: flex;
   flex-direction: column;
@@ -1861,6 +2239,19 @@ onBeforeUnmount(() => {
   background: var(--bg-muted, var(--bg-input));
   border-radius: 999px;
   padding: 2px 8px;
+}
+
+/* 未匹配到知识树节点：虚线描边 + 更淡的字色，与已确认标签区分 */
+.ai-q-kp--unconfirmed {
+  color: var(--text-tertiary, #86868b);
+  background: transparent;
+  border: 1px dashed var(--border-color);
+  padding: 1px 7px;
+}
+
+.ai-q-kp--pending {
+  color: var(--accent);
+  background: var(--accent-light);
 }
 
 [data-theme='dark'] .ai-q-card {

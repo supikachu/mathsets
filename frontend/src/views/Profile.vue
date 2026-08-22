@@ -220,16 +220,34 @@
           <template v-else-if="activeTab === 'ai'">
             <section class="bg-white dark:bg-slate-900 rounded-2xl border border-gray-100 dark:border-slate-800 shadow-sm p-6 flex flex-col gap-5">
               <h2 class="text-lg font-semibold text-gray-900 dark:text-gray-100">AI 模型配置</h2>
-              <p class="text-sm text-gray-500 dark:text-gray-400">配置用于智能录题的文本/视觉大模型 API Key。留空则使用平台默认配置。</p>
+              <p class="text-sm text-gray-500 dark:text-gray-400">文本模型用于试卷分类、OCR 后拆题和知识点打标。视觉模型仅作 OCR 兜底，可与文本服务商分开（如 GLM 文本 + 通义视觉）。</p>
 
               <!-- LLM 服务商 -->
               <div class="flex flex-col gap-1.5">
                 <label class="text-sm font-medium text-gray-700 dark:text-gray-300">LLM 服务商</label>
                 <select v-model="aiForm.provider" class="ai-input">
-                  <option value="deepseek">DeepSeek（推荐）</option>
+                  <option value="deepseek">DeepSeek</option>
                   <option value="qwen">通义千问</option>
+                  <option value="glm">智谱 GLM</option>
+                  <option value="gemini">Google Gemini</option>
                   <option value="openai">OpenAI</option>
+                  <option value="custom">自定义 / OpenRouter</option>
                 </select>
+              </div>
+
+              <!-- 自定义 Base URL -->
+              <div v-if="isCustomLlm" class="flex flex-col gap-1.5">
+                <label class="text-sm font-medium text-gray-700 dark:text-gray-300">API 地址（Base URL）</label>
+                <input
+                  v-model="aiForm.llmBaseUrl"
+                  class="ai-input"
+                  placeholder="https://openrouter.ai/api/v1"
+                />
+                <p class="text-xs text-gray-500 dark:text-gray-400">
+                  OpenAI Chat Completions 兼容地址。OpenRouter 填
+                  <code class="text-xs">https://openrouter.ai/api/v1</code>
+                  ；其它中转站填其文档中的根路径。
+                </p>
               </div>
 
               <!-- API Key -->
@@ -238,14 +256,35 @@
                   API Key
                   <span v-if="aiSettings?.has_api_key" class="text-xs text-green-600 ml-2">已配置</span>
                 </label>
-                <input v-model="aiForm.apiKey" type="password" class="ai-input" placeholder="输入新 Key 以更新，留空保持不变" />
+                <div class="flex gap-2">
+                  <input v-model="aiForm.apiKey" type="password" class="ai-input flex-1" placeholder="输入新 Key 以更新，留空保持不变" />
+                  <AppButton v-if="isCustomLlm" variant="ghost" :loading="testingLlm" @click="testLlmConnection">
+                    <AppIcon name="bolt" :size="16" /> 测试连接
+                  </AppButton>
+                </div>
+                <p v-if="isCustomLlm" class="text-xs text-gray-400">OpenRouter Key 形如 sk-or-v1-...，在 openrouter.ai/keys 创建。</p>
               </div>
 
               <!-- 模型名 -->
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div class="flex flex-col gap-1.5">
-                  <label class="text-sm font-medium text-gray-700 dark:text-gray-300">文本模型（可选）</label>
-                  <input v-model="aiForm.modelText" class="ai-input" placeholder="如 deepseek-chat" />
+                  <label class="text-sm font-medium text-gray-700 dark:text-gray-300">
+                    文本模型{{ isCustomLlm ? '' : '（可选）' }}
+                  </label>
+                  <input v-model="aiForm.modelText" class="ai-input" :placeholder="textModelPlaceholder" />
+                  <p v-if="aiForm.provider === 'gemini'" class="text-xs text-gray-500 dark:text-gray-400">
+                    免费档按 AI Studio 当前额度：Flash（含 3.7）5 次/分钟、20 次/天；Flash-Lite 10 次/分钟、20 次/天。拆题单路排队，请以
+                    <a class="underline" href="https://aistudio.google.com/rate-limit" target="_blank" rel="noreferrer">AI Studio Rate Limit</a>
+                    为准。
+                  </p>
+                  <p v-else-if="isCustomLlm" class="text-xs text-gray-500 dark:text-gray-400">
+                    须填写 OpenRouter 完整模型 ID，例如
+                    <code class="text-xs">stealth/ox-alpha</code>
+                    （Ox Alpha）、
+                    <code class="text-xs">qwen/qwen3-8b:free</code>
+                    。不要只填显示名「Ox Alpha」。免费/预览模型限额较低，拆题会自动单路。列表见
+                    <a class="underline" href="https://openrouter.ai/models" target="_blank" rel="noreferrer">OpenRouter Models</a>。
+                  </p>
                 </div>
                 <div class="flex flex-col gap-1.5">
                   <label class="text-sm font-medium text-gray-700 dark:text-gray-300">视觉模型（可选）</label>
@@ -327,7 +366,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, reactive, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted, reactive, onBeforeUnmount, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { userApi, aiApi, type UserProfile, type AiSettings } from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
@@ -410,16 +449,47 @@ onMounted(loadProfile)
 const aiSettings = ref<AiSettings | null>(null)
 const savingAi = ref(false)
 const testingConnection = ref(false)
+const testingLlm = ref(false)
+
+const DEFAULT_OPENROUTER_URL = 'https://openrouter.ai/api/v1'
 
 const aiForm = reactive({
   provider: 'deepseek',
   apiKey: '',           // 明文输入，保存后清空
   modelText: '',
   modelVision: '',
+  llmBaseUrl: '',
   ocrProvider: 'auto', // auto / doc2x / mineru_local / qwen_vl
   doc2xApiKey: '',     // 明文输入，保存后清空
   mineruEndpoint: '',
   mineruApiKey: '',    // 明文输入，保存后清空
+})
+
+const TEXT_MODEL_DEFAULTS: Record<string, string> = {
+  deepseek: 'deepseek-chat',
+  qwen: 'qwen-plus',
+  glm: 'glm-4-flash',
+  gemini: 'gemini-3.7-flash',
+  openai: 'gpt-4o-mini',
+  custom: 'stealth/ox-alpha',
+}
+
+const isCustomLlm = computed(() => aiForm.provider === 'custom' || aiForm.provider === 'openrouter')
+
+const textModelPlaceholder = computed(() => {
+  const name = TEXT_MODEL_DEFAULTS[aiForm.provider] || 'deepseek-chat'
+  return `如 ${name}`
+})
+
+watch(() => aiForm.provider, (next, prev) => {
+  if (next === prev) return
+  const known = Object.values(TEXT_MODEL_DEFAULTS)
+  if (!aiForm.modelText || known.includes(aiForm.modelText)) {
+    aiForm.modelText = TEXT_MODEL_DEFAULTS[next] || ''
+  }
+  if ((next === 'custom' || next === 'openrouter') && !aiForm.llmBaseUrl) {
+    aiForm.llmBaseUrl = DEFAULT_OPENROUTER_URL
+  }
 })
 
 async function loadAiSettings() {
@@ -431,6 +501,7 @@ async function loadAiSettings() {
     aiForm.modelVision = res.data.model_vision || ''
     aiForm.ocrProvider = res.data.ocr_provider || 'auto'
     aiForm.mineruEndpoint = res.data.mineru_endpoint || ''
+    aiForm.llmBaseUrl = res.data.llm_base_url || ''
     // apiKey / doc2xApiKey / mineruApiKey 留空（脱敏，不回显明文）
     aiForm.apiKey = ''
     aiForm.doc2xApiKey = ''
@@ -441,13 +512,26 @@ async function loadAiSettings() {
 }
 
 async function saveAiSettings() {
+  if (isCustomLlm.value) {
+    if (!aiForm.apiKey && !aiSettings.value?.has_api_key) {
+      toast.error('自定义服务商需要填写 API Key')
+      return
+    }
+    if (!aiForm.modelText.trim()) {
+      toast.error('请填写模型 ID（如 stealth/ox-alpha）')
+      return
+    }
+  }
   savingAi.value = true
   try {
     const payload: Parameters<typeof aiApi.updateSettings>[0] = {
-      provider: aiForm.provider,
-      model_text: aiForm.modelText || undefined,
+      provider: aiForm.provider === 'openrouter' ? 'custom' : aiForm.provider,
+      model_text: aiForm.modelText || TEXT_MODEL_DEFAULTS[aiForm.provider],
       model_vision: aiForm.modelVision || undefined,
       ocr_provider: aiForm.ocrProvider,
+    }
+    if (isCustomLlm.value) {
+      payload.llm_base_url = aiForm.llmBaseUrl.trim() || DEFAULT_OPENROUTER_URL
     }
     if (aiForm.apiKey) payload.api_key = aiForm.apiKey
     if (aiForm.doc2xApiKey) payload.doc2x_api_key = aiForm.doc2xApiKey
@@ -458,6 +542,7 @@ async function saveAiSettings() {
     aiForm.apiKey = ''
     aiForm.doc2xApiKey = ''
     aiForm.mineruApiKey = ''
+    if (res.data.llm_base_url) aiForm.llmBaseUrl = res.data.llm_base_url
     toast.success('AI 设置已保存')
   } catch (e: any) {
     toast.error(e?.response?.data?.error || '保存失败')
@@ -490,6 +575,26 @@ async function testOcrConnection() {
     toast.error(e?.response?.data?.error || e?.message || '测试连接失败')
   } finally {
     testingConnection.value = false
+  }
+}
+
+async function testLlmConnection() {
+  testingLlm.value = true
+  try {
+    const payload: { api_key?: string; endpoint?: string } = {}
+    if (aiForm.apiKey) payload.api_key = aiForm.apiKey
+    if (aiForm.llmBaseUrl.trim()) payload.endpoint = aiForm.llmBaseUrl.trim()
+    const res = await aiApi.testLlmConnection(payload)
+    const { ok, latency_ms, message } = res.data
+    if (ok) {
+      toast.success(`连接成功（${latency_ms}ms）：${message}`)
+    } else {
+      toast.error(`连接失败：${message}`)
+    }
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error || e?.message || '测试连接失败')
+  } finally {
+    testingLlm.value = false
   }
 }
 

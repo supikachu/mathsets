@@ -53,6 +53,8 @@ pub struct MineruProvider {
     client: Client,
     /// 题目图片落盘根目录（如 "./uploads"），云端模式解压 zip 时把 images/* 落盘到这里
     upload_dir: Option<String>,
+    /// 解析任务 ID，云端 zip 保存到 `{upload_dir}/ocr/{task_id}/mineru.zip`
+    task_id: Option<Uuid>,
 }
 
 impl MineruProvider {
@@ -74,6 +76,7 @@ impl MineruProvider {
             base_url: base_url.trim_end_matches('/').to_string(),
             client,
             upload_dir: None,
+            task_id: None,
         }
     }
 
@@ -81,6 +84,37 @@ impl MineruProvider {
     pub fn with_upload_dir(mut self, upload_dir: Option<String>) -> Self {
         self.upload_dir = upload_dir.filter(|s| !s.trim().is_empty());
         self
+    }
+
+    pub fn with_task_id(mut self, task_id: Option<Uuid>) -> Self {
+        self.task_id = task_id;
+        self
+    }
+
+    fn cloud_zip_path(&self) -> Option<std::path::PathBuf> {
+        let root = self.upload_dir.as_ref()?;
+        let id = self
+            .task_id
+            .map(|u| u.to_string())
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        Some(std::path::PathBuf::from(root).join("ocr").join(id).join("mineru.zip"))
+    }
+
+    async fn persist_cloud_zip(&self, bytes: &[u8]) {
+        let Some(path) = self.cloud_zip_path() else {
+            tracing::warn!("未配置 upload_dir，MinerU 云端 zip 未落盘");
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                tracing::warn!("创建 MinerU zip 目录失败 {}: {e}", parent.display());
+                return;
+            }
+        }
+        match tokio::fs::write(&path, bytes).await {
+            Ok(()) => tracing::info!("MinerU 云端 zip 已保存: {}", path.display()),
+            Err(e) => tracing::warn!("写入 MinerU zip 失败 {}: {e}", path.display()),
+        }
     }
 
     /// 构造可选 Authorization Bearer header（仅当 api_key 非空时返回）
@@ -556,6 +590,8 @@ impl MineruProvider {
             OcrError::Upstream(0, format!("读取 zip 字节失败: {e}"))
         })?;
 
+        self.persist_cloud_zip(&zip_bytes).await;
+
         let cursor = std::io::Cursor::new(&zip_bytes[..]);
         let mut archive = zip::ZipArchive::new(cursor).map_err(|e| {
             OcrError::Upstream(0, format!("zip 解压失败: {e}"))
@@ -802,6 +838,17 @@ mod tests {
     }
 
     // --- 云端模式判定 ---
+
+    #[test]
+    fn test_cloud_zip_path_uses_task_id() {
+        let id = Uuid::parse_str("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap();
+        let p = MineruProvider::new("".into(), "https://mineru.net/api".into())
+            .with_upload_dir(Some("./uploads".into()))
+            .with_task_id(Some(id));
+        let path = p.cloud_zip_path().unwrap();
+        let s = path.to_string_lossy().replace('\\', "/");
+        assert!(s.ends_with("ocr/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/mineru.zip"), "{s}");
+    }
 
     #[test]
     fn test_is_cloud_detects_mineru_net() {

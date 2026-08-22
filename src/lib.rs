@@ -285,6 +285,7 @@ pub fn build_app(state: AppState) -> Router {
         .route("/ai/settings", put(handlers::ai::update_settings))
         // OCR 引擎连接测试（轻量探测，不消耗配额）
         .route("/ai/ocr/test-connection", post(handlers::ai::test_ocr_connection))
+        .route("/ai/llm/test-connection", post(handlers::ai::test_llm_connection))
         // V2.1.1 异步解析任务（POST 创建 + GET 进度 + 取消）
         .route("/ai/parse-task", post(handlers::ai_tasks::submit_parse_task))
         .route(
@@ -294,6 +295,11 @@ pub fn build_app(state: AppState) -> Router {
         .route(
             "/ai/parse-task/{id}/cancel",
             post(handlers::ai_tasks::cancel_task),
+        )
+        // 题目全部确认保存后终止残留打标任务（建议已无落点，继续跑纯属浪费额度）
+        .route(
+            "/ai/parse-task/{id}/cancel-tagging",
+            post(handlers::ai_tagging_tasks::cancel_parse_tagging_tasks),
         )
         // V2.1.1 资料/Document：上传页图集 + 列表 + 详情
         .route("/ai/documents", get(handlers::documents::list_documents))

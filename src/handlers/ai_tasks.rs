@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::auth::middleware::AuthUser;
 use crate::auth::permissions::is_admin_user;
-use crate::models::ai_task::{AiParseTask, AiTaskSourceType, TaskStatusResponse};
+use crate::models::ai_task::{AiParseTask, AiTaskSourceType, AiTaskStatus, TaskStatusResponse};
 use crate::models::user::try_consume_quota;
 use crate::AppState;
 
@@ -369,6 +369,7 @@ pub async fn get_task_status(
         current_question_no: task.current_question_no.clone(),
         started_at: task.started_at,
         completed_at: task.completed_at,
+        document_id: task.document_id,
         paper_id,
         collection_ids,
         question_ids,
@@ -409,15 +410,32 @@ pub async fn cancel_task(
         ));
     }
 
+    if matches!(task.status, AiTaskStatus::Pending | AiTaskStatus::Retrying) {
+        sqlx::query(
+            r#"
+            UPDATE ai_parse_tasks
+            SET status = 'cancelled', cancel_requested_at = COALESCE(cancel_requested_at, NOW()),
+                last_error = '用户取消', completed_at = NOW(), updated_at = NOW(),
+                locked_at = NULL, worker_id = NULL
+            WHERE id = $1 AND status IN ('pending', 'retrying')
+            "#,
+        )
+        .bind(task_id)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| db_err(format!("取消任务失败: {e}")))?;
+        return Ok(Json(json!({ "message": "已取消", "status": "cancelled" })));
+    }
+
     sqlx::query(
-        "UPDATE ai_parse_tasks SET cancel_requested_at = NOW(), updated_at = NOW() WHERE id = $1",
+        "UPDATE ai_parse_tasks SET cancel_requested_at = NOW(), updated_at = NOW() WHERE id = $1 AND status = 'processing'",
     )
     .bind(task_id)
     .execute(&state.pool)
     .await
     .map_err(|e| db_err(format!("取消任务失败: {e}")))?;
 
-    Ok(Json(json!({ "message": "已请求取消，正在停止解析" })))
+    Ok(Json(json!({ "message": "已请求取消，正在停止解析", "status": "cancelling" })))
 }
 
 #[cfg(test)]

@@ -9,6 +9,8 @@ axum = { version = "0.8", features = ["multipart"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
+# join_all：Stage2 切块 N 路并发（借用 state / provider，无法用需要 'static 的 JoinSet）
+futures = "0.3"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

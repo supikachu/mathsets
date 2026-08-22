@@ -93,7 +93,7 @@ pub async fn ai_tagging(
     }
 
     let (api_key, provider_name, model, base_url) =
-        resolve_ai_config(&auth, &state, ModelKind::Text)
+        resolve_ai_config(&auth, &state, ModelKind::Tagging)
             .await
             .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({"error": e}))))?;
     let provider = create_provider(&provider_name, &api_key, &base_url);

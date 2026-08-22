@@ -73,7 +73,13 @@ pub fn confirmation_or_legacy(
     })
 }
 
-/// 将建议中用户仍保留的匹配标为 AI 来源，返回待写入候选。
+/// 空列表 = 前端尚未带回填（解析先于打标），应用建议中的全部匹配；
+/// 非空 = 用户确认后的选择，只保留交集。
+fn keep_suggested_target(selected: &[Uuid], target_id: Uuid) -> bool {
+    selected.is_empty() || selected.contains(&target_id)
+}
+
+/// 将建议中的匹配写入题目关联（空选择则落全部匹配），返回待写入候选。
 ///
 /// 幂等：同一 suggestion 已应用到同一题目时直接成功（不再重复生成候选）。
 pub async fn apply_tagging_suggestion(
@@ -111,16 +117,14 @@ pub async fn apply_tagging_suggestion(
         ));
     }
 
-    if status == "applied" {
-        if applied_qid == Some(question_id) {
-            return Ok(Vec::new());
-        }
+    let already_applied_here = status == "applied" && applied_qid == Some(question_id);
+    if status == "applied" && !already_applied_here {
         return Err((
             StatusCode::CONFLICT,
             Json(json!({"error": "该打标建议已应用到其他题目"})),
         ));
     }
-    if status != "pending" {
+    if !already_applied_here && status != "pending" {
         return Err((
             StatusCode::CONFLICT,
             Json(json!({"error": format!("打标建议不可用（status={status}）")})),
@@ -131,22 +135,23 @@ pub async fn apply_tagging_suggestion(
         db_err(format!("打标建议内容损坏: {e}"))
     })?;
 
-    let node_set: std::collections::HashSet<Uuid> = final_node_ids.iter().copied().collect();
-    let tag_set: std::collections::HashSet<Uuid> = final_tag_ids.iter().copied().collect();
-
     for m in &suggestion.matches {
         let conf = rust_decimal::Decimal::from_f32_retain(m.score)
             .map(|d| d.max(rust_decimal::Decimal::ZERO))
             .unwrap_or(rust_decimal::Decimal::ZERO);
         match m.target_type {
-            TaggingTargetType::KnowledgeNode if node_set.contains(&m.target_id) => {
+            TaggingTargetType::KnowledgeNode
+                if keep_suggested_target(final_node_ids, m.target_id) =>
+            {
                 sqlx::query(
                     r#"
-                    UPDATE question_knowledge_nodes
-                    SET source = 'ai',
-                        ai_confidence = $3,
-                        suggestion_id = $4
-                    WHERE question_id = $1 AND node_id = $2
+                    INSERT INTO question_knowledge_nodes
+                      (question_id, node_id, is_primary, source, ai_confidence, suggestion_id, created_at)
+                    VALUES ($1, $2, FALSE, 'ai', $3, $4, NOW())
+                    ON CONFLICT (question_id, node_id) DO UPDATE SET
+                      source = 'ai',
+                      ai_confidence = EXCLUDED.ai_confidence,
+                      suggestion_id = EXCLUDED.suggestion_id
                     "#,
                 )
                 .bind(question_id)
@@ -155,16 +160,18 @@ pub async fn apply_tagging_suggestion(
                 .bind(sid)
                 .execute(&mut **tx)
                 .await
-                .map_err(|e| db_err(format!("标记 AI 知识树关联失败: {e}")))?;
+                .map_err(|e| db_err(format!("写入 AI 知识树关联失败: {e}")))?;
             }
-            TaggingTargetType::Tag if tag_set.contains(&m.target_id) => {
+            TaggingTargetType::Tag if keep_suggested_target(final_tag_ids, m.target_id) => {
                 sqlx::query(
                     r#"
-                    UPDATE question_tags_relation
-                    SET source = 'ai',
-                        ai_confidence = $3,
-                        suggestion_id = $4
-                    WHERE question_id = $1 AND tag_id = $2
+                    INSERT INTO question_tags_relation
+                      (question_id, tag_id, source, ai_confidence, suggestion_id)
+                    VALUES ($1, $2, 'ai', $3, $4)
+                    ON CONFLICT (question_id, tag_id) DO UPDATE SET
+                      source = 'ai',
+                      ai_confidence = EXCLUDED.ai_confidence,
+                      suggestion_id = EXCLUDED.suggestion_id
                     "#,
                 )
                 .bind(question_id)
@@ -173,10 +180,19 @@ pub async fn apply_tagging_suggestion(
                 .bind(sid)
                 .execute(&mut **tx)
                 .await
-                .map_err(|e| db_err(format!("标记 AI 标签关联失败: {e}")))?;
+                .map_err(|e| db_err(format!("写入 AI 标签关联失败: {e}")))?;
             }
             _ => {}
         }
+    }
+
+    if already_applied_here {
+        tracing::info!(
+            suggestion_id = %sid,
+            question_id = %question_id,
+            "打标建议已应用过，已幂等补写题目关联"
+        );
+        return Ok(Vec::new());
     }
 
     let selected: std::collections::HashSet<&str> = confirmation
@@ -264,6 +280,198 @@ pub async fn apply_tagging_suggestion(
     Ok(pending)
 }
 
+/// 打标晚于题目保存完成时的兜底认领。
+///
+/// 解析链路的题目可以先落库、打标后完成；此时建议的 `question_id` 仍为 NULL、状态仍是
+/// `pending`，既不会写入关联表也不会被 `repair_applied_suggestion_links` 捞到，
+/// 标签就此永久丢失。这里把建议直接挂到已保存的题目上。
+///
+/// 与用户确认路径的区别：只落匹配项，未匹配项**不**进候选审核队列（未经教师确认）；
+/// 已有关联一律 `DO NOTHING`，不覆盖用户手工选择。
+pub async fn claim_suggestion_for_saved_question(
+    pool: &PgPool,
+    suggestion_id: Uuid,
+    question_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let row: Option<(String, Option<Uuid>, serde_json::Value)> = sqlx::query_as(
+        r#"
+        SELECT status, question_id, result
+        FROM ai_tagging_suggestions
+        WHERE id = $1
+        "#,
+    )
+    .bind(suggestion_id)
+    .fetch_optional(pool)
+    .await?;
+
+    let Some((status, existing_qid, result)) = row else {
+        return Ok(false);
+    };
+    // 只认领尚未落到任何题目上的 pending 建议，避免抢走用户已确认的结果
+    if status != "pending" || matches!(existing_qid, Some(q) if q != question_id) {
+        return Ok(false);
+    }
+
+    let suggestion: TaggingSuggestion = match serde_json::from_value(result) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(suggestion_id = %suggestion_id, "认领打标建议时内容损坏: {e}");
+            return Ok(false);
+        }
+    };
+
+    let mut tx = pool.begin().await?;
+    for m in &suggestion.matches {
+        let conf = rust_decimal::Decimal::from_f32_retain(m.score)
+            .map(|d| d.max(rust_decimal::Decimal::ZERO))
+            .unwrap_or(rust_decimal::Decimal::ZERO);
+        match m.target_type {
+            TaggingTargetType::KnowledgeNode => {
+                sqlx::query(
+                    r#"
+                    INSERT INTO question_knowledge_nodes
+                      (question_id, node_id, is_primary, source, ai_confidence, suggestion_id, created_at)
+                    VALUES ($1, $2, FALSE, 'ai', $3, $4, NOW())
+                    ON CONFLICT (question_id, node_id) DO NOTHING
+                    "#,
+                )
+                .bind(question_id)
+                .bind(m.target_id)
+                .bind(conf)
+                .bind(suggestion_id)
+                .execute(&mut *tx)
+                .await?;
+            }
+            TaggingTargetType::Tag => {
+                sqlx::query(
+                    r#"
+                    INSERT INTO question_tags_relation
+                      (question_id, tag_id, source, ai_confidence, suggestion_id)
+                    VALUES ($1, $2, 'ai', $3, $4)
+                    ON CONFLICT (question_id, tag_id) DO NOTHING
+                    "#,
+                )
+                .bind(question_id)
+                .bind(m.target_id)
+                .bind(conf)
+                .bind(suggestion_id)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+    }
+
+    // 即使 matches 为空也标记 applied 并绑定题目，避免重复认领与悬空建议
+    let updated = sqlx::query(
+        r#"
+        UPDATE ai_tagging_suggestions
+        SET status = 'applied', question_id = $2, applied_at = NOW()
+        WHERE id = $1 AND status = 'pending'
+        "#,
+    )
+    .bind(suggestion_id)
+    .bind(question_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    tx.commit().await?;
+
+    if updated == 0 {
+        return Ok(false);
+    }
+    tracing::info!(
+        suggestion_id = %suggestion_id,
+        question_id = %question_id,
+        matches = suggestion.matches.len(),
+        "打标晚于保存完成，已把建议认领到题目上"
+    );
+    Ok(true)
+}
+
+/// 已 applied 但当时未写入关联的题目：按建议补写节点/标签（幂等）。
+pub async fn repair_applied_suggestion_links(
+    pool: &PgPool,
+    question_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let row: Option<(Uuid, serde_json::Value)> = sqlx::query_as(
+        r#"
+        SELECT id, result
+        FROM ai_tagging_suggestions
+        WHERE question_id = $1 AND status = 'applied'
+        ORDER BY applied_at DESC NULLS LAST
+        LIMIT 1
+        "#,
+    )
+    .bind(question_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some((sid, result)) = row else {
+        return Ok(false);
+    };
+    let suggestion: TaggingSuggestion = match serde_json::from_value(result) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(question_id = %question_id, "补写打标关联时建议内容损坏: {e}");
+            return Ok(false);
+        }
+    };
+    if suggestion.matches.is_empty() {
+        return Ok(false);
+    }
+
+    let mut wrote = false;
+    let mut tx = pool.begin().await?;
+    for m in &suggestion.matches {
+        let conf = rust_decimal::Decimal::from_f32_retain(m.score)
+            .map(|d| d.max(rust_decimal::Decimal::ZERO))
+            .unwrap_or(rust_decimal::Decimal::ZERO);
+        let n = match m.target_type {
+            TaggingTargetType::KnowledgeNode => sqlx::query(
+                r#"
+                INSERT INTO question_knowledge_nodes
+                  (question_id, node_id, is_primary, source, ai_confidence, suggestion_id, created_at)
+                VALUES ($1, $2, FALSE, 'ai', $3, $4, NOW())
+                ON CONFLICT (question_id, node_id) DO NOTHING
+                "#,
+            )
+            .bind(question_id)
+            .bind(m.target_id)
+            .bind(conf)
+            .bind(sid)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected(),
+            TaggingTargetType::Tag => sqlx::query(
+                r#"
+                INSERT INTO question_tags_relation
+                  (question_id, tag_id, source, ai_confidence, suggestion_id)
+                VALUES ($1, $2, 'ai', $3, $4)
+                ON CONFLICT (question_id, tag_id) DO NOTHING
+                "#,
+            )
+            .bind(question_id)
+            .bind(m.target_id)
+            .bind(conf)
+            .bind(sid)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected(),
+        };
+        if n > 0 {
+            wrote = true;
+        }
+    }
+    tx.commit().await?;
+    if wrote {
+        tracing::info!(
+            suggestion_id = %sid,
+            question_id = %question_id,
+            "已补写此前未落库的打标关联"
+        );
+    }
+    Ok(wrote)
+}
+
 /// 题目事务提交后写入候选；单条失败只记日志。
 pub async fn insert_confirmed_candidates(
     pool: &PgPool,
@@ -347,6 +555,14 @@ mod tests {
     fn missing_suggestion_id_yields_none() {
         let staged = json!({ "unmatched": { "knowledge": ["x"] } });
         assert!(confirmation_or_legacy(None, Some(&staged)).is_none());
+    }
+
+    #[test]
+    fn empty_selection_keeps_all_suggested_targets() {
+        let id = Uuid::new_v4();
+        assert!(keep_suggested_target(&[], id));
+        assert!(keep_suggested_target(&[id], id));
+        assert!(!keep_suggested_target(&[Uuid::new_v4()], id));
     }
 
     #[test]

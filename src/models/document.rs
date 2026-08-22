@@ -221,6 +221,33 @@ pub struct PaperMetaInput {
     pub paper_id: Option<Uuid>,
 }
 
+/// AI 从文件名推断的试卷字段（均可选，供分类预填）
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct AiPaperMetaSuggestion {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub year: Option<i32>,
+    #[serde(default)]
+    pub stage: Option<String>,
+    #[serde(default)]
+    pub grade: Option<String>,
+    #[serde(default)]
+    pub subject: Option<String>,
+    #[serde(default)]
+    pub semester: Option<String>,
+    #[serde(default)]
+    pub region_province: Option<String>,
+    #[serde(default)]
+    pub region_city: Option<String>,
+    #[serde(default)]
+    pub school_name: Option<String>,
+    #[serde(default)]
+    pub source_type: Option<String>,
+    #[serde(default)]
+    pub sub_source_type: Option<String>,
+}
+
 impl PaperMetaInput {
     /// 试卷类型：表单 source_type，否则回退到来源子类（如 final / midterm）
     pub fn resolved_source_type(&self, fallback_kind: &str) -> Option<String> {
@@ -296,6 +323,12 @@ pub struct AiClassificationRaw {
     pub confidence: f32,
     #[serde(default)]
     pub reason: Option<String>,
+    /// 是否建议同时创建试卷（仅 paper 类有效）
+    #[serde(default)]
+    pub create_paper: Option<bool>,
+    /// 从文件名推断的试卷详情（仅 paper 类有效）
+    #[serde(default)]
+    pub paper_meta: Option<AiPaperMetaSuggestion>,
 }
 
 /// AI 分类最终结果（入库 ai_classification JSONB）
@@ -312,6 +345,10 @@ pub struct AiClassification {
     pub reason: Option<String>,
     pub level: i32,
     pub checked_pages: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub create_paper: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paper_meta: Option<AiPaperMetaSuggestion>,
 }
 
 impl AiClassificationRaw {

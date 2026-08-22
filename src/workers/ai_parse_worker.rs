@@ -6,7 +6,7 @@
 //!
 //! 可靠性：
 //! - Stage 0 原子认领（SKIP LOCKED + locked_at/worker_id/heartbeat_at）
-//! - 租约 60s / 心跳 20s；僵尸任务（120s 无心跳）重新入队或 failed（§7.3）
+//! - 租约 60s / 心跳 20s；僵尸任务（240s 无心跳）重新入队或 failed（须大于单次 LLM 超时）
 //! - 幂等：progress.idempotency_map（question_index → question_id）+
 //!   (paper_id,question_id)/(collection_id,question_id) 唯一索引 + 容器幂等键
 //! - 取消：题间检查 cancel_requested_at，终态 cancelled，已落库题目保留（§6.4）
@@ -23,10 +23,14 @@ use crate::ai::ocr::{
     create_ocr_provider, parse_percent_value, should_fallback, OcrError, OcrProvider,
     PdfProgressCallback,
 };
-use crate::ai::prompt::{BATCH_IMAGE_OCR_FULL_PROMPT, STAGE2_PARSE_FULL_PROMPT};
-use crate::ai::provider::{create_provider, AiError, AiProvider};
+use crate::ai::prompt::{BATCH_IMAGE_OCR_FULL_PROMPT, STAGE2_PARSE_FULL_PROMPT, STAGE2_PARSE_SLIM_PROMPT};
+use crate::ai::provider::{
+    create_provider, is_transient_openrouter_error, AiError, AiProvider,
+    OPENROUTER_PROVIDER_ERROR_USER_MESSAGE, RATE_LIMIT_USER_MESSAGE,
+};
 use crate::ai::tagging::{
-    run_tagging, tagging_content_from_parsed, TaggingContext, TaggingInput, TaggingPolicy,
+    content_input_hash_with_stage, run_tagging, tagging_content_from_parsed, TaggingContext,
+    TaggingInput, TaggingPolicy,
 };
 use crate::ai::types::ParsedQuestion;
 use crate::auth::middleware::AuthUser;
@@ -42,8 +46,8 @@ use crate::AppState;
 // 常量
 // ---------------------------------------------------------------------------
 
-/// 僵尸任务判定：心跳超时（120s）
-const HEARTBEAT_TIMEOUT: &str = "120 seconds";
+/// 僵尸任务判定：须大于 DeepSeekProvider 单次超时（180s），避免切块解析中被误回收
+const HEARTBEAT_TIMEOUT: &str = "240 seconds";
 /// 可重试次数上限
 const MAX_RETRIES: i32 = 2;
 /// 跨页组装默认开启（环境变量 AI_TASK_ASSEMBLE=0 可关闭）
@@ -75,6 +79,7 @@ struct TaskFailure {
 pub async fn start_worker(state: AppState) {
     let worker_id = format!("worker-{}", Uuid::new_v4().simple());
     tracing::info!("🤖 AI 解析 worker 已启动（{worker_id}），每 2s 轮询一次任务");
+    abandon_orphaned_processing(&state, &worker_id).await;
 
     loop {
         recover_stale_tasks(&state, &worker_id).await;
@@ -91,16 +96,51 @@ pub async fn start_worker(state: AppState) {
     }
 }
 
-/// 恢复僵尸任务（计划书 §7.3）：只有"超时且无心跳"才允许重新入队
+/// 进程启动时：上一次崩溃/关停留下的 processing 不再续跑
+async fn abandon_orphaned_processing(state: &AppState, worker_id: &str) {
+    let n = sqlx::query(
+        r#"
+        UPDATE ai_parse_tasks
+        SET status = 'cancelled',
+            last_error = '后台进程已停止，任务已终止（不会自动续跑）',
+            completed_at = NOW(), locked_at = NULL, worker_id = NULL, updated_at = NOW()
+        WHERE status = 'processing'
+        "#,
+    )
+    .execute(&state.pool)
+    .await
+    .map(|r| r.rows_affected())
+    .unwrap_or(0);
+    if n > 0 {
+        tracing::warn!("Worker {worker_id} 终止上一次遗留 processing 任务 {n} 个");
+    }
+}
+
+/// 取消请求立即落 cancelled（未拾取的任务）；卡住的 processing 终止而不是重新入队
 async fn recover_stale_tasks(state: &AppState, worker_id: &str) {
-    let requeued = sqlx::query(&format!(
+    let cancelled = sqlx::query(
         r#"
         UPDATE ai_parse_tasks
-        SET status = 'pending', retry_count = retry_count + 1,
-            locked_at = NULL, worker_id = NULL, updated_at = NOW()
+        SET status = 'cancelled',
+            last_error = COALESCE(last_error, '任务已取消'),
+            completed_at = NOW(), locked_at = NULL, worker_id = NULL, updated_at = NOW()
+        WHERE cancel_requested_at IS NOT NULL
+          AND status IN ('pending', 'retrying')
+        "#,
+    )
+    .execute(&state.pool)
+    .await
+    .map(|r| r.rows_affected())
+    .unwrap_or(0);
+
+    let stale = sqlx::query(&format!(
+        r#"
+        UPDATE ai_parse_tasks
+        SET status = 'cancelled',
+            last_error = '任务处理中断（超时或进程退出），未自动续跑',
+            completed_at = NOW(), locked_at = NULL, worker_id = NULL, updated_at = NOW()
         WHERE status = 'processing'
           AND heartbeat_at < NOW() - INTERVAL '{HEARTBEAT_TIMEOUT}'
-          AND retry_count < {MAX_RETRIES}
         "#
     ))
     .execute(&state.pool)
@@ -108,23 +148,8 @@ async fn recover_stale_tasks(state: &AppState, worker_id: &str) {
     .map(|r| r.rows_affected())
     .unwrap_or(0);
 
-    let failed = sqlx::query(&format!(
-        r#"
-        UPDATE ai_parse_tasks
-        SET status = 'failed', last_error = '任务处理超时（租约过期）',
-            completed_at = NOW(), updated_at = NOW()
-        WHERE status = 'processing'
-          AND heartbeat_at < NOW() - INTERVAL '{HEARTBEAT_TIMEOUT}'
-          AND retry_count >= {MAX_RETRIES}
-        "#
-    ))
-    .execute(&state.pool)
-    .await
-    .map(|r| r.rows_affected())
-    .unwrap_or(0);
-
-    if requeued > 0 || failed > 0 {
-        tracing::warn!("Worker {worker_id} 恢复僵尸任务：requeue={requeued} failed={failed}");
+    if cancelled > 0 || stale > 0 {
+        tracing::warn!("Worker {worker_id} 清理任务：cancelled={cancelled} stale={stale}");
     }
 }
 
@@ -142,6 +167,7 @@ async fn process_one_task(state: &AppState, worker_id: &str) -> Result<bool, Str
         WHERE id = (
             SELECT id FROM ai_parse_tasks
             WHERE status IN ('pending', 'retrying')
+              AND cancel_requested_at IS NULL
             ORDER BY created_at ASC
             LIMIT 1
             FOR UPDATE SKIP LOCKED
@@ -165,7 +191,11 @@ async fn process_one_task(state: &AppState, worker_id: &str) -> Result<bool, Str
         task.retry_count + 1
     );
 
-    match execute_task(state, &task).await {
+    let heartbeat = spawn_parse_heartbeat(state.pool.clone(), task_id);
+    let outcome = execute_task(state, &task).await;
+    heartbeat.abort();
+
+    match outcome {
         Ok(TaskOutcome::Terminal(status)) => {
             // ⚠️ 必须参数化 bind（Rust enum → PG enum）。
             // 曾用 serde_json::to_string 拼 SQL，产生 "failed"（双引号）被 PG 当作
@@ -174,7 +204,7 @@ async fn process_one_task(state: &AppState, worker_id: &str) -> Result<bool, Str
                 r#"
                 UPDATE ai_parse_tasks
                 SET status = $1::ai_task_status, completed_at = NOW(), updated_at = NOW()
-                WHERE id = $2
+                WHERE id = $2 AND status = 'processing'
                 "#,
             )
             .bind(&status)
@@ -197,7 +227,7 @@ async fn process_one_task(state: &AppState, worker_id: &str) -> Result<bool, Str
                     UPDATE ai_parse_tasks
                     SET status = 'retrying', retry_count = retry_count + 1,
                         last_error = $1, updated_at = NOW()
-                    WHERE id = $2
+                    WHERE id = $2 AND status = 'processing'
                     "#,
                 )
                 .bind(&short)
@@ -211,7 +241,7 @@ async fn process_one_task(state: &AppState, worker_id: &str) -> Result<bool, Str
                     r#"
                     UPDATE ai_parse_tasks
                     SET status = 'failed', last_error = $1, completed_at = NOW(), updated_at = NOW()
-                    WHERE id = $2
+                    WHERE id = $2 AND status = 'processing'
                     "#,
                 )
                 .bind(&short)
@@ -234,6 +264,9 @@ async fn process_one_task(state: &AppState, worker_id: &str) -> Result<bool, Str
 /// 执行单个解析任务（阶段 1-4）
 async fn execute_task(state: &AppState, task: &AiParseTask) -> Result<TaskOutcome, TaskFailure> {
     let task_id = task.id;
+    if is_cancel_requested(state, task_id).await {
+        return Ok(TaskOutcome::Terminal(AiTaskStatus::Cancelled));
+    }
 
     // ── Stage 1：加载 Document 与输入快照 ──────────────────────────
     let doc_id = task
@@ -305,9 +338,10 @@ async fn execute_task(state: &AppState, task: &AiParseTask) -> Result<TaskOutcom
     // OCR 引擎路由（任务 override > 用户偏好 > auto）：
     // - doc2x / mineru：两阶段（引擎 OCR → Markdown → 文本模型 Stage 2 结构化）
     // - qwen_vl / auto / 未配置：单阶段视觉批量识别（V2.1.1 原路径，行为不变）
-    let ocr_cfg = resolve_ocr_config(&auth, state, task.ocr_provider_override.as_deref())
+    let mut ocr_cfg = resolve_ocr_config(&auth, state, task.ocr_provider_override.as_deref())
         .await
         .map_err(|e| TaskFailure { retryable: false, message: e })?;
+    ocr_cfg.task_id = Some(task.id);
     let ocr_engine = create_ocr_provider(&ocr_cfg);
     let two_stage = ocr_engine.id() != "qwen_vl";
     tracing::info!(
@@ -595,19 +629,23 @@ async fn execute_task(state: &AppState, task: &AiParseTask) -> Result<TaskOutcom
         };
         let image_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
 
-        let raw_json = match ocr_page_to_json(
-            task_id,
-            &image_b64,
-            ocr_engine.as_ref(),
-            two_stage,
-            vision_provider.as_ref(),
-            vision_model.as_deref(),
-            text_provider
-                .as_ref()
-                .map(|(p, m)| (p.as_ref() as &dyn AiProvider, m.as_deref())),
-        )
-        .await
-        {
+        let raw_json = match tokio::select! {
+            r = ocr_page_to_json(
+                task_id,
+                &image_b64,
+                ocr_engine.as_ref(),
+                two_stage,
+                vision_provider.as_ref(),
+                vision_model.as_deref(),
+                text_provider
+                    .as_ref()
+                    .map(|(p, m)| (p.as_ref() as &dyn AiProvider, m.as_deref())),
+            ) => r,
+            _ = wait_until_cancel(state, task_id) => {
+                cancelled = true;
+                break;
+            }
+        } {
             Ok(raw) => raw,
             Err(msg) => {
                 // 页面级失败不消耗重试（计入 failed_count，走 partial_success）
@@ -1313,7 +1351,7 @@ async fn stage_question(
         role: "user".into(),
         global_role: "teacher".into(),
     };
-    let text_resolved = resolve_ai_config(&auth, state, ModelKind::Text).await.ok();
+    let text_resolved = resolve_ai_config(&auth, state, ModelKind::Tagging).await.ok();
     let text_provider = text_resolved
         .as_ref()
         .map(|(key, name, _, base)| create_provider(name, key, base));
@@ -1336,47 +1374,61 @@ async fn stage_question(
         stage: Some(tagging_stage.clone()),
     };
 
-    let tagging_input = if has_text_model {
-        TaggingInput::Content {
-            content: tagging_content_from_parsed(&parsed),
-        }
-    } else {
-        TaggingInput::Parsed(Box::new(parsed.clone()))
-    };
-
-    let suggestion = match run_tagging(
-        &state.pool,
-        text_provider.as_deref(),
-        text_model.as_deref(),
-        tagging_input,
-        &ctx,
-        &policy,
-    )
-    .await
-    {
-        Ok(s) => Some(s),
-        Err(e) => {
-            tracing::warn!("任务 {} 打标失败（不影响暂存）: {:?}", task.id, e);
-            None
-        }
-    };
-
-    let (matched, unmatched, suggestion_id, engine_version, suggestion_value) =
-        if let Some(s) = suggestion {
-            let matched = s.compat_matched_nodes();
-            let unmatched = serde_json::Value::Object(s.compat_unmatched_map());
-            let sid = s.suggestion_id;
-            let ver = s.engine_version.clone();
-            let val = serde_json::to_value(&s).unwrap_or(serde_json::Value::Null);
-            (matched, unmatched, sid, Some(ver), val)
-        } else {
+    let (matched, unmatched, suggestion_id, engine_version, suggestion_value, tagging_status) =
+        if has_text_model {
+            let content = tagging_content_from_parsed(&parsed);
+            // 解析阶段已产出知识点 / 章节 / 解法，一并带上让打标复用，省掉重复的 LLM 提取
+            let signals = serde_json::to_value(crate::ai::tagging::signals_from_parsed(&parsed)).ok();
+            enqueue_staged_tagging(
+                state,
+                task,
+                question_index,
+                &content,
+                space_id,
+                &tagging_stage,
+                signals,
+            )
+            .await;
             (
                 Vec::new(),
                 serde_json::json!({}),
                 None,
                 None,
                 serde_json::Value::Null,
+                "pending",
             )
+        } else {
+            let tagging_input = TaggingInput::Parsed(Box::new(parsed.clone()));
+            match run_tagging(
+                &state.pool,
+                text_provider.as_deref(),
+                text_model.as_deref(),
+                tagging_input,
+                &ctx,
+                &policy,
+            )
+            .await
+            {
+                Ok(s) => {
+                    let matched = s.compat_matched_nodes();
+                    let unmatched = serde_json::Value::Object(s.compat_unmatched_map());
+                    let sid = s.suggestion_id;
+                    let ver = s.engine_version.clone();
+                    let val = serde_json::to_value(&s).unwrap_or(serde_json::Value::Null);
+                    (matched, unmatched, sid, Some(ver), val, "done")
+                }
+                Err(e) => {
+                    tracing::warn!("任务 {} 打标失败（不影响暂存）: {:?}", task.id, e);
+                    (
+                        Vec::new(),
+                        serde_json::json!({}),
+                        None,
+                        None,
+                        serde_json::Value::Null,
+                        "failed",
+                    )
+                }
+            }
         };
 
     let staged_item = serde_json::json!({
@@ -1394,6 +1446,7 @@ async fn stage_question(
         "engine_version": engine_version,
         "suggestion": suggestion_value,
         "tagging_stage": tagging_stage,
+        "tagging_status": tagging_status,
         "matched": matched,
         "unmatched": unmatched,
         "saved": false,
@@ -1419,6 +1472,62 @@ async fn stage_question(
     .map_err(|e| format!("写入暂存失败: {e}"))?;
 
     Ok(())
+}
+
+/// 解析完成入队打标（不占打标日额度；进行中任务按 hash 幂等复用）
+async fn enqueue_staged_tagging(
+    state: &AppState,
+    task: &AiParseTask,
+    question_index: &str,
+    content: &str,
+    space_id: Uuid,
+    stage: &str,
+    parsed_signals: Option<serde_json::Value>,
+) {
+    let content = content.trim();
+    if content.is_empty() {
+        return;
+    }
+    let input_hash = content_input_hash_with_stage(content, Some(stage));
+    let inserted = sqlx::query(
+        r#"
+        INSERT INTO ai_tagging_tasks (
+            creator_id, space_id, question_id, input_hash, content, stage, status,
+            parse_task_id, source_index, parsed_signals
+        )
+        VALUES ($1, $2, NULL, $3, $4, $5, 'pending', $6, $7, $8)
+        "#,
+    )
+    .bind(task.creator_id)
+    .bind(space_id)
+    .bind(&input_hash)
+    .bind(content)
+    .bind(stage)
+    .bind(task.id)
+    .bind(question_index)
+    .bind(parsed_signals)
+    .execute(&state.pool)
+    .await;
+
+    match inserted {
+        Ok(_) => {
+            tracing::info!(
+                "任务 {} 题目 {question_index} 已入队异步打标",
+                task.id
+            );
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("unique")
+                || msg.contains("duplicate")
+                || msg.contains("idx_ai_tagging_tasks_inflight")
+            {
+                tracing::debug!("任务 {} 题目 {question_index} 打标任务已在队列中", task.id);
+            } else {
+                tracing::warn!("任务 {} 题目 {question_index} 入队打标失败（不阻断暂存）: {e}", task.id);
+            }
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -1540,6 +1649,21 @@ async fn refresh_heartbeat(state: &AppState, task_id: Uuid) {
     .await;
 }
 
+fn spawn_parse_heartbeat(pool: sqlx::PgPool, task_id: Uuid) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(20)).await;
+            let _ = sqlx::query(
+                "UPDATE ai_parse_tasks SET heartbeat_at = NOW(), updated_at = NOW() \
+                 WHERE id = $1 AND status = 'processing' AND cancel_requested_at IS NULL",
+            )
+            .bind(task_id)
+            .execute(&pool)
+            .await;
+        }
+    })
+}
+
 async fn is_cancel_requested(state: &AppState, task_id: Uuid) -> bool {
     sqlx::query_scalar::<_, Option<chrono::DateTime<chrono::Utc>>>(
         "SELECT cancel_requested_at FROM ai_parse_tasks WHERE id = $1",
@@ -1658,6 +1782,32 @@ pub(crate) fn map_pdf_poll_progress(
 
 /// Stage 2 切块上限（字符数）：约 2~4 页一块，控制 LLM 上下文与输出截断风险
 const STAGE2_CHUNK_MAX_CHARS: usize = 6000;
+/// Stage2 同时解析的切块数（暂存仍串行，避免 jsonb 追加丢题）
+const STAGE2_CONCURRENCY: usize = 4;
+
+/// 明确已知限流很紧的档位：智谱、Gemini 免费档、OpenRouter `:free` 免费模型。
+///
+/// 早先把所有含 `/` 的 OpenRouter `vendor/model` ID 一律压到 1，但付费 OpenRouter 模型
+/// 并没有那么紧——实测 `stealth/ox-alpha` 连续 50 次调用只撞到 1 次 429，串行反而让
+/// 10 块排队 13.8 分钟。改为只对确知的免费档降档。
+fn stage2_concurrency_for(text_model: Option<&str>, override_n: Option<usize>) -> usize {
+    if let Some(n) = override_n {
+        return n.clamp(1, 16);
+    }
+    let m = text_model.unwrap_or("").to_ascii_lowercase();
+    if m.contains("glm") || m.contains("gemini") || m.contains(":free") {
+        1
+    } else {
+        STAGE2_CONCURRENCY
+    }
+}
+
+fn stage2_concurrency(text_model: Option<&str>) -> usize {
+    let override_n = std::env::var("STAGE2_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok());
+    stage2_concurrency_for(text_model, override_n)
+}
 
 /// 快速路径心跳周期（租约 60s，页循环原路径每页心跳；此处固定 20s）
 const FAST_PATH_HEARTBEAT_SECS: u64 = 20;
@@ -1704,58 +1854,78 @@ async fn run_pdf_fast_path(
         engine.id()
     );
 
-    // ── Phase 1：整档 OCR（pin 引擎 future，select 并行处理进度/心跳/取消） ──
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<u8>();
-    let on_progress: PdfProgressCallback = std::sync::Arc::new(move |p| {
-        let _ = tx.send(p);
-    });
-    let engine_fut = engine.ocr_pdf_async_with_progress(&pdf_bytes, &on_progress);
-    tokio::pin!(engine_fut);
+    let markdown = if let Some(cached) = cached_ocr_markdown(task) {
+        tracing::info!(
+            "任务 {task_id} 复用已落库 OCR Markdown（{} 字符，跳过 OCR）",
+            cached.chars().count()
+        );
+        cached
+    } else {
+        // ── Phase 1：整档 OCR（pin 引擎 future，select 并行处理进度/心跳/取消） ──
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<u8>();
+        let on_progress: PdfProgressCallback = std::sync::Arc::new(move |p| {
+            let _ = tx.send(p);
+        });
+        let engine_fut = engine.ocr_pdf_async_with_progress(&pdf_bytes, &on_progress);
+        tokio::pin!(engine_fut);
 
-    let mut prev: Option<PdfOcrProgress> = None;
-    let mut heartbeat = tokio::time::interval(Duration::from_secs(FAST_PATH_HEARTBEAT_SECS));
-    let markdown = loop {
-        tokio::select! {
-            // 引擎进度 → 单调映射 → 写库（update_progress 自带 heartbeat_at 刷新）
-            Some(pct) = rx.recv() => {
-                if let Some(mapped) =
-                    map_pdf_poll_progress(Some(&serde_json::json!(pct)), total_pages, prev.take())
-                {
-                    prev = Some(mapped.clone());
-                    update_progress(state, task_id, mapped.current_page, mapped.processed_count, 0, 0).await;
+        let mut prev: Option<PdfOcrProgress> = None;
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
+        let mut hb_ticks: u32 = 0;
+        let markdown = loop {
+            tokio::select! {
+                Some(pct) = rx.recv() => {
+                    if let Some(mapped) =
+                        map_pdf_poll_progress(Some(&serde_json::json!(pct)), total_pages, prev.take())
+                    {
+                        prev = Some(mapped.clone());
+                        update_progress(state, task_id, mapped.current_page, mapped.processed_count, 0, 0).await;
+                    }
+                }
+                _ = tick.tick() => {
+                    hb_ticks += 1;
+                    if hb_ticks % FAST_PATH_HEARTBEAT_SECS as u32 == 0 {
+                        refresh_heartbeat(state, task_id).await;
+                    }
+                    if is_cancel_requested(state, task_id).await {
+                        return Ok(FastPathOutcome {
+                            cancelled: true,
+                            success_count: 0,
+                            failed_count: 0,
+                            processed_count: 0,
+                        });
+                    }
+                }
+                res = &mut engine_fut => {
+                    break res.map_err(|e| format!("PDF 直传 OCR 失败: {}", format_ocr_error(&e)))?;
                 }
             }
-            // 无进度引擎（MinerU 云端）由定时分支保活；取消即返回（future drop 中断上传）
-            _ = heartbeat.tick() => {
-                refresh_heartbeat(state, task_id).await;
-                if is_cancel_requested(state, task_id).await {
-                    return Ok(FastPathOutcome {
-                        cancelled: true,
-                        success_count: 0,
-                        failed_count: 0,
-                        processed_count: 0,
-                    });
-                }
-            }
-            // OCR 完成 / 失败
-            res = &mut engine_fut => {
-                break res.map_err(|e| format!("PDF 直传 OCR 失败: {}", format_ocr_error(&e)))?;
-            }
-        }
+        };
+        persist_ocr_markdown(state, task_id, &markdown, engine.id()).await;
+        markdown
     };
 
     // OCR 100%：页进度收敛到满页
     update_progress(state, task_id, total_pages, total_pages, 0, 0).await;
 
-    // ── Phase 2：切块 Stage2 解析 → 逐题落库 ──
-    let chunks = split_markdown_chunks(&markdown, STAGE2_CHUNK_MAX_CHARS);
+    // ── Phase 2：按题号切块 Stage2 解析 → 逐题落库 ──
+    let analysis_paper = looks_like_analysis_paper(&markdown, &task.paper_meta);
+    let chunks = split_stage2_markdown(&markdown, &task.paper_meta);
     if chunks.is_empty() {
         return Err("PDF 直传 OCR 结果为空".into());
     }
+    let prompt = if analysis_paper {
+        STAGE2_PARSE_SLIM_PROMPT.as_str()
+    } else {
+        STAGE2_PARSE_FULL_PROMPT.as_str()
+    };
+    let stage2_n = stage2_concurrency(text_model);
     tracing::info!(
-        "任务 {task_id} 全文 Markdown {} 字符 → {} 块解析",
+        "任务 {task_id} 全文 Markdown {} 字符 → {} 块解析（解析卷={}，并发={}）",
         markdown.chars().count(),
-        chunks.len()
+        chunks.len(),
+        analysis_paper,
+        stage2_n
     );
 
     let mut outcome = FastPathOutcome {
@@ -1765,42 +1935,63 @@ async fn run_pdf_fast_path(
         processed_count: 0,
     };
 
-    for (ci, chunk) in chunks.iter().enumerate() {
+    let mut pending: Vec<(usize, String)> = chunks.into_iter().enumerate().collect();
+    let mut parsed_by_chunk: std::collections::BTreeMap<usize, Vec<ParsedQuestion>> =
+        std::collections::BTreeMap::new();
+
+    while !pending.is_empty() {
         refresh_heartbeat(state, task_id).await;
         if is_cancel_requested(state, task_id).await {
             outcome.cancelled = true;
             return Ok(outcome);
         }
 
-        let raw_json = match text_provider
-            .parse_text_with_prompt(chunk, &STAGE2_PARSE_FULL_PROMPT, text_model)
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                let msg = format!("第 {} 块解析失败: {}", ci + 1, map_ai_error_msg(&e));
-                tracing::warn!("任务 {task_id} {msg}");
-                outcome.failed_count += 1;
-                outcome.processed_count += 1;
-                set_last_error(state, task_id, &msg).await;
-                continue;
-            }
-        };
+        let take_n = stage2_n.min(pending.len());
+        let batch: Vec<(usize, String)> = pending.drain(..take_n).collect();
 
-        let mut chunk_questions = match post_process_batch(&raw_json, &state.pool).await {
-            Ok(qs) => qs,
-            Err((_, err)) => {
-                let msg = format!("第 {} 块后处理失败: {}", ci + 1, err["error"]);
-                tracing::warn!("任务 {task_id} {msg}");
-                outcome.failed_count += 1;
-                outcome.processed_count += 1;
-                set_last_error(state, task_id, &msg).await;
-                continue;
-            }
-        };
-        // Stage2 常丢掉 ![图](url)；从本块 OCR Markdown 把配图划回对应题目
-        assign_chunk_images(chunk, &mut chunk_questions);
+        // 通用 N 路：必须覆盖整个 batch。batch 已从 pending 里 drain 出来，漏处理任何一块
+        // 都会让该块的题目凭空消失且不报错。
+        let results: Vec<(usize, Result<Vec<ParsedQuestion>, (bool, String)>)> =
+            futures::future::join_all(batch.iter().map(|(ci, chunk)| async move {
+                let r = parse_stage2_chunk_cancellable(
+                    state, task_id, text_provider, text_model, prompt, *ci, chunk,
+                )
+                .await;
+                (*ci, r)
+            }))
+            .await;
 
+        let mut fatal = false;
+        for (ci, res) in results {
+            match res {
+                Ok(qs) => {
+                    parsed_by_chunk.insert(ci, qs);
+                }
+                Err((is_fatal, msg)) => {
+                    if msg.contains("任务已取消") || is_cancel_requested(state, task_id).await {
+                        outcome.cancelled = true;
+                        return Ok(outcome);
+                    }
+                    tracing::warn!("任务 {task_id} {msg}");
+                    outcome.failed_count += 1;
+                    outcome.processed_count += 1;
+                    set_last_error(state, task_id, &msg).await;
+                    if is_fatal {
+                        tracing::warn!(
+                            "任务 {task_id} 遇到不可恢复的 AI 错误，停止后续 {} 块",
+                            pending.len()
+                        );
+                        fatal = true;
+                    }
+                }
+            }
+        }
+        if fatal {
+            break;
+        }
+    }
+
+    for (ci, chunk_questions) in parsed_by_chunk {
         for (idx, q) in chunk_questions.into_iter().enumerate() {
             if idx % 5 == 0 {
                 refresh_heartbeat(state, task_id).await;
@@ -1820,7 +2011,7 @@ async fn run_pdf_fast_path(
                 task,
                 &question_index,
                 q,
-                None, // 快速路径无逐页图源；Doc2X/MinerU 真实图片 URL 走 image_urls
+                None,
                 paper_id,
                 collection_id,
                 is_mixed,
@@ -1861,6 +2052,269 @@ async fn run_pdf_fast_path(
     }
 
     Ok(outcome)
+}
+
+fn cached_ocr_markdown(task: &AiParseTask) -> Option<String> {
+    task.progress
+        .get("ocr_markdown")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+async fn persist_ocr_markdown(state: &AppState, task_id: Uuid, markdown: &str, engine_id: &str) {
+    let zip_rel = format!("ocr/{task_id}/mineru.zip");
+    let zip_abs = std::path::Path::new(&state.upload_dir).join(&zip_rel);
+    let mut patch = serde_json::json!({
+        "ocr_markdown": markdown,
+        "ocr_engine": engine_id,
+        "ocr_chars": markdown.chars().count(),
+    });
+    if zip_abs.is_file() {
+        patch["ocr_zip"] = serde_json::Value::String(zip_rel.replace('\\', "/"));
+    }
+    if let Err(e) = sqlx::query(
+        r#"
+        UPDATE ai_parse_tasks
+        SET progress = COALESCE(progress, '{}'::jsonb) || $2::jsonb, updated_at = NOW()
+        WHERE id = $1
+        "#,
+    )
+    .bind(task_id)
+    .bind(&patch)
+    .execute(&state.pool)
+    .await
+    {
+        tracing::warn!("任务 {task_id} 写入 OCR Markdown 失败: {e}");
+    }
+}
+
+/// Ok(questions) / Err((fatal, message))
+async fn parse_stage2_chunk_cancellable(
+    state: &AppState,
+    task_id: Uuid,
+    text_provider: &dyn AiProvider,
+    text_model: Option<&str>,
+    prompt: &str,
+    ci: usize,
+    chunk: &str,
+) -> Result<Vec<ParsedQuestion>, (bool, String)> {
+    tokio::select! {
+        r = parse_stage2_chunk(state, task_id, text_provider, text_model, prompt, ci, chunk) => r,
+        _ = wait_until_cancel(state, task_id) => Err((false, "任务已取消".into())),
+    }
+}
+
+async fn wait_until_cancel(state: &AppState, task_id: Uuid) {
+    loop {
+        if is_cancel_requested(state, task_id).await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+/// Ok(questions) / Err((fatal, message))
+async fn parse_stage2_chunk(
+    state: &AppState,
+    task_id: Uuid,
+    text_provider: &dyn AiProvider,
+    text_model: Option<&str>,
+    prompt: &str,
+    ci: usize,
+    chunk: &str,
+) -> Result<Vec<ParsedQuestion>, (bool, String)> {
+    let mut last_err: Option<AiError> = None;
+    let mut parsed: Option<String> = None;
+    for attempt in 0..2u8 {
+        match text_provider
+            .parse_text_with_prompt(chunk, prompt, text_model)
+            .await
+        {
+            Ok(r) => {
+                parsed = Some(r);
+                break;
+            }
+            Err(e) if (matches!(e, AiError::Timeout) || e.is_rate_limited()) && attempt == 0 => {
+                tracing::warn!(
+                    "任务 {task_id} 第 {} 块{}，3s 后重试 1 次",
+                    ci + 1,
+                    if e.is_rate_limited() { "限流" } else { "超时" }
+                );
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                last_err = Some(e);
+            }
+            Err(e) => {
+                last_err = Some(e);
+                break;
+            }
+        }
+    }
+    let raw_json = match parsed {
+        Some(r) => r,
+        None => {
+            let e = last_err.expect("解析失败时必有错误");
+            let msg = format!("第 {} 块解析失败: {}", ci + 1, map_ai_error_msg(&e));
+            return Err((is_fatal_ai_error(&e), msg));
+        }
+    };
+
+    let mut chunk_questions = match post_process_batch(&raw_json, &state.pool).await {
+        Ok(qs) => qs,
+        Err((_, err)) => {
+            let msg = format!("第 {} 块后处理失败: {}", ci + 1, err["error"]);
+            return Err((false, msg));
+        }
+    };
+    assign_chunk_images(chunk, &mut chunk_questions);
+    Ok(chunk_questions)
+}
+
+fn looks_like_analysis_paper(md: &str, paper_meta: &serde_json::Value) -> bool {
+    let title = paper_meta
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let pm_title = paper_meta
+        .pointer("/paper_meta/title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if title.contains("解析") || pm_title.contains("解析") {
+        return true;
+    }
+    md.matches("【解析】").count() + md.matches("【分析】").count() >= 3
+}
+
+fn split_stage2_markdown(md: &str, paper_meta: &serde_json::Value) -> Vec<String> {
+    let max_q = if looks_like_analysis_paper(md, paper_meta) {
+        1
+    } else {
+        2
+    };
+    let by_q = split_markdown_by_question_no(md, max_q);
+    if by_q.len() >= 2 {
+        return by_q;
+    }
+    split_markdown_chunks(md, STAGE2_CHUNK_MAX_CHARS)
+}
+
+fn question_start_regex() -> &'static regex::Regex {
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r"^\s*(?:\*\*|__|#+\s*)?(?:第\s*)?([1-9]\d{0,2})\s*(?:题|[.．、]\s|[.．、][\u{4e00}-\u{9fff}]|[.．、]$)",
+        )
+        .expect("question start regex")
+    });
+    &RE
+}
+
+fn exam_section_heading_regex() -> &'static regex::Regex {
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r"(?:第\s*[IⅠⅡⅢIV一二三四五1-9]+\s*卷)|(^[一二三四五六七八九十]+[、．，.､]?\s*(?:选|多选|填空|解答|计算|证明|综合))",
+        )
+        .expect("exam section heading regex")
+    });
+    &RE
+}
+
+fn is_notice_heading(line: &str) -> bool {
+    line.contains("注意事项") || line.contains("注意事項")
+}
+
+/// 卷头「1.答卷前 / 2.用铅笔涂卡」这类说明，不是大题。
+fn is_instruction_numbered_line(line: &str) -> bool {
+    const HINTS: &[&str] = &[
+        "答卷前",
+        "考生务必",
+        "准考证",
+        "答题卡",
+        "用铅笔",
+        "用橡皮",
+        "本试卷",
+        "写在本试卷",
+        "考试结束",
+        "一并交回",
+        "密封线",
+        "填涂",
+        "选出每小题",
+        "回答选择题时",
+        "注意事项",
+    ];
+    HINTS.iter().any(|h| line.contains(h))
+}
+
+fn looks_like_math_question_start(line: &str) -> bool {
+    const MATH: &[&str] = &[
+        "已知",
+        "设",
+        "若",
+        "如图",
+        "函数",
+        "求证",
+        "计算",
+        "下列",
+        "椭圆",
+        "集合",
+        "向量",
+        "不等式",
+        "证明：",
+        "证明:",
+    ];
+    MATH.iter().any(|h| line.contains(h))
+}
+
+/// 按行首大题号切段，再按 `max_questions_per_chunk` 打包。
+/// 切不出至少两道大题时返回空，由调用方回退字数切块。
+/// 卷头「注意事项」序号与考场说明不计入题号。
+fn split_markdown_by_question_no(md: &str, max_questions_per_chunk: usize) -> Vec<String> {
+    let re = question_start_regex();
+    let section_re = exam_section_heading_regex();
+    let mut starts: Vec<usize> = Vec::new();
+    let mut offset = 0usize;
+    let mut in_notice = false;
+    for line in md.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if is_notice_heading(trimmed) {
+            in_notice = true;
+        }
+        if section_re.is_match(trimmed) {
+            in_notice = false;
+        }
+        if re.is_match(trimmed) {
+            let instruction = is_instruction_numbered_line(trimmed);
+            let math_like = looks_like_math_question_start(trimmed);
+            if instruction || (in_notice && !math_like) {
+                // 卷头说明序号，跳过
+            } else {
+                in_notice = false;
+                starts.push(offset);
+            }
+        }
+        offset += line.len();
+    }
+    if starts.len() < 2 {
+        return Vec::new();
+    }
+
+    let mut pieces: Vec<String> = Vec::new();
+    for (i, &s) in starts.iter().enumerate() {
+        let end = starts.get(i + 1).copied().unwrap_or(md.len());
+        let body = &md[s..end];
+        if i == 0 && s > 0 {
+            pieces.push(format!("{}{}", &md[..s], body));
+        } else {
+            pieces.push(body.to_string());
+        }
+    }
+
+    let pack = max_questions_per_chunk.max(1);
+    pieces
+        .chunks(pack)
+        .map(|g| g.join(""))
+        .filter(|s| !s.trim().is_empty())
+        .collect()
 }
 
 /// 全文 Markdown → Stage2 切块（纯函数）
@@ -2031,6 +2485,27 @@ fn map_ai_error_msg(e: &AiError) -> String {
     match e {
         AiError::NoApiKey => "未配置 AI API Key".to_string(),
         AiError::Upstream(status, msg) => {
+            if is_insufficient_balance(*status, msg) {
+                return "AI 服务余额不足，请充值后再试".to_string();
+            }
+            if e.is_rate_limited() {
+                if msg.contains("RPD") || msg.contains("太平洋时间") {
+                    return crate::ai::gemini_limit::GEMINI_RPD_USER_MESSAGE.to_string();
+                }
+                return RATE_LIMIT_USER_MESSAGE.to_string();
+            }
+            if is_transient_openrouter_error(*status, msg) {
+                return OPENROUTER_PROVIDER_ERROR_USER_MESSAGE.to_string();
+            }
+            if msg.contains("免费档不可用") {
+                return crate::ai::gemini_limit::GEMINI_UNAVAILABLE_USER_MESSAGE.to_string();
+            }
+            if *status == 401 {
+                return "AI API Key 无效或已过期，请到设置页检查".to_string();
+            }
+            if *status == 403 {
+                return "AI 服务拒绝访问（HTTP 403），请检查密钥权限".to_string();
+            }
             let short = if msg.chars().count() > 300 {
                 format!("{}...", msg.chars().take(300).collect::<String>())
             } else {
@@ -2038,7 +2513,26 @@ fn map_ai_error_msg(e: &AiError) -> String {
             };
             format!("AI 上游错误 (HTTP {status}): {short}")
         }
-        AiError::Timeout => "AI 调用超时（120s）".to_string(),
+        AiError::Timeout => "AI 调用超时（180s）".to_string(),
+    }
+}
+
+fn is_insufficient_balance(status: u16, msg: &str) -> bool {
+    if status == 402 {
+        return true;
+    }
+    let lower = msg.to_ascii_lowercase();
+    lower.contains("insufficient") && lower.contains("balance")
+}
+
+/// 401/402/403 / 未配置 Key：后续切块会同样失败，应立即停掉
+fn is_fatal_ai_error(e: &AiError) -> bool {
+    match e {
+        AiError::NoApiKey => true,
+        AiError::Upstream(status, msg) => {
+            matches!(*status, 401 | 402 | 403) || is_insufficient_balance(*status, msg)
+        }
+        AiError::Timeout => false,
     }
 }
 
@@ -2473,7 +2967,6 @@ mod tests {
         let pool = state.pool.clone();
 
         // 准备用户（满足 creator_id FK）
-        let user_id = Uuid::new_v4();
         let username = format!("wkr_{}", Uuid::new_v4().simple().to_string().get(..8).unwrap_or("x"));
         sqlx::query(
             "INSERT INTO users (id, username, password_hash, email, role, global_role, display_name) VALUES ($1, $2, 'x', $3, 'user', 'teacher', '测试用户')",
@@ -2485,7 +2978,7 @@ mod tests {
         .await
         .expect("插入用户失败");
 
-        let insert_task = async |retry_count: i32| -> Uuid {
+        let insert_stale = async |retry_count: i32| -> Uuid {
             let id = Uuid::new_v4();
             sqlx::query(
                 r#"
@@ -2502,48 +2995,59 @@ mod tests {
             id
         };
 
-        // 重试未耗尽（0）→ 重新入队 pending + retry_count+1
-        let t1 = insert_task(0).await;
-        recover_stale_tasks(&state, "test-worker").await;
-        let (status, retry): (String, i32) = sqlx::query_as(
-            "SELECT status::text, retry_count FROM ai_parse_tasks WHERE id = $1",
-        )
-        .bind(t1)
-        .fetch_one(&pool)
-        .await
-        .expect("查询任务失败");
-        assert_eq!(status, "pending", "僵尸任务应重新入队");
-        assert_eq!(retry, 1);
+        // 心跳超时的 processing 一律终止，不自动续跑；剩余重试次数不影响结果
+        for retry_count in [0, 2] {
+            let id = insert_stale(retry_count).await;
+            recover_stale_tasks(&state, "test-worker").await;
+            let (status, last_error, retry): (String, Option<String>, i32) = sqlx::query_as(
+                "SELECT status::text, last_error, retry_count FROM ai_parse_tasks WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("查询任务失败");
+            assert_eq!(status, "cancelled", "僵尸任务应终止而非重新入队");
+            assert!(last_error.unwrap_or_default().contains("中断"));
+            assert_eq!(retry, retry_count, "终止不应消耗重试次数");
+        }
 
-        // 重试耗尽（2）→ failed
-        let t2 = insert_task(2).await;
-        recover_stale_tasks(&state, "test-worker").await;
-        let (status, last_error): (String, Option<String>) = sqlx::query_as(
-            "SELECT status::text, last_error FROM ai_parse_tasks WHERE id = $1",
-        )
-        .bind(t2)
-        .fetch_one(&pool)
-        .await
-        .expect("查询任务失败");
-        assert_eq!(status, "failed", "重试耗尽应标记失败");
-        assert!(last_error.unwrap_or_default().contains("超时"));
-
-        // 心跳正常（未超时）→ 不受影响
-        let t3 = Uuid::new_v4();
+        // 已请求取消且尚未被拾取 → 立即落 cancelled
+        let pending_cancel = Uuid::new_v4();
         sqlx::query(
             r#"
-            INSERT INTO ai_parse_tasks (id, creator_id, raw_text, status, document_id, retry_count, heartbeat_at, created_at, updated_at, progress)
-            VALUES ($1, $2, '', 'processing', NULL, 0, NOW(), NOW(), NOW(), '{"idempotency_map": {}}')
+            INSERT INTO ai_parse_tasks (id, creator_id, raw_text, status, document_id, retry_count, cancel_requested_at, created_at, updated_at, progress)
+            VALUES ($1, $2, '', 'pending', NULL, 0, NOW(), NOW(), NOW(), '{"idempotency_map": {}}')
             "#,
         )
-        .bind(t3)
+        .bind(pending_cancel)
         .bind(user_id)
         .execute(&pool)
         .await
         .expect("插入任务失败");
         recover_stale_tasks(&state, "test-worker").await;
         let status: String = sqlx::query_scalar("SELECT status::text FROM ai_parse_tasks WHERE id = $1")
-            .bind(t3)
+            .bind(pending_cancel)
+            .fetch_one(&pool)
+            .await
+            .expect("查询任务失败");
+        assert_eq!(status, "cancelled", "取消请求应在拾取前生效");
+
+        // 心跳正常（未超时）→ 不受影响
+        let healthy = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO ai_parse_tasks (id, creator_id, raw_text, status, document_id, retry_count, heartbeat_at, created_at, updated_at, progress)
+            VALUES ($1, $2, '', 'processing', NULL, 0, NOW(), NOW(), NOW(), '{"idempotency_map": {}}')
+            "#,
+        )
+        .bind(healthy)
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .expect("插入任务失败");
+        recover_stale_tasks(&state, "test-worker").await;
+        let status: String = sqlx::query_scalar("SELECT status::text FROM ai_parse_tasks WHERE id = $1")
+            .bind(healthy)
             .fetch_one(&pool)
             .await
             .expect("查询任务失败");
@@ -2622,7 +3126,6 @@ mod tests {
         .await
         .expect("stage 失败");
 
-        // 未匹配标签随暂存项保存（确认保存时才写 tag_candidates）
         let staged: serde_json::Value = sqlx::query_scalar(
             "SELECT progress->'staged_questions'->0 FROM ai_parse_tasks WHERE id = $1",
         )
@@ -2630,22 +3133,41 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("查询暂存失败");
-        let unmatched_knowledge = staged
-            .get("unmatched")
-            .and_then(|u| u.get("knowledge"))
-            .and_then(|k| k.as_array())
-            .cloned()
-            .unwrap_or_default();
-        let planted = format!("完全不存在的知识点XYZ_{uid}");
-        let captured_parsed_key = unmatched_knowledge
-            .iter()
-            .any(|n| n.as_str() == Some(planted.as_str()));
-        if !captured_parsed_key {
-            // 配置了文本模型时走与编辑页相同的 Content 提取，不再沿用 OCR knowledge_points
-            assert!(
-                staged.get("suggestion").is_some() && !staged.get("suggestion").unwrap().is_null(),
-                "打标建议应写入暂存项：{staged}"
-            );
+
+        match staged.get("tagging_status").and_then(|s| s.as_str()) {
+            // 配置了文本模型：走与编辑页相同的 Content 提取，暂存阶段只入队，标签由打标 worker 事后回写
+            Some("pending") => {
+                assert!(
+                    staged.get("suggestion").is_none_or(|s| s.is_null()),
+                    "异步打标尚未完成时不应写入 suggestion：{staged}"
+                );
+                let queued: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM ai_tagging_tasks WHERE parse_task_id = $1 AND source_index = $2",
+                )
+                .bind(task.id)
+                .bind("p1_i0")
+                .fetch_one(&pool)
+                .await
+                .expect("查询打标队列失败");
+                assert_eq!(queued, 1, "暂存应为该题入队一个打标任务");
+            }
+            // 无文本模型时降级为同步 Parsed 适配，未匹配名称随暂存项保存
+            Some("done") => {
+                let planted = format!("完全不存在的知识点XYZ_{uid}");
+                let unmatched_knowledge = staged
+                    .get("unmatched")
+                    .and_then(|u| u.get("knowledge"))
+                    .and_then(|k| k.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                assert!(
+                    unmatched_knowledge
+                        .iter()
+                        .any(|n| n.as_str() == Some(planted.as_str())),
+                    "未匹配知识点应随暂存项保存：{staged}"
+                );
+            }
+            other => panic!("暂存项 tagging_status 异常：{other:?}，staged={staged}"),
         }
 
         // 暂存阶段不产生候选（延迟到确认保存）
@@ -2825,5 +3347,145 @@ mod tests {
         // max_chars=0 视为不切块（防御，正常调用不会传 0）
         let chunks = split_markdown_chunks("任意内容", 0);
         assert_eq!(chunks, vec!["任意内容".to_string()]);
+    }
+
+    #[test]
+    fn test_split_by_question_no_packs_two() {
+        let md = "1. 第一题题干\n\n解答略\n\n2. 第二题题干\n\n3. 第三题\n\n4. 第四题";
+        let chunks = split_markdown_by_question_no(md, 2);
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks[0].contains("1. 第一题"));
+        assert!(chunks[0].contains("2. 第二题"));
+        assert!(chunks[1].contains("3. 第三题"));
+        assert!(chunks[1].contains("4. 第四题"));
+        assert!(!chunks[0].contains("3. 第三题"));
+    }
+
+    #[test]
+    fn test_split_by_question_no_analysis_one_per_chunk() {
+        let md = "16. 椭圆题\n【解析】法一\n\n17. 导数题\n【解析】法二";
+        let chunks = split_markdown_by_question_no(md, 1);
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks[0].contains("16. 椭圆题"));
+        assert!(!chunks[0].contains("17. 导数题"));
+    }
+
+    #[test]
+    fn test_split_by_question_no_ignores_sub_items_and_decimals() {
+        let md = "1. 大题\n（1）小问一\n（2）小问二\n3.14 不是题号\n2. 第二大题";
+        let chunks = split_markdown_by_question_no(md, 1);
+        assert_eq!(chunks.len(), 2, "只应按 1. / 2. 切，不切（1）和 3.14");
+        assert!(chunks[0].contains("（1）小问一"));
+        assert!(chunks[0].contains("3.14"));
+        assert!(chunks[1].starts_with("2. 第二大题") || chunks[1].contains("2. 第二大题"));
+    }
+
+    #[test]
+    fn test_split_skips_notice_numbered_instructions() {
+        let md = "\
+宁波市 2025 期末九校联考高一数学试题\n\
+注意事项：\n\
+1.答卷前，考生务必将自己的姓名、准考证号填写在答题卡上.\n\
+2.回答选择题时，选出每小题答案后，用铅笔把答题卡上对应题目的答案标号涂黑.\n\
+3.考试结束后，将本试卷和答题卡一并交回.\n\
+第 I 卷\n\
+一、选择题（本大题共 8 小题）\n\
+1. 已知全集 $U=R$，集合 $A$ 如图阴影部分表示的集合是（  ）\n\
+A. ${0<x<1}$\n\
+2. 已知向量 $\\vec{a}$，则下列等式中成立的是（  ）\n\
+3. 已知命题 $p$，则实数 $a$ 的取值范围是（  ）\n\
+4. 已知 $a,b,c$ 的大小关系为（  ）\n";
+        let chunks = split_markdown_by_question_no(md, 2);
+        assert!(chunks.len() >= 2, "应切出真实选择题，chunks={chunks:?}");
+        assert!(
+            chunks[0].contains("1. 已知全集"),
+            "第 1 块应含第 1 题: {}",
+            chunks[0]
+        );
+        assert!(
+            chunks[0].contains("2. 已知向量"),
+            "每块 2 题，第 1 块还应含第 2 题"
+        );
+        assert!(
+            !chunks[0].contains("3. 已知命题"),
+            "第 3 题不应打进第 1 块"
+        );
+        // 注意事项应作为前文附在第 1 题上，但 1.答卷前 不能单独成块
+        assert!(chunks[0].contains("注意事项"));
+        assert!(chunks.iter().all(|c| !c.trim_start().starts_with("1.答卷前")));
+        assert!(chunks[1].contains("3. 已知命题"));
+    }
+
+    #[test]
+    fn test_split_skips_notice_without_section_heading() {
+        let md = "\
+注意事项：\n\
+1.考生务必在答题卡上填涂.\n\
+2.考试结束后一并交回.\n\
+1. 已知函数 $f(x)$ 的值域是\n\
+2. 设椭圆 $C$ 的方程为\n";
+        let chunks = split_markdown_by_question_no(md, 1);
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks[0].contains("1. 已知函数"));
+        assert!(chunks[1].contains("2. 设椭圆"));
+        assert!(!chunks[1].contains("考生务必"));
+    }
+
+    #[test]
+    fn test_split_stage2_falls_back_without_numbers() {
+        let md = "没有题号的一段文字\n\n另一段";
+        let chunks = split_stage2_markdown(md, &json!({}));
+        assert!(!chunks.is_empty());
+    }
+
+    #[test]
+    fn test_looks_like_analysis_paper_by_title() {
+        assert!(looks_like_analysis_paper("1. x", &json!({"title": "2024年高考数学试卷（解析卷）"})));
+        assert!(!looks_like_analysis_paper("1. x", &json!({"title": "月考"})));
+    }
+
+    #[test]
+    fn test_map_ai_error_402_is_balance_message() {
+        let e = AiError::Upstream(
+            402,
+            r#"{"error":{"message":"Insufficient Balance","type":"unknown_error"}}"#.into(),
+        );
+        assert_eq!(map_ai_error_msg(&e), "AI 服务余额不足，请充值后再试");
+        assert!(is_fatal_ai_error(&e));
+    }
+
+    #[test]
+    fn test_map_ai_error_insufficient_balance_text_without_402() {
+        let e = AiError::Upstream(400, "Error: Insufficient Balance for this api key".into());
+        assert_eq!(map_ai_error_msg(&e), "AI 服务余额不足，请充值后再试");
+        assert!(is_fatal_ai_error(&e));
+    }
+
+    #[test]
+    fn test_map_ai_error_429_glm_rate_limit() {
+        let e = AiError::Upstream(
+            429,
+            r#"{"error":{"code":"1302","message":"您的账户已达到速率限制，请您控制请求频率"}}"#.into(),
+        );
+        assert_eq!(map_ai_error_msg(&e), RATE_LIMIT_USER_MESSAGE);
+        assert!(!is_fatal_ai_error(&e));
+        // 确知限流很紧的档位降为 1
+        assert_eq!(stage2_concurrency_for(Some("glm-4.7-flash"), None), 1);
+        assert_eq!(stage2_concurrency_for(Some("gemini-3.7-flash"), None), 1);
+        assert_eq!(stage2_concurrency_for(Some("gemini-2.5-flash"), None), 1);
+        assert_eq!(stage2_concurrency_for(Some("qwen/qwen3-8b:free"), None), 1);
+        assert_eq!(stage2_concurrency_for(Some("google/gemma-3-27b-it:free"), None), 1);
+        // 付费模型（含 OpenRouter vendor/model ID）走默认并发
+        assert_eq!(stage2_concurrency_for(Some("deepseek-chat"), None), STAGE2_CONCURRENCY);
+        assert_eq!(stage2_concurrency_for(Some("stealth/ox-alpha"), None), STAGE2_CONCURRENCY);
+        // 环境变量覆盖优先，且被夹在 [1,16]
+        assert_eq!(stage2_concurrency_for(Some("gemini-3.7-flash"), Some(8)), 8);
+        assert_eq!(stage2_concurrency_for(Some("deepseek-chat"), Some(0)), 1);
+        assert_eq!(stage2_concurrency_for(Some("deepseek-chat"), Some(99)), 16);
+        let or_err = AiError::Upstream(
+            400,
+            r#"{"error":{"message":"Provider returned error","code":400,"metadata":{"raw":"ERROR","provider_name":"Stealth"}}}"#.into(),
+        );
+        assert_eq!(map_ai_error_msg(&or_err), OPENROUTER_PROVIDER_ERROR_USER_MESSAGE);
     }
 }

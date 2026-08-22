@@ -533,6 +533,271 @@ async fn test_unconfirmed_does_not_write_candidates_and_foreign_suggestion_forbi
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
 }
 
+async fn insert_parse_task(pool: &sqlx::PgPool, creator_id: Uuid) -> Uuid {
+    sqlx::query_scalar("INSERT INTO ai_parse_tasks (creator_id) VALUES ($1) RETURNING id")
+        .bind(creator_id)
+        .fetch_one(pool)
+        .await
+        .expect("insert parse task")
+}
+
+async fn insert_tagging_task(
+    pool: &sqlx::PgPool,
+    creator_id: Uuid,
+    parse_task_id: Uuid,
+    status: &str,
+) -> Uuid {
+    sqlx::query_scalar(
+        r#"
+        INSERT INTO ai_tagging_tasks
+          (creator_id, input_hash, content, status, parse_task_id, source_index)
+        VALUES ($1, $2, '题干', $3, $4, $5)
+        RETURNING id
+        "#,
+    )
+    .bind(creator_id)
+    .bind(unique_name("hash"))
+    .bind(status)
+    .bind(parse_task_id)
+    .bind(unique_name("p1_i"))
+    .fetch_one(pool)
+    .await
+    .expect("insert tagging task")
+}
+
+/// 题目全部保存后终止残留打标任务：pending 立即终止，processing 打取消标记，
+/// 已结束的任务不动；他人无权终止。
+#[tokio::test]
+async fn test_cancel_parse_tagging_tasks() {
+    let Some((mut app, pool)) = create_test_app().await else {
+        eprintln!("跳过：未配置 DATABASE_URL_TEST");
+        return;
+    };
+    let (token, user_id) = register_and_login(&mut app).await;
+    let uid = Uuid::parse_str(&user_id).unwrap();
+    let parse_id = insert_parse_task(&pool, uid).await;
+
+    let pending_id = insert_tagging_task(&pool, uid, parse_id, "pending").await;
+    let processing_id = insert_tagging_task(&pool, uid, parse_id, "processing").await;
+    let done_id = insert_tagging_task(&pool, uid, parse_id, "success").await;
+
+    // 他人无权终止：计数为 0，任务状态不变
+    let (token2, _) = register_and_login(&mut app).await;
+    let (status, body) = request_auth(
+        &mut app,
+        Method::POST,
+        &format!("/api/v1/ai/parse-task/{parse_id}/cancel-tagging"),
+        Some(json!({})),
+        &token2,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["cancelled"], 0);
+    assert_eq!(body["cancelling"], 0);
+    let still: String = sqlx::query_scalar("SELECT status FROM ai_tagging_tasks WHERE id = $1")
+        .bind(pending_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(still, "pending", "他人调用不应影响任务");
+
+    let (status, body) = request_auth(
+        &mut app,
+        Method::POST,
+        &format!("/api/v1/ai/parse-task/{parse_id}/cancel-tagging"),
+        Some(json!({})),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["cancelled"], 1, "pending 应立即终止");
+    assert_eq!(body["cancelling"], 1, "processing 应打取消标记");
+
+    let (st, cancel_at): (String, Option<chrono::DateTime<chrono::Utc>>) = sqlx::query_as(
+        "SELECT status, cancel_requested_at FROM ai_tagging_tasks WHERE id = $1",
+    )
+    .bind(pending_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(st, "cancelled");
+    assert!(cancel_at.is_none(), "pending 直接终止，无需取消标记");
+
+    let (st, cancel_at): (String, Option<chrono::DateTime<chrono::Utc>>) = sqlx::query_as(
+        "SELECT status, cancel_requested_at FROM ai_tagging_tasks WHERE id = $1",
+    )
+    .bind(processing_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(st, "processing", "processing 由 Worker 收敛，不直接改状态");
+    assert!(cancel_at.is_some(), "processing 应写入取消标记");
+
+    let st: String = sqlx::query_scalar("SELECT status FROM ai_tagging_tasks WHERE id = $1")
+        .bind(done_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(st, "success", "已结束的任务不应被改写");
+
+    // 幂等：再调一次不再产生变更
+    let (status, body) = request_auth(
+        &mut app,
+        Method::POST,
+        &format!("/api/v1/ai/parse-task/{parse_id}/cancel-tagging"),
+        Some(json!({})),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["cancelled"], 0);
+    assert_eq!(body["cancelling"], 0);
+}
+
+/// 打标晚于题目保存完成：建议应被认领到已保存的题目上（否则标签永久丢失），
+/// 但未匹配项未经教师确认，不得进入候选审核队列。
+#[tokio::test]
+async fn test_claim_suggestion_after_question_saved() {
+    use mathset::ai::tagging::{
+        claim_suggestion_for_saved_question, run_tagging, TaggingContext, TaggingInput,
+        TaggingPolicy,
+    };
+    use mathset::ai::types::ParsedQuestion;
+
+    let Some((mut app, pool)) = create_test_app().await else {
+        eprintln!("跳过：未配置 DATABASE_URL_TEST");
+        return;
+    };
+    let (token, user_id) = register_and_login(&mut app).await;
+    let uid = Uuid::parse_str(&user_id).unwrap();
+
+    let tree = insert_tree(&pool, "knowledge").await;
+    let node_name = unique_name("晚到知识点");
+    let node_id = insert_node(&pool, tree, &node_name).await;
+    let unmatched_raw = unique_name("晚到未匹配词");
+
+    let q = ParsedQuestion {
+        question_type: "solution".into(),
+        sub_type: None,
+        difficulty: Some("medium".into()),
+        stem: unique_name("先保存后打标题干"),
+        options: None,
+        correct_answer: None,
+        analysis: vec![],
+        knowledge_points: vec![node_name.clone(), unmatched_raw.clone()],
+        confidence: 0.9,
+        warnings: vec![],
+        image_placeholders: vec![],
+        image_urls: vec![],
+        kp_matches: vec![],
+        question_no: None,
+        display_order: None,
+        score: None,
+        chapter_path: vec![],
+        solution_methods: vec![],
+    };
+    let mut policy = TaggingPolicy::default();
+    policy.run_llm_extract = false;
+    policy.run_llm_converge = false;
+    policy.fail_on_persist = true;
+    let suggestion = run_tagging(
+        &pool,
+        None,
+        None,
+        TaggingInput::Parsed(Box::new(q)),
+        &TaggingContext {
+            user_id: uid,
+            ..TaggingContext::default()
+        },
+        &policy,
+    )
+    .await
+    .expect("persist suggestion");
+    let sid = suggestion.suggestion_id.expect("应写入 suggestion");
+
+    // 用户等不到标签就保存：不带 confirmation，落库时没有任何知识点
+    let (status, created) = request_auth(
+        &mut app,
+        Method::POST,
+        "/api/v1/questions",
+        Some(solution_payload(&unique_name("先保存后打标"))),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let qid = Uuid::parse_str(created["id"].as_str().unwrap()).unwrap();
+
+    let before: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM question_knowledge_nodes WHERE question_id = $1")
+            .bind(qid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(before, 0, "打标未完成就保存，此时应无任何关联");
+
+    let claimed = claim_suggestion_for_saved_question(&pool, sid, qid)
+        .await
+        .expect("claim");
+    assert!(claimed, "pending 建议应被认领到已保存题目");
+
+    let links: Vec<(Uuid, String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT node_id, source::text, suggestion_id FROM question_knowledge_nodes WHERE question_id = $1",
+    )
+    .bind(qid)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let link = links
+        .iter()
+        .find(|l| l.0 == node_id)
+        .expect("匹配节点应被补写");
+    assert_eq!(link.1, "ai");
+    assert_eq!(link.2, Some(sid));
+
+    let (st, bound): (String, Option<Uuid>) = sqlx::query_as(
+        "SELECT status, question_id FROM ai_tagging_suggestions WHERE id = $1",
+    )
+    .bind(sid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(st, "applied");
+    assert_eq!(bound, Some(qid), "建议应绑定到该题目");
+
+    let cand: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM tag_candidates WHERE source_question_id = $1 AND raw_name = $2",
+    )
+    .bind(qid)
+    .bind(&unmatched_raw)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(cand, 0, "认领不应把未确认的未匹配项写入候选");
+
+    // 已 applied 的建议不能再被认领到别的题目
+    let (status, other) = request_auth(
+        &mut app,
+        Method::POST,
+        "/api/v1/questions",
+        Some(solution_payload(&unique_name("另一道题"))),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{other}");
+    let other_qid = Uuid::parse_str(other["id"].as_str().unwrap()).unwrap();
+    let again = claim_suggestion_for_saved_question(&pool, sid, other_qid)
+        .await
+        .expect("claim again");
+    assert!(!again, "已应用的建议不应被再次认领");
+    let stolen: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM question_knowledge_nodes WHERE question_id = $1")
+            .bind(other_qid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stolen, 0, "第二道题不应拿到别人的标签");
+}
+
 #[tokio::test]
 async fn test_alias_maps_write_suggested_node_id() {
     use mathset::ai::tagging::{

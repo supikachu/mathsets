@@ -1,6 +1,7 @@
 pub mod cleaner;
 pub mod deepseek;
 pub mod embedding;
+pub mod gemini_limit;
 pub mod kp_matcher;
 pub mod ocr;
 pub mod prompt;

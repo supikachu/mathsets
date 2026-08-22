@@ -6,8 +6,8 @@
  *   供 AttributeSidePanel（Tab/学段切换）与 QuestionEdit（tree_id→kind 分类分发）共享
  * - 单棵树数据按 treeId 缓存：Tab 来回切换、学段切出再切回均零请求
  * - 失败不进缓存，下次调用自动重试
- * - buildTreeMetaIndex：从嵌套树构建扁平 meta（parentId / namePath），
- *   供已选 chips 折叠（最高层已选节点 +N）与悬浮完整路径使用
+ * - buildTreeMetaIndex：从嵌套树构建扁平 meta（parentId / namePath / childrenIds），
+ *   供已选 chips 折叠（最高层已选节点 +N）、悬浮完整路径与移除时清理子孙使用
  */
 import {
   knowledgeTreeApi,
@@ -66,6 +66,8 @@ export interface TreeMetaInfo {
   name: string
   /** 完整知识路径（如「集合与常用逻辑用语 / 集合 / 集合的概念」） */
   namePath: string
+  /** 直接子节点 ID；移除折叠 chip 时据此连带清掉被代管的已选子孙 */
+  childrenIds: string[]
 }
 
 export function buildTreeMetaIndex(nodes: KnowledgeNodeTreeNode[]): Map<string, TreeMetaInfo> {
@@ -73,7 +75,12 @@ export function buildTreeMetaIndex(nodes: KnowledgeNodeTreeNode[]): Map<string, 
   const walk = (list: KnowledgeNodeTreeNode[], parentId: string | null, parentPath: string) => {
     for (const n of list) {
       const namePath = parentPath ? `${parentPath} / ${n.name}` : n.name
-      map.set(n.id, { parentId, name: n.name, namePath })
+      map.set(n.id, {
+        parentId,
+        name: n.name,
+        namePath,
+        childrenIds: n.children.map((c) => c.id),
+      })
       if (n.children.length > 0) walk(n.children, n.id, namePath)
     }
   }

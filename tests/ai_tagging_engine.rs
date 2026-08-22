@@ -1,4 +1,4 @@
-//! 智能打标引擎：召回规则、上限、适配器一致性（需 DATABASE_URL_TEST�?
+//! 智能打标引擎：召回规则、上限、适配器一致性（需 DATABASE_URL_TEST）
 
 use mathset::ai::tagging::repository::{match_nodes, recall_nodes};
 use mathset::ai::tagging::{
@@ -126,8 +126,8 @@ async fn test_exact_alias_beats_fuzzy_and_excludes_inactive() {
         return;
     };
     let tree = insert_tree(&pool, "knowledge", None).await;
-    let exact_name = unique_name("精确知识�?);
-    let alias_name = unique_name("别名�?);
+    let exact_name = unique_name("精确知识点");
+    let alias_name = unique_name("别名点");
     let alias_raw = unique_name("别名命中");
     let inactive_name = unique_name("停用节点");
     let exact_id = insert_node(&pool, tree, &exact_name, &ltree_seg(), None, 1).await;
@@ -173,10 +173,10 @@ async fn test_merged_deprecated_rejected_and_canonical_excluded() {
         return;
     };
     let tree = insert_tree(&pool, "knowledge", None).await;
-    let live_name = unique_name("活节�?);
-    let merged_name = unique_name("已合�?);
-    let deprecated_name = unique_name("已弃�?);
-    let rejected_name = unique_name("已拒�?);
+    let live_name = unique_name("活节点");
+    let merged_name = unique_name("已合并");
+    let deprecated_name = unique_name("已弃用");
+    let rejected_name = unique_name("已拒绝");
     let live = insert_node(&pool, tree, &live_name, &ltree_seg(), None, 1).await;
     let merged = insert_node(&pool, tree, &merged_name, &ltree_seg(), None, 1).await;
     let deprecated = insert_node(&pool, tree, &deprecated_name, &ltree_seg(), None, 1).await;
@@ -228,12 +228,12 @@ async fn test_chapter_allows_parent_knowledge_and_pattern_leaf_only() {
     let ch_tree = insert_tree(&pool, "chapter", None).await;
     let kn_tree = insert_tree(&pool, "knowledge", None).await;
     let pat_tree = insert_tree(&pool, "ability", None).await;
-    let parent_name = unique_name("父章�?);
+    let parent_name = unique_name("父章节");
     let child_name = unique_name("叶子章节");
-    let kn_parent = unique_name("知识�?);
-    let kn_leaf = unique_name("知识�?);
-    let pat_parent = unique_name("专题�?);
-    let pat_leaf = unique_name("专题�?);
+    let kn_parent = unique_name("知识父");
+    let kn_leaf = unique_name("知识叶");
+    let pat_parent = unique_name("专题父");
+    let pat_leaf = unique_name("专题叶");
 
     let ch_pseg = ltree_seg();
     let ch_parent = insert_node(&pool, ch_tree, &parent_name, &ch_pseg, None, 0).await;
@@ -283,7 +283,7 @@ async fn test_chapter_allows_parent_knowledge_and_pattern_leaf_only() {
     .expect("chapter recall");
     assert!(
         ch_recs.iter().any(|c| c.id == ch_parent),
-        "章节应能命中父节�? {ch_recs:?}"
+        "章节应能命中父节点: {ch_recs:?}"
     );
 
     let kn_recs = recall_nodes(
@@ -313,7 +313,7 @@ async fn test_chapter_allows_parent_knowledge_and_pattern_leaf_only() {
     .expect("pattern recall");
     assert!(
         pat_recs.iter().all(|c| c.id != pat_p),
-        "题型专题不应命中仍有子节点的父节�? {pat_recs:?}"
+        "题型专题不应命中仍有子节点的父节点: {pat_recs:?}"
     );
 }
 
@@ -365,7 +365,7 @@ async fn test_space_isolation() {
     .expect("global");
     assert!(
         global.iter().all(|c| c.id != node_id),
-        "无空间上下文不应命中空间树节�?
+        "无空间上下文不应命中空间树节点"
     );
 }
 
@@ -375,7 +375,8 @@ async fn test_engine_no_silent_top1_and_max_limit() {
         eprintln!("跳过：未配置 DATABASE_URL_TEST");
         return;
     };
-    let tree = insert_tree(&pool, "knowledge", None).await;
+    let space = insert_space(&pool).await;
+    let tree = insert_tree(&pool, "knowledge", Some(space)).await;
     let mut names = Vec::new();
     for i in 0..4 {
         let n = unique_name(&format!("上限{i}"));
@@ -384,13 +385,18 @@ async fn test_engine_no_silent_top1_and_max_limit() {
     }
     let q = parsed(names.clone(), vec![], vec![]);
     let mut policy = offline_policy();
-    policy.max_knowledge = 3;
+    // 提取阶段已把 knowledge_keys 硬截断到 3 条，上限设为 3 会与之重合而测不到
+    // max_selected；设为 2 才能验证「命中被上限砍掉的 key 仍落入 unmatched」。
+    policy.max_knowledge = 2;
     let suggestion = run_tagging(
         &pool,
         None,
         None,
         TaggingInput::Parsed(Box::new(q)),
-        &TaggingContext::default(),
+        &TaggingContext {
+            space_id: Some(space),
+            ..TaggingContext::default()
+        },
         &policy,
     )
     .await
@@ -400,12 +406,16 @@ async fn test_engine_no_silent_top1_and_max_limit() {
         .iter()
         .filter(|m| m.dimension == TaggingDimension::Knowledge)
         .collect();
-    assert_eq!(kn.len(), 3, "知识点上限应�?3: {:?}", kn);
+    assert_eq!(kn.len(), 2, "知识点应被上限砍到 2: {:?}", kn);
     assert_eq!(suggestion.engine_version, ENGINE_VERSION);
-    assert!(suggestion
-        .unmatched
-        .iter()
-        .any(|u| u.dimension == TaggingDimension::Knowledge));
+    assert!(
+        suggestion
+            .unmatched
+            .iter()
+            .any(|u| u.dimension == TaggingDimension::Knowledge),
+        "超出上限的知识点不应被静默丢弃: {:?}",
+        suggestion.unmatched
+    );
 
     let fuzzy_key = format!("{}变式", names[0]);
     let q2 = parsed(vec![fuzzy_key], vec![], vec![]);
@@ -426,7 +436,7 @@ async fn test_engine_no_silent_top1_and_max_limit() {
         .collect();
     assert!(
         auto.is_empty(),
-        "关闭收敛时不应静默接�?fuzzy Top1: {:?}",
+        "关闭收敛时不应静默接受 fuzzy Top1: {:?}",
         suggestion2.matches
     );
     assert!(suggestion2.needs_review);
@@ -441,8 +451,8 @@ async fn test_parsed_adapter_matches_direct_recall() {
     let kn_tree = insert_tree(&pool, "knowledge", None).await;
     let ch_tree = insert_tree(&pool, "chapter", None).await;
     let kn_name = unique_name("一致知识点");
-    let ch_name = unique_name("一致章�?);
-    let method_name = unique_name("一致方�?);
+    let ch_name = unique_name("一致章节");
+    let method_name = unique_name("一致方法");
     let kn_id = insert_node(&pool, kn_tree, &kn_name, &ltree_seg(), None, 1).await;
     let ch_id = insert_node(&pool, ch_tree, &ch_name, &ltree_seg(), None, 1).await;
     sqlx::query(
@@ -549,7 +559,7 @@ async fn test_content_adapter_offline_does_not_invent_matches() {
         None,
         None,
         TaggingInput::Content {
-            content: format!("已知{name}，求最值�?),
+            content: format!("已知{name}，求最值。"),
         },
         &TaggingContext::default(),
         &offline_policy(),
@@ -558,7 +568,7 @@ async fn test_content_adapter_offline_does_not_invent_matches() {
     .expect("content tagging");
     assert!(
         suggestion.matches.is_empty(),
-        "关闭提取�?Content 适配器不应凭题文静默召回: {:?}",
+        "关闭提取后 Content 适配器不应凭题文静默召回: {:?}",
         suggestion.matches
     );
 }
@@ -570,7 +580,7 @@ async fn test_old_top1_includes_fuzzy_engine_does_not() {
         return;
     };
     let tree = insert_tree(&pool, "knowledge", None).await;
-    let exact = unique_name("二次函数最值问�?);
+    let exact = unique_name("二次函数最值问题");
     insert_node(&pool, tree, &exact, &ltree_seg(), None, 1).await;
     let key = format!("{exact}变式");
     let (old_matched, _) = match_nodes(&pool, &[key.clone()], None, "knowledge")
@@ -594,7 +604,7 @@ async fn test_old_top1_includes_fuzzy_engine_does_not() {
     if !old_matched.is_empty() && old_matched[0].match_type != "exact" {
         assert!(
             engine_kn.is_empty(),
-            "�?Top1 可收�?fuzzy，引擎关闭收敛后不应自动收下"
+            "旧 Top1 可收下 fuzzy，引擎关闭收敛后不应自动收下"
         );
         assert!(!suggestion.unmatched.is_empty());
     }
@@ -653,8 +663,8 @@ async fn test_semantic_recall_chapter_key_contained_in_textbook_title() {
     };
     let tree = insert_tree(&pool, "chapter", None).await;
     let marker = unique_name("e7sem");
-    let chapter_name = format!("第一�?{marker}与常用逻辑用语");
-    let section_name = format!("1.3 {marker}的基本运�?);
+    let chapter_name = format!("第一章 {marker}与常用逻辑用语");
+    let section_name = format!("1.3 {marker}的基本运算");
     let pseg = ltree_seg();
     let chapter_id = insert_node(&pool, tree, &chapter_name, &pseg, None, 0).await;
     let _section_id = insert_node(
@@ -683,11 +693,11 @@ async fn test_semantic_recall_chapter_key_contained_in_textbook_title() {
     let hit = recs
         .iter()
         .find(|c| c.id == chapter_id)
-        .unwrap_or_else(|| panic!("短关键词应召回教材式章节�?{chapter_name}，实�?{recs:?}"));
+        .unwrap_or_else(|| panic!("短关键词应召回教材式章节名 {chapter_name}，实际 {recs:?}"));
     assert_eq!(hit.match_type.as_str(), "fuzzy", "包含命中不得升为 exact");
     assert!(
         recs.iter().any(|c| c.name == section_name),
-        "带节号的子章节也应进入模糊候�? {recs:?}"
+        "带节号的子章节也应进入模糊候选: {recs:?}"
     );
 }
 
@@ -730,7 +740,7 @@ async fn test_semantic_recall_knowledge_leaf_from_paraphrase() {
 
     let mut policy = offline_policy();
     policy.recall_limit_knowledge = 80;
-    let key = format!("{marker}集合的交集运�?);
+    let key = format!("{marker}集合的交集运算");
     let recs = recall_nodes(
         &pool,
         &[key],
@@ -748,7 +758,7 @@ async fn test_semantic_recall_knowledge_leaf_from_paraphrase() {
     assert_eq!(hit.match_type.as_str(), "fuzzy");
     assert!(
         hit.name_path.contains(&set_name) && hit.name_path.contains(&leaf_name),
-        "收敛菜单需要祖先路�? {}",
+        "收敛菜单需要祖先路径: {}",
         hit.name_path
     );
     assert!(

@@ -24,7 +24,8 @@ use crate::auth::permissions::is_admin_user;
 use crate::handlers::ai::{map_ai_error, resolve_ai_config, ModelKind};
 use crate::models::document::{
     document_type_compat, is_valid_source_category, source_kind_matches_category, validate_confirm,
-    AiClassification, AiClassificationRaw, ConfirmDocumentRequest, Document, PaperMetaInput,
+    AiClassification, AiClassificationRaw, AiPaperMetaSuggestion, ConfirmDocumentRequest, Document,
+    PaperMetaInput,
 };
 use crate::AppState;
 
@@ -860,6 +861,33 @@ async fn run_classification(
     }
     let document_type = document_type_compat(&category, &kind);
 
+    let create_paper = best.create_paper.or_else(|| {
+        if category == "paper" {
+            Some(matches!(
+                kind.as_str(),
+                "midterm" | "final" | "gaokao" | "mock"
+            ))
+        } else {
+            None
+        }
+    });
+
+    let mut paper_meta = best.paper_meta.clone();
+    if category == "paper" {
+        if let Some(ref mut pm) = paper_meta {
+            if pm.title.as_ref().map(|s| s.trim().is_empty()).unwrap_or(true) {
+                pm.title = best.title.clone();
+            }
+        } else if best.title.is_some() {
+            paper_meta = Some(AiPaperMetaSuggestion {
+                title: best.title.clone(),
+                ..Default::default()
+            });
+        }
+    } else {
+        paper_meta = None;
+    }
+
     Ok(AiClassification {
         source_category: category,
         source_kind: kind,
@@ -869,6 +897,8 @@ async fn run_classification(
         reason: best.reason,
         level,
         checked_pages: checked_pages as i32,
+        create_paper,
+        paper_meta,
     })
 }
 

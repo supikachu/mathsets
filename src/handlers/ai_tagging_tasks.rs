@@ -3,6 +3,7 @@
 //! - `POST /questions/ai-tagging-tasks` → 202 + task id（进行中任务幂等复用，不重复扣配额）
 //! - `GET /questions/ai-tagging-tasks/{id}` → 状态 + suggestion（不含题文）
 //! - `POST /questions/ai-tagging-tasks/{id}/cancel`
+//! - `POST /ai/parse-task/{id}/cancel-tagging` → 批量终止某解析任务下未完成的打标任务
 
 use axum::{
     extract::{Extension, Path, State},
@@ -341,4 +342,69 @@ pub async fn cancel_tagging_task(
     .map_err(|e| db_err(format!("请求取消打标任务失败: {e}")))?;
 
     Ok(Json(json!({ "id": id, "status": "cancelling" })))
+}
+
+/// POST /api/v1/ai/parse-task/{id}/cancel-tagging
+///
+/// 识别结果已全部确认保存后调用。此时该解析任务下未完成的打标任务已经没有落点
+/// （建议无法自动挂到已落库的题目上），继续跑只会白耗额度与算力。
+pub async fn cancel_parse_tagging_tasks(
+    Extension(auth): Extension<AuthUser>,
+    State(state): State<AppState>,
+    Path(parse_task_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let is_admin = is_admin_user(&auth);
+
+    let cancelled = sqlx::query(
+        r#"
+        UPDATE ai_tagging_tasks
+        SET status = 'cancelled',
+            error_message = COALESCE(error_message, '题目已保存，打标任务已终止'),
+            completed_at = NOW(), updated_at = NOW(),
+            locked_at = NULL, worker_id = NULL
+        WHERE parse_task_id = $1
+          AND (creator_id = $2 OR $3::boolean)
+          AND status IN ('pending', 'retrying')
+        "#,
+    )
+    .bind(parse_task_id)
+    .bind(auth.id)
+    .bind(is_admin)
+    .execute(&state.pool)
+    .await
+    .map_err(|e| db_err(format!("取消解析打标任务失败: {e}")))?
+    .rows_affected();
+
+    // processing 只能打标记，由 worker 在下一次轮询时收敛为 cancelled
+    let cancelling = sqlx::query(
+        r#"
+        UPDATE ai_tagging_tasks
+        SET cancel_requested_at = NOW(), updated_at = NOW()
+        WHERE parse_task_id = $1
+          AND (creator_id = $2 OR $3::boolean)
+          AND status = 'processing'
+          AND cancel_requested_at IS NULL
+        "#,
+    )
+    .bind(parse_task_id)
+    .bind(auth.id)
+    .bind(is_admin)
+    .execute(&state.pool)
+    .await
+    .map_err(|e| db_err(format!("请求取消解析打标任务失败: {e}")))?
+    .rows_affected();
+
+    if cancelled > 0 || cancelling > 0 {
+        tracing::info!(
+            parse_task_id = %parse_task_id,
+            cancelled,
+            cancelling,
+            "题目已保存，终止该解析任务下未完成的打标任务"
+        );
+    }
+
+    Ok(Json(json!({
+        "cancelled": cancelled,
+        "cancelling": cancelling,
+    })))
 }

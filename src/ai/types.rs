@@ -1,13 +1,50 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::ai::kp_matcher::KpMatch;
+
+/// LLM 常把字符串/数组写成 JSON `null`；按空值接收，避免整题被丢弃。
+mod llm_null {
+    use super::*;
+
+    pub fn as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+    where
+        D: Deserializer<'de>,
+        T: Deserialize<'de> + Default,
+    {
+        Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+    }
+
+    pub fn vec_skip_null<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+    where
+        D: Deserializer<'de>,
+        T: Deserialize<'de>,
+    {
+        let raw: Option<Vec<Option<T>>> = Option::deserialize(deserializer)?;
+        Ok(raw
+            .unwrap_or_default()
+            .into_iter()
+            .flatten()
+            .collect())
+    }
+
+    pub fn opt_vec_skip_null<'de, D, T>(deserializer: D) -> Result<Option<Vec<T>>, D::Error>
+    where
+        D: Deserializer<'de>,
+        T: Deserialize<'de>,
+    {
+        let raw: Option<Vec<Option<T>>> = Option::deserialize(deserializer)?;
+        Ok(raw.map(|arr| arr.into_iter().flatten().collect()))
+    }
+}
 
 /// 多小题答案单元（解答题）
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SubAnswer {
     /// 小题序号，从 1 开始
+    #[serde(default)]
     pub sub_id: i32,
     /// 该小题答案，含 $...$ 公式与 ![配图](IMAGE_PLACEHOLDER_N)
+    #[serde(default, deserialize_with = "llm_null::as_default")]
     pub content: String,
 }
 
@@ -15,14 +52,17 @@ pub struct SubAnswer {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AnalysisMethod {
     /// "解法一" / "解法二"
+    #[serde(default, deserialize_with = "llm_null::as_default")]
     pub title: String,
     /// 推导过程，含 $...$ 与 ![配图](IMAGE_PLACEHOLDER_N)
+    #[serde(default, deserialize_with = "llm_null::as_default")]
     pub content: String,
 }
 
 /// V2.1.1 通用解题方法（AI 输出；匹配 tags.category=method，不匹配专题树）
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SolutionMethod {
+    #[serde(default, deserialize_with = "llm_null::as_default")]
     pub name: String,
     #[serde(default)]
     pub confidence: Option<f32>,
@@ -31,14 +71,18 @@ pub struct SolutionMethod {
 /// 填空题空位
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct BlankAnswer {
+    #[serde(default)]
     pub position: i32,
+    #[serde(default, deserialize_with = "llm_null::as_default")]
     pub answer: String,
 }
 
 /// 选择题选项
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ParsedOption {
+    #[serde(default, deserialize_with = "llm_null::as_default")]
     pub label: String,
+    #[serde(default, deserialize_with = "llm_null::as_default")]
     pub content: String,
 }
 
@@ -47,11 +91,20 @@ pub struct ParsedOption {
 #[serde(tag = "kind", content = "value", rename_all = "lowercase")]
 pub enum ParsedAnswer {
     /// 选择题：["A"] 或 ["A", "C"]
-    Choice { options: Vec<String> },
+    Choice {
+        #[serde(default, deserialize_with = "llm_null::vec_skip_null")]
+        options: Vec<String>,
+    },
     /// 填空题：[{position: 1, answer: "x"}]
-    Fill { blanks: Vec<BlankAnswer> },
+    Fill {
+        #[serde(default, deserialize_with = "llm_null::vec_skip_null")]
+        blanks: Vec<BlankAnswer>,
+    },
     /// 解答题：[{sub_id: 1, content: "..."}]
-    Solution { subs: Vec<SubAnswer> },
+    Solution {
+        #[serde(default, deserialize_with = "llm_null::vec_skip_null")]
+        subs: Vec<SubAnswer>,
+    },
 }
 
 impl ParsedAnswer {
@@ -73,34 +126,42 @@ impl ParsedAnswer {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ParsedQuestion {
     /// "choice" | "fill" | "solution"
+    #[serde(default, deserialize_with = "llm_null::as_default")]
     pub question_type: String,
     /// 选择题多选时为 "multi"
     pub sub_type: Option<String>,
     /// "easy" | "medium" | "hard"
     pub difficulty: Option<String>,
     /// 题干，含 IMAGE_PLACEHOLDER_N
+    #[serde(default, deserialize_with = "llm_null::as_default")]
     pub stem: String,
     /// 选择题选项
+    #[serde(default, deserialize_with = "llm_null::opt_vec_skip_null")]
     pub options: Option<Vec<ParsedOption>>,
     /// 按题型分支（`Option` 容错：LLM 可能输出 `null` 表示无答案，后端补默认空结构）
     #[serde(default)]
     pub correct_answer: Option<ParsedAnswer>,
     /// 多解法数组（至少 1 个）
+    #[serde(default, deserialize_with = "llm_null::vec_skip_null")]
     pub analysis: Vec<AnalysisMethod>,
     /// 名称列表，后端做模糊匹配
+    #[serde(default, deserialize_with = "llm_null::vec_skip_null")]
     pub knowledge_points: Vec<String>,
     /// 0.0-1.0
+    #[serde(default, deserialize_with = "llm_null::as_default")]
     pub confidence: f32,
     /// AI 自报警告
+    #[serde(default, deserialize_with = "llm_null::vec_skip_null")]
     pub warnings: Vec<String>,
     /// ["IMAGE_PLACEHOLDER_0", ...] 便于前端批量替换
+    #[serde(default, deserialize_with = "llm_null::vec_skip_null")]
     pub image_placeholders: Vec<String>,
     /// v1.1：从 Markdown 中提取的所有图片 URL（去重）
     ///
     /// 当 Stage 1（Doc2X / MinerU）输出含 `![...](url)` 真实链接时，
     /// Stage 2 收集去重后填入此数组，前端据内联标记绑定原图，避免几何题丢图。
     /// Qwen-VL 路径仅有 IMAGE_PLACEHOLDER_N，此数组为空（向后兼容）。
-    #[serde(default)]
+    #[serde(default, deserialize_with = "llm_null::vec_skip_null")]
     pub image_urls: Vec<String>,
     /// 后端知识点模糊匹配结果（非 AI 输出，后端填充）
     #[serde(default)]
@@ -117,11 +178,11 @@ pub struct ParsedQuestion {
     #[serde(default)]
     pub score: Option<i32>,
     /// 章节路径（如 ["高中数学", "函数", "导数"]）
-    #[serde(default)]
+    #[serde(default, deserialize_with = "llm_null::vec_skip_null")]
     pub chapter_path: Vec<String>,
     /// 解题方法（通用方法/数学思想，如 [{"name": "数形结合", "confidence": 0.91}]）
     /// 不匹配题型专题树；编辑页由 tags.category=method 承载
-    #[serde(default)]
+    #[serde(default, deserialize_with = "llm_null::vec_skip_null")]
     pub solution_methods: Vec<SolutionMethod>,
 }
 
@@ -135,6 +196,19 @@ impl ParsedQuestion {
         self.stem = crate::ai::cleaner::close_unclosed_img_row_fences(&self.stem);
         for a in &mut self.analysis {
             a.content = crate::ai::cleaner::close_unclosed_img_row_fences(&a.content);
+        }
+    }
+
+    /// 清洗字面量 `\n` 与误输出的 HTML 表格（stem / options / analysis）
+    pub fn sanitize_text_markup(&mut self) {
+        self.stem = crate::ai::cleaner::sanitize_question_markup(&self.stem);
+        if let Some(opts) = self.options.as_mut() {
+            for o in opts {
+                o.content = crate::ai::cleaner::sanitize_question_markup(&o.content);
+            }
+        }
+        for a in &mut self.analysis {
+            a.content = crate::ai::cleaner::sanitize_question_markup(&a.content);
         }
     }
 }
@@ -223,5 +297,45 @@ mod tests {
     fn test_empty_for_type_solution() {
         let a = ParsedAnswer::empty_for_type("solution");
         assert!(matches!(a, ParsedAnswer::Solution { subs } if subs.is_empty()));
+    }
+
+    #[test]
+    fn test_null_strings_in_analysis_and_knowledge_do_not_drop_question() {
+        let raw = serde_json::json!({
+            "question_type": "solution",
+            "stem": "已知椭圆",
+            "analysis": [{"title": "解法一", "content": null}],
+            "knowledge_points": ["椭圆", null],
+            "confidence": null,
+            "warnings": null,
+            "image_placeholders": null
+        });
+        let q: ParsedQuestion = serde_json::from_value(raw).unwrap();
+        assert_eq!(q.stem, "已知椭圆");
+        assert_eq!(q.analysis.len(), 1);
+        assert_eq!(q.analysis[0].title, "解法一");
+        assert_eq!(q.analysis[0].content, "");
+        assert_eq!(q.knowledge_points, vec!["椭圆".to_string()]);
+        assert_eq!(q.confidence, 0.0);
+        assert!(q.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_null_option_content_deserializes() {
+        let raw = serde_json::json!({
+            "question_type": "choice",
+            "stem": "下列正确的是",
+            "options": [{"label": "A", "content": null}, null],
+            "analysis": [],
+            "knowledge_points": [],
+            "confidence": 0.5,
+            "warnings": [],
+            "image_placeholders": []
+        });
+        let q: ParsedQuestion = serde_json::from_value(raw).unwrap();
+        let opts = q.options.unwrap();
+        assert_eq!(opts.len(), 1);
+        assert_eq!(opts[0].label, "A");
+        assert_eq!(opts[0].content, "");
     }
 }

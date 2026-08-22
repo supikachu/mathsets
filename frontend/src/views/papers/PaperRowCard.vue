@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { AppIcon } from '@/components/ui'
-import AppBadge from '@/components/ui/AppBadge.vue'
 import type { PaperSummary } from '@/api/client'
 import { displayPaperSource } from '@/utils/questionSource'
 
@@ -11,22 +10,14 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   open: []
+  download: []
   fill: []
-  viewQuestions: []
+  analysis: []
 }>()
 
 const sourceLabel = computed(() =>
   displayPaperSource(props.paper.source_type, props.paper.sub_source_type) || '试卷',
 )
-
-const typeBadgeColor = computed(() => {
-  const t = `${props.paper.source_type || ''} ${props.paper.sub_source_type || ''}`
-  if (/gaokao|高考|真题/.test(t)) return 'purple'
-  if (/mock|模拟/.test(t)) return 'teal'
-  if (/midterm|期中/.test(t)) return 'blue'
-  if (/final|期末/.test(t)) return 'green'
-  return 'blue'
-})
 
 const region = computed(() =>
   [props.paper.region_province, props.paper.region_city].filter(Boolean).join('') || '',
@@ -42,98 +33,62 @@ const dateText = computed(() => {
   const day = String(dt.getDate()).padStart(2, '0')
   return `${y}/${m}/${day}`
 })
-
-const sourceMeta = computed(() => {
-  const parts = [
-    props.paper.year ? `${props.paper.year}年` : '',
-    props.paper.grade || '',
-    region.value,
-    sourceLabel.value,
-  ].filter(Boolean)
-  return parts.join(' · ')
-})
 </script>
 
 <template>
   <article class="q-card paper-card" @click="emit('open')">
-    <!-- 来源角标：贴左上角边缘，绝对定位 -->
-    <span v-if="sourceMeta" class="q-source-badge" :title="sourceMeta">
-      {{ sourceMeta }}
-    </span>
-
-    <!-- 学校角标：贴右上角边缘 -->
-    <span v-if="paper.school_name" class="q-school-tag" :title="paper.school_name">
-      <AppIcon name="landmark" :size="11" :stroke="1.6" />
-      <span class="q-school-name">{{ paper.school_name }}</span>
-    </span>
-
-    <!-- Row 1: Header 属性标签 -->
-    <div class="q-card-header">
-      <div class="q-card-tags">
-        <AppBadge :color="typeBadgeColor" class="flex-shrink-0">
-          {{ sourceLabel }}
-        </AppBadge>
-        <span v-if="paper.grade" class="q-ghost-tag flex-shrink-0">
-          <span class="q-dot q-dot--blue"></span>
-          {{ paper.grade }}
-        </span>
-        <span v-if="paper.year" class="q-ghost-tag flex-shrink-0">
-          <span class="q-dot q-dot--emerald"></span>
-          {{ paper.year }}年
-        </span>
-        <span v-if="region" class="q-ghost-tag flex-shrink-0">
-          <span class="q-dot q-dot--purple"></span>
-          {{ region }}
-        </span>
-      </div>
-    </div>
-
-    <!-- Row 2: Body — 试卷标题与信息 -->
-    <div class="q-card-body paper-body">
-      <h3 class="paper-title">{{ paper.title }}</h3>
-      <div class="paper-meta-row">
-        <span class="paper-stat-item">
-          <AppIcon name="file-text" :size="13" class="text-blue-500" />
-          <span>总题量：</span>
-          <strong class="text-blue-600 dark:text-blue-400">{{ paper.question_count ?? 0 }} 题</strong>
-        </span>
-        <span v-if="dateText" class="paper-stat-item text-gray-400">
-          <AppIcon name="calendar" :size="13" />
-          <span>更新时间：{{ dateText }}</span>
-        </span>
-      </div>
-    </div>
-
-    <!-- Row 3: Footer — 底部操作栏 -->
-    <div class="q-card-footer flex items-center justify-between w-full gap-2">
-      <div class="q-footer-info flex items-center gap-2">
-        <span class="paper-tag-pill">含参考答案与解析</span>
+    <div class="paper-card-inner">
+      <!-- 左侧：试卷主体信息 -->
+      <div class="paper-info-col">
+        <h3 class="paper-title" :title="paper.title">
+          {{ paper.title }}
+        </h3>
+        <div class="paper-meta-row">
+          <span class="paper-stat-item">
+            <AppIcon name="file-text" :size="13" class="text-blue-500" />
+            <span>总题量：</span>
+            <strong class="text-blue-600 dark:text-blue-400">{{ paper.question_count ?? 0 }} 题</strong>
+          </span>
+          <span v-if="dateText" class="paper-stat-item text-gray-400">
+            <AppIcon name="calendar" :size="13" />
+            <span>更新时间：{{ dateText }}</span>
+          </span>
+          <span v-if="paper.grade" class="paper-meta-pill">{{ paper.grade }}</span>
+          <span v-if="paper.year" class="paper-meta-pill">{{ paper.year }}年</span>
+          <span v-if="region" class="paper-meta-pill">{{ region }}</span>
+          <span v-if="sourceLabel" class="paper-meta-pill">{{ sourceLabel }}</span>
+          <span v-if="paper.school_name" class="paper-meta-pill">{{ paper.school_name }}</span>
+        </div>
       </div>
 
-      <div class="q-actions flex items-center gap-2">
+      <!-- 右侧：功能按钮组（下载、补录、分析） -->
+      <div class="paper-actions-col" @click.stop>
         <button
           type="button"
-          class="q-action-btn q-action--ghost"
-          @click.stop="emit('viewQuestions')"
+          class="paper-action-btn"
+          title="下载试卷"
+          @click="emit('download')"
         >
-          <AppIcon name="search" :size="13" />
-          <span>查看试题</span>
+          <AppIcon name="download" :size="14" />
+          <span>下载</span>
         </button>
         <button
           type="button"
-          class="q-action-btn"
-          @click.stop="emit('fill')"
+          class="paper-action-btn"
+          title="补录试题"
+          @click="emit('fill')"
         >
-          <AppIcon name="plus" :size="13" />
+          <AppIcon name="plus" :size="14" />
           <span>补录</span>
         </button>
         <button
           type="button"
-          class="q-action-btn q-action--primary"
-          @click.stop="emit('open')"
+          class="paper-action-btn"
+          title="试卷分析"
+          @click="emit('analysis')"
         >
-          <AppIcon name="external-link" :size="13" />
-          <span>打开试卷</span>
+          <AppIcon name="chart" :size="14" />
+          <span>分析</span>
         </button>
       </div>
     </div>
@@ -141,14 +96,14 @@ const sourceMeta = computed(() => {
 </template>
 
 <style scoped>
-/* ===== 试卷卡片（完全对齐 q-card 规范） ===== */
+/* ===== 试卷卡片（纯净单体卡片，只保留主体与右侧操作） ===== */
 .paper-card {
   position: relative;
   background: var(--bg-card);
   border-radius: 12px;
   border: 1px solid var(--border-color);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
-  transition: transform 0.3s cubic-bezier(0.25, 0.8, 0.25, 1), box-shadow 0.3s ease, border-color 0.3s ease;
+  transition: transform 0.26s cubic-bezier(0.25, 0.8, 0.25, 1), box-shadow 0.26s ease, border-color 0.26s ease;
   cursor: pointer;
   margin-bottom: 14px;
 }
@@ -169,106 +124,34 @@ const sourceMeta = computed(() => {
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
 }
 
-/* ---- 来源角标 ---- */
-.q-source-badge {
-  position: absolute;
-  top: 0;
-  left: 0;
-  max-width: 70%;
-  padding: 4px 16px 4px 12px;
-  font-size: 11px;
-  line-height: 1.4;
-  color: var(--text-muted);
-  background: rgba(100, 116, 139, 0.08);
-  border-radius: 12px 0 6px 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  pointer-events: none;
-  z-index: 2;
-}
-
-/* ---- 学校角标 ---- */
-.q-school-tag {
-  position: absolute;
-  top: 0;
-  right: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  max-width: 38%;
-  padding: 4px 12px 4px 14px;
-  font-size: 11px;
-  line-height: 1.4;
-  color: var(--text-muted);
-  background: rgba(100, 116, 139, 0.08);
-  border-radius: 0 12px 0 6px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  pointer-events: none;
-  z-index: 2;
-}
-
-[data-theme='dark'] .q-source-badge,
-[data-theme='dark'] .q-school-tag {
-  background: rgba(148, 163, 184, 0.12);
-}
-
-/* ---- Header Row 1 ---- */
-.q-card-header {
+.paper-card-inner {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 26px 20px 10px;
-  border-bottom: 1px solid var(--divider);
-  gap: 12px;
+  padding: 18px 22px;
+  gap: 20px;
 }
 
-.q-card-tags {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
+/* ---- 左侧信息列 ---- */
+.paper-info-col {
+  flex: 1;
   min-width: 0;
-}
-
-/* ---- Ghost Tag ---- */
-.q-ghost-tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 2px 4px;
-  font-size: 12px;
-  font-weight: 500;
-  line-height: 1.5;
-  color: var(--text-secondary);
-}
-
-.q-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-
-.q-dot--blue { background: #3b82f6; }
-.q-dot--emerald { background: #10b981; }
-.q-dot--purple { background: #8b5cf6; }
-
-/* ---- Body Row 2 ---- */
-.paper-body {
-  padding: 16px 20px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .paper-title {
-  margin: 0 0 10px 0;
+  margin: 0;
   font-size: 15.5px;
   font-weight: 650;
   color: var(--text-primary);
-  line-height: 1.5;
+  line-height: 1.45;
   letter-spacing: -0.01em;
   transition: color 0.18s ease;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .paper-card:hover .paper-title {
@@ -278,7 +161,8 @@ const sourceMeta = computed(() => {
 .paper-meta-row {
   display: flex;
   align-items: center;
-  gap: 16px;
+  flex-wrap: wrap;
+  gap: 12px;
   font-size: 12.5px;
   color: var(--text-secondary);
 }
@@ -289,78 +173,62 @@ const sourceMeta = computed(() => {
   gap: 5px;
 }
 
-/* ---- Footer Row 3 ---- */
-.q-card-footer {
-  display: flex;
+.paper-meta-pill {
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 10px 20px;
-  background-color: #fafbfc;
-  border-top: 1px solid #f0f0f2;
-  border-radius: 0 0 12px 12px;
-  gap: 12px;
-}
-
-[data-theme='dark'] .q-card-footer {
-  background-color: rgba(0, 0, 0, 0.15);
-  border-top-color: var(--divider);
-}
-
-.paper-tag-pill {
+  padding: 2px 8px;
+  border-radius: 4px;
   font-size: 11.5px;
   color: var(--text-muted);
   background: var(--bg-hover);
-  padding: 2px 8px;
-  border-radius: 4px;
 }
 
-.q-actions {
+/* ---- 右侧按钮组 ---- */
+.paper-actions-col {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
 }
 
-.q-action-btn {
+.paper-action-btn {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 5px 12px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-input);
+  padding: 6px 13px;
+  border-radius: 8px;
+  background: var(--bg-hover);
   border: 1px solid var(--border-color);
   color: var(--text-secondary);
-  font-size: 12px;
-  font-weight: 600;
+  font-size: 13px;
+  font-weight: 500;
   white-space: nowrap;
   transition: var(--transition-fast);
   cursor: pointer;
 }
 
-.q-action-btn:hover {
-  background: var(--bg-hover);
-  border-color: var(--border-strong);
-  color: var(--text-primary);
+.paper-action-btn:hover {
+  background: var(--accent-light);
+  border-color: rgba(0, 113, 227, 0.3);
+  color: var(--accent);
 }
 
-.q-action-btn:active {
+.paper-action-btn:active {
   transform: scale(0.96);
 }
 
-.q-action--ghost:hover {
-  color: var(--accent);
-  border-color: var(--accent);
-  background: var(--accent-light);
-}
-
-.q-action--primary {
-  background: var(--accent) !important;
-  color: #ffffff !important;
-  border-color: var(--accent) !important;
-}
-
-.q-action--primary:hover {
-  background: var(--accent-hover) !important;
-  border-color: var(--accent-hover) !important;
+@media (max-width: 768px) {
+  .paper-card-inner {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 14px;
+  }
+  .paper-actions-col {
+    width: 100%;
+    justify-content: flex-end;
+  }
+  .paper-title {
+    white-space: normal;
+  }
 }
 </style>

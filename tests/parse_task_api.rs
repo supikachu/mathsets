@@ -1,6 +1,6 @@
 // V2.1.1 P0-C：AI 解析任务 API 集成测试
 //
-// 覆盖：提交前置校验（404/400/409）、任务快照、取消、终态取消拒绝。
+// 覆盖：提交前置校验（404 / OCR 先行允许未确认）、任务快照、取消、终态取消拒绝。
 // Worker 核心逻辑（persist_question/租约恢复）在 src/workers/ai_parse_worker.rs
 // 的 cfg(test) 模块直测（无 LLM 依赖）；LLM 全链路走人工验收。
 
@@ -208,8 +208,7 @@ async fn test_parse_task_lifecycle_and_409() {
             .fetch_one(&pool)
             .await
             .expect("查询快照失败");
-    assert_eq!(snapshot["document_type"], "class_exercise");
-    assert_eq!(snapshot["collections"][0]["title"], "二次函数课堂练习");
+    assert_eq!(snapshot["document_type"], "practice:in_class");
 
     // 同文档再次提交 → 409 + existing_task_id
     let (status, body) = post_auth(
@@ -229,8 +228,8 @@ async fn test_parse_task_lifecycle_and_409() {
     assert_eq!(body["status"], "pending");
     assert_eq!(body["total_pages"], 1);
 
-    // 取消 → 200（worker 未运行，任务保持 pending + cancel_requested_at）
-    let (status, _) = post_auth(
+    // 取消 → 立即 cancelled（worker 未拾取）
+    let (status, body) = post_auth(
         &mut app,
         &format!("/api/v1/ai/parse-task/{task_id}/cancel"),
         json!({}),
@@ -238,6 +237,7 @@ async fn test_parse_task_lifecycle_and_409() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "cancelled");
     let cancel_at: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
         "SELECT cancel_requested_at FROM ai_parse_tasks WHERE id = $1",
     )
@@ -246,6 +246,12 @@ async fn test_parse_task_lifecycle_and_409() {
     .await
     .expect("查询取消标记失败");
     assert!(cancel_at.is_some(), "cancel_requested_at 应已写入");
+    let st: String = sqlx::query_scalar("SELECT status::text FROM ai_parse_tasks WHERE id = $1")
+        .bind(Uuid::parse_str(&task_id).unwrap())
+        .fetch_one(&pool)
+        .await
+        .expect("查询任务状态失败");
+    assert_eq!(st, "cancelled");
 
     // 终态任务 → 取消被拒 409
     sqlx::query("UPDATE ai_parse_tasks SET status = 'success', completed_at = NOW() WHERE id = $1")
@@ -268,7 +274,7 @@ async fn test_parse_task_lifecycle_and_409() {
 }
 
 #[tokio::test]
-async fn test_parse_task_requires_confirmed_document() {
+async fn test_parse_task_allows_unconfirmed_document() {
     let Some((mut app, _)) = create_test_app().await else {
         eprintln!("跳过：未配置 DATABASE_URL_TEST");
         return;
@@ -285,7 +291,7 @@ async fn test_parse_task_requires_confirmed_document() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
-    // 未确认的文档（仅上传）→ 400
+    // OCR 先行：仅上传、尚未 confirm 也可以建解析任务
     let doc_id = upload_document(&mut app, &token).await;
     let (status, body) = post_auth(
         &mut app,
@@ -294,8 +300,8 @@ async fn test_parse_task_requires_confirmed_document() {
         &token,
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert_eq!(body["code"], "ERR_DOCUMENT_NOT_CONFIRMED");
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert!(body["task_id"].as_str().is_some());
 }
 
 #[tokio::test]
@@ -312,6 +318,7 @@ async fn test_parse_task_paper_snapshot_and_quota() {
         &doc_id,
         json!({
             "document_type": "exam",
+            "create_paper": true,
             "paper_meta": {
                 "title": "2025高一数学期中考试",
                 "year": 2025,
@@ -344,7 +351,7 @@ async fn test_parse_task_paper_snapshot_and_quota() {
             .fetch_one(&pool)
             .await
             .expect("查询快照失败");
-    assert_eq!(snapshot["document_type"], "exam");
+    assert_eq!(snapshot["document_type"], "paper:monthly_test");
     assert_eq!(snapshot["paper_meta"]["title"], "2025高一数学期中考试");
     assert_eq!(snapshot["paper_meta"]["year"], 2025);
 

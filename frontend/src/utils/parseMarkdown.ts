@@ -290,7 +290,7 @@ export function parseMarkdownToQuestion(md: string): ParsedQuestion {
     question_type: questionType as 'choice' | 'fill' | 'solution',
     sub_type: subType,
     difficulty,
-    stem: normalizeChoiceAnswerBlank(stem, questionType),
+    stem: normalizeChoiceAnswerBlank(stem, questionType, Boolean(options?.length)),
     options: options ?? undefined,
     correct_answer: correctAnswer,
     analysis,
@@ -303,30 +303,100 @@ export function parseMarkdownToQuestion(md: string): ParsedQuestion {
   }
 }
 
+/** LLM 常把换行写成两个字符 `\` + `n`。后面是字母时视为 LaTeX（\nu / \neq），不替换。 */
+export function unescapeLiteralNewlines(s: string): string {
+  return s.replace(/\\n([^a-z]|$)/g, '\n$1').replace(/\\t([^a-z]|$)/g, '\t$1')
+}
+
+function stripHtmlCell(raw: string): string {
+  return raw
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/\|/g, '\\|')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function htmlTableFragmentToMarkdown(tableHtml: string): string {
+  const rows: string[][] = []
+  const trRe = /<tr\b[^>]*>([\s\S]*?)<\/tr>/gi
+  let tr: RegExpExecArray | null
+  while ((tr = trRe.exec(tableHtml)) !== null) {
+    const cells: string[] = []
+    const cellRe = /<t[dh]\b[^>]*>([\s\S]*?)<\/t[dh]>/gi
+    let cell: RegExpExecArray | null
+    while ((cell = cellRe.exec(tr[1])) !== null) cells.push(stripHtmlCell(cell[1]))
+    if (cells.length) rows.push(cells)
+  }
+  if (!rows.length) return ''
+  const width = Math.max(...rows.map((r) => r.length))
+  const pad = (row: string[]) => Array.from({ length: width }, (_, i) => row[i] || '')
+  const fmt = (row: string[]) => `| ${pad(row).join(' | ')} |`
+  const sep = `| ${Array.from({ length: width }, () => '---').join(' | ')} |`
+  return `\n${fmt(rows[0])}\n${sep}\n${rows.slice(1).map(fmt).join('\n')}\n`
+}
+
+/** 把误输出的 HTML 表格转成 Markdown 表格 */
+export function htmlTablesToMarkdown(s: string): string {
+  return s.replace(/<table\b[^>]*>[\s\S]*?<\/table>/gi, (m) => htmlTableFragmentToMarkdown(m) || m)
+}
+
+export function restoreLatexFromJsonControls(s: string): string {
+  return s
+    .replace(/\u000C/g, '\\f')
+    .replace(/\u0008/g, '\\b')
+    .replace(/[⬆↑⇧]\s*rac/g, '\\frac')
+}
+
+export function sanitizeQuestionMarkup(s: string): string {
+  return htmlTablesToMarkdown(unescapeLiteralNewlines(restoreLatexFromJsonControls(s)))
+}
+
+/** 剥离选择题题干末尾残留的 A/B/C/D 选项块（与后端 strip_options_residue_from_stem 对齐） */
+export function stripChoiceOptionsResidue(stem: string): string {
+  const re = /(?:^|\n|[。；;！？$）])\s*\$?\s*A[.、．)][\s\S]*?B[.、．)][\s\S]*?C[.、．)][\s\S]*?D[.、．)][\s\S]*$/i
+  const m = re.exec(stem)
+  if (!m || m.index == null) return stem
+  let cut = m.index
+  const ch = stem[cut]
+  if (ch === '$' || ch === '）') cut += ch.length
+  let next = stem.slice(0, cut).trimEnd()
+  const dollars = (next.match(/\$/g) || []).length
+  if (next.endsWith('$') && dollars % 2 === 1) next = next.slice(0, -1).trimEnd()
+  return next
+}
+
 /** 选择题题干末尾作答空括号 () / （） → $(\hspace{2em})$ */
-export function normalizeChoiceAnswerBlank(stem: string, questionType?: string): string {
-  if (questionType && questionType !== 'choice' && questionType !== 'multiple') return stem
+export function normalizeChoiceAnswerBlank(stem: string, questionType?: string, hasOptions = true): string {
+  if (questionType && questionType !== 'choice' && questionType !== 'multiple') {
+    return sanitizeQuestionMarkup(stem)
+  }
+  let normalized = sanitizeQuestionMarkup(stem)
+  if (hasOptions) normalized = stripChoiceOptionsResidue(normalized)
   const emptyParens = /[（(][\s\u00a0\u3000]*[）)]/g
   const mathSpans: [number, number][] = []
-  for (let i = 0; i < stem.length; i++) {
-    if (stem[i] !== '$') continue
+  for (let i = 0; i < normalized.length; i++) {
+    if (normalized[i] !== '$') continue
     const start = i
     i++
-    while (i < stem.length && stem[i] !== '$') i++
-    if (i < stem.length) mathSpans.push([start, i + 1])
+    while (i < normalized.length && normalized[i] !== '$') i++
+    if (i < normalized.length) mathSpans.push([start, i + 1])
   }
   const inMath = (idx: number) => mathSpans.some(([a, b]) => idx >= a && idx < b)
   let last: { start: number; end: number } | null = null
   emptyParens.lastIndex = 0
   let m: RegExpExecArray | null
-  while ((m = emptyParens.exec(stem)) !== null) {
+  while ((m = emptyParens.exec(normalized)) !== null) {
     if (inMath(m.index)) continue
-    const before = m.index > 0 ? stem[m.index - 1] : ''
+    const before = m.index > 0 ? normalized[m.index - 1] : ''
     if (/[A-Za-z0-9_\\]/.test(before)) continue
     last = { start: m.index, end: m.index + m[0].length }
   }
-  if (!last) return stem
-  const rest = stem.slice(last.end)
-  if (!/^(?:\s|!\[[^\]]*\]\([^)]*\))*$/.test(rest)) return stem
-  return stem.slice(0, last.start) + '$(\\hspace{2em})$' + rest
+  if (!last) return normalized
+  const rest = normalized.slice(last.end)
+  if (!/^(?:\s|!\[[^\]]*\]\([^)]*\))*$/.test(rest)) return normalized
+  return normalized.slice(0, last.start) + '$(\\hspace{2em})$' + rest
 }

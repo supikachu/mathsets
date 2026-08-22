@@ -113,6 +113,8 @@ const props = defineProps<{
    * key = `${subject}_${stage}`，切走前快照、命中时瞬时恢复。
    */
   selectionCache?: Map<string, { chapter: string[]; knowledge: string[]; method: string[] }>
+  /** 父组件正在把 AI 打标节点写回表单：学段 watch / prune 不得清空 */
+  hydrating?: boolean
 }>()
 
 const toast = useToast()
@@ -315,11 +317,20 @@ function nodeBelongsToCurrentStage(id: string): boolean {
 
 /** 清掉错学段 / 无名称幽灵 ID，消除「未识别节点」标签 */
 function pruneInvalidSelectedNodes() {
+  if (props.hydrating) return
   const keep = (ids: string[]) =>
     ids.filter((id) => {
-      const named = !!(nodeMetaMap.value.get(id)?.name ?? nodeNameMap.value.get(id))
+      const named = !!(
+        nodeMetaMap.value.get(id)?.name
+        ?? nodeNameMap.value.get(id)
+        ?? props.initialNodeNames?.[id]
+      )
       if (!named) return false
-      return nodeBelongsToCurrentStage(id)
+      const tid = nodeTreeIdMap.value.get(id) ?? props.initialNodeTreeIds?.[id]
+      if (!tid || treeList.value.length === 0) return true
+      const t = treeList.value.find((x) => x.id === tid)
+      if (!t) return true
+      return t.code.endsWith(`_${currentStageSuffix()}`)
     })
   chapterNodeIds.value = keep(chapterNodeIds.value)
   knowledgeNodeIds.value = keep(knowledgeNodeIds.value)
@@ -573,7 +584,7 @@ watch(
     const subjectChanged = old && old[2] !== newSubject
     // 学段 / 学科变化：旧 key 快照三组勾选，新 key 命中缓存则瞬时恢复（无弹窗、无丢失）
     // AI 打标回填年级时会改 stage，此时必须保留引擎刚写入的节点 ID
-    if ((stageChanged || subjectChanged) && !aiTaggingInProgress) {
+    if ((stageChanged || subjectChanged) && !aiTaggingInProgress && !props.hydrating) {
       const cache = props.selectionCache
       if (cache) {
         const oldKey = `${old[2]}_${old[1]}`

@@ -307,6 +307,7 @@
           :selection-cache="selectionCache"
           :initial-node-names="initialNodeNames"
           :initial-node-tree-ids="initialNodeTreeIds"
+          :hydrating="hydratingAiNodes"
           :competenceTags="competenceTags"
           :methodTags="methodTags"
           :schoolTags="schoolTags"
@@ -339,9 +340,11 @@
       :edited-snapshots="questionList"
       @applied="onAiApplied"
       @batch-parsed="handleBatchParsed"
+      @tagging-ready="handleTaggingReady"
       @open-question="openRecognizedQuestion"
       @save-all="handleSaveAllRecognized"
       @source-updated="onAiSourceUpdated"
+      @document-updated="onAiDocumentUpdated"
       :saving-all="savingAll"
     />
 
@@ -372,6 +375,17 @@
       cancel-text="丢弃"
       @confirm="doRestoreDraft"
       @update:model-value="(v: boolean) => { if (!v) discardDraft() }"
+    />
+
+    <!-- 打标未完成仍要保存 -->
+    <AppConfirm
+      v-model="taggingPendingConfirm"
+      title="还有题目正在智能打标"
+      :message="`${taggingPendingCount} 道题的 AI 打标尚未完成。现在保存，这些题不会带上 AI 识别的知识点标签，且打标结果无法自动补回，需要进入题目重新打标。建议等标签填充完成后再保存。`"
+      confirm-text="仍然保存"
+      cancel-text="等待打标完成"
+      danger
+      @confirm="confirmSaveAllWhileTagging"
     />
 
     <!-- 团队空间：审题人选择对话框 -->
@@ -420,7 +434,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick, defineAsyncComponent } from 'vue'
 import { useRoute, useRouter, onBeforeRouteLeave } from 'vue-router'
-import { questionApi, spaceApi, tagsApi, paperApi, aiTaskApi, type SpaceMemberInfo, type Tag, type ParsedQuestion, type TaggingUnmatched, type TaggingMatch } from '@/api/client'
+import { questionApi, spaceApi, tagsApi, paperApi, aiTaskApi, type SpaceMemberInfo, type Tag, type ParsedQuestion, type TaggingUnmatched, type TaggingMatch, type DocumentMeta } from '@/api/client'
 import { AppButton, AppBadge, AppModal, AppConfirm, AppIcon } from '@/components/ui'
 import { useToast } from '@/composables/useToast'
 import { getKnowledgeTreeList } from '@/composables/useKnowledgeTreeCache'
@@ -467,6 +481,9 @@ const isNew = route.path.endsWith('/new')
 const loading = ref(false)
 const saving = ref(false)
 const savingAll = ref(false)
+// 「全部保存」时仍有题目在异步打标：确认框 + 待完成题数
+const taggingPendingConfirm = ref(false)
+const taggingPendingCount = ref(0)
 const submitting = ref(false)
 const isLoading = ref(false)
 // 409 状态冲突后锁定编辑：题目状态已变更（如被他人提交审核/通过），禁止重复保存
@@ -497,6 +514,12 @@ const aiDialogRef = ref<InstanceType<typeof AiRecognizeDialog> | null>(null)
 // onMounted 时若异步组件尚未挂载，aiDialogRef.value 为 null，
 // 缓存快照并 watch aiDialogRef 变化，组件就绪后补发 triggerSnapshotRestore
 const pendingSnapshotRestore = ref<BatchSnapshot | null>(null)
+/** 识别弹窗尚未挂载时，待补发的试卷信息恢复 */
+const pendingPaperRestore = ref<{
+  document?: DocumentMeta | null
+  source?: QuestionSourceState | null
+  taskId?: string | null
+} | null>(null)
 
 // ===== 批量录题工作台模式 =====
 // questionList 存放每道题的快照（plain object），activeIndex 指向当前编辑的题目
@@ -545,15 +568,44 @@ function persistSlotMeta(prev: any, formUnsaved: boolean) {
   }
 }
 
-function persistCurrentQuestionSlot() {
+function persistCurrentQuestionSlot(idx = activeIndex.value) {
   const list = questionList.value
-  const idx = activeIndex.value
   if (!list.length || idx < 0 || idx >= list.length) return
   const prev = list[idx]
-  list[idx] = {
+  const next: any = {
     ...captureFormSnapshot(),
     ...persistSlotMeta(prev, form.hasUnsaved),
   }
+  const nextNodes =
+    (next.knowledgeNodeIds?.length || 0)
+    + (next.chapterNodeIds?.length || 0)
+    + (next.methodNodeIds?.length || 0)
+  const prevNodes =
+    (prev?.knowledgeNodeIds?.length || 0)
+    + (prev?.chapterNodeIds?.length || 0)
+    + (prev?.methodNodeIds?.length || 0)
+  // 打标晚于解析回填时，当前 form 可能仍是空节点；不要用空表单盖掉已写入快照的标签
+  if (nextNodes === 0 && prevNodes > 0) {
+    next.knowledgeNodeIds = prev.knowledgeNodeIds
+    next.chapterNodeIds = prev.chapterNodeIds
+    next.methodNodeIds = prev.methodNodeIds
+    next.nodeNames = prev.nodeNames
+    next.nodeTreeIds = prev.nodeTreeIds
+  } else {
+    next.nodeNames = { ...(prev?.nodeNames || {}), ...(next.nodeNames || {}) }
+    next.nodeTreeIds = { ...(prev?.nodeTreeIds || {}), ...(next.nodeTreeIds || {}) }
+  }
+  if (!next.tagIds?.length && prev?.tagIds?.length) next.tagIds = prev.tagIds
+  if (!next.taggingSuggestionId && prev?.taggingSuggestionId) {
+    next.taggingSuggestionId = prev.taggingSuggestionId
+    next.taggingUnmatched = prev.taggingUnmatched
+    next.taggingUnmatchedIds = prev.taggingUnmatchedIds
+    next.taggingAliasMaps = prev.taggingAliasMaps
+  }
+  if (!next.taggingMatches?.length && prev?.taggingMatches?.length) {
+    next.taggingMatches = prev.taggingMatches
+  }
+  list[idx] = next
 }
 
 function returnToAiRecognition() {
@@ -748,24 +800,18 @@ function saveAiDraft() {
     void clearBatchSnapshot()
     return
   }
+  syncAiSessionFromDialog()
   const key = getBatchDraftKey()
   try {
     const idx = activeIndex.value
-    const cur = questionList.value[idx]
-    const list = questionList.value.map((q, i) => {
-      if (i === idx && editingFromAiCard.value) {
-        return {
-          ...captureFormSnapshot(),
-          ...persistSlotMeta(cur, form.hasUnsaved),
-        }
-      }
-      return JSON.parse(JSON.stringify(q))
-    })
+    if (editingFromAiCard.value) persistCurrentQuestionSlot(idx)
+    const list = questionList.value.map((q) => JSON.parse(JSON.stringify(q)))
     sessionStorage.setItem(key, JSON.stringify({
       mode: 'ai',
       activeIndex: idx,
       questionList: list,
       aiSource: aiSourceState.value,
+      aiDocument: aiDocument.value,
       paperIds: paperIds.value,
       savedAt: Date.now(),
     }))
@@ -791,6 +837,7 @@ function saveBatchDraft() {
     void clearBatchSnapshot()
     return
   }
+  syncAiSessionFromDialog()
   const key = getBatchDraftKey()
   try {
     const idx = activeIndex.value
@@ -810,6 +857,7 @@ function saveBatchDraft() {
       activeIndex: idx,
       questionList: list,
       aiSource: aiSourceState.value,
+      aiDocument: aiDocument.value,
       paperIds: paperIds.value,
       savedAt: Date.now(),
     }))
@@ -878,6 +926,8 @@ const currentExistingQuestionId = computed(() => {
 const initialNodeNames = ref<Record<string, string>>({})
 /** 节点 → tree_id（与 initialNodeNames 同步，供属性面板切树勾选） */
 const initialNodeTreeIds = ref<Record<string, string>>({})
+/** 正在把 AI 打标写回属性面板，避免学段 watch 把节点清掉 */
+const hydratingAiNodes = ref(false)
 // 知识树分类元数据（knowledgeTreeApi.list）加载失败时的待分发节点
 // 保留 id/name/tree_id，重试后按 tree_id->kind 精准分发；绝不静默错分为知识点
 const pendingNodes = ref<{ id: string; name: string; tree_id: string }[]>([])
@@ -887,6 +937,36 @@ const classifyRetrying = ref(false)
 const paperIds = ref<string[]>([])
 /** AI 识别会话的来源级联（写入题目 metadata；create_paper 时带 paper_ids） */
 const aiSourceState = ref<QuestionSourceState | null>(null)
+/** 识别会话的资料元数据（恢复「试卷信息」面板） */
+const aiDocument = ref<DocumentMeta | null>(null)
+
+function firstAiTaskId(list: any[] | undefined | null): string | undefined {
+  if (!Array.isArray(list)) return undefined
+  return list
+    .map((q: any) => q?.aiMeta?.task_id || q?.ai_meta?.task_id)
+    .find((id: unknown): id is string => typeof id === 'string' && id.length > 0)
+}
+
+function syncAiSessionFromDialog() {
+  const dialog = aiDialogRef.value as { getSourceState?: () => QuestionSourceState | null; getCurrentDoc?: () => DocumentMeta | null } | null
+  const src = dialog?.getSourceState?.()
+  if (src) aiSourceState.value = src
+  const doc = dialog?.getCurrentDoc?.()
+  if (doc) aiDocument.value = doc
+}
+
+async function applyPaperSessionRestore(payload: {
+  document?: DocumentMeta | null
+  source?: QuestionSourceState | null
+  taskId?: string | null
+}) {
+  const inst = aiDialogRef.value as { restorePaperSession?: (opts: typeof payload) => Promise<void> } | null
+  if (inst?.restorePaperSession) {
+    await inst.restorePaperSession(payload)
+    return
+  }
+  pendingPaperRestore.value = payload
+}
 
 /** 把来源映射字段 merge 进目标对象（undefined 跳过；空串表示清空） */
 function mergeSourceFieldsIntoTarget(target: Record<string, unknown>, fields: QuestionFormSourceFields) {
@@ -901,6 +981,7 @@ function mergeSourceFieldsIntoTarget(target: Record<string, unknown>, fields: Qu
 
 /** 来源条 → 当前 form + 整批 questionList + paperIds，并落 AI 草稿 */
 function applyAiSourceToWorkbench(state: QuestionSourceState) {
+  hydratingAiNodes.value = true
   aiSourceState.value = state
   const fields = applySourceStateToQuestionFields(state)
   paperIds.value = resolvePaperIdsFromSource(state)
@@ -916,10 +997,16 @@ function applyAiSourceToWorkbench(state: QuestionSourceState) {
   }
 
   saveAiDraft()
+  nextTick(() => { hydratingAiNodes.value = false })
 }
 
 function onAiSourceUpdated(state: QuestionSourceState) {
   applyAiSourceToWorkbench(state)
+}
+
+function onAiDocumentUpdated(doc: DocumentMeta | null) {
+  aiDocument.value = doc
+  if (questionList.value.length > 0) saveAiDraft()
 }
 
 // Tag classification lists
@@ -1761,10 +1848,53 @@ async function handleSave(submitAfter: boolean) {
   }
 }
 
-/** 识别预览页一次性把校对后的题目全部保存为草稿，无需逐卡点保存 */
+/**
+ * 题目已全部落库，该解析任务下残留的打标任务不再有落点（建议无法自动挂到已存题上），
+ * 终止以免继续占用额度与算力。失败不影响保存结果，仅记录。
+ */
+async function cancelLeftoverTagging(items: any[]) {
+  const taskIds = [
+    ...new Set(items.map(q => q?.aiMeta?.task_id).filter(Boolean) as string[]),
+  ]
+  await Promise.all(
+    taskIds.map(id =>
+      aiTaskApi.cancelParseTagging(id).catch((e: any) => {
+        console.warn('[QuestionEdit] 终止残留打标任务失败:', id, e?.message)
+      }),
+    ),
+  )
+}
+
+/**
+ * 识别预览页一次性把校对后的题目全部保存为草稿，无需逐卡点保存。
+ *
+ * 打标是异步的，保存只提交知识树节点 UUID；打标未回写就保存等于永久丢弃 AI 标签
+ * （后端不会把晚到的 suggestion 补挂到已落库的题上），因此这里先拦一道。
+ */
 async function handleSaveAllRecognized() {
   if (savingAll.value || submitting.value) return
+  syncTaggingFromPreview()
   persistCurrentQuestionSlot()
+
+  const stillTagging = questionList.value.filter(
+    q => q?.taggingPending && Boolean(q?.stem?.trim()) && (!q.saved || q.hasUnsaved),
+  ).length
+  if (stillTagging > 0) {
+    taggingPendingCount.value = stillTagging
+    taggingPendingConfirm.value = true
+    return
+  }
+
+  await doSaveAllRecognized()
+}
+
+function confirmSaveAllWhileTagging() {
+  taggingPendingConfirm.value = false
+  void doSaveAllRecognized()
+}
+
+async function doSaveAllRecognized() {
+  if (savingAll.value || submitting.value) return
   if (aiSourceState.value) {
     applyAiSourceToWorkbench(aiSourceState.value)
   }
@@ -1825,6 +1955,7 @@ async function handleSaveAllRecognized() {
     saveAiDraft()
 
     if (failed.length === 0) {
+      await cancelLeftoverTagging(list)
       clearAiDraft()
       clearDraft()
       void clearBatchSnapshot()
@@ -1923,16 +2054,7 @@ watch(activeIndex, async (newIdx, oldIdx) => {
     // 1. 保存当前题到旧索引槽位（保留 saved/savedQid/hasUnsaved 元信息，避免被纯 form 快照覆盖）
     //    否则 markCurrentSaved 写入的 saved=true 会被这里的 captureFormSnapshot() 覆盖丢失
     if (oldIdx >= 0 && oldIdx < questionList.value.length) {
-      const prev = questionList.value[oldIdx]
-      questionList.value[oldIdx] = {
-        ...captureFormSnapshot(),
-        saved: prev?.saved ?? false,
-        savedQid: prev?.savedQid,
-        hasUnsaved: prev?.hasUnsaved ?? false,
-        // 保留暂存链路元信息：切换 Tab 后再切回，保存时仍需携带 ai_meta 落库
-        aiMeta: prev?.aiMeta,
-        existingQuestionId: prev?.existingQuestionId,
-      }
+      persistCurrentQuestionSlot(oldIdx)
     }
     // 2. 加载目标题到 form
     const target = questionList.value[newIdx]
@@ -2052,6 +2174,9 @@ async function doRestoreDraft() {
       if (pendingBatchDraft.aiSource) {
         aiSourceState.value = pendingBatchDraft.aiSource as QuestionSourceState
       }
+      if (pendingBatchDraft.aiDocument) {
+        aiDocument.value = pendingBatchDraft.aiDocument as DocumentMeta
+      }
       if (Array.isArray(pendingBatchDraft.paperIds)) {
         paperIds.value = [...pendingBatchDraft.paperIds]
       } else if (aiSourceState.value) {
@@ -2074,6 +2199,11 @@ async function doRestoreDraft() {
         entryMode.value = 'ai'
         await nextTick()
         await aiDialogRef.value?.restoreOriginalSource?.()
+        await applyPaperSessionRestore({
+          document: aiDocument.value,
+          source: aiSourceState.value,
+          taskId: firstAiTaskId(questionList.value),
+        })
       }
       toast.success(isNew
         ? `已恢复 ${questionList.value.length} 道识别结果`
@@ -2224,7 +2354,11 @@ async function loadQuestion() {
     const res = await questionApi.get(route.params.id as string)
     const d = res.data
     const meta = (d.metadata || {}) as Record<string, any>
-    form.stem = d.stem
+    form.stem = normalizeChoiceAnswerBlank(
+      d.stem,
+      d.question_type,
+      Boolean(d.options && (Array.isArray(d.options) ? d.options.length : true)),
+    )
     // 库内 multiple → 编辑态 choice + sub_type=multi（表单控件按 choice 渲染）
     if (d.question_type === 'multiple') {
       form.question_type = 'choice'
@@ -2455,6 +2589,7 @@ function markCurrentSaved(qid: string): boolean {
 
 // 将快照应用回 form（每个字段显式赋值，避免 delete+assign 引发响应式抖动）
 function applyFormSnapshot(s: any) {
+  hydratingAiNodes.value = true
   form.stem = s.stem ?? ''
   form.question_type = s.question_type ?? 'choice'
   form.sub_type = s.sub_type ?? ''
@@ -2504,11 +2639,21 @@ function applyFormSnapshot(s: any) {
   form.version = s.version ?? 1
   form.hasUnsaved = false // 切换后的目标题视为未修改
 
-  // 每题独立保存三维已选节点（chapter/method 仅存在于 form 之外的独立 ref，
-  // watch 是 ref→form 单向同步，切换快照时必须手动回写 ref）
-  knowledgeNodeIds.value = Array.isArray(s.knowledgeNodeIds) ? [...s.knowledgeNodeIds] : []
-  chapterNodeIds.value = Array.isArray(s.chapterNodeIds) ? [...s.chapterNodeIds] : []
-  methodNodeIds.value = Array.isArray(s.methodNodeIds) ? [...s.methodNodeIds] : []
+  if (s.nodeNames && typeof s.nodeNames === 'object') {
+    initialNodeNames.value = { ...s.nodeNames }
+  }
+  if (s.nodeTreeIds && typeof s.nodeTreeIds === 'object') {
+    initialNodeTreeIds.value = { ...s.nodeTreeIds }
+  }
+
+  const nextKnowledge = Array.isArray(s.knowledgeNodeIds) ? [...s.knowledgeNodeIds] : []
+  const nextChapter = Array.isArray(s.chapterNodeIds) ? [...s.chapterNodeIds] : []
+  const nextMethod = Array.isArray(s.methodNodeIds) ? [...s.methodNodeIds] : []
+  knowledgeNodeIds.value = nextKnowledge
+  chapterNodeIds.value = nextChapter
+  methodNodeIds.value = nextMethod
+  form.chapterNodeIds = [...nextChapter]
+  form.methodNodeIds = [...nextMethod]
   form.cognitive_level = s.cognitive_level ?? ''
   form.taggingSuggestionId = s.taggingSuggestionId ?? ''
   form.taggingUnmatched = Array.isArray(s.taggingUnmatched) ? [...s.taggingUnmatched] : []
@@ -2516,11 +2661,22 @@ function applyFormSnapshot(s: any) {
   form.taggingAliasMaps = Array.isArray(s.taggingAliasMaps)
     ? s.taggingAliasMaps.map((m: { unmatched_id: string; node_id?: string | null; tag_id?: string | null }) => ({ ...m }))
     : []
-  if (s.nodeNames && typeof s.nodeNames === 'object') {
-    initialNodeNames.value = { ...s.nodeNames }
-  }
-  if (s.nodeTreeIds && typeof s.nodeTreeIds === 'object') {
-    initialNodeTreeIds.value = { ...s.nodeTreeIds }
+  // 学段 watch 可能把刚写入的节点清掉，下一拍再写回
+  if (nextKnowledge.length || nextChapter.length || nextMethod.length || (s.tagIds?.length ?? 0)) {
+    nextTick(() => {
+      knowledgeNodeIds.value = [...nextKnowledge]
+      chapterNodeIds.value = [...nextChapter]
+      methodNodeIds.value = [...nextMethod]
+      form.knowledgeNodeIds = [...nextKnowledge]
+      form.chapterNodeIds = [...nextChapter]
+      form.methodNodeIds = [...nextMethod]
+      if (Array.isArray(s.tagIds) && s.tagIds.length) {
+        form.tagIds = [...s.tagIds]
+      }
+      hydratingAiNodes.value = false
+    })
+  } else {
+    nextTick(() => { hydratingAiNodes.value = false })
   }
 }
 
@@ -2734,13 +2890,12 @@ function parsedQuestionToSnapshot(q: ParsedQuestion): any {
   if (matches.length) {
     for (const m of matches) {
       if (m.target_type === 'knowledge_node' && m.target_id) {
-        const label = (m.target_name || m.ai_name || '').trim()
-        if (!label) continue
+        const label = (m.target_name || m.ai_name || '').trim() || m.target_id
         nodeNames[m.target_id] = label
         if (m.tree_id) nodeTreeIds[m.target_id] = m.tree_id
         if (m.dimension === 'chapter') chapterNodeIds.push(m.target_id)
-        else if (m.dimension === 'knowledge') knowledgeNodeIds.push(m.target_id)
         else if (m.dimension === 'pattern') methodNodeIds.push(m.target_id)
+        else knowledgeNodeIds.push(m.target_id)
       }
     }
   } else if (q.kp_matches?.length) {
@@ -2786,7 +2941,7 @@ function parsedQuestionToSnapshot(q: ParsedQuestion): any {
   const subType = isMulti ? 'multi' : (q.sub_type || '')
 
   return {
-    stem: normalizeChoiceAnswerBlank(q.stem ?? '', questionType),
+    stem: normalizeChoiceAnswerBlank(q.stem ?? '', questionType, Boolean(q.options?.length)),
     question_type: questionType,
     sub_type: subType,
     difficulty,
@@ -2825,6 +2980,8 @@ function parsedQuestionToSnapshot(q: ParsedQuestion): any {
     taggingUnmatched: Array.isArray(q.tagging_unmatched) ? q.tagging_unmatched : [],
     taggingUnmatchedIds: [],
     taggingAliasMaps: [],
+    taggingMatches: matches,
+    taggingPending: q.tagging_status === 'pending',
     cognitive_level: q.cognitive_level || '',
     reviewer_ids: [],
     reviewer: '',
@@ -2840,7 +2997,86 @@ function parsedQuestionToSnapshot(q: ParsedQuestion): any {
   }
 }
 
-// 接收 AI 批量识别结果：只装进工作台，不立刻切到手动录题（点卡片再进）
+function nodeCountOfSnapshot(s: any): number {
+  return (s?.knowledgeNodeIds?.length || 0)
+    + (s?.chapterNodeIds?.length || 0)
+    + (s?.methodNodeIds?.length || 0)
+}
+
+/** 打标完成后把匹配节点写进已有快照；用户已选节点不覆盖 */
+function mergeTaggingIntoSnapshot(snap: any, parsed: ParsedQuestion): any {
+  const tagged = parsedQuestionToSnapshot(parsed)
+  const keepNodes = nodeCountOfSnapshot(snap) > 0
+  return {
+    ...snap,
+    knowledgeNodeIds: keepNodes ? snap.knowledgeNodeIds : tagged.knowledgeNodeIds,
+    chapterNodeIds: keepNodes ? snap.chapterNodeIds : tagged.chapterNodeIds,
+    methodNodeIds: keepNodes ? snap.methodNodeIds : tagged.methodNodeIds,
+    tagIds: snap.tagIds?.length ? snap.tagIds : tagged.tagIds,
+    nodeNames: { ...(tagged.nodeNames || {}), ...(snap.nodeNames || {}) },
+    nodeTreeIds: { ...(tagged.nodeTreeIds || {}), ...(snap.nodeTreeIds || {}) },
+    taggingSuggestionId: snap.taggingSuggestionId || tagged.taggingSuggestionId,
+    taggingUnmatched: Array.isArray(tagged.taggingUnmatched)
+      ? tagged.taggingUnmatched
+      : snap.taggingUnmatched,
+    taggingMatches: tagged.taggingMatches?.length ? tagged.taggingMatches : snap.taggingMatches,
+    taggingPending: tagged.taggingPending,
+    cognitive_level: snap.cognitive_level || tagged.cognitive_level,
+  }
+}
+
+function mergePreviewTagging(questions: ParsedQuestion[]) {
+  if (!questionList.value.length || !questions?.length) return
+  const byIndex = new Map(
+    questions
+      .filter(q => q.ai_meta?.staged_index != null)
+      .map(q => [String(q.ai_meta!.staged_index), q]),
+  )
+  questionList.value = questionList.value.map((snap, i) => {
+    const key = snap.aiMeta?.staged_index
+    const parsed = (key != null ? byIndex.get(String(key)) : undefined) ?? questions[i]
+    if (!parsed) return snap
+    return mergeTaggingIntoSnapshot(snap, parsed)
+  })
+}
+
+function handleTaggingReady(questions: ParsedQuestion[]) {
+  if (editingFromAiCard.value) persistCurrentQuestionSlot()
+  const before = nodeCountOfSnapshot(questionList.value[activeIndex.value])
+  mergePreviewTagging(questions)
+  const cur = questionList.value[activeIndex.value]
+  const after = nodeCountOfSnapshot(cur)
+  const formEmpty = nodeCountOfSnapshot({
+    knowledgeNodeIds: knowledgeNodeIds.value,
+    chapterNodeIds: chapterNodeIds.value,
+    methodNodeIds: methodNodeIds.value,
+  }) === 0
+  if (cur && after > 0 && (formEmpty || after > before)) applyFormSnapshot(cur)
+  saveAiDraft()
+}
+
+function syncTaggingFromPreview() {
+  const preview = aiDialogRef.value?.getPreviewQuestions?.() as ParsedQuestion[] | undefined
+  if (!preview?.length) return
+  mergePreviewTagging(preview)
+}
+
+function openRecognizedQuestion(index: number) {
+  if (questionList.value.length === 0) return
+  syncTaggingFromPreview()
+  const item = questionList.value[index]
+  if (!item) return
+  item.stem = normalizeChoiceAnswerBlank(item.stem ?? '', item.question_type, Boolean(item.options?.length))
+  returnToAiOnBack.value = true
+  editingFromAiCard.value = true
+  entryMode.value = 'ai'
+  if (index === activeIndex.value) {
+    applyFormSnapshot(item)
+    return
+  }
+  switchToTab(index)
+}
+
 async function handleBatchParsed(questions: ParsedQuestion[]) {
   if (!questions || questions.length === 0) {
     toast.warning('未识别到任何题目')
@@ -2872,18 +3108,6 @@ async function handleBatchParsed(questions: ParsedQuestion[]) {
     isSwitchingTab.value = false
     console.error('[handleBatchParsed] 应用第一题失败:', e)
   }
-}
-
-function openRecognizedQuestion(index: number) {
-  if (questionList.value.length === 0) return
-  const item = questionList.value[index]
-  if (item) {
-    item.stem = normalizeChoiceAnswerBlank(item.stem ?? '', item.question_type)
-  }
-  returnToAiOnBack.value = true
-  editingFromAiCard.value = true
-  entryMode.value = 'ai'
-  switchToTab(index)
 }
 
 // Window unload checks（批量模式同样拦截）
@@ -2971,6 +3195,11 @@ watch(aiDialogRef, (inst) => {
   if (inst && pendingSnapshotRestore.value) {
     inst.triggerSnapshotRestore(pendingSnapshotRestore.value)
     pendingSnapshotRestore.value = null
+  }
+  if (inst && pendingPaperRestore.value) {
+    const payload = pendingPaperRestore.value
+    pendingPaperRestore.value = null
+    void inst.restorePaperSession?.(payload)
   }
 })
 

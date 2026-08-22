@@ -448,8 +448,9 @@
             :key="p.id"
             :paper="p"
             @open="openPaper(p)"
+            @download="downloadPaper(p)"
             @fill="fillPaper(p)"
-            @view-questions="viewPaperQuestions(p)"
+            @analysis="analyzePaper(p)"
           />
         </div>
         <AppPagination
@@ -1014,8 +1015,16 @@ function openPaper(p: PaperSummary) {
   router.push(`/papers/${p.id}`)
 }
 
+function downloadPaper(p: PaperSummary) {
+  router.push(`/papers/${p.id}`)
+}
+
 function fillPaper(p: PaperSummary) {
   router.push({ path: '/questions/new', query: { paperId: p.id } })
+}
+
+function analyzePaper(p: PaperSummary) {
+  router.push(`/papers/${p.id}`)
 }
 
 function viewPaperQuestions(p: PaperSummary) {

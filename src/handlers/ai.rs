@@ -10,7 +10,8 @@ use std::sync::LazyLock;
 
 use crate::ai::cleaner::{clean_and_parse, repair_truncated_batch};
 use crate::ai::ocr::OcrConfig;
-use crate::ai::provider::AiError;
+use crate::ai::provider::{AiError, is_rate_limit_message, is_transient_openrouter_error, RATE_LIMIT_USER_MESSAGE, OPENROUTER_PROVIDER_ERROR_USER_MESSAGE};
+use crate::ai::gemini_limit::{GEMINI_RPD_USER_MESSAGE, GEMINI_UNAVAILABLE_USER_MESSAGE};
 use crate::ai::types::{AnalysisMethod, ParsedAnswer, ParsedQuestion};
 use crate::auth::middleware::AuthUser;
 use crate::handlers::ai_tagging::match_knowledge_nodes;
@@ -18,17 +19,20 @@ use crate::models::ai_setting::{
     decrypt_api_key, encrypt_api_key, parse_master_key, AiSettingsResponse, UpdateAiSettingsRequest,
     UserAiSetting,
 };
+use crate::config::{default_text_model, is_custom_llm_provider, normalize_llm_base_url};
 use crate::AppState;
 
 // ---------------------------------------------------------------------------
 // 请求/响应类型
 // ---------------------------------------------------------------------------
 
-/// AI 模型类型 — 决定 resolve_ai_config 返回 text 还是 vision 模型配置
+/// AI 模型类型 — 决定 resolve_ai_config 返回哪个模型配置
 #[derive(Clone, Copy)]
 pub(crate) enum ModelKind {
     Text,
     Vision,
+    /// 打标专用；未单独配置时回退 Text，因此不会影响既有部署
+    Tagging,
 }
 
 // ---------------------------------------------------------------------------
@@ -44,21 +48,40 @@ pub(crate) fn map_ai_error(e: AiError) -> (StatusCode, Json<serde_json::Value>) 
             Json(json!({"error": "未配置 AI API Key，请到设置页配置或联系管理员"})),
         ),
         AiError::Upstream(status, msg) => {
-            let code = if status == 429 {
-                StatusCode::TOO_MANY_REQUESTS
-            } else {
-                StatusCode::BAD_GATEWAY
-            };
+            if msg.contains("免费档不可用") {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({"error": GEMINI_UNAVAILABLE_USER_MESSAGE})),
+                );
+            }
+            if msg.contains("RPD") || msg.contains("太平洋时间") {
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(json!({"error": GEMINI_RPD_USER_MESSAGE})),
+                );
+            }
+            if is_rate_limit_message(status, &msg) {
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(json!({"error": RATE_LIMIT_USER_MESSAGE})),
+                );
+            }
+            if is_transient_openrouter_error(status, &msg) {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({"error": OPENROUTER_PROVIDER_ERROR_USER_MESSAGE})),
+                );
+            }
             let short_msg = if msg.chars().count() > 500 {
                 format!("{}...", msg.chars().take(500).collect::<String>())
             } else {
                 msg
             };
-            (code, Json(json!({"error": format!("AI 服务调用失败: {short_msg}")})))
+            (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("AI 服务调用失败: {short_msg}")})))
         }
         AiError::Timeout => (
             StatusCode::GATEWAY_TIMEOUT,
-            Json(json!({"error": "AI 服务响应超时（120s），请稍后重试或使用更小的图片"})),
+            Json(json!({"error": "AI 服务响应超时，请稍后重试或拆成更少页后再识别"})),
         ),
     }
 }
@@ -77,7 +100,7 @@ pub(crate) fn map_ai_error(e: AiError) -> (StatusCode, Json<serde_json::Value>) 
 /// - `(?is)`：i 忽略大小写，s 让 `.` 跨换行（选项常跨多行）
 static OPTIONS_RESIDUE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?is)(?:^|\n|[。；;！？])\s*A[\.、\)]\s*.*?B[\.、\)]\s*.*?C[\.、\)]\s*.*?D[\.、\)]\s*.*$",
+        r"(?is)(?:^|\n|[。；;！？$）])\s*\$?\s*A[\.、．\)]\s*.*?B[\.、．\)]\s*.*?C[\.、．\)]\s*.*?D[\.、．\)]\s*.*$",
     )
     .expect("选项残留正则编译失败")
 });
@@ -100,7 +123,18 @@ fn strip_options_residue_from_stem(q: &mut ParsedQuestion) {
         return;
     }
     if let Some(m) = OPTIONS_RESIDUE_RE.find(&q.stem) {
-        let new_stem = q.stem[..m.start()].trim_end().to_string();
+        let mut cut = m.start();
+        // `$` / `）` 是题干合法结尾（作答空位、中文括号），保留；换行/句末标点仍随选项一起去掉
+        if let Some(ch) = q.stem[cut..].chars().next() {
+            if ch == '$' || ch == '）' {
+                cut += ch.len_utf8();
+            }
+        }
+        let mut new_stem = q.stem[..cut].trim_end().to_string();
+        if new_stem.ends_with('$') && new_stem.matches('$').count() % 2 == 1 {
+            new_stem.pop();
+            new_stem = new_stem.trim_end().to_string();
+        }
         if new_stem != q.stem {
             tracing::info!(
                 "剥离题干选项残留：{} 字符 → {} 字符",
@@ -273,13 +307,19 @@ pub(crate) async fn post_process_batch(
         // solution_methods 容错归一化：LLM 常输出 ["数形结合"] 字符串数组而非
         // [{"name":"..."}] 对象数组 → 先转对象再反序列化，避免整题因类型不匹配被丢弃
         let q_val = normalize_solution_methods(q_val.clone());
-        match serde_json::from_value::<ParsedQuestion>(q_val) {
+        match serde_json::from_value::<ParsedQuestion>(q_val.clone()) {
             Ok(mut q) => {
                 // 校验 question_type
                 if !["choice", "fill", "solution", "multiple"].contains(&q.question_type.as_str()) {
                     tracing::warn!("第 {} 题题型无效: {}，跳过", i + 1, q.question_type);
                     continue;
                 }
+                if q.stem.trim().is_empty() {
+                    tracing::warn!("第 {} 题题干为空，跳过", i + 1);
+                    continue;
+                }
+                // 字面量 \n、HTML 表格 → 真换行 / Markdown 表
+                q.sanitize_text_markup();
                 // 第二道防线：剥离选择题题干末尾的选项残留
                 strip_options_residue_from_stem(&mut q);
                 // 选择题作答空括号 () / （） → $(\hspace{2em})$
@@ -293,6 +333,12 @@ pub(crate) async fn post_process_batch(
                         content: "".into(),
                     }];
                     q.warnings.push("AI 返回解析为空，请手动补充".into());
+                } else {
+                    for (ai, a) in q.analysis.iter_mut().enumerate() {
+                        if a.title.trim().is_empty() {
+                            a.title = format!("解法{}", ai + 1);
+                        }
+                    }
                 }
                 // v1.2：correct_answer 为 None（LLM 输出了 null）→ 按题型补空默认值
                 if q.correct_answer.is_none() {
@@ -343,7 +389,12 @@ pub(crate) async fn post_process_batch(
             }
             Err(e) => {
                 // ⚠️ 补丁十核心：单题解析失败只记录 warning，不影响同批次其他题目
-                tracing::warn!("第 {} 题解析失败，跳过（不影响其他题目）: {}", i + 1, e);
+                tracing::warn!(
+                    "第 {} 题解析失败，跳过（不影响其他题目）: {}；片段: {}",
+                    i + 1,
+                    e,
+                    serde_json::to_string(&q_val).unwrap_or_default().chars().take(240).collect::<String>()
+                );
             }
         }
     }
@@ -376,7 +427,7 @@ fn truncation_or_parse_error(
         Err((
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(json!({
-                "error": "该页题目过密，AI 识别已达上限。请尝试将页面裁切成两张图片后分别上传。",
+                "error": "AI 输出过长被截断，未能解析出完整题目。请重试；解析卷可拆成更少页后再识别。",
                 "code": "ERR_LLM_TRUNCATED"
             })),
         ))
@@ -415,20 +466,24 @@ pub async fn get_settings(
             has_api_key: s.api_key_enc.is_some(),
             model_text: s.model_text,
             model_vision: s.model_vision,
+            model_tagging: s.model_tagging,
             ocr_provider: s.ocr_provider,
             has_doc2x_key: s.doc2x_api_key_enc.is_some(),
             mineru_endpoint: s.mineru_api_endpoint,
             has_mineru_key: s.mineru_api_key_enc.is_some(),
+            llm_base_url: s.llm_base_url,
         },
         None => AiSettingsResponse {
             provider: "deepseek".to_string(),
             has_api_key: false,
             model_text: None,
             model_vision: None,
+            model_tagging: None,
             ocr_provider: "auto".to_string(),
             has_doc2x_key: false,
             mineru_endpoint: None,
             has_mineru_key: false,
+            llm_base_url: None,
         },
     };
 
@@ -502,14 +557,29 @@ pub async fn update_settings(
     };
 
     // UPSERT
-    let provider = req.provider.unwrap_or_else(|| "deepseek".to_string());
+    let mut provider = req.provider.unwrap_or_else(|| "deepseek".to_string());
+    if provider == "openrouter" {
+        provider = "custom".to_string();
+    }
+    let llm_base_url = if is_custom_llm_provider(&provider) {
+        Some(normalize_llm_base_url(req.llm_base_url.as_deref()).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": e})),
+            )
+        })?)
+    } else {
+        None
+    };
+
     let setting = sqlx::query_as::<_, UserAiSetting>(
         r#"
         INSERT INTO user_ai_settings
             (user_id, provider, api_key_enc, api_key_iv, model_text, model_vision,
              ocr_provider, doc2x_api_key_enc, doc2x_api_key_iv,
-             mineru_api_endpoint, mineru_api_key_enc, mineru_api_key_iv, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, 'auto'), $8, $9, $10, $11, $12, NOW())
+             mineru_api_endpoint, mineru_api_key_enc, mineru_api_key_iv, llm_base_url,
+             model_tagging, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, 'auto'), $8, $9, $10, $11, $12, $13, $14, NOW())
         ON CONFLICT (user_id) DO UPDATE SET
             provider = COALESCE($2, user_ai_settings.provider),
             api_key_enc = CASE WHEN $3 IS NOT NULL THEN $3 ELSE user_ai_settings.api_key_enc END,
@@ -522,6 +592,8 @@ pub async fn update_settings(
             mineru_api_endpoint = COALESCE($10, user_ai_settings.mineru_api_endpoint),
             mineru_api_key_enc = CASE WHEN $11 IS NOT NULL THEN $11 ELSE user_ai_settings.mineru_api_key_enc END,
             mineru_api_key_iv = CASE WHEN $12 IS NOT NULL THEN $12 ELSE user_ai_settings.mineru_api_key_iv END,
+            llm_base_url = COALESCE($13, user_ai_settings.llm_base_url),
+            model_tagging = $14,
             updated_at = NOW()
         RETURNING *
         "#,
@@ -538,6 +610,8 @@ pub async fn update_settings(
     .bind(&req.mineru_endpoint)
     .bind(&mineru_enc)
     .bind(&mineru_iv)
+    .bind(&llm_base_url)
+    .bind(req.model_tagging.as_deref().map(str::trim).filter(|s| !s.is_empty()))
     .fetch_one(&state.pool)
     .await
     .map_err(|e| {
@@ -552,10 +626,12 @@ pub async fn update_settings(
         has_api_key: setting.api_key_enc.is_some(),
         model_text: setting.model_text,
         model_vision: setting.model_vision,
+        model_tagging: setting.model_tagging,
         ocr_provider: setting.ocr_provider,
         has_doc2x_key: setting.doc2x_api_key_enc.is_some(),
         mineru_endpoint: setting.mineru_api_endpoint,
         has_mineru_key: setting.mineru_api_key_enc.is_some(),
+        llm_base_url: setting.llm_base_url,
     };
 
     Ok(Json(resp))
@@ -582,6 +658,47 @@ pub(crate) async fn resolve_ai_config(
     .map_err(|e| format!("数据库查询失败: {e}"))?;
 
     if let Some(ref setting) = user_setting {
+        let custom = is_custom_llm_provider(&setting.provider);
+        if custom {
+            let (Some(enc), Some(iv)) = (&setting.api_key_enc, &setting.api_key_iv) else {
+                return Err("自定义服务商需要填写 API Key，请到设置页配置".into());
+            };
+            let b64_key = state
+                .ai_config
+                .key_encryption_key
+                .as_ref()
+                .ok_or_else(|| "服务器未配置 AI_KEY_ENCRYPTION_KEY".to_string())?;
+            let master_key = parse_master_key(b64_key).map_err(|e| e.to_string())?;
+            let api_key =
+                decrypt_api_key(enc, iv, &master_key).map_err(|e| format!("解密失败: {e}"))?;
+            let provider_name = setting.provider.clone();
+            let base_url = normalize_llm_base_url(setting.llm_base_url.as_deref())?;
+            let model = match model_kind {
+                ModelKind::Text => setting
+                    .model_text
+                    .clone()
+                    .filter(|s| !s.trim().is_empty())
+                    .or_else(|| Some(default_text_model("custom").to_string())),
+                ModelKind::Vision => setting
+                    .model_vision
+                    .clone()
+                    .filter(|s| !s.trim().is_empty())
+                    .or_else(|| setting.model_text.clone().filter(|s| !s.trim().is_empty())),
+                ModelKind::Tagging => setting
+                    .model_tagging
+                    .clone()
+                    .filter(|s| !s.trim().is_empty())
+                    .or_else(|| setting.model_text.clone().filter(|s| !s.trim().is_empty()))
+                    .or_else(|| Some(default_text_model("custom").to_string())),
+            };
+            if model.as_ref().is_none_or(|s| s.trim().is_empty()) {
+                return Err(
+                    "自定义服务商需要填写模型 ID（如 qwen/qwen3-8b:free）".into(),
+                );
+            }
+            return Ok((api_key, provider_name, model, base_url));
+        }
+
         if let (Some(enc), Some(iv)) = (&setting.api_key_enc, &setting.api_key_iv) {
             // 有用户个人 Key → 解密使用
             if let Some(ref b64_key) = state.ai_config.key_encryption_key {
@@ -592,8 +709,18 @@ pub(crate) async fn resolve_ai_config(
                 let provider_name = setting.provider.clone();
                 let base_url = get_provider_base_url(&state.ai_config, &provider_name);
                 let model = match model_kind {
-                    ModelKind::Text => setting.model_text.clone(),
-                    ModelKind::Vision => setting.model_vision.clone(),
+                    ModelKind::Text => setting
+                        .model_text
+                        .clone()
+                        .filter(|s| !s.trim().is_empty())
+                        .or_else(|| Some(default_text_model(&provider_name).to_string())),
+                    ModelKind::Vision => setting.model_vision.clone().filter(|s| !s.trim().is_empty()),
+                    ModelKind::Tagging => setting
+                        .model_tagging
+                        .clone()
+                        .filter(|s| !s.trim().is_empty())
+                        .or_else(|| setting.model_text.clone().filter(|s| !s.trim().is_empty()))
+                        .or_else(|| Some(default_text_model(&provider_name).to_string())),
                 };
                 return Ok((api_key, provider_name, model, base_url));
             }
@@ -605,42 +732,27 @@ pub(crate) async fn resolve_ai_config(
     let default_model = match model_kind {
         ModelKind::Text => ai_config.default_model_text.clone(),
         ModelKind::Vision => ai_config.default_model_vision.clone(),
+        ModelKind::Tagging => ai_config
+            .default_model_tagging
+            .clone()
+            .unwrap_or_else(|| ai_config.default_model_text.clone()),
     };
 
     // ⚠️ 智能路由：Vision 模式下根据模型名前缀选择正确的 provider
     // 避免用 deepseek provider 发送 qwen-vl-plus 等视觉模型请求导致调用失败
     let preferred_provider = match model_kind {
-        ModelKind::Text => ai_config.default_provider.clone(),
+        ModelKind::Text | ModelKind::Tagging => ai_config.default_provider.clone(),
         ModelKind::Vision => match default_model.as_str() {
             m if m.starts_with("qwen") => "qwen".to_string(),
             m if m.starts_with("gpt") => "openai".to_string(),
             m if m.starts_with("deepseek") => "deepseek".to_string(),
+            m if m.starts_with("glm") => "glm".to_string(),
+            m if m.starts_with("gemini") => "gemini".to_string(),
             _ => ai_config.default_provider.clone(),
         },
     };
 
-    let (api_key, provider_name, base_url) = match preferred_provider.as_str() {
-        "deepseek" => (
-            ai_config.deepseek_api_key.clone(),
-            "deepseek",
-            ai_config.deepseek_base_url.clone(),
-        ),
-        "qwen" => (
-            ai_config.qwen_api_key.clone(),
-            "qwen",
-            ai_config.qwen_base_url.clone(),
-        ),
-        "openai" => (
-            ai_config.openai_api_key.clone(),
-            "openai",
-            ai_config.openai_base_url.clone(),
-        ),
-        _ => (
-            ai_config.deepseek_api_key.clone(),
-            "deepseek",
-            ai_config.deepseek_base_url.clone(),
-        ),
-    };
+    let (api_key, provider_name, base_url) = ai_config.credentials_for(&preferred_provider);
 
     let api_key = api_key.ok_or_else(|| {
         format!(
@@ -653,7 +765,14 @@ pub(crate) async fn resolve_ai_config(
     let model = match model_kind {
         ModelKind::Text => user_setting.as_ref().and_then(|s| s.model_text.clone()),
         ModelKind::Vision => user_setting.as_ref().and_then(|s| s.model_vision.clone()),
+        ModelKind::Tagging => user_setting.as_ref().and_then(|s| {
+            s.model_tagging
+                .clone()
+                .filter(|v| !v.trim().is_empty())
+                .or_else(|| s.model_text.clone())
+        }),
     }
+    .filter(|s| !s.trim().is_empty())
     .or(Some(default_model));
 
     Ok((api_key, provider_name.to_string(), model, base_url))
@@ -769,6 +888,7 @@ pub(crate) async fn resolve_ocr_config(
             base_url,
             model: None,
             upload_dir: Some(state.upload_dir.clone()),
+            task_id: None,
         });
     }
 
@@ -809,6 +929,7 @@ pub(crate) async fn resolve_ocr_config(
             base_url: endpoint,
             model: None,
             upload_dir: Some(state.upload_dir.clone()),
+            task_id: None,
         });
     }
 
@@ -839,17 +960,13 @@ pub(crate) async fn resolve_ocr_config(
         base_url,
         model,
         upload_dir: Some(state.upload_dir.clone()),
+        task_id: None,
     })
 }
 
 /// 根据 provider 名称获取 base_url
 fn get_provider_base_url(ai_config: &crate::config::AiConfig, provider: &str) -> String {
-    match provider {
-        "deepseek" => ai_config.deepseek_base_url.clone(),
-        "qwen" => ai_config.qwen_base_url.clone(),
-        "openai" => ai_config.openai_base_url.clone(),
-        _ => ai_config.deepseek_base_url.clone(),
-    }
+    ai_config.credentials_for(provider).2
 }
 
 // ---------------------------------------------------------------------------
@@ -1051,6 +1168,90 @@ pub async fn test_ocr_connection(
     }))
 }
 
+/// 文本模型连接测试请求（自定义 / OpenRouter / 任意 OpenAI 兼容端点）
+#[derive(Deserialize)]
+pub struct TestLlmConnectionRequest {
+    pub api_key: Option<String>,
+    pub endpoint: Option<String>,
+}
+
+/// 测试文本模型连接 — GET /models，不消耗生成配额
+pub async fn test_llm_connection(
+    Extension(auth): Extension<AuthUser>,
+    State(state): State<AppState>,
+    Json(req): Json<TestLlmConnectionRequest>,
+) -> Result<Json<TestOcrConnectionResponse>, (StatusCode, Json<serde_json::Value>)> {
+    use std::time::Instant;
+
+    let start = Instant::now();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .no_proxy()
+        .build()
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("创建 HTTP 客户端失败: {e}")})),
+            )
+        })?;
+
+    let saved = sqlx::query_as::<_, UserAiSetting>(
+        "SELECT * FROM user_ai_settings WHERE user_id = $1",
+    )
+    .bind(auth.id)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten();
+
+    let api_key = match req.api_key.as_deref().filter(|s| !s.is_empty()) {
+        Some(k) => k.to_string(),
+        None => {
+            let personal = saved.as_ref().and_then(|s| {
+                let enc = s.api_key_enc.as_ref()?;
+                let iv = s.api_key_iv.as_ref()?;
+                let b64 = state.ai_config.key_encryption_key.as_ref()?;
+                parse_master_key(b64)
+                    .and_then(|mk| decrypt_api_key(enc, iv, &mk))
+                    .ok()
+            });
+            match personal {
+                Some(k) => k,
+                None => {
+                    return Ok(Json(TestOcrConnectionResponse {
+                        ok: false,
+                        latency_ms: start.elapsed().as_millis() as u64,
+                        message: "未配置 API Key".to_string(),
+                    }));
+                }
+            }
+        }
+    };
+
+    let endpoint = match normalize_llm_base_url(
+        req.endpoint
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .or(saved.as_ref().and_then(|s| s.llm_base_url.as_deref())),
+    ) {
+        Ok(u) => u,
+        Err(e) => {
+            return Ok(Json(TestOcrConnectionResponse {
+                ok: false,
+                latency_ms: start.elapsed().as_millis() as u64,
+                message: e,
+            }));
+        }
+    };
+
+    let (ok, message) = probe_openai_compatible(&client, &api_key, &endpoint).await;
+    Ok(Json(TestOcrConnectionResponse {
+        ok,
+        latency_ms: start.elapsed().as_millis() as u64,
+        message,
+    }))
+}
+
 /// 探测 Doc2X 鉴权：GET /api/v2/parse/status?uid=test-connection-probe
 ///
 /// - 401/403 → Key 无效
@@ -1085,7 +1286,7 @@ async fn probe_doc2x(
     }
 }
 
-/// 探测 OpenAI 兼容鉴权：GET /v1/models
+/// 探测 OpenAI 兼容鉴权：GET /models
 ///
 /// - 200 → ok
 /// - 401/403 → Key 无效
@@ -1095,10 +1296,8 @@ async fn probe_openai_compatible(
     api_key: &str,
     base_url: &str,
 ) -> (bool, String) {
-    let url = format!("{}/v1/models", base_url.trim_end_matches('/'));
-    let resp = client
-        .get(&url)
-        .header("Authorization", format!("Bearer {api_key}"))
+    let url = crate::ai::deepseek::openai_models_url(base_url);
+    let resp = crate::ai::deepseek::apply_openai_compat_headers(client.get(&url), base_url, api_key)
         .send()
         .await;
 
@@ -1376,6 +1575,26 @@ mod tests {
         strip_options_residue_from_stem(&mut q);
         assert!(q.stem.contains("A. 1"));
         assert!(q.warnings.is_empty());
+    }
+
+    #[test]
+    fn strips_options_after_hspace_closing_dollar() {
+        let mut q = make_choice(
+            r"下列结论正确的是 $(\hspace{2em})$A. $\sqrt{2}$ B. 2 C. $\sqrt{7}$ D. $2\sqrt{2}$",
+            true,
+        );
+        strip_options_residue_from_stem(&mut q);
+        assert_eq!(q.stem, r"下列结论正确的是 $(\hspace{2em})$");
+    }
+
+    #[test]
+    fn strips_options_after_dollar_newline_dollar() {
+        let mut q = make_choice(
+            "下列结论正确的是 $\n$A. $\\sqrt{2}$ B. 2 C. $\\sqrt{7}$ D. $2\\sqrt{2}$",
+            true,
+        );
+        strip_options_residue_from_stem(&mut q);
+        assert_eq!(q.stem, "下列结论正确的是");
     }
 
     #[test]

@@ -3,8 +3,8 @@ import { aiTaskApi, type AiParseTaskDetail, type ParseMode } from '@/api/client'
 
 /// 轮询间隔（毫秒）
 const POLL_INTERVAL_MS = 2000
-/// 最大轮询次数（600 次 = 20 分钟，防止无限轮询）
-const MAX_ATTEMPTS = 600
+/// 最大轮询次数（1800 次 = 60 分钟：长 PDF 逐题打标常超过 20 分钟）
+const MAX_ATTEMPTS = 1800
 
 /// 终态集合
 const TERMINAL: ReadonlySet<string> = new Set([
@@ -35,6 +35,7 @@ export function useAiParsePolling() {
 
   let timer: ReturnType<typeof setInterval> | null = null
   let attempts = 0
+  let cancelRequested = false
 
   function clearTimer() {
     if (timer !== null) {
@@ -51,19 +52,20 @@ export function useAiParsePolling() {
     task.value = null
     taskId.value = null
     attempts = 0
+    cancelRequested = false
   }
 
   function handleTask(data: AiParseTaskDetail) {
     task.value = data
     switch (data.status) {
       case 'pending':
-        statusText.value = '正在排队…'
+        statusText.value = cancelRequested ? '正在停止…' : '正在排队…'
         break
       case 'processing':
-        statusText.value = 'AI 正在解析（可随时取消）…'
+        statusText.value = cancelRequested ? '正在停止解析…' : 'AI 正在解析（可随时取消）…'
         break
       case 'retrying':
-        statusText.value = '解析遇到波动，正在重试…'
+        statusText.value = cancelRequested ? '正在停止…' : '解析遇到波动，正在重试…'
         break
       case 'success':
         statusText.value = '解析完成'
@@ -99,9 +101,14 @@ export function useAiParsePolling() {
     try {
       const { data } = await aiTaskApi.getParseTask(id)
       handleTask(data)
-      if (TERMINAL.has(data.status)) {
+      const taggingPending = (data.staged_questions ?? []).some(
+        (s) => s.tagging_status === 'pending',
+      )
+      if (cancelRequested || (TERMINAL.has(data.status) && !taggingPending)) {
         clearTimer()
         isPolling.value = false
+      } else if (TERMINAL.has(data.status) && taggingPending) {
+        statusText.value = '题目已识别，正在填充标签…'
       }
     } catch (e: any) {
       // 网络抖动：继续重试
@@ -142,10 +149,18 @@ export function useAiParsePolling() {
   /// 取消任务（已落库题目保留）
   async function cancel() {
     if (!taskId.value) return
+    const id = taskId.value
+    cancelRequested = true
+    clearTimer()
+    isPolling.value = false
     try {
-      await aiTaskApi.cancelParseTask(taskId.value)
-      statusText.value = '已请求取消…'
+      await aiTaskApi.cancelParseTask(id)
+      statusText.value = '已取消'
+      if (task.value && task.value.status !== 'cancelled') {
+        handleTask({ ...task.value, status: 'cancelled' })
+      }
     } catch (e: any) {
+      cancelRequested = false
       error.value = e?.response?.data?.error ?? e?.message ?? '取消失败'
     }
   }
@@ -154,6 +169,24 @@ export function useAiParsePolling() {
   function stopPolling() {
     clearTimer()
     isPolling.value = false
+  }
+
+  /// 恢复已有解析任务的轮询（离开页面后再进来，不重新 create）
+  async function resumePolling(existingTaskId: string) {
+    if (!existingTaskId) return
+    if (isPolling.value && taskId.value === existingTaskId && timer !== null) return
+    clearTimer()
+    cancelRequested = false
+    isPolling.value = true
+    taskId.value = existingTaskId
+    error.value = null
+    attempts = 0
+    statusText.value = '正在同步识别进度…'
+    await pollOnce(existingTaskId)
+    if (!isPolling.value) return
+    timer = setInterval(() => {
+      pollOnce(existingTaskId)
+    }, POLL_INTERVAL_MS)
   }
 
   onUnmounted(() => {
@@ -169,6 +202,7 @@ export function useAiParsePolling() {
     startPolling,
     cancel,
     stopPolling,
+    resumePolling,
     reset,
   }
 }
