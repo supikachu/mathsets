@@ -21,7 +21,8 @@ import QuestionOptions from '@/components/QuestionOptions.vue'
 import { typeLabel, typeBadgeColor, diffLabel, diffBadgeColor } from '@/utils/questionDisplay'
 import { useToast } from '@/composables/useToast'
 import { useAiParsePolling } from '@/composables/useAiParsePolling'
-import { parseMarkdownToQuestion, RECOMMENDED_PROMPT, normalizeChoiceAnswerBlank } from '@/utils/parseMarkdown'
+import { normalizeChoiceAnswerBlank } from '@/utils/parseMarkdown'
+import { STAGE2_EXTERNAL_PROMPT } from '@/prompts/stage2External'
 import { compressImage, blobToFile } from '@/utils/imageCompressor'
 import { withBackoffRetry, isAbortError } from '@/utils/concurrency'
 import { pdfToImages, type PdfPageImage } from '@/utils/pdfToImages'
@@ -96,6 +97,12 @@ const aiError = ref('')
 const aiParsing = ref(false)
 const aiResult = ref<ParsedQuestion | null>(null)
 const promptCopied = ref(false)
+/** 录入模式：full=全自动 OCR+Stage2；ocr_export=仅 OCR，站外 JSON 导入 */
+const ingestMode = ref<'full' | 'ocr_export'>('full')
+const ocrMarkdown = ref('')
+const jsonImportText = ref('')
+const importingJson = ref(false)
+const ocrCopied = ref(false)
 const previewQuestions = ref<ParsedQuestion[]>([])
 const ocrFileName = ref('')
 const sourcePreviewUrl = ref('')
@@ -152,6 +159,7 @@ const {
   statusText: taskStatusText,
   error: taskError,
   task: pollTask,
+  taskId: pollTaskId,
   startPolling,
   cancel: cancelTask,
   reset: resetPolling,
@@ -178,8 +186,8 @@ let pendingSnapshotRestore: BatchSnapshot | null = null
 // Copied functions
 async function copyPrompt() {
   try {
-    await navigator.clipboard.writeText(RECOMMENDED_PROMPT)
-    toast.success('提示词已复制，请粘贴到 AI 对话框使用')
+    await navigator.clipboard.writeText(STAGE2_EXTERNAL_PROMPT)
+    toast.success('已复制结构化 Prompt，请连同 OCR 文本发给外部模型')
     promptCopied.value = true
     setTimeout(() => { promptCopied.value = false }, 3000)
   } catch {
@@ -187,43 +195,57 @@ async function copyPrompt() {
   }
 }
 
-function parseMarkdownNow(text: string) {
-  if (!text.trim()) {
-    if (previewQuestions.value.length === 0) {
-      aiResult.value = null
-      aiError.value = ''
-    }
+async function copyOcrMarkdown() {
+  if (!ocrMarkdown.value) {
+    toast.warning('暂无 OCR 文本')
     return
   }
   try {
-    aiResult.value = parseMarkdownToQuestion(text)
-    aiError.value = ''
-    previewQuestions.value = []
+    await navigator.clipboard.writeText(ocrMarkdown.value)
+    ocrCopied.value = true
+    toast.success('OCR 全文已复制')
+    setTimeout(() => { ocrCopied.value = false }, 2000)
+  } catch {
+    toast.error('复制失败')
+  }
+}
+
+function openOcrTab() {
+  if (!ocrMarkdown.value) {
+    toast.warning('OCR 尚未完成')
+    return
+  }
+  rightPaneTab.value = 'ocr'
+}
+
+async function importExternalJson() {
+  const raw = jsonImportText.value.trim()
+  if (!raw) {
+    toast.warning('请粘贴外部模型输出的 JSON')
+    return
+  }
+  const id = pollTaskId.value || pollTask.value?.id
+  if (!id) {
+    toast.error('没有可导入的识别任务，请先上传文件完成 OCR')
+    return
+  }
+  importingJson.value = true
+  try {
+    const { data } = await aiTaskApi.importParseQuestions(id, {
+      raw,
+      replace: previewCount.value === 0,
+    })
+    toast.success(data.message || `已导入 ${data.imported} 道题`)
+    jsonImportText.value = ''
+    rightPaneTab.value = 'preview'
+    presentedParseTaskId.value = ''
+    await resumePolling(id)
   } catch (e: any) {
-    aiResult.value = null
-    aiError.value = e.message || 'Markdown 解析失败'
-  }
-}
-
-function doAiParse() {
-  if (!aiText.value.trim()) {
-    toast.warning('请粘贴 Markdown，或将图片 / PDF 拖到左侧识别')
-    return
-  }
-  aiParsing.value = true
-  try {
-    parseMarkdownNow(aiText.value)
-    if (!aiResult.value && aiError.value) toast.warning(aiError.value)
+    toast.error(e?.response?.data?.error || e?.message || '导入失败')
   } finally {
-    aiParsing.value = false
+    importingJson.value = false
   }
 }
-
-watch(aiText, (text) => {
-  if (docFlowState.value !== 'idle') return
-  if (markdownParseTimer) clearTimeout(markdownParseTimer)
-  markdownParseTimer = setTimeout(() => parseMarkdownNow(text), 280)
-})
 
 const previewCards = computed(() => {
   const snapshots = props.editedSnapshots ?? []
@@ -242,7 +264,7 @@ const unsavedPreviewCount = computed(() =>
 )
 const canSaveAll = computed(() => (props.editedSnapshots?.length ?? 0) > 0)
 
-type RightPaneTab = 'source' | 'preview'
+type RightPaneTab = 'source' | 'preview' | 'ocr'
 const rightPaneTab = ref<RightPaneTab>('source')
 
 const sourceTabHint = computed(() => {
@@ -280,6 +302,12 @@ const progressStripPct = computed(() => {
 })
 
 const showOriginalSource = computed(() => Boolean(sourcePreviewUrl.value))
+const ingestLocked = computed(
+  () => docFlowState.value === 'progress' || docFlowState.value === 'uploading',
+)
+const showOcrTab = computed(
+  () => Boolean(ocrMarkdown.value) || ingestMode.value === 'ocr_export',
+)
 
 /** 打标尚未回写：此时卡片上只有 OCR 推断的名称，保存不会带上标签 */
 function cardTaggingPending(q: ParsedQuestion): boolean {
@@ -445,6 +473,9 @@ function clearEditor() {
   ocrFileName.value = ''
   aiImageFile.value = null
   sourceKind.value = 'markdown'
+  ocrMarkdown.value = ''
+  jsonImportText.value = ''
+  ingestMode.value = 'full'
   revokeSourcePreview()
 }
 
@@ -581,8 +612,16 @@ async function restorePreviewFromParseTask(taskId: string) {
   if (!taskId) return
   try {
     const { data } = await aiTaskApi.getParseTask(taskId)
+    if (data.ocr_markdown) ocrMarkdown.value = data.ocr_markdown
+    if (data.pipeline === 'ocr_export') ingestMode.value = 'ocr_export'
     const staged = (data.staged_questions ?? []).filter(s => !s.saved && !s.merged_into)
-    if (!staged.length) return
+    if (!staged.length) {
+      if (data.pipeline === 'ocr_export' || data.phase === 'ocr_ready') {
+        rightPaneTab.value = 'ocr'
+        await resumePolling(taskId)
+      }
+      return
+    }
     presentedParseTaskId.value = data.id
     applyStagedPreview(staged, taskId, true)
     const taggingPending = staged.some(s => s.tagging_status === 'pending')
@@ -1054,7 +1093,11 @@ function onSourceState(state: QuestionSourceState) {
 /** 创建解析任务并进入进度态（左侧保留原文） */
 async function startTask(documentId: string, parseMode?: 'pdf_direct' | 'page') {
   docFlowState.value = 'progress'
-  await startPolling(documentId, parseMode)
+  await startPolling(
+    documentId,
+    parseMode,
+    ingestMode.value === 'ocr_export' ? 'ocr_export' : undefined,
+  )
 }
 
 /** PDF 直连失败 → 用户确认回退：同 Document 重建 page 模式任务（页面图已上传，无需重传） */
@@ -1194,14 +1237,26 @@ function stagedToParsed(s: AiStagedQuestion, taskId: string): ParsedQuestion {
 /// 监听任务终态：成功 → 工作台（非 Mixed）/ 分组（Mixed）
 watch(pollTask, async (t) => {
   if (!t) return
+  if (t.ocr_markdown) ocrMarkdown.value = t.ocr_markdown
+  if (t.pipeline === 'ocr_export') ingestMode.value = 'ocr_export'
   if (t.status === 'success' || t.status === 'partial_success') {
     const staged = (t.staged_questions ?? []).filter(s => !s.saved && !s.merged_into)
     if (presentedParseTaskId.value === t.id) {
       mergeStagedTagging(staged, t.id)
       return
     }
-    presentedParseTaskId.value = t.id
     pdfDirectActive.value = false
+    if (
+      staged.length === 0
+      && (t.pipeline === 'ocr_export' || t.phase === 'ocr_ready')
+    ) {
+      stopPolling()
+      rightPaneTab.value = 'ocr'
+      toast.success('OCR 已完成，请复制 Prompt，将 JSON 粘贴到右侧导入')
+      docFlowState.value = 'idle'
+      return
+    }
+    presentedParseTaskId.value = t.id
     // 暂存链路：题目尚未落库，从 staged_questions 构建待确认列表（跳过已保存/跨页合并项）
     if (staged.length === 0) {
       stopPolling()
@@ -1379,9 +1434,22 @@ onBeforeUnmount(() => {
           <!-- 左侧：Markdown 粘贴 + 图片/PDF 拖放 OCR -->
           <section class="ai-split-pane">
             <header class="ai-split-head">
-              <span class="ai-split-title">{{ showOriginalSource ? '原文' : '标记好的内容' }}</span>
+              <div class="ai-split-title-row">
+                <span class="ai-split-title">{{ showOriginalSource ? '原文' : '智能录入' }}</span>
+                <div class="ai-mode-radios" role="radiogroup" aria-label="录入模式">
+                  <label class="ai-mode-radio">
+                    <input type="radio" v-model="ingestMode" value="full" :disabled="ingestLocked">
+                    全自动
+                  </label>
+                  <label class="ai-mode-radio">
+                    <input type="radio" v-model="ingestMode" value="ocr_export" :disabled="ingestLocked">
+                    站外结构化
+                  </label>
+                </div>
+              </div>
               <div class="ai-split-head-actions">
                 <button type="button" class="ai-icon-btn" @click="copyPrompt">{{ promptCopied ? '已复制' : '复制 Prompt' }}</button>
+                <button type="button" class="ai-icon-btn" :disabled="!ocrMarkdown" @click="openOcrTab">查看 OCR</button>
                 <button type="button" class="ai-icon-btn" @click="fileInputRef?.click()">上传文件</button>
                 <button type="button" class="ai-icon-btn" @click="clearEditor">清空</button>
               </div>
@@ -1392,14 +1460,17 @@ onBeforeUnmount(() => {
               @dragover.prevent="aiUploadAreaHover = true"
               @dragleave.prevent="onEditorDragLeave"
               @drop.prevent="handleFileDrop"
+              @paste="onEditorPaste"
             >
-              <textarea
-                v-show="!showOriginalSource"
-                v-model="aiText"
-                class="ai-split-editor"
-                placeholder="粘贴已标记的 Markdown，或将图片 / PDF 拖到此处识别…"
-                @paste="onEditorPaste"
-              />
+              <div
+                v-if="!showOriginalSource"
+                class="ai-drop-empty"
+                @click="fileInputRef?.click()"
+              >
+                <AppIcon name="upload" :size="32" />
+                <p>将 PDF 或图片拖到此处，或点击上传</p>
+                <span>全自动会继续切题；站外结构化只做 OCR，由你导入 JSON</span>
+              </div>
               <div v-if="showOriginalSource" class="ai-source-preview">
                 <iframe
                   v-if="sourceKind === 'pdf'"
@@ -1490,25 +1561,15 @@ onBeforeUnmount(() => {
             </div>
             <footer class="ai-split-foot">
               <span v-if="ocrFileName" class="ai-file-chip">{{ ocrFileName }}</span>
-              <span v-else class="ai-split-hint">支持 Markdown、截图、图片、PDF</span>
+              <span v-else class="ai-split-hint">支持 PDF、图片（拖放或点击上传）</span>
               <div v-if="aiError" class="ai-error">{{ aiError }}</div>
-              <AppButton
-                v-if="!showOriginalSource"
-                variant="primary"
-                size="sm"
-                :loading="aiParsing"
-                :disabled="!aiText.trim() || docFlowState !== 'idle'"
-                @click="doAiParse"
-              >
-                开始识别
-              </AppButton>
             </footer>
           </section>
 
           <!-- 右侧：试卷信息 / 题目预览 可切换 -->
           <section class="ai-split-pane">
             <header class="ai-split-head">
-              <div class="ai-pane-tabs" role="tablist" aria-label="右侧内容">
+              <div class="ai-pane-tabs" :class="{ 'is-three': showOcrTab }" role="tablist" aria-label="右侧内容">
                 <button
                   type="button"
                   role="tab"
@@ -1529,6 +1590,17 @@ onBeforeUnmount(() => {
                 >
                   题目预览
                   <span v-if="previewCount > 0" class="ai-tab-count">{{ previewCount }}</span>
+                </button>
+                <button
+                  v-if="showOcrTab"
+                  type="button"
+                  role="tab"
+                  class="ai-pane-tab"
+                  :class="{ active: rightPaneTab === 'ocr' }"
+                  :aria-selected="rightPaneTab === 'ocr'"
+                  @click="rightPaneTab = 'ocr'"
+                >
+                  OCR 文本
                 </button>
               </div>
               <div class="ai-split-head-actions">
@@ -1640,6 +1712,33 @@ onBeforeUnmount(() => {
                     </div>
                   </article>
                 </div>
+              </div>
+              <div v-show="rightPaneTab === 'ocr'" class="ai-ocr-pane">
+                <div class="ai-ocr-toolbar">
+                  <span class="ai-empty-kicker">OCR 文本</span>
+                  <button type="button" class="ai-icon-btn" :disabled="!ocrMarkdown" @click="copyOcrMarkdown">
+                    {{ ocrCopied ? '已复制全文' : '复制全文' }}
+                  </button>
+                </div>
+                <pre class="ai-ocr-pre">{{ ocrMarkdown || '上传文件并完成 OCR 后，将在此显示识别文本。' }}</pre>
+                <template v-if="ingestMode === 'ocr_export'">
+                  <label class="ai-empty-kicker" for="ai-json-import">粘贴外部模型 JSON</label>
+                  <textarea
+                    id="ai-json-import"
+                    v-model="jsonImportText"
+                    class="ai-json-import"
+                    placeholder='{"questions":[...]} 或题目数组'
+                  />
+                  <AppButton
+                    variant="primary"
+                    size="sm"
+                    :loading="importingJson"
+                    :disabled="!jsonImportText.trim() || !pollTaskId"
+                    @click="importExternalJson"
+                  >
+                    导入题目
+                  </AppButton>
+                </template>
               </div>
             </div>
           </section>
@@ -1791,6 +1890,108 @@ onBeforeUnmount(() => {
   font-weight: 650;
   letter-spacing: -0.01em;
   color: var(--text-primary);
+}
+
+.ai-split-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.ai-mode-radios {
+  display: inline-flex;
+  gap: 8px;
+}
+
+.ai-mode-radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary, #6e6e73);
+  cursor: pointer;
+  user-select: none;
+}
+
+.ai-mode-radio input {
+  margin: 0;
+}
+
+.ai-drop-empty {
+  flex: 1;
+  min-height: 220px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px;
+  text-align: center;
+  color: var(--text-secondary, #6e6e73);
+  cursor: pointer;
+}
+
+.ai-drop-empty p {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.ai-drop-empty span {
+  font-size: 12px;
+  line-height: 1.5;
+  max-width: 280px;
+}
+
+.ai-ocr-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  height: 100%;
+  min-height: 0;
+  padding: 12px;
+}
+
+.ai-ocr-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ai-ocr-pre {
+  flex: 1;
+  min-height: 140px;
+  margin: 0;
+  padding: 10px 12px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.55;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--text-primary, #1d1d1f) 4%, transparent);
+  color: var(--text-primary);
+}
+
+.ai-json-import {
+  min-height: 120px;
+  resize: vertical;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--text-primary, #1d1d1f) 12%, transparent);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ai-pane-tabs.is-three {
+  grid-template-columns: 1fr 1fr 1fr;
+  max-width: 360px;
 }
 
 .ai-pane-tabs {

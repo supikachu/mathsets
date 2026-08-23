@@ -296,6 +296,10 @@ pub fn build_app(state: AppState) -> Router {
             "/ai/parse-task/{id}/cancel",
             post(handlers::ai_tasks::cancel_task),
         )
+        .route(
+            "/ai/parse-task/{id}/import-questions",
+            post(handlers::ai_tasks::import_questions),
+        )
         // 题目全部确认保存后终止残留打标任务（建议已无落点，继续跑纯属浪费额度）
         .route(
             "/ai/parse-task/{id}/cancel-tagging",

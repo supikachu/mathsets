@@ -124,6 +124,53 @@ fn task_staged_questions(task: &AiParseTask) -> Vec<serde_json::Value> {
     items.into_iter().map(|(_, v)| v).collect()
 }
 
+fn task_ocr_markdown(task: &AiParseTask) -> Option<String> {
+    task.progress
+        .get("ocr_markdown")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+fn task_pipeline(task: &AiParseTask) -> Option<String> {
+    task.paper_meta
+        .get("pipeline")
+        .and_then(|v| v.as_str())
+        .or_else(|| task.progress.get("pipeline").and_then(|v| v.as_str()))
+        .map(|s| s.to_string())
+}
+
+fn task_phase(task: &AiParseTask) -> Option<String> {
+    task.progress
+        .get("phase")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// 站外 JSON：允许 `{questions:[...]}`、纯数组，或带 ```json 围栏的文本。
+fn wrap_import_payload(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    let stripped = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+        .map(|s| s.trim())
+        .unwrap_or(trimmed);
+    let stripped = stripped
+        .strip_suffix("```")
+        .map(str::trim)
+        .unwrap_or(stripped);
+    let v: serde_json::Value =
+        serde_json::from_str(stripped).map_err(|e| format!("JSON 无法解析: {e}"))?;
+    if v.is_array() {
+        Ok(json!({ "questions": v }).to_string())
+    } else if v.get("questions").and_then(|q| q.as_array()).is_some() {
+        Ok(v.to_string())
+    } else {
+        Err("JSON 须为 { \"questions\": [...] } 或题目数组".into())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -144,6 +191,11 @@ pub struct SubmitParseTaskRequest {
     /// - 缺省：自动策略（直连失败自动降级逐页，V2.1.1 原行为）
     #[serde(default)]
     pub parse_mode: Option<String>,
+    /// 流水线（可选，随 paper_meta 快照入库）：
+    /// - `full` / 缺省：OCR 后继续 Stage2 LLM 结构化
+    /// - `ocr_export`：OCR 完成后停止，等待 `POST .../import-questions`
+    #[serde(default)]
+    pub pipeline: Option<String>,
 }
 
 pub async fn submit_parse_task(
@@ -236,6 +288,18 @@ pub async fn submit_parse_task(
         }
     }
 
+    if let Some(p) = req.pipeline.as_deref() {
+        if !matches!(p, "full" | "ocr_export") {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "pipeline 仅支持 full | ocr_export",
+                    "code": "ERR_INVALID_PIPELINE"
+                })),
+            ));
+        }
+    }
+
     // 4. 输入快照：来源级联 + 可选建卷（OCR 先行时可能尚未 confirm）
     let paper_meta_snapshot = json!({
         "document_type": doc_type,
@@ -246,6 +310,7 @@ pub async fn submit_parse_task(
         "paper_meta": doc_metadata.get("paper_meta").cloned().unwrap_or(json!(null)),
         "collections": doc_metadata.get("collections").cloned().unwrap_or(json!([])),
         "parse_mode": req.parse_mode,
+        "pipeline": req.pipeline,
     });
 
     let page_count: i32 = sqlx::query_scalar("SELECT page_count FROM documents WHERE id = $1")
@@ -375,6 +440,9 @@ pub async fn get_task_status(
         question_ids,
         pending_candidate_count,
         staged_questions: task_staged_questions(&task),
+        ocr_markdown: task_ocr_markdown(&task),
+        pipeline: task_pipeline(&task),
+        phase: task_phase(&task),
     }))
 }
 
@@ -436,6 +504,114 @@ pub async fn cancel_task(
     .map_err(|e| db_err(format!("取消任务失败: {e}")))?;
 
     Ok(Json(json!({ "message": "已请求取消，正在停止解析", "status": "cancelling" })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ImportQuestionsRequest {
+    #[serde(default)]
+    pub questions: Option<serde_json::Value>,
+    #[serde(default)]
+    pub raw: Option<String>,
+    #[serde(default)]
+    pub replace: bool,
+}
+
+/// POST /api/v1/ai/parse-task/{id}/import-questions — 导入站外 LLM 结构化 JSON
+pub async fn import_questions(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthUser>,
+    Path(task_id): Path<Uuid>,
+    Json(req): Json<ImportQuestionsRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let task = load_task(&state.pool, task_id)
+        .await?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "任务不存在"}))))?;
+    if !can_manage_task(&task, &auth) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "任务不存在"})),
+        ));
+    }
+
+    let pipeline = task_pipeline(&task).unwrap_or_default();
+    let markdown = task_ocr_markdown(&task);
+    if pipeline != "ocr_export" || markdown.is_none() {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "当前任务不是「站外结构化」OCR 导出，或 OCR 尚未完成",
+                "code": "ERR_IMPORT_NOT_READY"
+            })),
+        ));
+    }
+    if matches!(
+        task.status,
+        AiTaskStatus::Failed | AiTaskStatus::Cancelled
+    ) {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "任务已失败或已取消，无法导入",
+                "code": "ERR_TASK_TERMINAL"
+            })),
+        ));
+    }
+
+    let raw = req
+        .raw
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            req.questions.as_ref().map(|v| {
+                if v.is_array() {
+                    json!({ "questions": v }).to_string()
+                } else {
+                    v.to_string()
+                }
+            })
+        })
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "请提供 questions 或 raw JSON",
+                    "code": "ERR_EMPTY_IMPORT"
+                })),
+            )
+        })?;
+
+    let wrapped = wrap_import_payload(&raw).map_err(|e| {
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": e, "code": "ERR_INVALID_JSON" })),
+        )
+    })?;
+
+    let questions = crate::handlers::ai::post_process_batch(&wrapped, &state.pool)
+        .await
+        .map_err(|(status, body)| (status, body))?;
+    if questions.is_empty() {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "error": "未解析出有效题目",
+                "code": "ERR_NO_VALID_QUESTIONS"
+            })),
+        ));
+    }
+
+    let imported = crate::workers::ai_parse_worker::import_external_questions(
+        &state,
+        &task,
+        questions,
+        req.replace,
+    )
+    .await
+    .map_err(|e| db_err(format!("导入题目失败: {e}")))?;
+
+    Ok(Json(json!({
+        "imported": imported,
+        "message": format!("已导入 {imported} 道题，正在打标"),
+    })))
 }
 
 #[cfg(test)]
@@ -606,6 +782,36 @@ mod tests {
     fn test_question_ids_empty_map() {
         let task = ids_task(serde_json::json!({ "idempotency_map": {} }));
         assert!(task_question_ids(&task).is_empty());
+    }
+
+    #[test]
+    fn test_pipeline_deserializes() {
+        let req: SubmitParseTaskRequest = serde_json::from_str(&format!(
+            r#"{{"document_id":"{DOC_ID}","pipeline":"ocr_export"}}"#
+        ))
+        .expect("pipeline 应可解析");
+        assert_eq!(req.pipeline.as_deref(), Some("ocr_export"));
+    }
+
+    #[test]
+    fn test_pipeline_missing_defaults_none() {
+        let req: SubmitParseTaskRequest =
+            serde_json::from_str(&format!(r#"{{"document_id":"{DOC_ID}"}}"#)).unwrap();
+        assert_eq!(req.pipeline, None);
+    }
+
+    #[test]
+    fn test_wrap_import_payload_object() {
+        let out = wrap_import_payload(r#"{"questions":[{"stem":"1"}]}"#).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(v.get("questions").and_then(|q| q.as_array()).is_some());
+    }
+
+    #[test]
+    fn test_wrap_import_payload_array_and_fence() {
+        let out = wrap_import_payload("```json\n[{\"stem\":\"x\"}]\n```").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["questions"].as_array().unwrap().len(), 1);
     }
 }
 

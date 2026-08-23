@@ -1445,6 +1445,12 @@ export interface AiParseTaskDetail {
   pending_candidate_count: number
   /** 暂存题目（解析完成、待人工确认保存；按原文顺序） */
   staged_questions: AiStagedQuestion[]
+  /** OCR 全文 Markdown（站外结构化导入前展示） */
+  ocr_markdown?: string | null
+  /** full | ocr_export */
+  pipeline?: string | null
+  /** 如 ocr_ready */
+  phase?: string | null
 }
 
 /// AI 智能录入暂存项（对应后端 progress.staged_questions 数组元素）
@@ -1503,12 +1509,14 @@ export interface SubmitParseTaskResponse {
 
 /// 解析模式：pdf_direct=仅 PDF 直连（失败回前端引导）/ page=仅逐页 OCR / 缺省=自动降级
 export type ParseMode = 'pdf_direct' | 'page'
+export type ParsePipeline = 'full' | 'ocr_export'
 
 export const aiTaskApi = {
-  createParseTask(document_id: string, parse_mode?: ParseMode) {
+  createParseTask(document_id: string, parse_mode?: ParseMode, pipeline?: ParsePipeline) {
     return client.post<SubmitParseTaskResponse>('/ai/parse-task', {
       document_id,
       ...(parse_mode ? { parse_mode } : {}),
+      ...(pipeline ? { pipeline } : {}),
     })
   },
   getParseTask(task_id: string) {
@@ -1516,6 +1524,15 @@ export const aiTaskApi = {
   },
   cancelParseTask(task_id: string) {
     return client.post<{ message: string }>(`/ai/parse-task/${task_id}/cancel`, {})
+  },
+  importParseQuestions(
+    task_id: string,
+    body: { raw?: string; questions?: unknown; replace?: boolean },
+  ) {
+    return client.post<{ imported: number; message: string }>(
+      `/ai/parse-task/${task_id}/import-questions`,
+      body,
+    )
   },
   /// 题目全部确认保存后终止残留打标任务：建议已无落点，继续跑只会白耗额度
   cancelParseTagging(task_id: string) {

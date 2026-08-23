@@ -490,6 +490,7 @@ async fn execute_task(state: &AppState, task: &AiParseTask) -> Result<TaskOutcom
     let mut cancelled = false;
     // 直连成功后跳过逐页循环（pdf_direct 成功 / auto 成功两种情况）
     let mut fast_path_done = false;
+    let mut ocr_export_done = false;
 
     let pdf_file: Option<String> = doc_metadata
         .get("pdf_file")
@@ -542,6 +543,7 @@ async fn execute_task(state: &AppState, task: &AiParseTask) -> Result<TaskOutcom
                 processed_count = outcome.processed_count;
                 cancelled = outcome.cancelled;
                 fast_path_done = true;
+                ocr_export_done = outcome.ocr_export;
                 tracing::info!(
                     "任务 {task_id} PDF 直传快速路径完成：成功 {} / 失败 {} 题",
                     outcome.success_count,
@@ -588,6 +590,7 @@ async fn execute_task(state: &AppState, task: &AiParseTask) -> Result<TaskOutcom
                         processed_count = outcome.processed_count;
                         cancelled = outcome.cancelled;
                         fast_path_done = true;
+                        ocr_export_done = outcome.ocr_export;
                         tracing::info!(
                             "任务 {task_id} PDF 直传快速路径完成：成功 {} / 失败 {} 题",
                             outcome.success_count,
@@ -605,6 +608,34 @@ async fn execute_task(state: &AppState, task: &AiParseTask) -> Result<TaskOutcom
                         set_last_error(state, task_id, &msg).await;
                     }
                 }
+            }
+        }
+    }
+
+    if is_ocr_export(task) && !fast_path_done {
+        match run_page_ocr_export(
+            state,
+            task,
+            &page_files,
+            doc_id,
+            ocr_engine.as_ref(),
+            space_id,
+            paper_id,
+            collection_ids.first().copied(),
+            is_mixed,
+        )
+        .await
+        {
+            Ok(outcome) => {
+                cancelled = outcome.cancelled;
+                ocr_export_done = !outcome.cancelled;
+                fast_path_done = true;
+            }
+            Err(msg) => {
+                return Err(TaskFailure {
+                    retryable: false,
+                    message: msg,
+                });
             }
         }
     }
@@ -758,6 +789,8 @@ async fn execute_task(state: &AppState, task: &AiParseTask) -> Result<TaskOutcom
     let total_count = processed_count;
     let final_status = if cancelled {
         AiTaskStatus::Cancelled
+    } else if ocr_export_done {
+        AiTaskStatus::Success
     } else if total_count == 0 {
         AiTaskStatus::Failed
     } else if failed_count > 0 && success_count == 0 {
@@ -1844,6 +1877,8 @@ struct FastPathOutcome {
     success_count: i32,
     failed_count: i32,
     processed_count: i32,
+    /// OCR 导出流水线：已落 Markdown，跳过 Stage2
+    ocr_export: bool,
 }
 
 /// Stage 3 PDF 直传快速路径
@@ -1920,6 +1955,7 @@ async fn run_pdf_fast_path(
                             success_count: 0,
                             failed_count: 0,
                             processed_count: 0,
+                            ocr_export: false,
                         });
                     }
                 }
@@ -1937,6 +1973,29 @@ async fn run_pdf_fast_path(
 
     // OCR 100%：页进度收敛到满页
     update_progress(state, task_id, total_pages, total_pages, 0, 0).await;
+
+    if is_ocr_export(task) {
+        if markdown.trim().is_empty() {
+            return Err("OCR 结果为空".into());
+        }
+        persist_ocr_export_ready(
+            state,
+            task_id,
+            space_id,
+            paper_id,
+            collection_id,
+            is_mixed,
+        )
+        .await;
+        tracing::info!("任务 {task_id} OCR 导出就绪，跳过 Stage2");
+        return Ok(FastPathOutcome {
+            cancelled: false,
+            success_count: 0,
+            failed_count: 0,
+            processed_count: 0,
+            ocr_export: true,
+        });
+    }
 
     // ── Phase 2：版面切大题（失败则回退 Markdown 题号切块）→ Stage2 ──
     let analysis_paper = looks_like_analysis_paper(&markdown, &task.paper_meta);
@@ -1964,6 +2023,7 @@ async fn run_pdf_fast_path(
         success_count: 0,
         failed_count: 0,
         processed_count: 0,
+        ocr_export: false,
     };
 
     let mut pending: Vec<(usize, String)> = chunks.into_iter().enumerate().collect();
@@ -2119,6 +2179,271 @@ async fn persist_ocr_markdown(state: &AppState, task_id: Uuid, markdown: &str, e
     {
         tracing::warn!("任务 {task_id} 写入 OCR Markdown 失败: {e}");
     }
+}
+
+fn is_ocr_export(task: &AiParseTask) -> bool {
+    task.paper_meta
+        .get("pipeline")
+        .and_then(|v| v.as_str())
+        .or_else(|| task.progress.get("pipeline").and_then(|v| v.as_str()))
+        == Some("ocr_export")
+}
+
+async fn persist_ocr_export_ready(
+    state: &AppState,
+    task_id: Uuid,
+    space_id: Uuid,
+    paper_id: Option<Uuid>,
+    collection_id: Option<Uuid>,
+    is_mixed: bool,
+) {
+    let patch = serde_json::json!({
+        "phase": "ocr_ready",
+        "pipeline": "ocr_export",
+        "ocr_export_ctx": {
+            "space_id": space_id,
+            "paper_id": paper_id,
+            "collection_id": collection_id,
+            "is_mixed": is_mixed,
+        }
+    });
+    if let Err(e) = sqlx::query(
+        r#"
+        UPDATE ai_parse_tasks
+        SET progress = COALESCE(progress, '{}'::jsonb) || $2::jsonb, updated_at = NOW()
+        WHERE id = $1
+        "#,
+    )
+    .bind(task_id)
+    .bind(&patch)
+    .execute(&state.pool)
+    .await
+    {
+        tracing::warn!("任务 {task_id} 写入 OCR 导出就绪标记失败: {e}");
+    }
+}
+
+async fn run_page_ocr_export(
+    state: &AppState,
+    task: &AiParseTask,
+    page_files: &[String],
+    doc_id: Uuid,
+    engine: &dyn crate::ai::ocr::OcrProvider,
+    space_id: Uuid,
+    paper_id: Option<Uuid>,
+    collection_id: Option<Uuid>,
+    is_mixed: bool,
+) -> Result<FastPathOutcome, String> {
+    let task_id = task.id;
+    let mut parts: Vec<String> = Vec::new();
+    for (page_idx, page_file) in page_files.iter().enumerate() {
+        refresh_heartbeat(state, task_id).await;
+        if is_cancel_requested(state, task_id).await {
+            return Ok(FastPathOutcome {
+                cancelled: true,
+                success_count: 0,
+                failed_count: 0,
+                processed_count: 0,
+                ocr_export: false,
+            });
+        }
+        let page_no = (page_idx + 1) as i32;
+        let page_path = std::path::Path::new(&state.upload_dir)
+            .join("documents")
+            .join(doc_id.to_string())
+            .join(page_file);
+        let bytes = tokio::fs::read(&page_path)
+            .await
+            .map_err(|e| format!("读取第 {page_no} 页失败: {e}"))?;
+        let image_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        match engine.ocr_image(&image_b64).await {
+            Ok(md) => {
+                if !md.trim().is_empty() {
+                    parts.push(md);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "任务 {task_id} 第 {page_no} 页 OCR 导出失败: {}",
+                    format_ocr_error(&e)
+                );
+            }
+        }
+        update_progress(state, task_id, page_no, page_no, 0, 0).await;
+    }
+    let markdown = parts.join("\n\n");
+    if markdown.trim().is_empty() {
+        return Err("OCR 结果为空".into());
+    }
+    persist_ocr_markdown(state, task_id, &markdown, engine.id()).await;
+    let layout = resolve_ocr_layout(state, task, &markdown);
+    persist_ocr_layout(state, task_id, &layout).await;
+    persist_ocr_export_ready(
+        state,
+        task_id,
+        space_id,
+        paper_id,
+        collection_id,
+        is_mixed,
+    )
+    .await;
+    Ok(FastPathOutcome {
+        cancelled: false,
+        success_count: 0,
+        failed_count: 0,
+        processed_count: 0,
+        ocr_export: true,
+    })
+}
+
+fn fill_imported_question(q: &mut ParsedQuestion) {
+    if q.correct_answer.is_none() {
+        q.correct_answer = Some(ParsedAnswer::empty_for_type(&q.question_type));
+    }
+    if q.image_urls.is_empty() {
+        q.image_urls = harvest_markdown_image_urls(&question_body_text(q))
+            .into_iter()
+            .map(|(_, u)| u)
+            .collect();
+    }
+}
+
+fn staged_question_no(item: &serde_json::Value) -> Option<String> {
+    item.get("parsed")
+        .and_then(|p| p.get("question_no"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+pub(crate) async fn import_external_questions(
+    state: &AppState,
+    task: &AiParseTask,
+    questions: Vec<ParsedQuestion>,
+    replace: bool,
+) -> Result<usize, String> {
+    let ctx = task.progress.get("ocr_export_ctx").cloned();
+    let space_id = ctx
+        .as_ref()
+        .and_then(|c| c.get("space_id"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .ok_or_else(|| "缺少 OCR 导出上下文 space_id，请重新识别".to_string())?;
+    let paper_id = ctx
+        .as_ref()
+        .and_then(|c| c.get("paper_id"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok());
+    let collection_id = ctx
+        .as_ref()
+        .and_then(|c| c.get("collection_id"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok());
+    let is_mixed = ctx
+        .as_ref()
+        .and_then(|c| c.get("is_mixed"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    if replace {
+        sqlx::query(
+            r#"
+            UPDATE ai_parse_tasks
+            SET progress = jsonb_set(COALESCE(progress, '{}'::jsonb), '{staged_questions}', '[]'::jsonb),
+                updated_at = NOW()
+            WHERE id = $1
+            "#,
+        )
+        .bind(task.id)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| format!("清空暂存失败: {e}"))?;
+        let _ = sqlx::query(
+            r#"
+            UPDATE ai_tagging_tasks
+            SET status = 'cancelled', updated_at = NOW()
+            WHERE parse_task_id = $1 AND status IN ('pending', 'processing', 'queued')
+            "#,
+        )
+        .bind(task.id)
+        .execute(&state.pool)
+        .await;
+    }
+
+    let existing: Vec<serde_json::Value> = sqlx::query_scalar(
+        "SELECT COALESCE(progress->'staged_questions', '[]'::jsonb) FROM ai_parse_tasks WHERE id = $1",
+    )
+    .bind(task.id)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(|e| format!("读取暂存失败: {e}"))?;
+
+    let mut imported = 0usize;
+    let mut next_i = existing.len();
+    for mut q in questions {
+        fill_imported_question(&mut q);
+        if q.stem.trim().is_empty() {
+            continue;
+        }
+        let qno = q
+            .question_no
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        let reuse_index = qno.as_ref().and_then(|no| {
+            existing.iter().find_map(|item| {
+                if staged_question_no(item).as_deref() == Some(no.as_str()) {
+                    item.get("index").and_then(|v| v.as_str()).map(|s| s.to_string())
+                } else {
+                    None
+                }
+            })
+        });
+        let index = if let Some(idx) = reuse_index {
+            sqlx::query(
+                r#"
+                UPDATE ai_parse_tasks
+                SET progress = jsonb_set(
+                      progress,
+                      '{staged_questions}',
+                      COALESCE((
+                        SELECT jsonb_agg(elem)
+                        FROM jsonb_array_elements(COALESCE(progress->'staged_questions', '[]'::jsonb)) elem
+                        WHERE elem->>'index' <> $2
+                      ), '[]'::jsonb)
+                    ),
+                    updated_at = NOW()
+                WHERE id = $1
+                "#,
+            )
+            .bind(task.id)
+            .bind(&idx)
+            .execute(&state.pool)
+            .await
+            .map_err(|e| format!("合并暂存失败: {e}"))?;
+            idx
+        } else {
+            let idx = format!("ext_i{next_i}");
+            next_i += 1;
+            idx
+        };
+        stage_question(
+            state,
+            task,
+            &index,
+            q,
+            None,
+            paper_id,
+            collection_id,
+            is_mixed,
+            space_id,
+        )
+        .await?;
+        imported += 1;
+    }
+    Ok(imported)
 }
 
 fn merge_layout_progress_fields(

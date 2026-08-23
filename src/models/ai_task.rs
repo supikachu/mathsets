@@ -170,6 +170,15 @@ pub struct TaskStatusResponse {
     /// collection_id, is_mixed, existing_question_id, matched[], unmatched{},
     /// order?, merged_into?, saved, saved_question_id?}`
     pub staged_questions: Vec<serde_json::Value>,
+    /// OCR 全文 Markdown（`progress.ocr_markdown`）。站外结构化模式导入前展示。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ocr_markdown: Option<String>,
+    /// `full`（默认，OCR+Stage2）或 `ocr_export`（仅 OCR，等待外部 JSON 导入）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pipeline: Option<String>,
+    /// 流水线阶段，如 `ocr_ready`（OCR 已完成、等待导入）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
 }
 
 #[cfg(test)]

@@ -1,6 +1,9 @@
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
+import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+
+const root = fileURLToPath(new URL('.', import.meta.url))
 
 export default defineConfig({
   plugins: [
@@ -21,6 +24,9 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    fs: {
+      allow: [path.resolve(root, '..')],
+    },
     proxy: {
       '/api': {
         target: 'http://127.0.0.1:3000',

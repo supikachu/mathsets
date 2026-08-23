@@ -1,5 +1,5 @@
 import { ref, onUnmounted } from 'vue'
-import { aiTaskApi, type AiParseTaskDetail, type ParseMode } from '@/api/client'
+import { aiTaskApi, type AiParseTaskDetail, type ParseMode, type ParsePipeline } from '@/api/client'
 
 /// 轮询间隔（毫秒）
 const POLL_INTERVAL_MS = 2000
@@ -68,7 +68,10 @@ export function useAiParsePolling() {
         statusText.value = cancelRequested ? '正在停止…' : '解析遇到波动，正在重试…'
         break
       case 'success':
-        statusText.value = '解析完成'
+        statusText.value =
+          data.pipeline === 'ocr_export' && !(data.staged_questions ?? []).length
+            ? 'OCR 完成，请查看文本并导入 JSON'
+            : '解析完成'
         break
       case 'partial_success':
         statusText.value = `部分成功（${data.success_count}/${data.total_count} 题）`
@@ -119,15 +122,19 @@ export function useAiParsePolling() {
 
   /// 入口：为已确认 Document 创建任务并开始轮询
   /// parseMode：pdf_direct=仅 PDF 直连（失败由调用方引导回退）/ page=仅逐页 / 缺省=自动降级
-  async function startPolling(documentId: string, parseMode?: ParseMode) {
+  async function startPolling(
+    documentId: string,
+    parseMode?: ParseMode,
+    pipeline?: ParsePipeline,
+  ) {
     reset()
     isPolling.value = true
-    statusText.value = '正在提交任务…'
+    statusText.value = pipeline === 'ocr_export' ? '正在提交 OCR 任务…' : '正在提交任务…'
     attempts = 0
 
     let submitTaskId: string
     try {
-      const { data } = await aiTaskApi.createParseTask(documentId, parseMode)
+      const { data } = await aiTaskApi.createParseTask(documentId, parseMode, pipeline)
       submitTaskId = data.task_id
       taskId.value = submitTaskId
       statusText.value = '正在排队…'
