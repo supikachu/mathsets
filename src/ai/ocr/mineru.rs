@@ -597,8 +597,9 @@ impl MineruProvider {
             OcrError::Upstream(0, format!("zip 解压失败: {e}"))
         })?;
 
-        // 收集 full.md 文本 + images/* 图片字节
+        // 收集 full.md 文本 + images/* 图片字节 + content_list 版面
         let mut md_content: Option<String> = None;
+        let mut content_list_json: Option<String> = None;
         let mut images: Vec<(String, Vec<u8>)> = vec![]; // (zip 内完整路径, 字节)
 
         for i in 0..archive.len() {
@@ -606,7 +607,7 @@ impl MineruProvider {
                 OcrError::Upstream(0, format!("zip 读取条目失败: {e}"))
             })?;
             let name = file.name().to_string();
-            let lower = name.to_lowercase();
+            let lower = name.to_lowercase().replace('\\', "/");
 
             // 提取 full.md（可能在子目录中）
             if name.ends_with("full.md") {
@@ -616,6 +617,19 @@ impl MineruProvider {
                 })?;
                 if !content.trim().is_empty() {
                     md_content = Some(content);
+                }
+                continue;
+            }
+
+            // v2 优先；若 zip 里两者都有，后扫到的 v1 不得覆盖 v2
+            let is_v2 = lower.ends_with("content_list_v2.json");
+            let is_v1 = lower.ends_with("content_list.json");
+            if is_v2 || is_v1 {
+                let mut content = String::new();
+                if file.read_to_string(&mut content).is_ok() && !content.trim().is_empty() {
+                    if is_v2 || content_list_json.is_none() {
+                        content_list_json = Some(content);
+                    }
                 }
                 continue;
             }
@@ -648,74 +662,62 @@ impl MineruProvider {
         );
 
         // 落盘图片 + 替换 md 路径（仅当配置了 upload_dir）
+        let mut url_map: HashMap<String, String> = HashMap::new();
         if let Some(upload_dir) = &self.upload_dir {
-            if images.is_empty() {
-                return Ok(md);
-            }
+            if !images.is_empty() {
+                let questions_dir = format!("{}/questions", upload_dir.trim_end_matches('/'));
+                if let Err(e) = tokio::fs::create_dir_all(&questions_dir).await {
+                    tracing::warn!("创建图片目录 {questions_dir} 失败: {e}，跳过图片落盘");
+                } else {
+                    let mut written = 0usize;
+                    for (orig_path, bytes) in &images {
+                        let orig_filename = Path::new(orig_path)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("image");
+                        let ext = Path::new(orig_filename)
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .unwrap_or("png");
+                        let new_name = format!("{}.{}", Uuid::new_v4(), ext);
+                        let new_path = format!("{}/{}", questions_dir, new_name);
+                        let new_url = format!("/uploads/questions/{}", new_name);
 
-            let questions_dir = format!("{}/questions", upload_dir.trim_end_matches('/'));
-            if let Err(e) = tokio::fs::create_dir_all(&questions_dir).await {
-                tracing::warn!("创建图片目录 {questions_dir} 失败: {e}，跳过图片落盘");
-                return Ok(md);
-            }
-
-            // 构建路径映射：images/xxx.png → /uploads/questions/{uuid}.png
-            let mut url_map: HashMap<String, String> = HashMap::new();
-            let mut written = 0usize;
-
-            for (orig_path, bytes) in &images {
-                // 提取文件名（images/abc.png → abc.png）
-                let orig_filename = Path::new(orig_path)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("image");
-                let ext = Path::new(orig_filename)
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("png");
-                let new_name = format!("{}.{}", Uuid::new_v4(), ext);
-                let new_path = format!("{}/{}", questions_dir, new_name);
-                let new_url = format!("/uploads/questions/{}", new_name);
-
-                if let Err(e) = tokio::fs::write(&new_path, bytes).await {
-                    tracing::warn!("写入图片失败 {orig_path} -> {new_path}: {e}");
-                    continue;
-                }
-                // 归一化 key：去掉可能的 ./ 或 ../ 前缀，统一为 images/xxx.png
-                let normalized = orig_path
-                    .trim_start_matches("./")
-                    .trim_start_matches("../")
-                    .replace('\\', "/");
-                url_map.insert(normalized, new_url);
-                written += 1;
-            }
-
-            // 用正则替换 md 中所有 ![](images/xxx.png) 和 ![](./images/xxx.png)
-            // group 1 = `![alt](`，group 2 = 可选 `./`|`../`，group 3 = `images/xxx.png`，group 4 = `)`
-            let re = Regex::new(r"(!\[[^\]]*\]\()(\.{1,2}/)?(images/[^\s)]+)(\))")
-                .map_err(|e| OcrError::Upstream(0, format!("正则编译失败: {e}")))?;
-
-            md = re
-                .replace_all(&md, |caps: &regex::Captures| -> String {
-                    // group 3 = images/xxx.png 路径（非可选，必命中）
-                    let orig_path = match caps.get(3) {
-                        Some(m) => m.as_str(),
-                        None => return caps[0].to_string(),
-                    };
-                    match url_map.get(orig_path) {
-                        Some(new_url) => format!("{}{}{}", &caps[1], new_url, &caps[4]),
-                        // 未命中映射（可能图片落盘失败），保留原样
-                        None => caps[0].to_string(),
+                        if let Err(e) = tokio::fs::write(&new_path, bytes).await {
+                            tracing::warn!("写入图片失败 {orig_path} -> {new_path}: {e}");
+                            continue;
+                        }
+                        let normalized = orig_path
+                            .trim_start_matches("./")
+                            .trim_start_matches("../")
+                            .replace('\\', "/");
+                        url_map.insert(normalized, new_url);
+                        written += 1;
                     }
-                })
-                .to_string();
 
-            tracing::info!(
-                "MinerU zip 解压完成: 提取 {} 张图片（成功落盘 {}）到 {}",
-                images.len(),
-                written,
-                questions_dir
-            );
+                    let re = Regex::new(r"(!\[[^\]]*\]\()(\.{1,2}/)?(images/[^\s)]+)(\))")
+                        .map_err(|e| OcrError::Upstream(0, format!("正则编译失败: {e}")))?;
+                    md = re
+                        .replace_all(&md, |caps: &regex::Captures| -> String {
+                            let orig_path = match caps.get(3) {
+                                Some(m) => m.as_str(),
+                                None => return caps[0].to_string(),
+                            };
+                            match url_map.get(orig_path) {
+                                Some(new_url) => format!("{}{}{}", &caps[1], new_url, &caps[4]),
+                                None => caps[0].to_string(),
+                            }
+                        })
+                        .to_string();
+
+                    tracing::info!(
+                        "MinerU zip 解压完成: 提取 {} 张图片（成功落盘 {}）到 {}",
+                        images.len(),
+                        written,
+                        questions_dir
+                    );
+                }
+            }
         } else if !images.is_empty() {
             tracing::warn!(
                 "MinerU zip 包含 {} 张图片，但未配置 upload_dir，图片被丢弃（md 中保留 images/* 原始引用）",
@@ -723,7 +725,44 @@ impl MineruProvider {
             );
         }
 
+        self.persist_layout_sidecar(content_list_json.as_deref(), &url_map)
+            .await;
+
         Ok(md)
+    }
+
+    async fn persist_layout_sidecar(
+        &self,
+        content_list_json: Option<&str>,
+        url_map: &HashMap<String, String>,
+    ) {
+        let Some(raw) = content_list_json else {
+            tracing::info!("MinerU zip 无 content_list.json，切题将回退 Markdown");
+            return;
+        };
+        match crate::ai::layout::parse_mineru_content_list(raw, url_map) {
+            Ok(doc) => {
+                tracing::info!("MinerU 版面已解析：{} 块", doc.blocks.len());
+                let (Some(root), Some(id)) = (&self.upload_dir, self.task_id) else {
+                    return;
+                };
+                let dir = Path::new(root).join("ocr").join(id.to_string());
+                if let Err(e) = tokio::fs::create_dir_all(&dir).await {
+                    tracing::warn!("创建版面目录失败: {e}");
+                    return;
+                }
+                let path = dir.join("layout.json");
+                match serde_json::to_vec(&doc) {
+                    Ok(bytes) => {
+                        if let Err(e) = tokio::fs::write(&path, bytes).await {
+                            tracing::warn!("写入 layout.json 失败: {e}");
+                        }
+                    }
+                    Err(e) => tracing::warn!("序列化版面失败: {e}"),
+                }
+            }
+            Err(e) => tracing::warn!("解析 MinerU content_list 失败: {e}"),
+        }
     }
 
     // -----------------------------------------------------------------------

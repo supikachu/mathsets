@@ -19,6 +19,9 @@ use uuid::Uuid;
 use base64::Engine as _;
 
 use crate::ai::cleaner::clean_and_parse;
+use crate::ai::layout::{
+    layout_sidecar_path, load_layout_sidecar, split_question_chunks, LayoutDocument, LayoutSource,
+};
 use crate::ai::ocr::{
     create_ocr_provider, parse_percent_value, should_fallback, OcrError, OcrProvider,
     PdfProgressCallback,
@@ -32,7 +35,7 @@ use crate::ai::tagging::{
     content_input_hash_with_stage, run_tagging, tagging_content_from_parsed, TaggingContext,
     TaggingInput, TaggingPolicy,
 };
-use crate::ai::types::ParsedQuestion;
+use crate::ai::types::{ParsedAnswer, ParsedQuestion};
 use crate::auth::middleware::AuthUser;
 use crate::auth::permissions::ensure_personal_space;
 use crate::handlers::ai::{post_process_batch, resolve_ai_config, resolve_ocr_config, ModelKind};
@@ -1929,12 +1932,15 @@ async fn run_pdf_fast_path(
         markdown
     };
 
+    let layout = resolve_ocr_layout(state, task, &markdown);
+    persist_ocr_layout(state, task_id, &layout).await;
+
     // OCR 100%：页进度收敛到满页
     update_progress(state, task_id, total_pages, total_pages, 0, 0).await;
 
-    // ── Phase 2：按题号切块 Stage2 解析 → 逐题落库 ──
+    // ── Phase 2：版面切大题（失败则回退 Markdown 题号切块）→ Stage2 ──
     let analysis_paper = looks_like_analysis_paper(&markdown, &task.paper_meta);
-    let chunks = split_stage2_markdown(&markdown, &task.paper_meta);
+    let (chunks, split_via) = split_stage2_with_layout(&layout, &markdown, &task.paper_meta);
     if chunks.is_empty() {
         return Err("PDF 直传 OCR 结果为空".into());
     }
@@ -1944,9 +1950,11 @@ async fn run_pdf_fast_path(
         STAGE2_PARSE_FULL_PROMPT.as_str()
     };
     tracing::info!(
-        "任务 {task_id} 全文 Markdown {} 字符 → {} 块解析（解析卷={}，并发={}）",
+        "任务 {task_id} 全文 Markdown {} 字符 → {} 块解析（切题={split_via}，版面来源={}，{} 块，解析卷={}，并发={}）",
         markdown.chars().count(),
         chunks.len(),
+        layout.source.as_str(),
+        layout.blocks.len(),
         analysis_paper,
         stage2_n
     );
@@ -2113,6 +2121,83 @@ async fn persist_ocr_markdown(state: &AppState, task_id: Uuid, markdown: &str, e
     }
 }
 
+fn merge_layout_progress_fields(
+    patch: &mut serde_json::Value,
+    task_id: Uuid,
+    layout: &LayoutDocument,
+) {
+    patch["ocr_layout_source"] = serde_json::Value::String(layout.source.as_str().into());
+    patch["ocr_layout_blocks"] = serde_json::json!(layout.blocks.len());
+    patch["ocr_layout_path"] =
+        serde_json::Value::String(format!("ocr/{task_id}/layout.json").replace('\\', "/"));
+}
+
+fn resolve_ocr_layout(state: &AppState, task: &AiParseTask, markdown: &str) -> LayoutDocument {
+    if let Some(doc) = load_layout_sidecar(&state.upload_dir, task.id) {
+        if !doc.blocks.is_empty() {
+            return doc;
+        }
+    }
+    if let Some(v) = task.progress.get("ocr_layout") {
+        if v.get("blocks").is_some() {
+            if let Ok(doc) = serde_json::from_value::<LayoutDocument>(v.clone()) {
+                if !doc.blocks.is_empty() {
+                    return doc;
+                }
+            }
+        }
+    }
+    LayoutDocument::from_markdown(markdown, LayoutSource::Markdown)
+}
+
+async fn persist_ocr_layout(state: &AppState, task_id: Uuid, layout: &LayoutDocument) {
+    let path = layout_sidecar_path(&state.upload_dir, task_id);
+    if let Some(parent) = path.parent() {
+        if let Err(e) = tokio::fs::create_dir_all(parent).await {
+            tracing::warn!("任务 {task_id} 创建版面目录失败: {e}");
+        } else {
+            match serde_json::to_vec(layout) {
+                Ok(bytes) => {
+                    if let Err(e) = tokio::fs::write(&path, bytes).await {
+                        tracing::warn!("任务 {task_id} 写入 layout.json 失败: {e}");
+                    }
+                }
+                Err(e) => tracing::warn!("任务 {task_id} 序列化版面失败: {e}"),
+            }
+        }
+    }
+
+    let mut patch = serde_json::json!({});
+    merge_layout_progress_fields(&mut patch, task_id, layout);
+    if let Err(e) = sqlx::query(
+        r#"
+        UPDATE ai_parse_tasks
+        SET progress = COALESCE(progress, '{}'::jsonb) || $2::jsonb, updated_at = NOW()
+        WHERE id = $1
+        "#,
+    )
+    .bind(task_id)
+    .bind(&patch)
+    .execute(&state.pool)
+    .await
+    {
+        tracing::warn!("任务 {task_id} 写入 OCR 版面摘要失败: {e}");
+    }
+}
+
+fn split_stage2_with_layout(
+    layout: &LayoutDocument,
+    md: &str,
+    paper_meta: &serde_json::Value,
+) -> (Vec<String>, &'static str) {
+    if let Some(chunks) = split_question_chunks(layout) {
+        if chunks.len() >= 2 {
+            return (chunks, layout.source.as_str());
+        }
+    }
+    (split_stage2_markdown(md, paper_meta), "markdown_fallback")
+}
+
 /// Ok(questions) / Err((fatal, message))
 async fn parse_stage2_chunk_cancellable(
     state: &AppState,
@@ -2179,19 +2264,80 @@ async fn parse_stage2_chunk(
         None => {
             let e = last_err.expect("解析失败时必有错误");
             let msg = format!("第 {} 块解析失败: {}", ci + 1, map_ai_error_msg(&e));
-            return Err((is_fatal_ai_error(&e), msg));
+            if is_fatal_ai_error(&e) {
+                return Err((true, msg));
+            }
+            tracing::warn!("任务 {task_id} {msg}，降级为 OCR 草稿题干（保留配图）");
+            let mut qs = vec![draft_question_from_chunk(chunk, &map_ai_error_msg(&e))];
+            assign_chunk_images(chunk, &mut qs);
+            return Ok(qs);
         }
     };
 
     let mut chunk_questions = match post_process_batch(&raw_json, &state.pool).await {
-        Ok(qs) => qs,
-        Err((_, err)) => {
-            let msg = format!("第 {} 块后处理失败: {}", ci + 1, err["error"]);
-            return Err((false, msg));
+        Ok(qs) if !qs.is_empty() => qs,
+        other => {
+            let detail = match other {
+                Ok(_) => "questions 为空".to_string(),
+                Err((_, err)) => err["error"].as_str().unwrap_or("后处理失败").to_string(),
+            };
+            tracing::warn!(
+                "任务 {task_id} 第 {} 块后处理失败（{detail}），降级为 OCR 草稿题干（保留配图）",
+                ci + 1
+            );
+            vec![draft_question_from_chunk(chunk, &detail)]
         }
     };
     assign_chunk_images(chunk, &mut chunk_questions);
     Ok(chunk_questions)
+}
+
+fn draft_question_from_chunk(chunk: &str, reason: &str) -> ParsedQuestion {
+    let question_type = guess_chunk_question_type(chunk);
+    ParsedQuestion {
+        question_type: question_type.clone(),
+        sub_type: None,
+        difficulty: None,
+        stem: chunk.trim().to_string(),
+        options: None,
+        correct_answer: Some(ParsedAnswer::empty_for_type(&question_type)),
+        analysis: vec![],
+        knowledge_points: vec![],
+        confidence: 0.25,
+        warnings: vec![format!(
+            "Stage2 未能结构化（{reason}），已保留 OCR 原文与配图，请核对"
+        )],
+        image_placeholders: vec![],
+        image_urls: vec![],
+        kp_matches: vec![],
+        question_no: extract_chunk_question_no(chunk),
+        display_order: None,
+        score: None,
+        chapter_path: vec![],
+        solution_methods: vec![],
+    }
+}
+
+fn extract_chunk_question_no(chunk: &str) -> Option<String> {
+    for line in chunk.lines() {
+        if let Some(caps) = crate::ai::layout::question_start_regex().captures(line) {
+            return caps.get(1).map(|m| m.as_str().to_string());
+        }
+    }
+    None
+}
+
+fn guess_chunk_question_type(chunk: &str) -> String {
+    static CHOICE_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"(?m)^\s*A\s*[\.．、\)]").expect("choice option")
+    });
+    if CHOICE_RE.is_match(chunk) {
+        "choice".into()
+    } else if chunk.contains("____") || chunk.contains("填空") {
+        "fill".into()
+    } else {
+        "solution".into()
+    }
 }
 
 fn looks_like_analysis_paper(md: &str, paper_meta: &serde_json::Value) -> bool {
@@ -2829,6 +2975,16 @@ mod tests {
     }
 
     #[test]
+    fn test_draft_from_chunk_keeps_figure_and_question_no() {
+        let chunk = "5. 函数 $f(x)$ 的图象可能是（ ）\n\n![A](/uploads/q5a.png)\n\nA.\nB.";
+        let q = draft_question_from_chunk(chunk, "缺少 questions 数组");
+        assert_eq!(q.question_no.as_deref(), Some("5"));
+        assert_eq!(q.question_type, "choice");
+        assert!(q.stem.contains("/uploads/q5a.png"));
+        assert!(q.warnings.iter().any(|w| w.contains("OCR")));
+    }
+
+    #[test]
     fn test_tagging_stage_from_paper_meta() {
         let senior = serde_json::json!({"paper_meta": {"stage": "高中"}});
         assert_eq!(tagging_stage_from_paper_meta(&senior), "senior");
@@ -3458,6 +3614,57 @@ A. ${0<x<1}$\n\
     fn test_split_stage2_falls_back_without_numbers() {
         let md = "没有题号的一段文字\n\n另一段";
         let chunks = split_stage2_markdown(md, &json!({}));
+        assert!(!chunks.is_empty());
+    }
+
+    #[test]
+    fn test_split_stage2_prefers_layout_spans() {
+        use crate::ai::layout::{BBox, BlockKind, LayoutBlock};
+        let layout = LayoutDocument {
+            source: LayoutSource::Mineru,
+            blocks: vec![
+                LayoutBlock {
+                    page: 0,
+                    order: 0,
+                    kind: BlockKind::Text,
+                    text: "1. 已知集合 A".into(),
+                    bbox: Some(BBox {
+                        x0: 80.0,
+                        y0: 100.0,
+                        x1: 400.0,
+                        y1: 160.0,
+                    }),
+                    image_url: None,
+                },
+                LayoutBlock {
+                    page: 0,
+                    order: 1,
+                    kind: BlockKind::Text,
+                    text: "2. 设椭圆 C".into(),
+                    bbox: Some(BBox {
+                        x0: 80.0,
+                        y0: 200.0,
+                        x1: 400.0,
+                        y1: 260.0,
+                    }),
+                    image_url: None,
+                },
+            ],
+        };
+        let md = "整页糊成一团 1. 已知集合 A 2. 设椭圆 C 不按行切开";
+        let (chunks, via) = split_stage2_with_layout(&layout, md, &json!({}));
+        assert_eq!(via, "mineru");
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks[0].contains("1. 已知集合"));
+        assert!(chunks[1].contains("2. 设椭圆"));
+    }
+
+    #[test]
+    fn test_split_stage2_layout_too_few_falls_back() {
+        let layout = LayoutDocument::from_markdown("没有题号的一段文字", LayoutSource::Markdown);
+        let md = "没有题号的一段文字\n\n另一段";
+        let (chunks, via) = split_stage2_with_layout(&layout, md, &json!({}));
+        assert_eq!(via, "markdown_fallback");
         assert!(!chunks.is_empty());
     }
 

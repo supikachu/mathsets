@@ -1,4 +1,4 @@
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use mathset::build_app;
 use mathset::config::AppConfig;
@@ -9,12 +9,32 @@ async fn main() {
     // 加载 .env 文件（如果存在）
     dotenvy::dotenv().ok();
 
-    // 初始化日志 (tracing)
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "mathset=debug,tower_http=debug".into()),
-        )
+    // 确保 logs 目录存在
+    std::fs::create_dir_all("logs").ok();
+
+    // 每次启动时根据当前时间（精确到分钟）生成独立的日志文件名，运行期间不自动轮转
+    let log_filename = chrono::Local::now().format("mathset_%Y-%m-%d_%H-%M.log").to_string();
+    let file_appender = tracing_appender::rolling::never("logs", log_filename);
+    let (non_blocking_file, _guard) = tracing_appender::non_blocking(file_appender);
+
+    // 过滤规则（优先读取 RUST_LOG 环境变量）
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "mathset=debug,tower_http=debug".into());
+
+    // 控制台输出层（带 ANSI 终端彩色高亮）
+    let stdout_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stdout);
+
+    // 文件输出层（禁用 ANSI 控制符，避免乱码）
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .with_writer(non_blocking_file);
+
+    // 初始化全局 tracing 日志订阅器
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(stdout_layer)
+        .with(file_layer)
         .init();
 
     // 加载配置

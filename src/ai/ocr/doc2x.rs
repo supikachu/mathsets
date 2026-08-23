@@ -156,7 +156,7 @@ fn join_md_strings(md_list: Vec<String>) -> Result<String, OcrError> {
     if md_list.is_empty() {
         return Err(OcrError::Upstream(0, "Doc2X 返回空 Markdown".to_string()));
     }
-    Ok(md_list.join("\n\n"))
+    Ok(md_list.join(&format!("\n\n{}\n\n", crate::ai::layout::LayoutDocument::PAGE_BREAK)))
 }
 
 /// 截断字符串用于日志打印，避免日志过长
@@ -858,6 +858,14 @@ mod tests {
     fn test_join_md_strings_single() {
         let md = join_md_strings(vec!["only".into()]).unwrap();
         assert_eq!(md, "only");
+    }
+
+    #[test]
+    fn test_join_md_strings_inserts_page_breaks() {
+        let md = join_md_strings(vec!["page-a".into(), "page-b".into()]).unwrap();
+        assert!(md.contains(crate::ai::layout::LayoutDocument::PAGE_BREAK));
+        assert!(md.starts_with("page-a"));
+        assert!(md.ends_with("page-b"));
     }
 
     #[test]

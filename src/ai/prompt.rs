@@ -260,6 +260,9 @@ pub const STAGE2_PARSE_SYSTEM_PROMPT: &str = r#"你是一个数学题结构化�
 - 含 `![配图](IMAGE_PLACEHOLDER_N)` 占位符：计入该题 `image_placeholders`
 - 含 `![...](http...)` 或 `![...](/uploads/...)` 真实图片链接：在内联位置保留标记，并把 URL 收集去重到该题 `image_urls`
 - 题干含「如图」「见图」「下图」「图中」「图示」时，不得省略图片标记；找不到对应图时把该块中最邻近的图片划给该题
+- **文本模型看不见图片像素**。禁止描述、翻译、根据图选择或计算；不要为看懂图而长时间推理
+- `![...](url)` 必须原样抄进 stem / options（独立成行）。图象选择题的 A/B/C/D 可以只有图片标记
+- 即使题干写「如图」「阴影」「图象可能是」而你无法看见图，也必须立刻输出完整 JSON；无印刷答案时 `correct_answer` 用空结构，`analysis` 为 []
 
 # 切题
 - 输入里每一道独立题号（如 15. / 16.）必须各占 questions 数组一项，禁止把下一题并入上一题的 stem 或 analysis
@@ -468,6 +471,7 @@ mod tests {
         assert!(STAGE2_PARSE_FULL_PROMPT.contains("`questions` 数组"));
         assert!(STAGE2_PARSE_FULL_PROMPT.contains("image_urls"));
         assert!(STAGE2_PARSE_FULL_PROMPT.contains("本块只解析输入中出现的题目"));
+        assert!(STAGE2_PARSE_FULL_PROMPT.contains("文本模型看不见图片像素"));
         assert!(STAGE2_PARSE_SLIM_PROMPT.contains("解析卷输出约束"));
         // Stage 1 Qwen-VL OCR 输出纯 Markdown（非 JSON）
         assert!(QWEN_VL_OCR_PROMPT.contains("只输出 Markdown 文本"));
