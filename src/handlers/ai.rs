@@ -19,7 +19,11 @@ use crate::models::ai_setting::{
     decrypt_api_key, encrypt_api_key, parse_master_key, AiSettingsResponse, UpdateAiSettingsRequest,
     UserAiSetting,
 };
-use crate::config::{default_text_model, is_custom_llm_provider, normalize_llm_base_url};
+use crate::config::{
+    canonicalize_llm_provider, clamp_llm_concurrency, clamp_llm_concurrency_opt, default_text_model,
+    is_custom_llm_provider, normalize_llm_base_url, DEFAULT_STAGE2_CONCURRENCY,
+    DEFAULT_TAGGING_CONCURRENCY,
+};
 use crate::AppState;
 
 // ---------------------------------------------------------------------------
@@ -27,7 +31,7 @@ use crate::AppState;
 // ---------------------------------------------------------------------------
 
 /// AI 模型类型 — 决定 resolve_ai_config 返回哪个模型配置
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ModelKind {
     Text,
     Vision,
@@ -461,30 +465,8 @@ pub async fn get_settings(
     })?;
 
     let resp = match setting {
-        Some(s) => AiSettingsResponse {
-            provider: s.provider,
-            has_api_key: s.api_key_enc.is_some(),
-            model_text: s.model_text,
-            model_vision: s.model_vision,
-            model_tagging: s.model_tagging,
-            ocr_provider: s.ocr_provider,
-            has_doc2x_key: s.doc2x_api_key_enc.is_some(),
-            mineru_endpoint: s.mineru_api_endpoint,
-            has_mineru_key: s.mineru_api_key_enc.is_some(),
-            llm_base_url: s.llm_base_url,
-        },
-        None => AiSettingsResponse {
-            provider: "deepseek".to_string(),
-            has_api_key: false,
-            model_text: None,
-            model_vision: None,
-            model_tagging: None,
-            ocr_provider: "auto".to_string(),
-            has_doc2x_key: false,
-            mineru_endpoint: None,
-            has_mineru_key: false,
-            llm_base_url: None,
-        },
+        Some(s) => ai_settings_response(s),
+        None => empty_ai_settings_response(),
     };
 
     Ok(Json(resp))
@@ -556,6 +538,20 @@ pub async fn update_settings(
         _ => (None, None),
     };
 
+    // 加密打标独立 API Key（若提供）
+    let (tagging_key_enc, tagging_key_iv) = match &req.tagging_api_key {
+        Some(key) if !key.is_empty() => {
+            let (enc, iv) = encrypt_api_key(key, &master_key).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("打标 Key 加密失败: {e}")})),
+                )
+            })?;
+            (Some(enc), Some(iv))
+        }
+        _ => (None, None),
+    };
+
     // UPSERT
     let mut provider = req.provider.unwrap_or_else(|| "deepseek".to_string());
     if provider == "openrouter" {
@@ -572,14 +568,43 @@ pub async fn update_settings(
         None
     };
 
+    let tagging_provider_bind = req
+        .tagging_provider
+        .as_deref()
+        .map(canonicalize_llm_provider);
+    let tagging_custom = tagging_provider_bind
+        .as_deref()
+        .map(is_custom_llm_provider)
+        .unwrap_or(false);
+    let tagging_llm_base_url = if tagging_custom {
+        Some(normalize_llm_base_url(req.tagging_llm_base_url.as_deref()).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": e})),
+            )
+        })?)
+    } else {
+        req.tagging_llm_base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+    };
+    let stage2_n = clamp_llm_concurrency_opt(req.stage2_concurrency);
+    let tagging_n = clamp_llm_concurrency_opt(req.tagging_concurrency);
+
     let setting = sqlx::query_as::<_, UserAiSetting>(
         r#"
         INSERT INTO user_ai_settings
             (user_id, provider, api_key_enc, api_key_iv, model_text, model_vision,
              ocr_provider, doc2x_api_key_enc, doc2x_api_key_iv,
              mineru_api_endpoint, mineru_api_key_enc, mineru_api_key_iv, llm_base_url,
-             model_tagging, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, 'auto'), $8, $9, $10, $11, $12, $13, $14, NOW())
+             model_tagging, tagging_provider, tagging_api_key_enc, tagging_api_key_iv,
+             tagging_llm_base_url, stage2_concurrency, tagging_concurrency, updated_at)
+        VALUES (
+            $1, $2, $3, $4, $5, $6, COALESCE($7, 'auto'), $8, $9, $10, $11, $12, $13, $14,
+            NULLIF(btrim(COALESCE($15, '')), ''), $16, $17, $18, $19, $20, NOW()
+        )
         ON CONFLICT (user_id) DO UPDATE SET
             provider = COALESCE($2, user_ai_settings.provider),
             api_key_enc = CASE WHEN $3 IS NOT NULL THEN $3 ELSE user_ai_settings.api_key_enc END,
@@ -594,6 +619,20 @@ pub async fn update_settings(
             mineru_api_key_iv = CASE WHEN $12 IS NOT NULL THEN $12 ELSE user_ai_settings.mineru_api_key_iv END,
             llm_base_url = COALESCE($13, user_ai_settings.llm_base_url),
             model_tagging = $14,
+            tagging_provider = CASE
+                WHEN $15::text IS NULL THEN user_ai_settings.tagging_provider
+                WHEN btrim($15) = '' THEN NULL
+                ELSE $15
+            END,
+            tagging_api_key_enc = CASE WHEN $16 IS NOT NULL THEN $16 ELSE user_ai_settings.tagging_api_key_enc END,
+            tagging_api_key_iv = CASE WHEN $17 IS NOT NULL THEN $17 ELSE user_ai_settings.tagging_api_key_iv END,
+            tagging_llm_base_url = CASE
+                WHEN $15::text IS NULL THEN user_ai_settings.tagging_llm_base_url
+                WHEN btrim(COALESCE($15, '')) = '' THEN NULL
+                ELSE $18
+            END,
+            stage2_concurrency = COALESCE($19, user_ai_settings.stage2_concurrency),
+            tagging_concurrency = COALESCE($20, user_ai_settings.tagging_concurrency),
             updated_at = NOW()
         RETURNING *
         "#,
@@ -612,6 +651,12 @@ pub async fn update_settings(
     .bind(&mineru_iv)
     .bind(&llm_base_url)
     .bind(req.model_tagging.as_deref().map(str::trim).filter(|s| !s.is_empty()))
+    .bind(&tagging_provider_bind)
+    .bind(&tagging_key_enc)
+    .bind(&tagging_key_iv)
+    .bind(&tagging_llm_base_url)
+    .bind(stage2_n)
+    .bind(tagging_n)
     .fetch_one(&state.pool)
     .await
     .map_err(|e| {
@@ -621,18 +666,7 @@ pub async fn update_settings(
         )
     })?;
 
-    let resp = AiSettingsResponse {
-        provider: setting.provider,
-        has_api_key: setting.api_key_enc.is_some(),
-        model_text: setting.model_text,
-        model_vision: setting.model_vision,
-        model_tagging: setting.model_tagging,
-        ocr_provider: setting.ocr_provider,
-        has_doc2x_key: setting.doc2x_api_key_enc.is_some(),
-        mineru_endpoint: setting.mineru_api_endpoint,
-        has_mineru_key: setting.mineru_api_key_enc.is_some(),
-        llm_base_url: setting.llm_base_url,
-    };
+    let resp = ai_settings_response(setting);
 
     Ok(Json(resp))
 }
@@ -641,14 +675,159 @@ pub async fn update_settings(
 // 辅助函数
 // ---------------------------------------------------------------------------
 
+fn empty_ai_settings_response() -> AiSettingsResponse {
+    AiSettingsResponse {
+        provider: "deepseek".to_string(),
+        has_api_key: false,
+        model_text: None,
+        model_vision: None,
+        model_tagging: None,
+        ocr_provider: "auto".to_string(),
+        has_doc2x_key: false,
+        mineru_endpoint: None,
+        has_mineru_key: false,
+        llm_base_url: None,
+        tagging_provider: None,
+        has_tagging_api_key: false,
+        tagging_llm_base_url: None,
+        stage2_concurrency: DEFAULT_STAGE2_CONCURRENCY,
+        tagging_concurrency: DEFAULT_TAGGING_CONCURRENCY,
+    }
+}
+
+fn ai_settings_response(s: UserAiSetting) -> AiSettingsResponse {
+    AiSettingsResponse {
+        provider: s.provider,
+        has_api_key: s.api_key_enc.is_some(),
+        model_text: s.model_text,
+        model_vision: s.model_vision,
+        model_tagging: s.model_tagging,
+        ocr_provider: s.ocr_provider,
+        has_doc2x_key: s.doc2x_api_key_enc.is_some(),
+        mineru_endpoint: s.mineru_api_endpoint,
+        has_mineru_key: s.mineru_api_key_enc.is_some(),
+        llm_base_url: s.llm_base_url,
+        tagging_provider: s.tagging_provider,
+        has_tagging_api_key: s.tagging_api_key_enc.is_some(),
+        tagging_llm_base_url: s.tagging_llm_base_url,
+        stage2_concurrency: s
+            .stage2_concurrency
+            .map(clamp_llm_concurrency)
+            .unwrap_or(DEFAULT_STAGE2_CONCURRENCY),
+        tagging_concurrency: s
+            .tagging_concurrency
+            .map(clamp_llm_concurrency)
+            .unwrap_or(DEFAULT_TAGGING_CONCURRENCY),
+    }
+}
+
+fn decrypt_stored_key(
+    enc: &[u8],
+    iv: &[u8],
+    state: &AppState,
+) -> Result<String, String> {
+    let b64_key = state
+        .ai_config
+        .key_encryption_key
+        .as_ref()
+        .ok_or_else(|| "服务器未配置 AI_KEY_ENCRYPTION_KEY".to_string())?;
+    let master_key = parse_master_key(b64_key).map_err(|e| e.to_string())?;
+    decrypt_api_key(enc, iv, &master_key).map_err(|e| format!("解密失败: {e}"))
+}
+
+fn non_empty(s: &Option<String>) -> Option<String> {
+    s.as_ref()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// 打标凭证：优先独立服务商/Key，否则回退解析槽位，再否则平台默认。
+fn resolve_tagging_config(
+    setting: &UserAiSetting,
+    state: &AppState,
+) -> Result<(String, String, Option<String>, String), String> {
+    let text_provider = canonicalize_llm_provider(&setting.provider);
+    let tagging_provider = non_empty(&setting.tagging_provider)
+        .map(|p| canonicalize_llm_provider(&p))
+        .unwrap_or_else(|| text_provider.clone());
+    let inherited = tagging_provider == text_provider;
+
+    let tagging_key = match (&setting.tagging_api_key_enc, &setting.tagging_api_key_iv) {
+        (Some(enc), Some(iv)) => Some(decrypt_stored_key(enc, iv, state)?),
+        _ => None,
+    };
+    let text_key = match (&setting.api_key_enc, &setting.api_key_iv) {
+        (Some(enc), Some(iv)) => Some(decrypt_stored_key(enc, iv, state)?),
+        _ => None,
+    };
+    let api_key = tagging_key.or_else(|| if inherited { text_key } else { None });
+
+    let model = non_empty(&setting.model_tagging)
+        .or_else(|| if inherited { non_empty(&setting.model_text) } else { None });
+
+    if is_custom_llm_provider(&tagging_provider) {
+        let api_key = api_key.ok_or_else(|| {
+            "打标使用自定义服务商时需要填写 API Key，请到设置页配置".to_string()
+        })?;
+        let base_src = non_empty(&setting.tagging_llm_base_url).or_else(|| {
+            if inherited {
+                non_empty(&setting.llm_base_url)
+            } else {
+                None
+            }
+        });
+        let base_url = normalize_llm_base_url(base_src.as_deref())?;
+        let model = model.or_else(|| Some(default_text_model("custom").to_string()));
+        if model.as_ref().is_none_or(|s| s.trim().is_empty()) {
+            return Err("打标自定义服务商需要填写模型 ID".into());
+        }
+        return Ok((api_key, tagging_provider, model, base_url));
+    }
+
+    if let Some(api_key) = api_key {
+        let base_url = get_provider_base_url(&state.ai_config, &tagging_provider);
+        let model = model.or_else(|| Some(default_text_model(&tagging_provider).to_string()));
+        return Ok((api_key, tagging_provider, model, base_url));
+    }
+
+    resolve_platform_credentials(state, &tagging_provider, model, ModelKind::Tagging)
+}
+
+fn resolve_platform_credentials(
+    state: &AppState,
+    preferred_provider: &str,
+    user_model: Option<String>,
+    model_kind: ModelKind,
+) -> Result<(String, String, Option<String>, String), String> {
+    let ai_config = &state.ai_config;
+    let default_model = match model_kind {
+        ModelKind::Text => ai_config.default_model_text.clone(),
+        ModelKind::Vision => ai_config.default_model_vision.clone(),
+        ModelKind::Tagging => ai_config
+            .default_model_tagging
+            .clone()
+            .unwrap_or_else(|| ai_config.default_model_text.clone()),
+    };
+    let (api_key, provider_name, base_url) = ai_config.credentials_for(preferred_provider);
+    let api_key = api_key.ok_or_else(|| {
+        format!(
+            "未配置 {} 的 API Key（模型 {}），请在 .env 中设置或到设置页填写打标 Key",
+            provider_name, default_model
+        )
+    })?;
+    let model = user_model
+        .filter(|s| !s.trim().is_empty())
+        .or(Some(default_model));
+    Ok((api_key, provider_name.to_string(), model, base_url))
+}
+
 /// 解析 AI 配置：用户个人 Key 优先，否则平台默认
-/// model_kind 决定返回 text 还是 vision 模型
+/// model_kind 决定返回 text / vision / tagging 模型配置
 pub(crate) async fn resolve_ai_config(
     auth: &AuthUser,
     state: &AppState,
     model_kind: ModelKind,
 ) -> Result<(String, String, Option<String>, String), String> {
-    // 查用户个人配置
     let user_setting = sqlx::query_as::<_, UserAiSetting>(
         "SELECT * FROM user_ai_settings WHERE user_id = $1",
     )
@@ -658,19 +837,16 @@ pub(crate) async fn resolve_ai_config(
     .map_err(|e| format!("数据库查询失败: {e}"))?;
 
     if let Some(ref setting) = user_setting {
+        if model_kind == ModelKind::Tagging {
+            return resolve_tagging_config(setting, state);
+        }
+
         let custom = is_custom_llm_provider(&setting.provider);
         if custom {
             let (Some(enc), Some(iv)) = (&setting.api_key_enc, &setting.api_key_iv) else {
                 return Err("自定义服务商需要填写 API Key，请到设置页配置".into());
             };
-            let b64_key = state
-                .ai_config
-                .key_encryption_key
-                .as_ref()
-                .ok_or_else(|| "服务器未配置 AI_KEY_ENCRYPTION_KEY".to_string())?;
-            let master_key = parse_master_key(b64_key).map_err(|e| e.to_string())?;
-            let api_key =
-                decrypt_api_key(enc, iv, &master_key).map_err(|e| format!("解密失败: {e}"))?;
+            let api_key = decrypt_stored_key(enc, iv, state)?;
             let provider_name = setting.provider.clone();
             let base_url = normalize_llm_base_url(setting.llm_base_url.as_deref())?;
             let model = match model_kind {
@@ -684,12 +860,7 @@ pub(crate) async fn resolve_ai_config(
                     .clone()
                     .filter(|s| !s.trim().is_empty())
                     .or_else(|| setting.model_text.clone().filter(|s| !s.trim().is_empty())),
-                ModelKind::Tagging => setting
-                    .model_tagging
-                    .clone()
-                    .filter(|s| !s.trim().is_empty())
-                    .or_else(|| setting.model_text.clone().filter(|s| !s.trim().is_empty()))
-                    .or_else(|| Some(default_text_model("custom").to_string())),
+                ModelKind::Tagging => unreachable!(),
             };
             if model.as_ref().is_none_or(|s| s.trim().is_empty()) {
                 return Err(
@@ -700,12 +871,8 @@ pub(crate) async fn resolve_ai_config(
         }
 
         if let (Some(enc), Some(iv)) = (&setting.api_key_enc, &setting.api_key_iv) {
-            // 有用户个人 Key → 解密使用
-            if let Some(ref b64_key) = state.ai_config.key_encryption_key {
-                let master_key = parse_master_key(b64_key).map_err(|e| e.to_string())?;
-                let api_key =
-                    decrypt_api_key(enc, iv, &master_key).map_err(|e| format!("解密失败: {e}"))?;
-
+            if state.ai_config.key_encryption_key.is_some() {
+                let api_key = decrypt_stored_key(enc, iv, state)?;
                 let provider_name = setting.provider.clone();
                 let base_url = get_provider_base_url(&state.ai_config, &provider_name);
                 let model = match model_kind {
@@ -714,20 +881,16 @@ pub(crate) async fn resolve_ai_config(
                         .clone()
                         .filter(|s| !s.trim().is_empty())
                         .or_else(|| Some(default_text_model(&provider_name).to_string())),
-                    ModelKind::Vision => setting.model_vision.clone().filter(|s| !s.trim().is_empty()),
-                    ModelKind::Tagging => setting
-                        .model_tagging
-                        .clone()
-                        .filter(|s| !s.trim().is_empty())
-                        .or_else(|| setting.model_text.clone().filter(|s| !s.trim().is_empty()))
-                        .or_else(|| Some(default_text_model(&provider_name).to_string())),
+                    ModelKind::Vision => {
+                        setting.model_vision.clone().filter(|s| !s.trim().is_empty())
+                    }
+                    ModelKind::Tagging => unreachable!(),
                 };
                 return Ok((api_key, provider_name, model, base_url));
             }
         }
     }
 
-    // 无用户 Key → 用平台默认
     let ai_config = &state.ai_config;
     let default_model = match model_kind {
         ModelKind::Text => ai_config.default_model_text.clone(),
@@ -738,10 +901,12 @@ pub(crate) async fn resolve_ai_config(
             .unwrap_or_else(|| ai_config.default_model_text.clone()),
     };
 
-    // ⚠️ 智能路由：Vision 模式下根据模型名前缀选择正确的 provider
-    // 避免用 deepseek provider 发送 qwen-vl-plus 等视觉模型请求导致调用失败
     let preferred_provider = match model_kind {
-        ModelKind::Text | ModelKind::Tagging => ai_config.default_provider.clone(),
+        ModelKind::Text => ai_config.default_provider.clone(),
+        ModelKind::Tagging => ai_config
+            .default_provider_tagging
+            .clone()
+            .unwrap_or_else(|| ai_config.default_provider.clone()),
         ModelKind::Vision => match default_model.as_str() {
             m if m.starts_with("qwen") => "qwen".to_string(),
             m if m.starts_with("gpt") => "openai".to_string(),
@@ -752,17 +917,7 @@ pub(crate) async fn resolve_ai_config(
         },
     };
 
-    let (api_key, provider_name, base_url) = ai_config.credentials_for(&preferred_provider);
-
-    let api_key = api_key.ok_or_else(|| {
-        format!(
-            "未配置 {} 的 API Key（视觉模型 {} 需要对应的 API Key），请在 .env 中设置或到设置页配置",
-            provider_name, default_model
-        )
-    })?;
-
-    // 用户自定义模型覆盖平台默认
-    let model = match model_kind {
+    let user_model = match model_kind {
         ModelKind::Text => user_setting.as_ref().and_then(|s| s.model_text.clone()),
         ModelKind::Vision => user_setting.as_ref().and_then(|s| s.model_vision.clone()),
         ModelKind::Tagging => user_setting.as_ref().and_then(|s| {
@@ -771,11 +926,8 @@ pub(crate) async fn resolve_ai_config(
                 .filter(|v| !v.trim().is_empty())
                 .or_else(|| s.model_text.clone())
         }),
-    }
-    .filter(|s| !s.trim().is_empty())
-    .or(Some(default_model));
-
-    Ok((api_key, provider_name.to_string(), model, base_url))
+    };
+    resolve_platform_credentials(state, &preferred_provider, user_model, model_kind)
 }
 
 /// OCR 引擎决策来源判定（纯函数，供 resolve_ocr_config 决策日志使用）

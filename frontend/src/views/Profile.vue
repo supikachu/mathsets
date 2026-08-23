@@ -218,144 +218,287 @@
 
           <!-- TAB 4: AI 与 OCR 设置 -->
           <template v-else-if="activeTab === 'ai'">
-            <section class="bg-white dark:bg-slate-900 rounded-2xl border border-gray-100 dark:border-slate-800 shadow-sm p-6 flex flex-col gap-5">
-              <h2 class="text-lg font-semibold text-gray-900 dark:text-gray-100">AI 模型配置</h2>
-              <p class="text-sm text-gray-500 dark:text-gray-400">文本模型用于试卷分类、OCR 后拆题和知识点打标。视觉模型仅作 OCR 兜底，可与文本服务商分开（如 GLM 文本 + 通义视觉）。</p>
-
-              <!-- LLM 服务商 -->
-              <div class="flex flex-col gap-1.5">
-                <label class="text-sm font-medium text-gray-700 dark:text-gray-300">LLM 服务商</label>
-                <select v-model="aiForm.provider" class="ai-input">
-                  <option value="deepseek">DeepSeek</option>
-                  <option value="qwen">通义千问</option>
-                  <option value="glm">智谱 GLM</option>
-                  <option value="gemini">Google Gemini</option>
-                  <option value="openai">OpenAI</option>
-                  <option value="custom">自定义 / OpenRouter</option>
-                </select>
-              </div>
-
-              <!-- 自定义 Base URL -->
-              <div v-if="isCustomLlm" class="flex flex-col gap-1.5">
-                <label class="text-sm font-medium text-gray-700 dark:text-gray-300">API 地址（Base URL）</label>
-                <input
-                  v-model="aiForm.llmBaseUrl"
-                  class="ai-input"
-                  placeholder="https://openrouter.ai/api/v1"
-                />
-                <p class="text-xs text-gray-500 dark:text-gray-400">
-                  OpenAI Chat Completions 兼容地址。OpenRouter 填
-                  <code class="text-xs">https://openrouter.ai/api/v1</code>
-                  ；其它中转站填其文档中的根路径。
-                </p>
-              </div>
-
-              <!-- API Key -->
-              <div class="flex flex-col gap-1.5">
-                <label class="text-sm font-medium text-gray-700 dark:text-gray-300">
-                  API Key
-                  <span v-if="aiSettings?.has_api_key" class="text-xs text-green-600 ml-2">已配置</span>
-                </label>
-                <div class="flex gap-2">
-                  <input v-model="aiForm.apiKey" type="password" class="ai-input flex-1" placeholder="输入新 Key 以更新，留空保持不变" />
-                  <AppButton v-if="isCustomLlm" variant="ghost" :loading="testingLlm" @click="testLlmConnection">
-                    <AppIcon name="bolt" :size="16" /> 测试连接
-                  </AppButton>
-                </div>
-                <p v-if="isCustomLlm" class="text-xs text-gray-400">OpenRouter Key 形如 sk-or-v1-...，在 openrouter.ai/keys 创建。</p>
-              </div>
-
-              <!-- 模型名 -->
-              <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div class="flex flex-col gap-1.5">
-                  <label class="text-sm font-medium text-gray-700 dark:text-gray-300">
-                    文本模型{{ isCustomLlm ? '' : '（可选）' }}
-                  </label>
-                  <input v-model="aiForm.modelText" class="ai-input" :placeholder="textModelPlaceholder" />
-                  <p v-if="aiForm.provider === 'gemini'" class="text-xs text-gray-500 dark:text-gray-400">
-                    免费档按 AI Studio 当前额度：Flash（含 3.7）5 次/分钟、20 次/天；Flash-Lite 10 次/分钟、20 次/天。拆题单路排队，请以
-                    <a class="underline" href="https://aistudio.google.com/rate-limit" target="_blank" rel="noreferrer">AI Studio Rate Limit</a>
-                    为准。
-                  </p>
-                  <p v-else-if="isCustomLlm" class="text-xs text-gray-500 dark:text-gray-400">
-                    须填写 OpenRouter 完整模型 ID，例如
-                    <code class="text-xs">stealth/ox-alpha</code>
-                    （Ox Alpha）、
-                    <code class="text-xs">qwen/qwen3-8b:free</code>
-                    。不要只填显示名「Ox Alpha」。免费/预览模型限额较低，拆题会自动单路。列表见
-                    <a class="underline" href="https://openrouter.ai/models" target="_blank" rel="noreferrer">OpenRouter Models</a>。
-                  </p>
-                </div>
-                <div class="flex flex-col gap-1.5">
-                  <label class="text-sm font-medium text-gray-700 dark:text-gray-300">视觉模型（可选）</label>
-                  <input v-model="aiForm.modelVision" class="ai-input" placeholder="如 qwen-vl-plus" />
-                </div>
-              </div>
-            </section>
-
-            <!-- OCR 引擎设置卡片 -->
-            <section class="bg-white dark:bg-slate-900 rounded-2xl border border-gray-100 dark:border-slate-800 shadow-sm p-6 flex flex-col gap-5">
-              <div class="flex items-center justify-between">
-                <h2 class="text-lg font-semibold text-gray-900 dark:text-gray-100">OCR 模型设置</h2>
-                <span v-if="aiSettings?.has_doc2x_key" class="text-xs px-2 py-1 rounded-full bg-green-50 text-green-700 dark:bg-green-950 dark:text-green-400">Doc2X 已配置</span>
-                <span v-else-if="aiSettings?.has_mineru_key" class="text-xs px-2 py-1 rounded-full bg-blue-50 text-blue-700 dark:bg-blue-950 dark:text-blue-400">MinerU 已配置</span>
-              </div>
-              <p class="text-sm text-gray-500 dark:text-gray-400">选择图片/PDF 识别引擎。Doc2X 公式精度最高但需独立 Key；MinerU 为开源私有部署方案；Qwen-VL 为通用兜底。</p>
-
-              <!-- 引擎选择 -->
-              <div class="flex flex-col gap-1.5">
-                <label class="text-sm font-medium text-gray-700 dark:text-gray-300">OCR 引擎</label>
-                <select v-model="aiForm.ocrProvider" class="ai-input">
-                  <option value="auto">默认自动（跟随系统）</option>
-                  <option value="doc2x">Doc2X 极高精公式引擎（推荐）</option>
-                  <option value="mineru_local">MinerU 私有部署（开源）</option>
-                  <option value="qwen_vl">Qwen-VL 通用（兜底）</option>
-                </select>
-              </div>
-
-              <!-- Doc2X API Key（仅选中 doc2x 时显示） -->
-              <div v-if="aiForm.ocrProvider === 'doc2x'" class="flex flex-col gap-2">
-                <label class="text-sm font-medium text-gray-700 dark:text-gray-300">
-                  Doc2X API Key
-                  <span v-if="aiSettings?.has_doc2x_key" class="text-xs text-green-600 ml-2">已配置</span>
-                </label>
-                <div class="flex gap-2">
-                  <input v-model="aiForm.doc2xApiKey" type="password" class="ai-input flex-1" placeholder="输入 Doc2X API Key（sk-xxx）" />
-                  <AppButton variant="ghost" :loading="testingConnection" @click="testOcrConnection">
-          <AppIcon name="bolt" :size="16" /> 测试连接
-        </AppButton>
-                </div>
-                <p class="text-xs text-gray-400">未填写个人 Key 时使用平台默认 Key。可在 doc2x.noedgeai.com 获取。</p>
-              </div>
-
-              <!-- MinerU 私有部署配置（仅选中 mineru_local 时显示） -->
-              <div v-if="aiForm.ocrProvider === 'mineru_local'" class="flex flex-col gap-3">
-                <div class="flex flex-col gap-1.5">
-                  <label class="text-sm font-medium text-gray-700 dark:text-gray-300">MinerU 服务端点</label>
-                  <input v-model="aiForm.mineruEndpoint" class="ai-input" placeholder="如 http://127.0.0.1:8000" />
-                  <p class="text-xs text-gray-400">填写本地或内网部署的 MinerU 服务地址（无末尾斜杠）。</p>
-                </div>
-                <div class="flex flex-col gap-1.5">
-                  <label class="text-sm font-medium text-gray-700 dark:text-gray-300">
-                    MinerU API Key（可选）
-                    <span v-if="aiSettings?.has_mineru_key" class="text-xs text-blue-600 ml-2">已配置</span>
-                  </label>
-                  <div class="flex gap-2">
-                    <input v-model="aiForm.mineruApiKey" type="password" class="ai-input flex-1" placeholder="若服务前置鉴权网关则填写，否则留空" />
-                    <AppButton variant="ghost" :loading="testingConnection" @click="testOcrConnection">
-                      <AppIcon name="bolt" :size="16" /> 测试连接
-                    </AppButton>
+            <div class="ai-settings">
+              <!-- 解析 -->
+              <section class="ai-block">
+                <div class="ai-section-head">
+                  <div class="ai-section-icon ai-section-icon--parse">
+                    <AppIcon name="sparkles" :size="15" />
                   </div>
-                  <p class="text-xs text-gray-400">私有部署默认免鉴权；仅当在 MinerU 前置网关设置了 Bearer Token 时填写。</p>
+                  <div class="ai-section-copy">
+                    <h2>解析</h2>
+                    <p>试卷分类与 OCR 后拆题</p>
+                  </div>
                 </div>
-              </div>
-            </section>
 
-            <!-- 保存按钮 -->
-            <div class="flex justify-end">
-              <AppButton variant="primary" :loading="savingAi" @click="saveAiSettings">
-                <AppIcon name="check" :size="16" /> 保存设置
-              </AppButton>
+                <div class="ios-group">
+                  <div class="ios-row">
+                    <span class="ios-label">服务商</span>
+                    <select v-model="aiForm.provider" class="ios-select" aria-label="解析服务商">
+                      <option v-for="opt in llmProviderOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+                    </select>
+                  </div>
+
+                  <div v-if="isCustomLlm" class="ios-row ios-row--stack">
+                    <span class="ios-label">API 地址</span>
+                    <input
+                      v-model="aiForm.llmBaseUrl"
+                      class="ios-input"
+                      placeholder="https://openrouter.ai/api/v1"
+                      spellcheck="false"
+                      autocomplete="off"
+                    />
+                  </div>
+
+                  <div class="ios-row ios-row--stack">
+                    <div class="ios-row-top">
+                      <span class="ios-label">API Key</span>
+                      <span v-if="aiSettings?.has_api_key" class="ios-status">已配置</span>
+                    </div>
+                    <div class="ios-inline">
+                      <input
+                        v-model="aiForm.apiKey"
+                        type="password"
+                        class="ios-input"
+                        placeholder="输入新 Key，留空保持不变"
+                        autocomplete="off"
+                      />
+                      <button
+                        v-if="isCustomLlm"
+                        type="button"
+                        class="ios-text-btn"
+                        :disabled="testingLlm"
+                        @click="testLlmConnection"
+                      >{{ testingLlm ? '测试中…' : '测试' }}</button>
+                    </div>
+                  </div>
+
+                  <div class="ios-row ios-row--stack">
+                    <span class="ios-label">文本模型{{ isCustomLlm ? '' : '（可选）' }}</span>
+                    <input
+                      v-model="aiForm.modelText"
+                      class="ios-input ios-input--mono"
+                      :placeholder="textModelPlaceholder"
+                      spellcheck="false"
+                    />
+                  </div>
+
+                  <div class="ios-row ios-row--stack">
+                    <span class="ios-label">视觉模型（可选）</span>
+                    <input
+                      v-model="aiForm.modelVision"
+                      class="ios-input ios-input--mono"
+                      placeholder="如 qwen-vl-plus"
+                      spellcheck="false"
+                    />
+                  </div>
+
+                  <div class="ios-row">
+                    <div class="ios-label-block">
+                      <span class="ios-label">拆题并发</span>
+                    </div>
+                    <div class="ai-stepper">
+                      <button type="button" :disabled="aiForm.stage2Concurrency <= 1" @click="bumpConcurrency('stage2Concurrency', -1)">−</button>
+                      <span>{{ aiForm.stage2Concurrency }}</span>
+                      <button type="button" :disabled="aiForm.stage2Concurrency >= 16" @click="bumpConcurrency('stage2Concurrency', 1)">+</button>
+                    </div>
+                  </div>
+                </div>
+                <p class="ios-footer">
+                  <template v-if="aiForm.provider === 'gemini'">
+                    免费档按 AI Studio 额度：Flash 约 5 次/分钟、20 次/天。并发建议设为 1。详见
+                    <a href="https://aistudio.google.com/rate-limit" target="_blank" rel="noreferrer">Rate Limit</a>。
+                  </template>
+                  <template v-else-if="isCustomLlm">
+                    填写 OpenRouter 完整模型 ID，例如 stealth/ox-alpha。列表见
+                    <a href="https://openrouter.ai/models" target="_blank" rel="noreferrer">OpenRouter Models</a>。
+                    免费档建议并发为 1。
+                  </template>
+                  <template v-else>
+                    同时解析的切块数，范围 1–16。智谱 / Gemini 建议设为 1，避免限流。
+                  </template>
+                </p>
+              </section>
+
+              <!-- 智能打标 -->
+              <section class="ai-block">
+                <div class="ai-section-head">
+                  <div class="ai-section-icon ai-section-icon--tag">
+                    <AppIcon name="tag" :size="15" />
+                  </div>
+                  <div class="ai-section-copy">
+                    <h2>智能打标</h2>
+                    <p>分类任务，适合便宜的快模型</p>
+                  </div>
+                </div>
+
+                <div class="ios-group">
+                  <div class="ios-row ios-row--toggle" @click="aiForm.taggingIndependent = !aiForm.taggingIndependent">
+                    <div class="ios-label-block">
+                      <span class="ios-label">独立服务商</span>
+                      <span class="ios-sub">解析与打标可使用不同厂商</span>
+                    </div>
+                    <AppToggle v-model="aiForm.taggingIndependent" @click.stop />
+                  </div>
+
+                  <template v-if="aiForm.taggingIndependent">
+                    <div class="ios-row">
+                      <span class="ios-label">服务商</span>
+                      <select v-model="aiForm.taggingProvider" class="ios-select" aria-label="打标服务商">
+                        <option v-for="opt in llmProviderOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+                      </select>
+                    </div>
+
+                    <div v-if="isCustomTagging" class="ios-row ios-row--stack">
+                      <span class="ios-label">API 地址</span>
+                      <input
+                        v-model="aiForm.taggingLlmBaseUrl"
+                        class="ios-input"
+                        placeholder="https://openrouter.ai/api/v1"
+                        spellcheck="false"
+                        autocomplete="off"
+                      />
+                    </div>
+
+                    <div class="ios-row ios-row--stack">
+                      <div class="ios-row-top">
+                        <span class="ios-label">API Key</span>
+                        <span v-if="aiSettings?.has_tagging_api_key" class="ios-status">已配置</span>
+                        <span v-else-if="!isCustomTagging" class="ios-hint">可留空，使用平台默认</span>
+                      </div>
+                      <input
+                        v-model="aiForm.taggingApiKey"
+                        type="password"
+                        class="ios-input"
+                        placeholder="输入新 Key，留空保持不变"
+                        autocomplete="off"
+                      />
+                    </div>
+                  </template>
+
+                  <div class="ios-row ios-row--stack">
+                    <span class="ios-label">打标模型（可选）</span>
+                    <input
+                      v-model="aiForm.modelTagging"
+                      class="ios-input ios-input--mono"
+                      :placeholder="taggingModelPlaceholder"
+                      spellcheck="false"
+                    />
+                  </div>
+
+                  <div class="ios-row">
+                    <div class="ios-label-block">
+                      <span class="ios-label">打标并发</span>
+                    </div>
+                    <div class="ai-stepper">
+                      <button type="button" :disabled="aiForm.taggingConcurrency <= 1" @click="bumpConcurrency('taggingConcurrency', -1)">−</button>
+                      <span>{{ aiForm.taggingConcurrency }}</span>
+                      <button type="button" :disabled="aiForm.taggingConcurrency >= 16" @click="bumpConcurrency('taggingConcurrency', 1)">+</button>
+                    </div>
+                  </div>
+                </div>
+                <p class="ios-footer">
+                  {{ aiForm.taggingIndependent
+                    ? '例如解析走 OpenRouter，打标走官方 DeepSeek。'
+                    : '关闭时沿用上方解析服务商与 Key。模型可单独指定。' }}
+                  并发为同一账号同时打标的题目数（1–16）。
+                </p>
+              </section>
+
+              <!-- OCR -->
+              <section class="ai-block">
+                <div class="ai-section-head">
+                  <div class="ai-section-icon ai-section-icon--ocr">
+                    <AppIcon name="image" :size="15" />
+                  </div>
+                  <div class="ai-section-copy">
+                    <h2>OCR</h2>
+                    <p>图片与 PDF 识别引擎</p>
+                  </div>
+                  <span v-if="aiSettings?.has_doc2x_key" class="ios-status">Doc2X 已配置</span>
+                  <span v-else-if="aiSettings?.has_mineru_key" class="ios-status ios-status--accent">MinerU 已配置</span>
+                </div>
+
+                <div class="ios-group">
+                  <div class="ios-row">
+                    <span class="ios-label">引擎</span>
+                    <select v-model="aiForm.ocrProvider" class="ios-select" aria-label="OCR 引擎">
+                      <option value="auto">自动（跟随系统）</option>
+                      <option value="doc2x">Doc2X 公式引擎</option>
+                      <option value="mineru_local">MinerU 私有部署</option>
+                      <option value="qwen_vl">Qwen-VL 通用</option>
+                    </select>
+                  </div>
+
+                  <template v-if="aiForm.ocrProvider === 'doc2x'">
+                    <div class="ios-row ios-row--stack">
+                      <div class="ios-row-top">
+                        <span class="ios-label">Doc2X API Key</span>
+                        <span v-if="aiSettings?.has_doc2x_key" class="ios-status">已配置</span>
+                      </div>
+                      <div class="ios-inline">
+                        <input
+                          v-model="aiForm.doc2xApiKey"
+                          type="password"
+                          class="ios-input"
+                          placeholder="sk-xxx，留空使用平台默认"
+                          autocomplete="off"
+                        />
+                        <button type="button" class="ios-text-btn" :disabled="testingConnection" @click="testOcrConnection">
+                          {{ testingConnection ? '测试中…' : '测试' }}
+                        </button>
+                      </div>
+                    </div>
+                  </template>
+
+                  <template v-else-if="aiForm.ocrProvider === 'mineru_local'">
+                    <div class="ios-row ios-row--stack">
+                      <span class="ios-label">服务端点</span>
+                      <input
+                        v-model="aiForm.mineruEndpoint"
+                        class="ios-input"
+                        placeholder="http://127.0.0.1:8000"
+                        spellcheck="false"
+                      />
+                    </div>
+                    <div class="ios-row ios-row--stack">
+                      <div class="ios-row-top">
+                        <span class="ios-label">API Key（可选）</span>
+                        <span v-if="aiSettings?.has_mineru_key" class="ios-status ios-status--accent">已配置</span>
+                      </div>
+                      <div class="ios-inline">
+                        <input
+                          v-model="aiForm.mineruApiKey"
+                          type="password"
+                          class="ios-input"
+                          placeholder="仅网关鉴权时填写"
+                          autocomplete="off"
+                        />
+                        <button type="button" class="ios-text-btn" :disabled="testingConnection" @click="testOcrConnection">
+                          {{ testingConnection ? '测试中…' : '测试' }}
+                        </button>
+                      </div>
+                    </div>
+                  </template>
+                </div>
+                <p class="ios-footer">
+                  <template v-if="aiForm.ocrProvider === 'doc2x'">
+                    公式精度最高。未填个人 Key 时使用平台默认。可在 doc2x.noedgeai.com 获取。
+                  </template>
+                  <template v-else-if="aiForm.ocrProvider === 'mineru_local'">
+                    填写本地或内网 MinerU 地址，不要带末尾斜杠。私有部署默认免鉴权。
+                  </template>
+                  <template v-else>
+                    Doc2X 公式最准；MinerU 适合私有化；Qwen-VL 为通用兜底。
+                  </template>
+                </p>
+              </section>
+
+              <div class="ai-save">
+                <AppButton variant="primary" :loading="savingAi" @click="saveAiSettings">
+                  保存设置
+                </AppButton>
+              </div>
             </div>
           </template>
 
@@ -373,7 +516,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useToast } from '@/composables/useToast'
 import { useTheme } from '@/composables/useTheme'
 import { compressImage } from '@/utils/imageCompressor'
-import { AppButton, AppIcon, AppInput, AppBadge, AppProgress } from '@/components/ui'
+import { AppButton, AppIcon, AppInput, AppBadge, AppProgress, AppToggle } from '@/components/ui'
 import ThemeToggle from '@/components/ThemeToggle.vue'
 
 const router = useRouter()
@@ -458,12 +601,28 @@ const aiForm = reactive({
   apiKey: '',           // 明文输入，保存后清空
   modelText: '',
   modelVision: '',
+  modelTagging: '',
   llmBaseUrl: '',
   ocrProvider: 'auto', // auto / doc2x / mineru_local / qwen_vl
   doc2xApiKey: '',     // 明文输入，保存后清空
   mineruEndpoint: '',
   mineruApiKey: '',    // 明文输入，保存后清空
+  taggingIndependent: false,
+  taggingProvider: 'deepseek',
+  taggingApiKey: '',
+  taggingLlmBaseUrl: '',
+  stage2Concurrency: 4,
+  taggingConcurrency: 4,
 })
+
+const llmProviderOptions = [
+  { value: 'deepseek', label: 'DeepSeek' },
+  { value: 'qwen', label: '通义千问' },
+  { value: 'glm', label: '智谱 GLM' },
+  { value: 'gemini', label: 'Google Gemini' },
+  { value: 'openai', label: 'OpenAI' },
+  { value: 'custom', label: '自定义 / OpenRouter' },
+] as const
 
 const TEXT_MODEL_DEFAULTS: Record<string, string> = {
   deepseek: 'deepseek-chat',
@@ -475,11 +634,32 @@ const TEXT_MODEL_DEFAULTS: Record<string, string> = {
 }
 
 const isCustomLlm = computed(() => aiForm.provider === 'custom' || aiForm.provider === 'openrouter')
+const isCustomTagging = computed(
+  () => aiForm.taggingProvider === 'custom' || aiForm.taggingProvider === 'openrouter',
+)
 
 const textModelPlaceholder = computed(() => {
   const name = TEXT_MODEL_DEFAULTS[aiForm.provider] || 'deepseek-chat'
   return `如 ${name}`
 })
+
+const taggingModelPlaceholder = computed(() => {
+  if (!aiForm.taggingIndependent) {
+    return aiForm.modelText ? `留空则用 ${aiForm.modelText}` : '留空则沿用解析文本模型'
+  }
+  const name = TEXT_MODEL_DEFAULTS[aiForm.taggingProvider] || 'deepseek-chat'
+  return `如 ${name}`
+})
+
+function clampConcurrency(n: unknown, fallback = 4) {
+  const v = Math.round(Number(n))
+  if (!Number.isFinite(v)) return fallback
+  return Math.min(16, Math.max(1, v))
+}
+
+function bumpConcurrency(field: 'stage2Concurrency' | 'taggingConcurrency', delta: number) {
+  aiForm[field] = clampConcurrency((Number(aiForm[field]) || 4) + delta)
+}
 
 watch(() => aiForm.provider, (next, prev) => {
   if (next === prev) return
@@ -489,6 +669,29 @@ watch(() => aiForm.provider, (next, prev) => {
   }
   if ((next === 'custom' || next === 'openrouter') && !aiForm.llmBaseUrl) {
     aiForm.llmBaseUrl = DEFAULT_OPENROUTER_URL
+  }
+})
+
+watch(() => aiForm.taggingIndependent, (on, wasOn) => {
+  if (on === wasOn) return
+  if (on && !aiForm.taggingProvider) {
+    aiForm.taggingProvider = aiForm.provider === 'custom' || aiForm.provider === 'openrouter'
+      ? 'deepseek'
+      : aiForm.provider
+  }
+  if (on && isCustomTagging.value && !aiForm.taggingLlmBaseUrl) {
+    aiForm.taggingLlmBaseUrl = DEFAULT_OPENROUTER_URL
+  }
+})
+
+watch(() => aiForm.taggingProvider, (next, prev) => {
+  if (next === prev) return
+  const prevDefault = TEXT_MODEL_DEFAULTS[prev] || ''
+  if (!aiForm.modelTagging || aiForm.modelTagging === prevDefault) {
+    aiForm.modelTagging = TEXT_MODEL_DEFAULTS[next] || ''
+  }
+  if ((next === 'custom' || next === 'openrouter') && !aiForm.taggingLlmBaseUrl) {
+    aiForm.taggingLlmBaseUrl = DEFAULT_OPENROUTER_URL
   }
 })
 
@@ -502,10 +705,16 @@ async function loadAiSettings() {
     aiForm.ocrProvider = res.data.ocr_provider || 'auto'
     aiForm.mineruEndpoint = res.data.mineru_endpoint || ''
     aiForm.llmBaseUrl = res.data.llm_base_url || ''
-    // apiKey / doc2xApiKey / mineruApiKey 留空（脱敏，不回显明文）
+    aiForm.taggingIndependent = !!res.data.tagging_provider
+    aiForm.taggingProvider = res.data.tagging_provider || 'deepseek'
+    aiForm.taggingLlmBaseUrl = res.data.tagging_llm_base_url || ''
+    aiForm.modelTagging = res.data.model_tagging || ''
+    aiForm.stage2Concurrency = clampConcurrency(res.data.stage2_concurrency, 4)
+    aiForm.taggingConcurrency = clampConcurrency(res.data.tagging_concurrency, 4)
     aiForm.apiKey = ''
     aiForm.doc2xApiKey = ''
     aiForm.mineruApiKey = ''
+    aiForm.taggingApiKey = ''
   } catch (e: any) {
     toast.error(e?.response?.data?.error || '加载 AI 设置失败')
   }
@@ -522,18 +731,40 @@ async function saveAiSettings() {
       return
     }
   }
+  if (aiForm.taggingIndependent && isCustomTagging.value) {
+    const parseProv = aiForm.provider === 'openrouter' ? 'custom' : aiForm.provider
+    const tagProv = aiForm.taggingProvider === 'openrouter' ? 'custom' : aiForm.taggingProvider
+    const canInheritParseKey =
+      parseProv === 'custom' &&
+      tagProv === 'custom' &&
+      (!!aiForm.apiKey || !!aiSettings.value?.has_api_key)
+    if (!aiForm.taggingApiKey && !aiSettings.value?.has_tagging_api_key && !canInheritParseKey) {
+      toast.error('打标自定义服务商需要填写 API Key')
+      return
+    }
+  }
   savingAi.value = true
   try {
     const payload: Parameters<typeof aiApi.updateSettings>[0] = {
       provider: aiForm.provider === 'openrouter' ? 'custom' : aiForm.provider,
       model_text: aiForm.modelText || TEXT_MODEL_DEFAULTS[aiForm.provider],
       model_vision: aiForm.modelVision || undefined,
+      model_tagging: aiForm.modelTagging.trim() || undefined,
       ocr_provider: aiForm.ocrProvider,
+      tagging_provider: aiForm.taggingIndependent
+        ? (aiForm.taggingProvider === 'openrouter' ? 'custom' : aiForm.taggingProvider)
+        : '',
+      stage2_concurrency: clampConcurrency(aiForm.stage2Concurrency, 4),
+      tagging_concurrency: clampConcurrency(aiForm.taggingConcurrency, 4),
     }
     if (isCustomLlm.value) {
       payload.llm_base_url = aiForm.llmBaseUrl.trim() || DEFAULT_OPENROUTER_URL
     }
+    if (aiForm.taggingIndependent && isCustomTagging.value) {
+      payload.tagging_llm_base_url = aiForm.taggingLlmBaseUrl.trim() || DEFAULT_OPENROUTER_URL
+    }
     if (aiForm.apiKey) payload.api_key = aiForm.apiKey
+    if (aiForm.taggingApiKey) payload.tagging_api_key = aiForm.taggingApiKey
     if (aiForm.doc2xApiKey) payload.doc2x_api_key = aiForm.doc2xApiKey
     if (aiForm.mineruEndpoint) payload.mineru_endpoint = aiForm.mineruEndpoint
     if (aiForm.mineruApiKey) payload.mineru_api_key = aiForm.mineruApiKey
@@ -542,7 +773,13 @@ async function saveAiSettings() {
     aiForm.apiKey = ''
     aiForm.doc2xApiKey = ''
     aiForm.mineruApiKey = ''
+    aiForm.taggingApiKey = ''
     if (res.data.llm_base_url) aiForm.llmBaseUrl = res.data.llm_base_url
+    if (res.data.tagging_llm_base_url) aiForm.taggingLlmBaseUrl = res.data.tagging_llm_base_url
+    aiForm.taggingIndependent = !!res.data.tagging_provider
+    aiForm.taggingProvider = res.data.tagging_provider || aiForm.taggingProvider
+    aiForm.stage2Concurrency = clampConcurrency(res.data.stage2_concurrency, 4)
+    aiForm.taggingConcurrency = clampConcurrency(res.data.tagging_concurrency, 4)
     toast.success('AI 设置已保存')
   } catch (e: any) {
     toast.error(e?.response?.data?.error || '保存失败')
@@ -902,24 +1139,313 @@ onBeforeUnmount(() => {
   background: var(--bg-primary);
 }
 
-/* ===== AI 与 OCR 设置表单输入（M3 新增） ===== */
-.ai-input {
+/* ===== AI 与 OCR：iOS Settings 分组列表 ===== */
+.ai-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  padding-bottom: 32px;
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', sans-serif;
+}
+
+.ai-block {
+  display: flex;
+  flex-direction: column;
+}
+
+.ai-section-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 4px 10px;
+}
+
+.ai-section-icon {
+  width: 29px;
+  height: 29px;
+  border-radius: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  flex-shrink: 0;
+}
+
+.ai-section-icon--parse { background: var(--accent); }
+.ai-section-icon--tag { background: var(--warning); }
+.ai-section-icon--ocr { background: var(--teal); }
+
+.ai-section-copy {
+  flex: 1;
+  min-width: 0;
+}
+
+.ai-section-copy h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.022em;
+  color: var(--text-primary);
+  line-height: 1.2;
+}
+
+.ai-section-copy p {
+  margin: 2px 0 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.35;
+}
+
+.ios-group {
+  background: var(--bg-card);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  box-shadow: var(--shadow-xs);
+  border: 0.5px solid var(--border-color);
+}
+
+.ios-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 44px;
+  padding: 10px 16px;
+}
+
+.ios-row:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  left: 16px;
+  right: 0;
+  bottom: 0;
+  height: 0.5px;
+  background: var(--divider);
+}
+
+.ios-row--stack {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  padding-top: 10px;
+  padding-bottom: 12px;
+}
+
+.ios-row--toggle {
+  min-height: 52px;
+  cursor: pointer;
+}
+
+.ios-row:active {
+  background: var(--bg-hover);
+}
+
+.ios-row-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ios-label {
+  font-size: 17px;
+  font-weight: 400;
+  color: var(--text-primary);
+  letter-spacing: -0.022em;
+  line-height: 1.25;
+  flex-shrink: 0;
+}
+
+.ios-label-block {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.ios-sub,
+.ios-hint {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.3;
+}
+
+.ios-status {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--success);
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+
+.ios-status--accent {
+  color: var(--accent);
+}
+
+.ios-select {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  color-scheme: inherit;
+  flex: 1;
+  width: auto;
+  min-width: 0;
+  max-width: none;
+  border: none;
+  border-radius: 0;
+  background-color: transparent;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2386868b' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'><path d='m9 18 6-6-6-6'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 0 center;
+  padding: 0 18px 0 8px;
+  margin: 0;
+  font-size: 17px;
+  font-family: inherit;
+  color: var(--text-secondary);
+  text-align: right;
+  cursor: pointer;
+  line-height: 1.3;
+  box-shadow: none;
+}
+
+.ios-input {
   width: 100%;
-  padding: 8px 12px;
-  border: 1px solid var(--border, #e5e7eb);
-  border-radius: 8px;
-  font-size: 14px;
-  background: var(--bg-input, #fff);
-  color: var(--text-primary, #111827);
-  transition: border-color 0.2s;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
+  margin: 0;
+  font-size: 17px;
+  font-family: inherit;
+  color: var(--text-primary);
+  letter-spacing: -0.022em;
+  line-height: 1.35;
 }
-.ai-input:focus {
+
+.ios-input--mono {
+  font-family: var(--font-mono);
+  font-size: 15px;
+  letter-spacing: -0.01em;
+}
+
+.ios-input::placeholder {
+  color: var(--text-muted);
+}
+
+.ios-input:focus {
   outline: none;
-  border-color: var(--purple, #7c3aed);
+  border: none;
+  box-shadow: none;
+  background: transparent;
 }
-.dark .ai-input {
-  background: #0f172a;
-  border-color: #1e293b;
-  color: #e2e8f0;
+
+.ios-select:focus {
+  outline: none;
+  border: none;
+  box-shadow: none;
+  background-color: transparent;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%230071e3' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'><path d='m9 18 6-6-6-6'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 0 center;
+  color: var(--accent);
+}
+
+.ios-inline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ios-text-btn {
+  flex-shrink: 0;
+  border: none;
+  background: none;
+  padding: 0;
+  font-size: 15px;
+  font-weight: 500;
+  font-family: inherit;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.ios-text-btn:hover {
+  color: var(--accent-hover);
+}
+
+.ios-text-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.ios-footer {
+  margin: 8px 16px 0;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+
+.ios-footer a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.ios-footer a:hover {
+  text-decoration: underline;
+}
+
+.ai-stepper {
+  display: inline-flex;
+  align-items: center;
+  background: var(--bg-input);
+  border-radius: 9px;
+  overflow: hidden;
+}
+
+.ai-stepper button {
+  width: 32px;
+  height: 32px;
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font-size: 18px;
+  font-weight: 500;
+  font-family: inherit;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.ai-stepper button:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.ai-stepper button:disabled {
+  color: var(--text-muted);
+  cursor: default;
+}
+
+.ai-stepper span {
+  min-width: 28px;
+  text-align: center;
+  font-size: 17px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
+.ai-save {
+  display: flex;
+  justify-content: flex-end;
+  padding: 4px 0 8px;
+}
+
+.ai-save :deep(.btn) {
+  min-width: 120px;
+  min-height: 44px;
+  border-radius: 12px;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.022em;
 }
 </style>

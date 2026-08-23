@@ -33,6 +33,8 @@ pub struct AiConfig {
     /// 打标专用模型；未设置时回退 `default_model_text`。
     /// 打标是结构化分类任务，用推理模型会把单题拖到分钟级。
     pub default_model_tagging: Option<String>,
+    /// 打标平台默认服务商；未设置时回退 `default_provider`。
+    pub default_provider_tagging: Option<String>,
     /// Doc2X OCR 引擎平台默认 API Key（用户未配个人 Key 时兜底）
     pub doc2x_api_key: Option<String>,
     /// Doc2X OCR 引擎 base_url（默认官方 v2 端点，裸域名，路径需含 /api/v2 前缀）
@@ -84,6 +86,10 @@ impl AiConfig {
             default_model_tagging: std::env::var("AI_DEFAULT_MODEL_TAGGING")
                 .ok()
                 .filter(|s| !s.trim().is_empty()),
+            default_provider_tagging: std::env::var("AI_DEFAULT_PROVIDER_TAGGING")
+                .ok()
+                .map(|s| canonicalize_llm_provider(&s))
+                .filter(|s| !s.is_empty()),
             // v1.1（M2）：Doc2X OCR 引擎配置
             // v2 迁移：官方已弃用 noedgex.com/v1 域名，统一改用 v2.doc2x.noedgeai.com
             doc2x_api_key: std::env::var("DOC2X_API_KEY")
@@ -129,6 +135,29 @@ pub const DEFAULT_OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 /// 用户自填 Base URL 的 OpenAI 兼容服务（含 OpenRouter）
 pub fn is_custom_llm_provider(provider: &str) -> bool {
     matches!(provider, "custom" | "openrouter")
+}
+
+/// OpenRouter 与 custom 视为同一类；其它名称原样小写。
+pub fn canonicalize_llm_provider(provider: &str) -> String {
+    let p = provider.trim().to_ascii_lowercase();
+    if p == "openrouter" {
+        "custom".into()
+    } else {
+        p
+    }
+}
+
+/// Stage2 / 打标用户可配并发上限。
+pub const LLM_CONCURRENCY_MAX: i16 = 16;
+pub const DEFAULT_STAGE2_CONCURRENCY: i16 = 4;
+pub const DEFAULT_TAGGING_CONCURRENCY: i16 = 4;
+
+pub fn clamp_llm_concurrency(n: i16) -> i16 {
+    n.clamp(1, LLM_CONCURRENCY_MAX)
+}
+
+pub fn clamp_llm_concurrency_opt(n: Option<i16>) -> Option<i16> {
+    n.map(clamp_llm_concurrency)
 }
 
 /// 规范化用户填写的 LLM Base URL；空则默认 OpenRouter。

@@ -370,6 +370,11 @@ async fn execute_task(state: &AppState, task: &AiParseTask) -> Result<TaskOutcom
     } else {
         None
     };
+    let stage2_n = {
+        let tm = text_provider.as_ref().and_then(|(_, m)| m.as_deref());
+        let user_n = load_user_stage2_concurrency(&state.pool, task.creator_id).await;
+        stage2_concurrency(tm, user_n)
+    };
 
     // 个人空间
     let space_id = ensure_personal_space(
@@ -518,6 +523,7 @@ async fn execute_task(state: &AppState, task: &AiParseTask) -> Result<TaskOutcom
             ocr_engine.as_ref(),
             tp.as_ref(),
             tm.as_deref(),
+            stage2_n,
             total_pages,
             paper_id,
             collection_ids.first().copied(),
@@ -563,6 +569,7 @@ async fn execute_task(state: &AppState, task: &AiParseTask) -> Result<TaskOutcom
                     ocr_engine.as_ref(),
                     tp.as_ref(),
                     tm.as_deref(),
+                    stage2_n,
                     total_pages,
                     paper_id,
                     collection_ids.first().copied(),
@@ -1802,11 +1809,27 @@ fn stage2_concurrency_for(text_model: Option<&str>, override_n: Option<usize>) -
     }
 }
 
-fn stage2_concurrency(text_model: Option<&str>) -> usize {
+fn stage2_concurrency(text_model: Option<&str>, user_n: Option<usize>) -> usize {
+    if let Some(n) = user_n {
+        return n.clamp(1, 16);
+    }
     let override_n = std::env::var("STAGE2_CONCURRENCY")
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok());
     stage2_concurrency_for(text_model, override_n)
+}
+
+async fn load_user_stage2_concurrency(pool: &sqlx::PgPool, user_id: Uuid) -> Option<usize> {
+    sqlx::query_scalar::<_, Option<i16>>(
+        "SELECT stage2_concurrency FROM user_ai_settings WHERE user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .flatten()
+    .map(|v| v as usize)
 }
 
 /// 快速路径心跳周期（租约 60s，页循环原路径每页心跳；此处固定 20s）
@@ -1838,6 +1861,7 @@ async fn run_pdf_fast_path(
     engine: &dyn OcrProvider,
     text_provider: &dyn AiProvider,
     text_model: Option<&str>,
+    stage2_n: usize,
     total_pages: i32,
     paper_id: Option<Uuid>,
     collection_id: Option<Uuid>,
@@ -1919,7 +1943,6 @@ async fn run_pdf_fast_path(
     } else {
         STAGE2_PARSE_FULL_PROMPT.as_str()
     };
-    let stage2_n = stage2_concurrency(text_model);
     tracing::info!(
         "任务 {task_id} 全文 Markdown {} 字符 → {} 块解析（解析卷={}，并发={}）",
         markdown.chars().count(),

@@ -26,6 +26,13 @@ pub struct UserAiSetting {
     pub mineru_api_key_iv: Option<Vec<u8>>,
     /// OpenAI 兼容自定义端点（OpenRouter / 中转站），仅 provider=custom|openrouter 时使用
     pub llm_base_url: Option<String>,
+    /// 打标独立服务商；为空则回退 `provider`
+    pub tagging_provider: Option<String>,
+    pub tagging_api_key_enc: Option<Vec<u8>>,
+    pub tagging_api_key_iv: Option<Vec<u8>>,
+    pub tagging_llm_base_url: Option<String>,
+    pub stage2_concurrency: Option<i16>,
+    pub tagging_concurrency: Option<i16>,
 }
 
 /// API 响应（不返回明文 Key，仅返回脱敏标志位）
@@ -43,6 +50,12 @@ pub struct AiSettingsResponse {
     pub has_mineru_key: bool,
     /// 自定义 LLM Base URL（脱敏明文，不含 Key）
     pub llm_base_url: Option<String>,
+    /// 打标独立服务商；null 表示与解析共用
+    pub tagging_provider: Option<String>,
+    pub has_tagging_api_key: bool,
+    pub tagging_llm_base_url: Option<String>,
+    pub stage2_concurrency: i16,
+    pub tagging_concurrency: i16,
 }
 
 /// 更新请求
@@ -52,7 +65,7 @@ pub struct UpdateAiSettingsRequest {
     pub api_key: Option<String>,
     pub model_text: Option<String>,
     pub model_vision: Option<String>,
-    /// 打标专用模型（空字符串=清除回退 model_text，None=不变）
+    /// 打标专用模型（空字符串或省略=清除回退 model_text）
     pub model_tagging: Option<String>,
     // ── M3：OCR 引擎配置 ──
     /// OCR 引擎：auto / doc2x / mineru / qwen_vl
@@ -65,6 +78,12 @@ pub struct UpdateAiSettingsRequest {
     pub mineru_api_key: Option<String>,
     /// 自定义 OpenAI 兼容 Base URL（如 https://openrouter.ai/api/v1）
     pub llm_base_url: Option<String>,
+    /// 打标独立服务商；空字符串=与解析共用
+    pub tagging_provider: Option<String>,
+    pub tagging_api_key: Option<String>,
+    pub tagging_llm_base_url: Option<String>,
+    pub stage2_concurrency: Option<i16>,
+    pub tagging_concurrency: Option<i16>,
 }
 
 /// 从 base64 字符串解析 32 字节主密钥

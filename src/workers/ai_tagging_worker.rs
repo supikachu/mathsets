@@ -14,6 +14,7 @@ use crate::ai::tagging::{
     TaggingSignals, TaggingSuggestion,
 };
 use crate::auth::middleware::AuthUser;
+use crate::config::DEFAULT_TAGGING_CONCURRENCY;
 use crate::handlers::ai::{resolve_ai_config, ModelKind};
 use crate::models::ai_tagging_task::{AiTaggingTask, TAGGING_TASK_COLUMNS};
 use crate::AppState;
@@ -27,9 +28,10 @@ struct TaskFailure {
     message: String,
 }
 
-const DEFAULT_WORKER_CONCURRENCY: usize = 4;
+const DEFAULT_WORKER_CONCURRENCY: usize = 16;
 
-/// 并发数；`TAGGING_WORKER_CONCURRENCY` 可覆盖，上游频繁 429 时下调。
+/// 进程内打标协程上限；真正的每用户并发由拾取 SQL 的 `tagging_concurrency` 限制。
+/// `TAGGING_WORKER_CONCURRENCY` 可覆盖，须 ≥ 用户设置的最大值（默认 16）。
 fn worker_concurrency() -> usize {
     std::env::var("TAGGING_WORKER_CONCURRENCY")
         .ok()
@@ -142,17 +144,26 @@ async fn process_one_task(state: &AppState, worker_id: &str) -> Result<bool, Str
         SET status = 'processing', locked_at = NOW(), worker_id = $1,
             heartbeat_at = NOW(), started_at = COALESCE(started_at, NOW()), updated_at = NOW()
         WHERE id = (
-            SELECT id FROM ai_tagging_tasks
-            WHERE status IN ('pending', 'retrying')
-              AND cancel_requested_at IS NULL
-            ORDER BY created_at ASC
+            SELECT t.id FROM ai_tagging_tasks t
+            LEFT JOIN user_ai_settings s ON s.user_id = t.creator_id
+            WHERE t.status IN ('pending', 'retrying')
+              AND t.cancel_requested_at IS NULL
+              AND (
+                SELECT COUNT(*)::int FROM ai_tagging_tasks p
+                WHERE p.creator_id = t.creator_id AND p.status = 'processing'
+              ) < LEAST(
+                    16,
+                    GREATEST(1, COALESCE(s.tagging_concurrency, $2))
+                  )
+            ORDER BY t.created_at ASC
             LIMIT 1
-            FOR UPDATE SKIP LOCKED
+            FOR UPDATE OF t SKIP LOCKED
         )
         RETURNING {TAGGING_TASK_COLUMNS}
         "#
     ))
     .bind(worker_id)
+    .bind(DEFAULT_TAGGING_CONCURRENCY)
     .fetch_optional(&state.pool)
     .await
     .map_err(|e| format!("拾取打标任务失败: {e}"))?;

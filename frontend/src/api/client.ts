@@ -1188,12 +1188,19 @@ export interface AiSettings {
   has_api_key: boolean
   model_text: string | null
   model_vision: string | null
+  model_tagging: string | null
   // M3：OCR 引擎配置（脱敏）
   ocr_provider: string
   has_doc2x_key: boolean
   mineru_endpoint: string | null
   has_mineru_key: boolean
   llm_base_url: string | null
+  /** 打标独立服务商；null 表示与解析共用 */
+  tagging_provider: string | null
+  has_tagging_api_key: boolean
+  tagging_llm_base_url: string | null
+  stage2_concurrency: number
+  tagging_concurrency: number
 }
 
 export const aiApi = {
@@ -1205,11 +1212,17 @@ export const aiApi = {
     api_key?: string
     model_text?: string
     model_vision?: string
+    model_tagging?: string
     ocr_provider?: string
     doc2x_api_key?: string
     mineru_endpoint?: string
     mineru_api_key?: string
     llm_base_url?: string
+    tagging_provider?: string
+    tagging_api_key?: string
+    tagging_llm_base_url?: string
+    stage2_concurrency?: number
+    tagging_concurrency?: number
   }) {
     return client.put<AiSettings>('/ai/settings', data)
   },

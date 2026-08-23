@@ -1030,6 +1030,9 @@ async fn test_ai_settings_default() {
     assert_eq!(status, StatusCode::OK, "获取默认配置失败: {:?}", body);
     assert_eq!(body["provider"], "deepseek");
     assert_eq!(body["has_api_key"], false);
+    assert!(body["tagging_provider"].is_null());
+    assert_eq!(body["stage2_concurrency"], 4);
+    assert_eq!(body["tagging_concurrency"], 4);
 }
 
 #[tokio::test]
@@ -1069,6 +1072,67 @@ async fn test_ai_settings_save_and_get() {
         "GET 响应不应包含明文 api_key"
     );
     assert_eq!(body["model_text"], "deepseek-chat");
+    assert!(body["tagging_provider"].is_null());
+    assert_eq!(body["has_tagging_api_key"], false);
+    assert_eq!(body["stage2_concurrency"], 4);
+    assert_eq!(body["tagging_concurrency"], 4);
+}
+
+#[tokio::test]
+async fn test_ai_settings_tagging_provider_and_concurrency() {
+    let mut app = match create_test_app().await {
+        Some(app) => app,
+        None => return,
+    };
+    let token = register_and_login(&mut app).await;
+
+    let (status, body) = put_auth(
+        &mut app,
+        "/api/v1/ai/settings",
+        json!({
+            "provider": "custom",
+            "api_key": "sk-or-v1-parse",
+            "model_text": "stealth/ox-alpha",
+            "llm_base_url": "https://openrouter.ai/api/v1",
+            "tagging_provider": "deepseek",
+            "model_tagging": "deepseek-chat",
+            "stage2_concurrency": 8,
+            "tagging_concurrency": 2
+        }),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "保存打标独立配置失败: {:?}", body);
+    assert_eq!(body["provider"], "custom");
+    assert_eq!(body["tagging_provider"], "deepseek");
+    assert_eq!(body["model_tagging"], "deepseek-chat");
+    assert_eq!(body["has_tagging_api_key"], false);
+    assert_eq!(body["stage2_concurrency"], 8);
+    assert_eq!(body["tagging_concurrency"], 2);
+
+    let (status, body) = get_auth(&mut app, "/api/v1/ai/settings", &token).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["tagging_provider"], "deepseek");
+    assert_eq!(body["stage2_concurrency"], 8);
+    assert_eq!(body["tagging_concurrency"], 2);
+
+    // 空 tagging_provider 表示与解析共用
+    let (status, body) = put_auth(
+        &mut app,
+        "/api/v1/ai/settings",
+        json!({
+            "provider": "custom",
+            "tagging_provider": "",
+            "stage2_concurrency": 99,
+            "tagging_concurrency": 0
+        }),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "清除打标服务商失败: {:?}", body);
+    assert!(body["tagging_provider"].is_null());
+    assert_eq!(body["stage2_concurrency"], 16);
+    assert_eq!(body["tagging_concurrency"], 1);
 }
 
 #[tokio::test]
