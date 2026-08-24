@@ -253,9 +253,13 @@ fn normalize_solution_methods(mut q_val: serde_json::Value) -> serde_json::Value
 /// 并在每题 warnings 标注截断提示（AC-12：不整体失败）。
 ///
 /// M4：可见性改为 `pub(crate)` 以供 worker 调用（异步任务复用同一后处理管线）。
+///
+/// `match_knowledge`：全自动 Stage2 为 true（同步匹配知识点树）。
+/// 站外结构化导入为 false——打标延后到用户点击「智能打标」，避免导入时逐题打 embedding 超过前端超时。
 pub(crate) async fn post_process_batch(
     raw_json: &str,
     pool: &sqlx::PgPool,
+    match_knowledge: bool,
 ) -> Result<Vec<ParsedQuestion>, (StatusCode, Json<serde_json::Value>)> {
     // ⚠️ 补丁七：先尝试整体反序列化为 serde_json::Value
     let (batch_val, truncated): (serde_json::Value, bool) = match clean_and_parse::<serde_json::Value>(raw_json) {
@@ -350,7 +354,8 @@ pub(crate) async fn post_process_batch(
                     q.warnings.push("AI 未返回答案，已自动填充空答案".into());
                 }
                 // 知识点匹配（限定 knowledge 树，杜绝跨树错配；失败不影响整体解析）
-                if !q.knowledge_points.is_empty() {
+                // 站外导入跳过：会走 embedding HTTP，空闲后再导入容易超过前端 10s 超时。
+                if match_knowledge && !q.knowledge_points.is_empty() {
                     match match_knowledge_nodes(pool, &q.knowledge_points, None, "knowledge").await {
                         Ok((matched, _)) => {
                             for m in &matched {

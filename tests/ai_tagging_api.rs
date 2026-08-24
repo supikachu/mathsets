@@ -654,6 +654,137 @@ async fn test_cancel_parse_tagging_tasks() {
     assert_eq!(body["cancelling"], 0);
 }
 
+/// 站外结构化：导入后 idle，点击 start-tagging 才入队；他人无权启动。
+#[tokio::test]
+async fn test_start_parse_tagging_tasks() {
+    let Some((mut app, pool)) = create_test_app().await else {
+        eprintln!("跳过：未配置 DATABASE_URL_TEST");
+        return;
+    };
+    let (token, user_id) = register_and_login(&mut app).await;
+    let uid = Uuid::parse_str(&user_id).unwrap();
+    let parse_id = insert_parse_task(&pool, uid).await;
+    let space_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM spaces WHERE kind = 'personal' AND owner_user_id = $1",
+    )
+    .bind(uid)
+    .fetch_one(&pool)
+    .await
+    .expect("查询个人空间");
+
+    sqlx::query(
+        r#"
+        UPDATE ai_parse_tasks
+        SET progress = $1
+        WHERE id = $2
+        "#,
+    )
+    .bind(json!({
+        "pipeline": "ocr_export",
+        "ocr_export_ctx": { "space_id": space_id },
+        "staged_questions": [{
+            "index": "p1_i0",
+            "saved": false,
+            "tagging_status": "idle",
+            "space_id": space_id,
+            "parsed": {
+                "question_type": "solution",
+                "sub_type": null,
+                "difficulty": "medium",
+                "stem": "求函数 f(x) 的最大值"
+            }
+        }]
+    }))
+    .bind(parse_id)
+    .execute(&pool)
+    .await
+    .expect("写入暂存");
+
+    let (token2, _) = register_and_login(&mut app).await;
+    let (status, body) = request_auth(
+        &mut app,
+        Method::POST,
+        &format!("/api/v1/ai/parse-task/{parse_id}/start-tagging"),
+        Some(json!({})),
+        &token2,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+    let before: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM ai_tagging_tasks WHERE parse_task_id = $1",
+    )
+    .bind(parse_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(before, 0);
+
+    let (status, body) = request_auth(
+        &mut app,
+        Method::POST,
+        &format!("/api/v1/ai/parse-task/{parse_id}/start-tagging"),
+        Some(json!({})),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["started"], 1, "{body}");
+
+    let queued: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM ai_tagging_tasks WHERE parse_task_id = $1 AND source_index = 'p1_i0' AND status = 'pending'",
+    )
+    .bind(parse_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(queued, 1);
+
+    let tagging_status: String = sqlx::query_scalar(
+        "SELECT progress->'staged_questions'->0->>'tagging_status' FROM ai_parse_tasks WHERE id = $1",
+    )
+    .bind(parse_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(tagging_status, "pending");
+
+    sqlx::query(
+        r#"
+        UPDATE ai_parse_tasks
+        SET progress = jsonb_set(
+              progress,
+              '{staged_questions,0,tagging_status}',
+              '"pending"'
+            )
+        WHERE id = $1
+        "#,
+    )
+    .bind(parse_id)
+    .execute(&pool)
+    .await
+    .ok();
+
+    let (status, body) = request_auth(
+        &mut app,
+        Method::POST,
+        &format!("/api/v1/ai/parse-task/{parse_id}/cancel-tagging"),
+        Some(json!({})),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["cancelled"], 1, "{body}");
+    let tagging_status: String = sqlx::query_scalar(
+        "SELECT progress->'staged_questions'->0->>'tagging_status' FROM ai_parse_tasks WHERE id = $1",
+    )
+    .bind(parse_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(tagging_status, "idle", "停止后暂存应回到 idle");
+}
+
 /// 打标晚于题目保存完成：建议应被认领到已保存的题目上（否则标签永久丢失），
 /// 但未匹配项未经教师确认，不得进入候选审核队列。
 #[tokio::test]
@@ -886,5 +1017,133 @@ async fn test_alias_maps_write_suggested_node_id() {
     let (suggested, raw) = row.expect("应写入带 suggested_node_id 的候选");
     assert_eq!(suggested, Some(target_id));
     assert_eq!(raw, unmatched_raw);
+}
+
+/// 丢弃未确认暂存：未保存项删除、已保存项保留；进行中的打标被终止；他人 403。
+#[tokio::test]
+async fn test_clear_parse_staged_questions() {
+    let Some((mut app, pool)) = create_test_app().await else {
+        eprintln!("跳过：未配置 DATABASE_URL_TEST");
+        return;
+    };
+    let (token, user_id) = register_and_login(&mut app).await;
+    let uid = Uuid::parse_str(&user_id).unwrap();
+    let parse_id = insert_parse_task(&pool, uid).await;
+
+    sqlx::query(
+        r#"
+        UPDATE ai_parse_tasks
+        SET progress = $1
+        WHERE id = $2
+        "#,
+    )
+    .bind(json!({
+        "staged_questions": [
+            {"index": "p1_i0", "saved": false, "parsed": {"stem": "未保存甲"}},
+            {"index": "p1_i1", "saved": true, "parsed": {"stem": "已保存"}},
+            {"index": "p1_i2", "saved": false, "parsed": {"stem": "未保存乙"}}
+        ]
+    }))
+    .bind(parse_id)
+    .execute(&pool)
+    .await
+    .expect("写入暂存");
+
+    let pending_id = insert_tagging_task(&pool, uid, parse_id, "pending").await;
+    let processing_id = insert_tagging_task(&pool, uid, parse_id, "processing").await;
+    let done_id = insert_tagging_task(&pool, uid, parse_id, "success").await;
+
+    let missing = Uuid::new_v4();
+    let (status, body) = request_auth(
+        &mut app,
+        Method::POST,
+        &format!("/api/v1/ai/parse-task/{missing}/clear-staged"),
+        Some(json!({})),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+    let (token2, _) = register_and_login(&mut app).await;
+    let (status, body) = request_auth(
+        &mut app,
+        Method::POST,
+        &format!("/api/v1/ai/parse-task/{parse_id}/clear-staged"),
+        Some(json!({})),
+        &token2,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    let still: i32 = sqlx::query_scalar(
+        "SELECT jsonb_array_length(COALESCE(progress->'staged_questions', '[]'::jsonb)) FROM ai_parse_tasks WHERE id = $1",
+    )
+    .bind(parse_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(still, 3, "他人调用不应改写暂存");
+
+    let (status, body) = request_auth(
+        &mut app,
+        Method::POST,
+        &format!("/api/v1/ai/parse-task/{parse_id}/clear-staged"),
+        Some(json!({})),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["removed"], json!(2), "{body}");
+    assert_eq!(body["kept"], json!(1), "{body}");
+
+    let kept: Vec<(String, bool)> = sqlx::query_as(
+        r#"
+        SELECT elem->>'index', COALESCE((elem->>'saved')::boolean, false)
+        FROM ai_parse_tasks,
+             jsonb_array_elements(COALESCE(progress->'staged_questions', '[]'::jsonb)) AS elem
+        WHERE id = $1
+        ORDER BY elem->>'index'
+        "#,
+    )
+    .bind(parse_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(kept, vec![("p1_i1".to_string(), true)]);
+
+    let pending_st: String = sqlx::query_scalar("SELECT status FROM ai_tagging_tasks WHERE id = $1")
+        .bind(pending_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(pending_st, "cancelled");
+
+    let (proc_st, cancel_at): (String, Option<chrono::DateTime<chrono::Utc>>) = sqlx::query_as(
+        "SELECT status, cancel_requested_at FROM ai_tagging_tasks WHERE id = $1",
+    )
+    .bind(processing_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(proc_st, "processing");
+    assert!(cancel_at.is_some(), "processing 应写入取消标记");
+
+    let done_st: String = sqlx::query_scalar("SELECT status FROM ai_tagging_tasks WHERE id = $1")
+        .bind(done_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(done_st, "success");
+
+    let (status, body) = request_auth(
+        &mut app,
+        Method::POST,
+        &format!("/api/v1/ai/parse-task/{parse_id}/clear-staged"),
+        Some(json!({})),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["removed"], json!(0));
+    assert_eq!(body["kept"], json!(1));
 }
 

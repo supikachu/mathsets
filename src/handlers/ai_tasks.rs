@@ -3,6 +3,7 @@
 //! - `POST /ai/parse-task`：按已确认 Document 创建解析任务（1:N；存在未终态任务 → 409）
 //! - `GET /ai/parse-task/{id}`：任务进度（计数/当前页/结果关联）
 //! - `POST /ai/parse-task/{id}/cancel`：取消（已落库题目保留，计划书 §6.4）
+//! - `POST /ai/parse-task/{id}/clear-staged`：丢弃未保存的暂存题（已保存项保留）
 
 use axum::{
     extract::{Extension, Path, State},
@@ -148,9 +149,20 @@ fn task_phase(task: &AiParseTask) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-/// 站外 JSON：允许 `{questions:[...]}`、纯数组，或带 ```json 围栏的文本。
+/// 站外 JSON：允许 `{questions:[...]}`、纯数组，或带 ```json 围栏 / 前后说明文字的文本。
 fn wrap_import_payload(raw: &str) -> Result<String, String> {
-    let trimmed = raw.trim();
+    let v = parse_import_json(raw)?;
+    if v.is_array() {
+        Ok(json!({ "questions": v }).to_string())
+    } else if v.get("questions").and_then(|q| q.as_array()).is_some() {
+        Ok(v.to_string())
+    } else {
+        Err("JSON 须为 { \"questions\": [...] } 或题目数组".into())
+    }
+}
+
+fn parse_import_json(raw: &str) -> Result<serde_json::Value, String> {
+    let trimmed = raw.trim().trim_start_matches('\u{feff}').trim();
     let stripped = trimmed
         .strip_prefix("```json")
         .or_else(|| trimmed.strip_prefix("```"))
@@ -160,15 +172,32 @@ fn wrap_import_payload(raw: &str) -> Result<String, String> {
         .strip_suffix("```")
         .map(str::trim)
         .unwrap_or(stripped);
-    let v: serde_json::Value =
-        serde_json::from_str(stripped).map_err(|e| format!("JSON 无法解析: {e}"))?;
-    if v.is_array() {
-        Ok(json!({ "questions": v }).to_string())
-    } else if v.get("questions").and_then(|q| q.as_array()).is_some() {
-        Ok(v.to_string())
-    } else {
-        Err("JSON 须为 { \"questions\": [...] } 或题目数组".into())
+    // 豆包等站外模型常把 LaTeX `\(` `\)` `\widehat` 写成 JSON 非法转义；
+    // Stage2 清洗已有 fix_invalid_escapes，导入路径需走同一套修复。
+    let repaired = crate::ai::cleaner::fix_invalid_escapes(stripped);
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&repaired) {
+        return Ok(v);
     }
+    let start_obj = repaired.find('{');
+    let start_arr = repaired.find('[');
+    let start = match (start_obj, start_arr) {
+        (Some(o), Some(a)) => o.min(a),
+        (Some(o), None) => o,
+        (None, Some(a)) => a,
+        _ => {
+            return Err("JSON 无法解析: 未找到对象或数组".into());
+        }
+    };
+    let snippet = &repaired[start..];
+    let end_obj = snippet.rfind('}');
+    let end_arr = snippet.rfind(']');
+    let end = match (end_obj, end_arr) {
+        (Some(o), Some(a)) => o.max(a),
+        (Some(o), None) => o,
+        (None, Some(a)) => a,
+        _ => return Err("JSON 无法解析: 括号不完整".into()),
+    };
+    serde_json::from_str(&snippet[..=end]).map_err(|e| format!("JSON 无法解析: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -586,7 +615,9 @@ pub async fn import_questions(
         )
     })?;
 
-    let questions = crate::handlers::ai::post_process_batch(&wrapped, &state.pool)
+    // 站外结构化导入后打标由用户点击触发，这里不做知识点向量匹配，
+    // 避免空闲后第一次导入卡在 embedding HTTP 上超过前端超时。
+    let questions = crate::handlers::ai::post_process_batch(&wrapped, &state.pool, false)
         .await
         .map_err(|(status, body)| (status, body))?;
     if questions.is_empty() {
@@ -610,7 +641,43 @@ pub async fn import_questions(
 
     Ok(Json(json!({
         "imported": imported,
-        "message": format!("已导入 {imported} 道题，正在打标"),
+        "message": format!("已导入 {imported} 道题，可点击「智能打标」开始打标"),
+    })))
+}
+
+/// POST /api/v1/ai/parse-task/{id}/clear-staged
+///
+/// 丢弃未确认的暂存题（`saved=false`），已保存项保留。同时终止该任务下未完成的打标。
+pub async fn clear_staged_questions(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthUser>,
+    Path(task_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let task = load_task(&state.pool, task_id)
+        .await?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "任务不存在"}))))?;
+    if !can_manage_task(&task, &auth) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "无权清空该任务的暂存题目"})),
+        ));
+    }
+
+    let (removed, kept) = crate::workers::ai_parse_worker::clear_unsaved_staged_questions(
+        &state.pool,
+        task_id,
+    )
+    .await
+    .map_err(|e| db_err(format!("清空暂存失败: {e}")))?;
+
+    Ok(Json(json!({
+        "removed": removed,
+        "kept": kept,
+        "message": if removed == 0 {
+            "没有未确认的暂存题目".to_string()
+        } else {
+            format!("已丢弃 {removed} 道未确认题目")
+        },
     })))
 }
 
@@ -812,6 +879,39 @@ mod tests {
         let out = wrap_import_payload("```json\n[{\"stem\":\"x\"}]\n```").unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["questions"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_wrap_import_payload_with_preamble() {
+        let out = wrap_import_payload("好的，这是结果：\n{\"questions\":[{\"stem\":\"题\"}]}\n").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["questions"][0]["stem"], "题");
+    }
+
+    #[test]
+    fn test_wrap_import_payload_latex_invalid_escapes() {
+        // 豆包常把 \(\) / \widehat 直接写入 JSON 字符串（非法转义）
+        let raw = r#"{"questions":[{"stem":"弦$\(AC=OA\)$，点D在 $\widehat{BC}$ 上"}]}"#;
+        let out = wrap_import_payload(raw).expect("LaTeX 反斜杠应被修复后可解析");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let stem = v["questions"][0]["stem"].as_str().unwrap();
+        assert!(stem.contains("AC=OA"), "{stem}");
+        assert!(
+            stem.contains(r"\widehat") || stem.contains("widehat"),
+            "{stem}"
+        );
+    }
+
+    #[test]
+    fn test_wrap_import_payload_gaokao_fixture_keeps_19() {
+        let raw = include_str!("../../tests/fixtures/external_gaokao_19.json");
+        let out = wrap_import_payload(raw).expect("高考卷 JSON 应可解析");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            v["questions"].as_array().map(|a| a.len()),
+            Some(19),
+            "导入清洗不得把 19 题拆成更多题"
+        );
     }
 }
 

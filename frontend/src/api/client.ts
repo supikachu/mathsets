@@ -18,6 +18,12 @@ const client = axios.create({
 /// 后端额度耗尽错误码 — 见 src/handlers/ai.rs::consume_ai_quota
 export const AI_QUOTA_EXCEEDED_CODE = 'ERR_QUOTA_EXCEEDED'
 
+/// 判断一个 axios 错误是否为请求超时（默认 10s 或调用方指定 timeout）
+export function isTimeoutError(e: unknown): boolean {
+  const err = e as { code?: string; message?: string }
+  return err?.code === 'ECONNABORTED' || /timeout of \d+ms exceeded/i.test(err?.message ?? '')
+}
+
 /// 判断一个 axios 错误是否为「今日 AI 额度已耗尽」
 export function isQuotaExceededError(e: unknown): boolean {
   const err = e as { response?: { status?: number; data?: { code?: string } } }
@@ -1179,8 +1185,12 @@ export interface ParsedQuestion {
   tagging_question_type?: string | null
   /** junior | senior，OCR worker 打标时使用的学段 */
   tagging_stage?: 'junior' | 'senior' | null
-  /** pending：题目已出，打标尚未回写；此时 tagging_matches 为空，保存会丢标签 */
-  tagging_status?: 'pending' | 'done' | 'failed' | null
+  /** pending：题目已出，打标尚未回写；idle：站外导入后尚未开始打标 */
+  tagging_status?: 'idle' | 'pending' | 'done' | 'failed' | null
+  /** 试卷题号，如 "14" / "17(2)" */
+  question_no?: string | null
+  /** 卷内展示顺序 */
+  display_order?: number | null
 }
 
 export interface AiSettings {
@@ -1485,8 +1495,8 @@ export interface AiStagedQuestion {
   } | null
   /** OCR worker 打标时使用的学段，与编辑页 AI 智能打标一致 */
   tagging_stage?: 'junior' | 'senior' | null
-  /** pending：题目已出，打标尚未回写 */
-  tagging_status?: 'pending' | 'done' | 'failed' | null
+  /** pending：题目已出，打标尚未回写；idle：尚未开始打标 */
+  tagging_status?: 'idle' | 'pending' | 'done' | 'failed' | null
 }
 
 export interface AiStagedMatch {
@@ -1519,8 +1529,8 @@ export const aiTaskApi = {
       ...(pipeline ? { pipeline } : {}),
     })
   },
-  getParseTask(task_id: string) {
-    return client.get<AiParseTaskDetail>(`/ai/parse-task/${task_id}`)
+  getParseTask(task_id: string, opts?: { timeout?: number }) {
+    return client.get<AiParseTaskDetail>(`/ai/parse-task/${task_id}`, opts)
   },
   cancelParseTask(task_id: string) {
     return client.post<{ message: string }>(`/ai/parse-task/${task_id}/cancel`, {})
@@ -1532,12 +1542,26 @@ export const aiTaskApi = {
     return client.post<{ imported: number; message: string }>(
       `/ai/parse-task/${task_id}/import-questions`,
       body,
+      { timeout: 120000 },
     )
   },
-  /// 题目全部确认保存后终止残留打标任务：建议已无落点，继续跑只会白耗额度
+  startParseTagging(task_id: string) {
+    return client.post<{ started: number; skipped: number; message: string }>(
+      `/ai/parse-task/${task_id}/start-tagging`,
+      {},
+    )
+  },
+  /// 停止打标 / 离开录入 / 全部保存后终止未完成的打标任务
   cancelParseTagging(task_id: string) {
     return client.post<{ cancelled: number; cancelling: number }>(
       `/ai/parse-task/${task_id}/cancel-tagging`,
+      {},
+    )
+  },
+  /// 丢弃未确认的暂存题（已保存项保留），并终止该任务下未完成的打标
+  clearParseStaged(task_id: string) {
+    return client.post<{ removed: number; kept: number; message: string }>(
+      `/ai/parse-task/${task_id}/clear-staged`,
       {},
     )
   },

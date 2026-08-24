@@ -349,18 +349,22 @@
     />
 
     <!-- 离开确认：批量模式下三选项（丢弃未确认题目=删除后端草稿 / 保留草稿离开 / 继续编辑） -->
-      <AppModal v-model="leaveDialog" title="未保存提示" width="460px">
+      <AppModal v-model="leaveDialog" :title="taggingInProgressCount > 0 ? '打标尚未完成' : '未保存提示'" width="460px">
         <div class="leave-dialog-body">
           <p class="leave-dialog-msg">{{ leaveMessage }}</p>
           <div class="leave-dialog-actions">
             <template v-if="deletableDrafts.length > 0">
-              <AppButton variant="ghost" :disabled="discardingAll" @click="leaveDialog = false">继续编辑</AppButton>
-              <AppButton variant="outline" :disabled="discardingAll" @click="onLeaveKeepDrafts">保留草稿离开</AppButton>
-              <AppButton variant="danger" :loading="discardingAll" @click="onLeaveDiscardAll">丢弃未确认题目并离开</AppButton>
+              <AppButton variant="ghost" :disabled="discardingAll || leavingBusy" @click="leaveDialog = false">继续编辑</AppButton>
+              <AppButton variant="outline" :disabled="discardingAll || leavingBusy" :loading="leavingBusy" @click="onLeaveKeepDrafts">
+                {{ taggingInProgressCount > 0 ? '终止打标并保留草稿离开' : '保留草稿离开' }}
+              </AppButton>
+              <AppButton variant="danger" :loading="discardingAll" :disabled="leavingBusy" @click="onLeaveDiscardAll">丢弃未确认题目并离开</AppButton>
             </template>
             <template v-else>
-              <AppButton variant="ghost" @click="leaveDialog = false">继续编辑</AppButton>
-              <AppButton variant="primary" @click="onLeaveKeepDrafts">离开</AppButton>
+              <AppButton variant="ghost" :disabled="leavingBusy" @click="leaveDialog = false">继续编辑</AppButton>
+              <AppButton variant="primary" :loading="leavingBusy" @click="onLeaveKeepDrafts">
+                {{ taggingInProgressCount > 0 ? '终止打标并离开' : '离开' }}
+              </AppButton>
             </template>
           </div>
         </div>
@@ -444,6 +448,7 @@ import { hasUnfinishedSnapshot, clearBatchSnapshot, type BatchSnapshot } from '@
 import { clearAiSourceFile } from '@/utils/aiSourceFile'
 import { processMarkdownImages, type UploadCache } from '@/utils/markdownImages'
 import { normalizeChoiceAnswerBlank } from '@/utils/parseMarkdown'
+import { sortByPaperQuestionNo } from '@/utils/paperQuestionOrder'
 import {
   applySourceStateToQuestionFields,
   normalizeSubjectCode,
@@ -697,11 +702,13 @@ function switchEntryMode(mode: 'ai' | 'manual') {
   if (mode === 'ai' && manualLaneLocked.value) return
 
   if (mode === 'manual') {
-    stashAiQuestionList()
-    resetToBlankQuestion()
-    applyStoredManualDraft()
-    editingFromAiCard.value = false
-    entryMode.value = 'manual'
+    if (taggingInProgressCount.value > 0) {
+      pendingLeaveKind.value = 'manual'
+      pendingLeaveTo = null
+      leaveDialog.value = true
+      return
+    }
+    doSwitchToManual()
     return
   }
 
@@ -709,6 +716,14 @@ function switchEntryMode(mode: 'ai' | 'manual') {
   restoreStashedAiQuestionList()
   editingFromAiCard.value = false
   entryMode.value = 'ai'
+}
+
+function doSwitchToManual() {
+  stashAiQuestionList()
+  resetToBlankQuestion()
+  applyStoredManualDraft()
+  editingFromAiCard.value = false
+  entryMode.value = 'manual'
 }
 
 // 批量模式 UI 状态
@@ -941,10 +956,27 @@ const aiSourceState = ref<QuestionSourceState | null>(null)
 const aiDocument = ref<DocumentMeta | null>(null)
 
 function firstAiTaskId(list: any[] | undefined | null): string | undefined {
-  if (!Array.isArray(list)) return undefined
-  return list
-    .map((q: any) => q?.aiMeta?.task_id || q?.ai_meta?.task_id)
-    .find((id: unknown): id is string => typeof id === 'string' && id.length > 0)
+  return parseTaskIdsFromList(list)[0]
+}
+
+function parseTaskIdsFromList(list: any[] | undefined | null): string[] {
+  if (!Array.isArray(list)) return []
+  const ids = new Set<string>()
+  for (const q of list) {
+    const id = q?.aiMeta?.task_id || q?.ai_meta?.task_id
+    if (typeof id === 'string' && id.length > 0) ids.add(id)
+  }
+  return [...ids]
+}
+
+async function clearParseStagedForIds(ids: string[]) {
+  const unique = [...new Set(ids.filter(Boolean))]
+  if (!unique.length) return
+  await Promise.all(unique.map((id) =>
+    aiTaskApi.clearParseStaged(id).catch((e: any) => {
+      console.warn('[QuestionEdit] 清空识别暂存失败:', e?.message)
+    }),
+  ))
 }
 
 function syncAiSessionFromDialog() {
@@ -1085,20 +1117,77 @@ const leaveDialog = ref(false)
 const leaveConfirmed = ref(false)
 // pendingLeaveTo：非"返回按钮"触发的导航（如点击链接），确认后恢复到该目标路径
 let pendingLeaveTo: string | null = null
+/** route=离开页面；manual=切到手动录题（同样离开 AI 录入界面） */
+const pendingLeaveKind = ref<'route' | 'manual' | null>(null)
+const leavingBusy = ref(false)
+
+const taggingInProgressCount = computed(() =>
+  questionList.value.filter(q => q?.taggingPending).length,
+)
+
+function shouldInterceptLeave(): boolean {
+  return hasUnsavedChanges() || taggingInProgressCount.value > 0
+}
+
+async function cancelActiveTaggingIfAny() {
+  if (taggingInProgressCount.value <= 0) return
+  const dialog = aiDialogRef.value as { stopTagging?: () => Promise<void> } | null
+  if (dialog?.stopTagging) {
+    await dialog.stopTagging()
+    return
+  }
+  const id = firstAiTaskId(questionList.value)
+  if (!id) return
+  await aiTaskApi.cancelParseTagging(id).catch((e: any) => {
+    console.warn('[QuestionEdit] 离开时终止打标失败:', e?.message)
+  })
+}
+
+function cancelTaggingKeepalive() {
+  if (taggingInProgressCount.value <= 0) return
+  const dialog = aiDialogRef.value as { getParseTaskId?: () => string } | null
+  const id = dialog?.getParseTaskId?.() || firstAiTaskId(questionList.value)
+  if (!id) return
+  const token = localStorage.getItem('token')
+  try {
+    void fetch(`/api/v1/ai/parse-task/${id}/cancel-tagging`, {
+      method: 'POST',
+      keepalive: true,
+      headers: {
+        Authorization: token ? `Bearer ${token}` : '',
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+  } catch {
+    /* 关闭页时尽力终止，失败则依赖下次进入后的状态 */
+  }
+}
 
 // 离开确认弹窗文案（批量模式区分「从未确认保存的 worker 草稿」与「本地修改」）
 const deletableDrafts = computed(() =>
   questionList.value.filter(q => !q.saved && q.savedQid) as { savedQid: string }[],
 )
 const leaveMessage = computed(() => {
+  const pending = taggingInProgressCount.value
+  const taggingHint = pending > 0
+    ? `有 ${pending} 道题正在打标。离开将终止未完成的打标。`
+    : ''
+  let base = '有未保存的修改，确定离开吗？'
   if (questionList.value.length > 0) {
     const n = deletableDrafts.value.length
     if (n > 0) {
-      return `有 ${n} 道题尚未确认保存（目前以草稿存于题库）。「丢弃」将删除这些草稿；「保留」可稍后从草稿恢复继续编辑。`
+      base = `有 ${n} 道题尚未确认保存（目前以草稿存于题库）。「丢弃」将删除这些草稿；「保留」可稍后从草稿恢复继续编辑。`
+    } else if (hasUnsavedChanges()) {
+      base = '当前题目均已保存，本地未保存的修改可通过"恢复草稿"找回。确定离开吗？'
+    } else {
+      base = ''
     }
-    return '当前题目均已保存，本地未保存的修改可通过"恢复草稿"找回。确定离开吗？'
+  } else if (!hasUnsavedChanges()) {
+    base = ''
   }
-  return '有未保存的修改，确定离开吗？'
+  if (taggingHint && base) return `${taggingHint}\n\n${base}`
+  return taggingHint || base || '确定离开吗？'
 })
 
 function handleBack() {
@@ -1107,8 +1196,9 @@ function handleBack() {
     returnToAiRecognition()
     return
   }
-  if (hasUnsavedChanges()) {
+  if (shouldInterceptLeave()) {
     pendingLeaveTo = null // 标记：走 goBack 语义（router.back），而非恢复原导航
+    pendingLeaveKind.value = 'route'
     leaveDialog.value = true
   } else {
     goBack()
@@ -1128,9 +1218,21 @@ function doLeave() {
 }
 
 /** 保留草稿离开（原「离开」语义：后端草稿原样保留，可通过恢复草稿续录） */
-function onLeaveKeepDrafts() {
-  leaveDialog.value = false
-  doLeave()
+async function onLeaveKeepDrafts() {
+  leavingBusy.value = true
+  try {
+    await cancelActiveTaggingIfAny()
+    const kind = pendingLeaveKind.value
+    pendingLeaveKind.value = null
+    leaveDialog.value = false
+    if (kind === 'manual') {
+      doSwitchToManual()
+      return
+    }
+    doLeave()
+  } finally {
+    leavingBusy.value = false
+  }
 }
 
 /** 丢弃未确认题目并离开：批量 DELETE 从未保存（!saved）且 worker 已落库（savedQid）
@@ -1139,25 +1241,42 @@ const discardingAll = ref(false)
 async function onLeaveDiscardAll() {
   const targets = deletableDrafts.value.map(q => q.savedQid)
   discardingAll.value = true
-  let ok = 0
-  let fail = 0
-  for (const qid of targets) {
-    try {
-      await questionApi.delete(qid)
-      ok++
-    } catch {
-      fail++
+  try {
+    await cancelActiveTaggingIfAny()
+    const dialog = aiDialogRef.value as {
+      discardParseStaged?: (ids?: string[]) => Promise<void>
+      getParseTaskId?: () => string
+    } | null
+    const stagedIds = parseTaskIdsFromList(questionList.value)
+    const dialogId = dialog?.getParseTaskId?.()
+    if (dialogId) stagedIds.push(dialogId)
+    if (dialog?.discardParseStaged) {
+      await dialog.discardParseStaged(stagedIds)
+    } else {
+      await clearParseStagedForIds(stagedIds)
     }
+    let ok = 0
+    let fail = 0
+    for (const qid of targets) {
+      try {
+        await questionApi.delete(qid)
+        ok++
+      } catch {
+        fail++
+      }
+    }
+    leaveDialog.value = false
+    pendingLeaveKind.value = null
+    await clearBatchSnapshot()
+    if (fail > 0) {
+      toast.warning(`已丢弃 ${ok} 题；${fail} 题删除失败，已保留为草稿`)
+    } else {
+      toast.success(`已丢弃 ${ok} 道未确认题目`)
+    }
+    doLeave()
+  } finally {
+    discardingAll.value = false
   }
-  discardingAll.value = false
-  leaveDialog.value = false
-  await clearBatchSnapshot()
-  if (fail > 0) {
-    toast.warning(`已丢弃 ${ok} 题；${fail} 题删除失败，已保留为草稿`)
-  } else {
-    toast.success(`已丢弃 ${ok} 道未确认题目`)
-  }
-  doLeave()
 }
 
 function goBack() {
@@ -1181,9 +1300,10 @@ onBeforeRouteLeave((to) => {
     returnToAiRecognition()
     return false
   }
-  if (!hasUnsavedChanges()) return true
+  if (!shouldInterceptLeave()) return true
   // 拦截：记录目标路径 + 弹窗，取消本次导航
   pendingLeaveTo = to.fullPath
+  pendingLeaveKind.value = 'route'
   leaveDialog.value = true
   return false
 })
@@ -2255,6 +2375,8 @@ async function doRestoreDraft() {
 }
 
 function discardDraft() {
+  const discardedBatch = pendingBatchDraft
+  const stagedIds = parseTaskIdsFromList(discardedBatch?.questionList)
   if (pendingBatchDraft) clearAiDraft()
   else if (pendingDraft) clearManualDraft()
   else if (!isNew) {
@@ -2264,6 +2386,16 @@ function discardDraft() {
   pendingDraft = null
   pendingBatchDraft = null
   restoreHint.value = ''
+  if (!discardedBatch) return
+  void (async () => {
+    await clearBatchSnapshot()
+    const dialog = aiDialogRef.value as { discardParseStaged?: (ids?: string[]) => Promise<void> } | null
+    if (dialog?.discardParseStaged) {
+      await dialog.discardParseStaged(stagedIds)
+    } else {
+      await clearParseStagedForIds(stagedIds)
+    }
+  })()
 }
 
 function clearDraft() {
@@ -2994,6 +3126,8 @@ function parsedQuestionToSnapshot(q: ParsedQuestion): any {
     savedQid: q.id as string | undefined,
     aiMeta: q.ai_meta,
     existingQuestionId: q.existing_question_id || null,
+    question_no: q.question_no ?? null,
+    display_order: q.display_order ?? null,
   }
 }
 
@@ -3085,7 +3219,9 @@ async function handleBatchParsed(questions: ParsedQuestion[]) {
 
   isSwitchingTab.value = true
   try {
-    questionList.value = await reconcileAiSavedFlags(questions.map(q => parsedQuestionToSnapshot(q)))
+    questionList.value = await reconcileAiSavedFlags(
+      sortByPaperQuestionNo(questions, q => q).map(q => parsedQuestionToSnapshot(q)),
+    )
     if (isFullyPersistedBatch(questionList.value)) {
       clearAiDraft()
       void clearBatchSnapshot()
@@ -3112,7 +3248,11 @@ async function handleBatchParsed(questions: ParsedQuestion[]) {
 
 // Window unload checks（批量模式同样拦截）
 function handleBeforeUnload(e: BeforeUnloadEvent) {
-  if (hasUnsavedChanges()) { e.preventDefault(); e.returnValue = '' }
+  if (shouldInterceptLeave()) {
+    cancelTaggingKeepalive()
+    e.preventDefault()
+    e.returnValue = ''
+  }
 }
 
 onMounted(() => {
@@ -3234,7 +3374,7 @@ const imageAdjustPanelVisible = ref(false)
 const imageAdjustTarget = ref<HTMLElement | null>(null)
 const imageAdjustData = ref<{ url: string; mdId: string; config: ImageConfig } | null>(null)
 // 图片来源上下文：记录点击的图片属于哪个字段（stem/options[i]/solutions[i]）
-// 通过 DOM 反查 .paper-stem / .paper-opt / .paper-answer-block 确定，用于回写 Markdown
+// 通过 DOM 反查 .paper-stem / .paper-opt / .paper-analysis 确定，用于回写 Markdown
 // inImgRow / rowAlign：通过 DOM 反查 .latex-img-row 确定，用于 ImageAdjustmentPanel 显示「图组对齐」「移出并排」
 type ImageSource = {
   field: 'stem' | 'options' | 'solutions'
@@ -3261,7 +3401,7 @@ function handleImageClick(payload: ImageClickPayload) {
   const normalizedUrl = normalizeImageUrl(payload.url)
 
   // 1) DOM 反查图片来源字段：通过 closest() 找到图片所属的预览容器
-  //    LivePreviewCard 的 DOM 结构：.paper-stem / .paper-opt / .paper-answer-block
+  //    LivePreviewCard：.paper-stem / .paper-opt / .paper-analysis
   let field: 'stem' | 'options' | 'solutions' = 'stem'
   let index: number | undefined
   if (el.closest('.paper-stem')) {
@@ -3273,7 +3413,7 @@ function handleImageClick(payload: ImageClickPayload) {
     const idx = siblings.indexOf(optEl)
     field = 'options'
     index = idx >= 0 ? idx : 0
-  } else if (el.closest('.paper-answer-block')) {
+  } else if (el.closest('.paper-analysis') || el.closest('.paper-answer-block')) {
     // 解析区：遍历所有 solutions 做 URL 匹配替换（URL 唯一不会误替换）
     field = 'solutions'
   }
@@ -3746,31 +3886,34 @@ async function handleCropped(blob: Blob) {
   display: inline-flex;
   align-items: center;
   gap: 2px;
-  padding: 3px;
-  margin-left: 4px;
-  background: var(--bg-muted, var(--bg-input));
-  border-radius: 999px;
+  padding: 2px;
+  margin-left: 6px;
+  background: rgba(118, 118, 128, 0.12);
+  border-radius: 9px;
 }
 
 .entry-mode-tabs button {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 32px;
-  padding: 0 14px;
+  height: 30px;
+  padding: 0 13px;
   border: none;
-  border-radius: 999px;
+  border-radius: 7px;
   background: transparent;
   color: var(--text-secondary);
   font-size: 13px;
-  font-weight: 550;
+  font-weight: 600;
+  letter-spacing: -0.01em;
   cursor: pointer;
 }
 
 .entry-mode-tabs button.active {
-  background: var(--bg-primary, #fff);
+  background: var(--bg-card, #fff);
   color: var(--text-primary);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  box-shadow:
+    0 1px 1px rgba(0, 0, 0, 0.04),
+    0 1px 3px rgba(0, 0, 0, 0.12);
   font-weight: 650;
 }
 
@@ -3797,6 +3940,8 @@ async function handleCropped(blob: Blob) {
   justify-content: space-between;
   flex-shrink: 0;
   gap: 12px;
+  min-height: 44px;
+  padding: 2px 2px 4px;
 }
 
 .top-bar-left,
@@ -4587,6 +4732,7 @@ async function handleCropped(blob: Blob) {
   font-size: 14px;
   line-height: 1.65;
   color: var(--text-primary, #374151);
+  white-space: pre-line;
 }
 
 .leave-dialog-actions {

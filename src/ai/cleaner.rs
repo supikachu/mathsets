@@ -217,7 +217,7 @@ pub fn repair_truncated_batch(raw: &str) -> Option<String> {
 ///
 /// UTF-8 安全性：多字节 UTF-8 序列的首字节 >= 0x80，
 /// 不会与 ASCII `"`, `\` 冲突，可安全按字节扫描。
-fn fix_invalid_escapes(s: &str) -> String {
+pub(crate) fn fix_invalid_escapes(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len() + 16);
     let mut i = 0;
@@ -275,10 +275,16 @@ fn fix_invalid_escapes(s: &str) -> String {
 
         let next = bytes[i + 1];
         if VALID_ESCAPES.contains(&next) {
-            // `\f` / `\b` 虽是合法 JSON 控制符，但数学题里几乎总是 LaTeX
-            // `\frac` `\forall` `\bar` `\binom` `\begin`。按控制符吃掉后，
-            // 预览会变成 ⬆rac / 残缺命令。一律当 LaTeX 反斜杠双重转义。
-            if next == b'f' || next == b'b' || next == b'r' {
+            // `\f` `\b` `\r` `\t` 虽是合法 JSON 控制符，但数学题里几乎总是 LaTeX：
+            // `\frac` `\triangle` `\therefore` `\times` `\bar` `\right`。
+            // 按 Tab 吃掉后：`\triangle` → 制表符 + `riangle`，预览只剩 `riangle`。
+            // `\n` 仍保留为换行，除非后面像 `\neq` `\nabla` `\nu`。
+            if next == b'f'
+                || next == b'b'
+                || next == b'r'
+                || next == b't'
+                || (next == b'n' && looks_like_latex_n_command(&bytes[i + 2..]))
+            {
                 out.extend_from_slice(b"\\\\");
                 i += 1;
                 continue;
@@ -289,12 +295,33 @@ fn fix_invalid_escapes(s: &str) -> String {
         } else {
             // 非法转义（如 \d \s \sqrt 等 LaTeX 命令）
             // 把 \ 替换为 \\，下一轮继续处理 next 字符
+            //
+            // 豆包常写 `\\\(`：先用合法 `\\` 产出一个 `\`，再跟非法 `\(`。
+            // 若再补 `\\`，解析后会变成 `\\(`，KaTeX 无法识别。此时丢掉多余的 `\`。
+            if matches!(next, b'(' | b')' | b'[' | b']') && out.ends_with(b"\\\\") {
+                i += 1;
+                continue;
+            }
             out.extend_from_slice(b"\\\\");
             i += 1;
         }
     }
 
     String::from_utf8(out).unwrap_or_else(|_| s.to_string())
+}
+
+/// `\n` 后面更像 `\neq` / `\nabla` / `\nu`，而不是「换行 + 英文」。
+fn looks_like_latex_n_command(rest: &[u8]) -> bool {
+    rest.starts_with(b"eq")
+        || rest.starts_with(b"abla")
+        || rest.starts_with(b"ot")
+        || rest.starts_with(b"exists")
+        || rest.starts_with(b"parallel")
+        || rest.starts_with(b"cong")
+        || rest.starts_with(b"mid")
+        || rest.starts_with(b"geq")
+        || rest.starts_with(b"less")
+        || (rest.starts_with(b"u") && !rest.get(1).map(|c| c.is_ascii_alphabetic()).unwrap_or(false))
 }
 
 /// 打印出错位置附近的文本上下文，辅助定位是哪个公式带偏了 AI。
@@ -582,6 +609,7 @@ pub fn restore_latex_from_json_controls(s: &str) -> String {
         match c {
             '\u{000C}' => out.push_str("\\f"), // form feed ← `\frac`
             '\u{0008}' => out.push_str("\\b"), // backspace ← `\bar`
+            '\t' => out.push_str("\\t"),      // tab ← `\triangle` `\therefore` `\times`
             _ => out.push(c),
         }
     }
@@ -590,9 +618,99 @@ pub fn restore_latex_from_json_controls(s: &str) -> String {
         .replace("⇧rac", "\\frac")
 }
 
-/// 题干/选项/解析统一清洗：字面量 `\n` + HTML 表格 + 误伤的 `\frac`
+/// 题干/选项/解析统一清洗：字面量 `\n` + HTML 表格 + 误伤的 `\frac` + 豆包定界符
 pub fn sanitize_question_markup(s: &str) -> String {
-    html_tables_to_markdown(&unescape_literal_newlines(&restore_latex_from_json_controls(s)))
+    normalize_llm_latex(&html_tables_to_markdown(&unescape_literal_newlines(
+        &restore_latex_from_json_controls(s),
+    )))
+}
+
+/// 把站外模型常见的 TeX 定界符套娃修成本系统用的 `$` / `$$`。
+///
+/// 豆包典型输出（JSON 解析后）：`$$\\(\therefore\) OA=OC$$`、`$\(AC=OA\)$`。
+/// KaTeX 只吃 `$...$`，数学模式里再套 `\(` 会整段标红。
+pub fn normalize_llm_latex(s: &str) -> String {
+    let collapsed = collapse_overescaped_tex_delimiters(s);
+    let stripped = strip_tex_delimiters_inside_dollars(&collapsed);
+    convert_standalone_tex_delimiters(&stripped)
+}
+
+fn collapse_overescaped_tex_delimiters(s: &str) -> String {
+    let mut t = s.to_string();
+    loop {
+        let n = t
+            .replace(r"\\(", r"\(")
+            .replace(r"\\)", r"\)")
+            .replace(r"\\[", r"\[")
+            .replace(r"\\]", r"\]");
+        if n == t {
+            return n;
+        }
+        t = n;
+    }
+}
+
+fn strip_tex_open_close(inner: &str) -> String {
+    inner
+        .replace(r"\(", "")
+        .replace(r"\)", "")
+        .replace(r"\[", "")
+        .replace(r"\]", "")
+}
+
+fn strip_tex_delimiters_inside_dollars(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'$' {
+            let display = i + 1 < bytes.len() && bytes[i + 1] == b'$';
+            let open_len = if display { 2 } else { 1 };
+            let start = i + open_len;
+            let mut j = start;
+            let mut closer = None;
+            while j < bytes.len() {
+                if bytes[j] != b'$' {
+                    j += 1;
+                    continue;
+                }
+                if display {
+                    if j + 1 < bytes.len() && bytes[j + 1] == b'$' {
+                        closer = Some(j);
+                        break;
+                    }
+                    j += 1;
+                    continue;
+                }
+                closer = Some(j);
+                break;
+            }
+            if let Some(end) = closer {
+                out.push_str(if display { "$$" } else { "$" });
+                out.push_str(&strip_tex_open_close(&s[start..end]));
+                out.push_str(if display { "$$" } else { "$" });
+                i = end + open_len;
+                continue;
+            }
+        }
+        let ch = s[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+fn convert_standalone_tex_delimiters(s: &str) -> String {
+    static RE_DISPLAY: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r"\\\[([\s\S]*?)\\\]").expect("tex display delim regex")
+    });
+    static RE_INLINE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r"\\\(([\s\S]*?)\\\)").expect("tex inline delim regex")
+    });
+    let s = RE_DISPLAY.replace_all(s, |c: &regex::Captures| format!("$${}$$", &c[1]));
+    RE_INLINE
+        .replace_all(&s, |c: &regex::Captures| format!("${}$", &c[1]))
+        .into_owned()
 }
 
 #[cfg(test)]
@@ -776,10 +894,32 @@ mod tests {
 
     #[test]
     fn test_fix_invalid_escapes_leaves_valid_unchanged() {
-        // 合法 JSON 转义应原样保留
-        let input = r#"{"a": "line1\nline2\ttab\\back\"quote"}"#;
+        // 合法 JSON 转义应原样保留（\t 在数学题中按 LaTeX 处理，不用 Tab 用例）
+        let input = r#"{"a": "line1\nline2 next\\back\"quote"}"#;
         let fixed = fix_invalid_escapes(input);
         assert_eq!(fixed, input);
+    }
+
+    #[test]
+    fn test_fix_invalid_escapes_latex_triangle_not_tab() {
+        // Gemini 常把 `\triangle` `\therefore` `\times` 写成 JSON `\t`，会被解析成 Tab
+        let input = r#"{"stem": "$\triangle ABC$ $\therefore a=b$ $2\times 3$ $\neq 0$"}"#;
+        let fixed = fix_invalid_escapes(input);
+        let parsed: serde_json::Value = serde_json::from_str(&fixed).unwrap();
+        let stem = parsed["stem"].as_str().unwrap();
+        assert!(stem.contains(r"\triangle"), "{stem:?}");
+        assert!(stem.contains(r"\therefore"), "{stem:?}");
+        assert!(stem.contains(r"\times"), "{stem:?}");
+        assert!(stem.contains(r"\neq"), "{stem:?}");
+        assert!(!stem.contains('\t'), "{stem:?}");
+    }
+
+    #[test]
+    fn test_restore_tab_to_triangle() {
+        let s = format!("${}riangle ABC$ {}herefore a=b", '\t', '\t');
+        let restored = restore_latex_from_json_controls(&s);
+        assert!(restored.contains(r"\triangle"), "{restored}");
+        assert!(restored.contains(r"\therefore"), "{restored}");
     }
 
     #[test]
@@ -1024,5 +1164,37 @@ mod tests {
         assert!(md.contains("| --- | --- |"));
         assert!(md.contains("| 2 | 轻风 |"));
         assert!(!md.contains("<table>"));
+    }
+
+    #[test]
+    fn test_normalize_doubao_therefore_inside_display_math() {
+        // 豆包：$$\\\(\\therefore\) ...$$ 经非法转义修复后，数学模式里会留下 \( \)
+        let json = r#"{"c":"$$\\\(\\therefore\) O A = O C = A C$$\n∴ $\\triangle OAC$"}"#;
+        let fixed = fix_invalid_escapes(json);
+        let v: serde_json::Value = serde_json::from_str(&fixed).expect("应能解析");
+        let c = v["c"].as_str().unwrap();
+        let out = normalize_llm_latex(c);
+        assert!(!out.contains(r"\("), "{out}");
+        assert!(!out.contains(r"\)"), "{out}");
+        assert!(out.contains(r"$$\therefore"), "{out}");
+        assert!(out.contains(r"$\triangle OAC$"), "{out}");
+    }
+
+    #[test]
+    fn test_normalize_paren_inside_inline_math() {
+        let out = normalize_llm_latex(r"弦$\(AC=OA\)$，点D");
+        assert_eq!(out, r"弦$AC=OA$，点D");
+    }
+
+    #[test]
+    fn test_normalize_standalone_tex_parens() {
+        let out = normalize_llm_latex(r"故 \(\triangle ACF\sim\triangle OGF\)。");
+        assert_eq!(out, r"故 $\triangle ACF\sim\triangle OGF$。");
+    }
+
+    #[test]
+    fn test_normalize_keeps_correct_frac() {
+        let s = r"$\sqrt{\left(k+\frac{1}{2}\right)^2}$";
+        assert_eq!(normalize_llm_latex(s), s);
     }
 }

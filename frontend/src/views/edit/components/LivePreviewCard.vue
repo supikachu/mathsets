@@ -196,7 +196,7 @@ function splitSolution(text: string): { body: string; conclusion: string } {
           </div>
         </div>
 
-        <div v-if="previewSolutions.length" class="paper-answer-block">
+        <div v-if="previewSolutions.length" class="paper-answer-block paper-analysis">
           <div class="paper-answer-label flex justify-between items-center">
             <span>解析</span>
             <div v-if="previewSolutions.length > 1" class="sol-seg">
@@ -211,11 +211,20 @@ function splitSolution(text: string): { body: string; conclusion: string } {
           </div>
           <div class="paper-answer-content">
             <Transition name="sol-fade" mode="out-in">
-              <LatexRender :key="activeSolution" :text="splitSolution(previewSolutions[activeSolution]).body" />
+              <LatexRender
+                :key="activeSolution"
+                :text="splitSolution(previewSolutions[activeSolution]).body"
+                :mode="imageEditable ? 'editable' : 'readonly'"
+                @image-click="emit('image-click', $event)"
+              />
             </Transition>
           </div>
           <div v-if="splitSolution(previewSolutions[activeSolution]).conclusion" class="paper-conclusion">
-            <LatexRender :text="splitSolution(previewSolutions[activeSolution]).conclusion" />
+            <LatexRender
+              :text="splitSolution(previewSolutions[activeSolution]).conclusion"
+              :mode="imageEditable ? 'editable' : 'readonly'"
+              @image-click="emit('image-click', $event)"
+            />
           </div>
         </div>
       </div>

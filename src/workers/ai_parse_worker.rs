@@ -13,6 +13,7 @@
 //! - 错误分类：不可重试（NoApiKey/数据缺失）→ failed；
 //!   可重试（上游/超时/JSON）→ retrying（retry_count+1，≤2 次）
 
+use std::collections::HashSet;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -34,6 +35,9 @@ use crate::ai::provider::{
 use crate::ai::tagging::{
     content_input_hash_with_stage, run_tagging, tagging_content_from_parsed, TaggingContext,
     TaggingInput, TaggingPolicy,
+};
+use crate::ai::paper_order::{
+    cmp_paper_order, infer_question_no_from_stem, parse_question_no_key, paper_order_key,
 };
 use crate::ai::types::{ParsedAnswer, ParsedQuestion};
 use crate::auth::middleware::AuthUser;
@@ -699,7 +703,7 @@ async fn execute_task(state: &AppState, task: &AiParseTask) -> Result<TaskOutcom
             }
         };
 
-        let page_questions = match post_process_batch(&raw_json, &state.pool).await {
+        let page_questions = match post_process_batch(&raw_json, &state.pool, true).await {
             Ok(qs) => qs,
             Err((_, err)) => {
                 let msg = format!("第 {page_no} 页解析失败: {}", err["error"]);
@@ -1304,7 +1308,8 @@ fn tagging_stage_from_paper_meta(pm: &serde_json::Value) -> String {
 /// 解析阶段**不写 questions 表**：题目数据（含图片本地化后的 URL）、三维标签
 /// 匹配结果、hash 去重命中信息一起暂存到 `ai_parse_tasks.progress.staged_questions`。
 /// 用户在工作台确认保存时由 `POST /questions`（ai_meta）真正落库并关联容器；
-/// 丢弃/永不保存的暂存项由 GC（72h）清理。
+/// 显式「丢弃」走 `POST /ai/parse-task/{id}/clear-staged`（只删未保存项）；
+/// 从未丢弃的暂存项由 GC（72h）兜底清理。
 ///
 /// 暂存项结构：
 /// ```json
@@ -1417,8 +1422,20 @@ async fn stage_question(
         stage: Some(tagging_stage.clone()),
     };
 
+    // 站外结构化：导入后暂不入队，等用户在「智能打标」里点开始。
+    // 无文本模型时仍走同步 Parsed 适配（测试环境 / 未配置打标模型）。
+    let defer_async_tagging = is_ocr_export(task);
     let (matched, unmatched, suggestion_id, engine_version, suggestion_value, tagging_status) =
-        if has_text_model {
+        if has_text_model && defer_async_tagging {
+            (
+                Vec::new(),
+                serde_json::json!({}),
+                None,
+                None,
+                serde_json::Value::Null,
+                "idle",
+            )
+        } else if has_text_model {
             let content = tagging_content_from_parsed(&parsed);
             // 解析阶段已产出知识点 / 章节 / 解法，一并带上让打标复用，省掉重复的 LLM 提取
             let signals = serde_json::to_value(crate::ai::tagging::signals_from_parsed(&parsed)).ok();
@@ -1502,7 +1519,7 @@ async fn stage_question(
         SET progress = jsonb_set(
               progress,
               '{staged_questions}',
-              COALESCE(progress->'staged_questions', '[]'::jsonb) || $2::jsonb
+              COALESCE(progress->'staged_questions', '[]'::jsonb) || jsonb_build_array($2::jsonb)
             ),
             heartbeat_at = NOW(), updated_at = NOW()
         WHERE id = $1
@@ -1518,6 +1535,8 @@ async fn stage_question(
 }
 
 /// 解析完成入队打标（不占打标日额度；进行中任务按 hash 幂等复用）
+///
+/// 返回是否已在队列中（新插入或 inflight 幂等命中）。
 async fn enqueue_staged_tagging(
     state: &AppState,
     task: &AiParseTask,
@@ -1526,10 +1545,10 @@ async fn enqueue_staged_tagging(
     space_id: Uuid,
     stage: &str,
     parsed_signals: Option<serde_json::Value>,
-) {
+) -> bool {
     let content = content.trim();
     if content.is_empty() {
-        return;
+        return false;
     }
     let input_hash = content_input_hash_with_stage(content, Some(stage));
     let inserted = sqlx::query(
@@ -1542,7 +1561,7 @@ async fn enqueue_staged_tagging(
         "#,
     )
     .bind(task.creator_id)
-    .bind(space_id)
+    .bind((!space_id.is_nil()).then_some(space_id))
     .bind(&input_hash)
     .bind(content)
     .bind(stage)
@@ -1558,6 +1577,7 @@ async fn enqueue_staged_tagging(
                 "任务 {} 题目 {question_index} 已入队异步打标",
                 task.id
             );
+            true
         }
         Err(e) => {
             let msg = e.to_string();
@@ -1566,11 +1586,271 @@ async fn enqueue_staged_tagging(
                 || msg.contains("idx_ai_tagging_tasks_inflight")
             {
                 tracing::debug!("任务 {} 题目 {question_index} 打标任务已在队列中", task.id);
+                true
             } else {
                 tracing::warn!("任务 {} 题目 {question_index} 入队打标失败（不阻断暂存）: {e}", task.id);
+                false
             }
         }
     }
+}
+
+fn staged_space_id(item: &serde_json::Value, task: &AiParseTask) -> Uuid {
+    item.get("space_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .or_else(|| {
+            task.progress
+                .get("ocr_export_ctx")
+                .and_then(|c| c.get("space_id"))
+                .and_then(|v| v.as_str())
+                .and_then(|s| Uuid::parse_str(s).ok())
+        })
+        .unwrap_or(Uuid::nil())
+}
+
+fn staged_item_saved(item: &serde_json::Value) -> bool {
+    item.get("saved")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+async fn patch_staged_tagging_status(
+    pool: &sqlx::PgPool,
+    parse_id: Uuid,
+    index: &str,
+    status: &str,
+) -> Result<(), String> {
+    let patch = serde_json::json!({ "tagging_status": status });
+    sqlx::query(
+        r#"
+        UPDATE ai_parse_tasks
+        SET progress = jsonb_set(
+              progress,
+              '{staged_questions}',
+              COALESCE((
+                SELECT jsonb_agg(
+                    elem || CASE WHEN elem->>'index' = $2 THEN $3::jsonb ELSE '{}'::jsonb END
+                    ORDER BY ord
+                )
+                FROM jsonb_array_elements(COALESCE(progress->'staged_questions', '[]'::jsonb))
+                    WITH ORDINALITY AS t(elem, ord)
+              ), '[]'::jsonb)
+            ),
+            updated_at = NOW()
+        WHERE id = $1
+        "#,
+    )
+    .bind(parse_id)
+    .bind(index)
+    .bind(&patch)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("回写暂存打标状态失败: {e}"))?;
+    Ok(())
+}
+
+/// 用户停止打标 / 离开录入：未完成的暂存项从 pending 回到 idle，便于再次开始。
+pub(crate) async fn reset_pending_staged_tagging(
+    pool: &sqlx::PgPool,
+    parse_task_id: Uuid,
+) -> Result<u64, String> {
+    let result = sqlx::query(
+        r#"
+        UPDATE ai_parse_tasks
+        SET progress = jsonb_set(
+              progress,
+              '{staged_questions}',
+              COALESCE((
+                SELECT jsonb_agg(
+                    CASE
+                      WHEN elem->>'tagging_status' = 'pending'
+                       AND COALESCE(elem->>'saved', 'false') <> 'true'
+                      THEN elem || '{"tagging_status":"idle"}'::jsonb
+                      ELSE elem
+                    END
+                    ORDER BY ord
+                )
+                FROM jsonb_array_elements(COALESCE(progress->'staged_questions', '[]'::jsonb))
+                    WITH ORDINALITY AS t(elem, ord)
+              ), '[]'::jsonb)
+            ),
+            updated_at = NOW()
+        WHERE id = $1
+        "#,
+    )
+    .bind(parse_task_id)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("重置暂存打标状态失败: {e}"))?;
+    Ok(result.rows_affected())
+}
+
+/// 丢弃未确认的暂存题：保留 `saved=true` 的项，并终止该解析任务下未完成的打标。
+pub(crate) async fn clear_unsaved_staged_questions(
+    pool: &sqlx::PgPool,
+    parse_task_id: Uuid,
+) -> Result<(usize, usize), String> {
+    let existing_json: serde_json::Value = sqlx::query_scalar(
+        "SELECT COALESCE(progress->'staged_questions', '[]'::jsonb) FROM ai_parse_tasks WHERE id = $1",
+    )
+    .bind(parse_task_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| format!("读取暂存失败: {e}"))?;
+    let existing: Vec<serde_json::Value> = match existing_json {
+        serde_json::Value::Array(items) => items,
+        _ => Vec::new(),
+    };
+    let kept: Vec<serde_json::Value> = existing
+        .iter()
+        .filter(|item| staged_item_saved(item))
+        .cloned()
+        .collect();
+    let kept_count = kept.len();
+    let removed = existing.len().saturating_sub(kept_count);
+
+    sqlx::query(
+        r#"
+        UPDATE ai_parse_tasks
+        SET progress = jsonb_set(
+              COALESCE(progress, '{}'::jsonb),
+              '{staged_questions}',
+              $2::jsonb
+            ),
+            updated_at = NOW()
+        WHERE id = $1
+        "#,
+    )
+    .bind(parse_task_id)
+    .bind(serde_json::Value::Array(kept))
+    .execute(pool)
+    .await
+    .map_err(|e| format!("清空暂存失败: {e}"))?;
+
+    let _ = sqlx::query(
+        r#"
+        UPDATE ai_tagging_tasks
+        SET status = 'cancelled',
+            error_message = COALESCE(error_message, '用户丢弃暂存题目'),
+            completed_at = NOW(), updated_at = NOW(),
+            locked_at = NULL, worker_id = NULL
+        WHERE parse_task_id = $1
+          AND status IN ('pending', 'retrying', 'queued')
+        "#,
+    )
+    .bind(parse_task_id)
+    .execute(pool)
+    .await;
+
+    let _ = sqlx::query(
+        r#"
+        UPDATE ai_tagging_tasks
+        SET cancel_requested_at = NOW(), updated_at = NOW()
+        WHERE parse_task_id = $1
+          AND status = 'processing'
+          AND cancel_requested_at IS NULL
+        "#,
+    )
+    .bind(parse_task_id)
+    .execute(pool)
+    .await;
+
+    Ok((removed, kept_count))
+}
+
+/// 用户点击「开始打标」后，为 idle/failed 的未保存暂存项入队。
+///
+/// 返回 (started, skipped)。
+pub(crate) async fn start_staged_tagging(
+    state: &AppState,
+    parse_task_id: Uuid,
+) -> Result<(u32, u32), String> {
+    let task: AiParseTask = sqlx::query_as(&format!(
+        "SELECT {TASK_COLUMNS} FROM ai_parse_tasks WHERE id = $1"
+    ))
+    .bind(parse_task_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| format!("查询解析任务失败: {e}"))?
+    .ok_or_else(|| "解析任务不存在".to_string())?;
+
+    let staged_json: serde_json::Value = sqlx::query_scalar(
+        "SELECT COALESCE(progress->'staged_questions', '[]'::jsonb) FROM ai_parse_tasks WHERE id = $1",
+    )
+    .bind(parse_task_id)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(|e| format!("读取暂存失败: {e}"))?;
+    let items = match staged_json {
+        serde_json::Value::Array(items) => items,
+        _ => Vec::new(),
+    };
+
+    let default_stage = tagging_stage_from_paper_meta(&task.paper_meta);
+    let mut started = 0u32;
+    let mut skipped = 0u32;
+
+    for item in items {
+        let index = match item.get("index").and_then(|v| v.as_str()) {
+            Some(i) if !i.is_empty() => i.to_string(),
+            _ => {
+                skipped += 1;
+                continue;
+            }
+        };
+        if staged_item_saved(&item) {
+            skipped += 1;
+            continue;
+        }
+        let status = item
+            .get("tagging_status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if status == "pending" || status == "done" {
+            skipped += 1;
+            continue;
+        }
+
+        let parsed: ParsedQuestion = match serde_json::from_value(
+            item.get("parsed").cloned().unwrap_or(serde_json::Value::Null),
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(
+                    parse_task_id = %parse_task_id,
+                    index,
+                    "开始打标时解析暂存题失败: {e}"
+                );
+                skipped += 1;
+                continue;
+            }
+        };
+        let content = tagging_content_from_parsed(&parsed);
+        let signals = serde_json::to_value(crate::ai::tagging::signals_from_parsed(&parsed)).ok();
+        let stage = item
+            .get("tagging_stage")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&default_stage);
+        let space_id = staged_space_id(&item, &task);
+        if enqueue_staged_tagging(state, &task, &index, &content, space_id, stage, signals).await {
+            if let Err(e) =
+                patch_staged_tagging_status(&state.pool, parse_task_id, &index, "pending").await
+            {
+                tracing::warn!(
+                    parse_task_id = %parse_task_id,
+                    index,
+                    "入队后回写 pending 失败: {e}"
+                );
+            }
+            started += 1;
+        } else {
+            skipped += 1;
+        }
+    }
+
+    Ok((started, skipped))
 }
 
 #[allow(dead_code)]
@@ -2296,6 +2576,58 @@ async fn run_page_ocr_export(
     })
 }
 
+fn normalize_stem_key(stem: &str) -> String {
+    stem.chars().filter(|c| !c.is_whitespace()).take(96).collect()
+}
+
+fn question_no_identity(no: Option<&str>) -> Option<String> {
+    let raw = no.map(str::trim).filter(|s| !s.is_empty())?;
+    Some(
+        parse_question_no_key(raw)
+            .map(|(major, minor)| format!("{major}:{minor}"))
+            .unwrap_or_else(|| raw.to_string()),
+    )
+}
+
+fn staged_question_identity(item: &serde_json::Value) -> Option<String> {
+    question_no_identity(staged_question_no(item).as_deref())
+}
+
+fn staged_stem_identity(item: &serde_json::Value) -> Option<String> {
+    item.get("parsed")
+        .and_then(|p| p.get("stem"))
+        .and_then(|v| v.as_str())
+        .map(normalize_stem_key)
+        .filter(|s| !s.is_empty())
+}
+
+fn staged_index_str(item: &serde_json::Value) -> Option<&str> {
+    item.get("index").and_then(|v| v.as_str())
+}
+
+/// 同一份站外 JSON 偶发带重复题；按题号、再按题干指纹去重，保留先出现的一题。
+fn dedupe_parsed_questions(questions: Vec<ParsedQuestion>) -> Vec<ParsedQuestion> {
+    let mut seen_no = HashSet::new();
+    let mut seen_stem = HashSet::new();
+    let mut out = Vec::with_capacity(questions.len());
+    for q in questions {
+        if q.stem.trim().is_empty() {
+            continue;
+        }
+        if let Some(key) = question_no_identity(q.question_no.as_deref()) {
+            if !seen_no.insert(key) {
+                continue;
+            }
+        }
+        let stem_key = normalize_stem_key(&q.stem);
+        if !stem_key.is_empty() && !seen_stem.insert(stem_key) {
+            continue;
+        }
+        out.push(q);
+    }
+    out
+}
+
 fn fill_imported_question(q: &mut ParsedQuestion) {
     if q.correct_answer.is_none() {
         q.correct_answer = Some(ParsedAnswer::empty_for_type(&q.question_type));
@@ -2306,15 +2638,89 @@ fn fill_imported_question(q: &mut ParsedQuestion) {
             .map(|(_, u)| u)
             .collect();
     }
+    let no = q
+        .question_no
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    q.question_no = no.or_else(|| infer_question_no_from_stem(&q.stem));
+}
+
+fn json_question_no(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) => {
+            let t = s.trim();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
+        }
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
 }
 
 fn staged_question_no(item: &serde_json::Value) -> Option<String> {
     item.get("parsed")
         .and_then(|p| p.get("question_no"))
+        .and_then(json_question_no)
+}
+
+fn staged_paper_order_key(item: &serde_json::Value) -> (u8, i32, i32) {
+    let parsed = item.get("parsed");
+    let no = parsed
+        .and_then(|p| p.get("question_no"))
+        .and_then(json_question_no);
+    let display_order = parsed
+        .and_then(|p| p.get("display_order"))
+        .and_then(|v| v.as_i64())
+        .map(|n| n as i32);
+    let stem = parsed
+        .and_then(|p| p.get("stem"))
         .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
+        .unwrap_or("");
+    paper_order_key(no.as_deref(), display_order, stem)
+}
+
+async fn resort_staged_questions_by_paper_no(
+    state: &AppState,
+    task_id: Uuid,
+) -> Result<(), String> {
+    let raw: serde_json::Value = sqlx::query_scalar(
+        "SELECT COALESCE(progress->'staged_questions', '[]'::jsonb) FROM ai_parse_tasks WHERE id = $1",
+    )
+    .bind(task_id)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(|e| format!("读取暂存失败: {e}"))?;
+    let mut items = match raw {
+        serde_json::Value::Array(a) => a,
+        _ => return Ok(()),
+    };
+    if items.len() < 2 {
+        return Ok(());
+    }
+    items.sort_by(|a, b| staged_paper_order_key(a).cmp(&staged_paper_order_key(b)));
+    sqlx::query(
+        r#"
+        UPDATE ai_parse_tasks
+        SET progress = jsonb_set(
+              COALESCE(progress, '{}'::jsonb),
+              '{staged_questions}',
+              $2::jsonb
+            ),
+            updated_at = NOW()
+        WHERE id = $1
+        "#,
+    )
+    .bind(task_id)
+    .bind(serde_json::Value::Array(items))
+    .execute(&state.pool)
+    .await
+    .map_err(|e| format!("按题号重排暂存失败: {e}"))?;
+    Ok(())
 }
 
 pub(crate) async fn import_external_questions(
@@ -2371,35 +2777,52 @@ pub(crate) async fn import_external_questions(
         .await;
     }
 
-    let existing: Vec<serde_json::Value> = sqlx::query_scalar(
+    // progress->'staged_questions' 是 JSONB 数组值，不是 Postgres JSONB[]。
+    // 解码成 Vec<Value> 会被 sqlx 当成 JSONB[]，触发 type mismatch。
+    let existing_json: serde_json::Value = sqlx::query_scalar(
         "SELECT COALESCE(progress->'staged_questions', '[]'::jsonb) FROM ai_parse_tasks WHERE id = $1",
     )
     .bind(task.id)
     .fetch_one(&state.pool)
     .await
     .map_err(|e| format!("读取暂存失败: {e}"))?;
+    let mut existing: Vec<serde_json::Value> = match existing_json {
+        serde_json::Value::Array(items) => items,
+        _ => Vec::new(),
+    };
 
     let mut imported = 0usize;
     let mut next_i = existing.len();
-    for mut q in questions {
-        fill_imported_question(&mut q);
+    let mut questions = questions;
+    for q in &mut questions {
+        fill_imported_question(q);
+    }
+    questions.sort_by(|a, b| {
+        cmp_paper_order(
+            a.question_no.as_deref(),
+            a.display_order,
+            &a.stem,
+            b.question_no.as_deref(),
+            b.display_order,
+            &b.stem,
+        )
+    });
+    questions = dedupe_parsed_questions(questions);
+    for q in questions {
         if q.stem.trim().is_empty() {
             continue;
         }
-        let qno = q
-            .question_no
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string());
-        let reuse_index = qno.as_ref().and_then(|no| {
-            existing.iter().find_map(|item| {
-                if staged_question_no(item).as_deref() == Some(no.as_str()) {
-                    item.get("index").and_then(|v| v.as_str()).map(|s| s.to_string())
-                } else {
-                    None
-                }
-            })
+        let no_key = question_no_identity(q.question_no.as_deref());
+        let stem_key = normalize_stem_key(&q.stem);
+        let reuse_index = existing.iter().find_map(|item| {
+            let no_hit = no_key.is_some() && staged_question_identity(item) == no_key;
+            let stem_hit = !stem_key.is_empty()
+                && staged_stem_identity(item).as_deref() == Some(stem_key.as_str());
+            if no_hit || stem_hit {
+                staged_index_str(item).map(str::to_string)
+            } else {
+                None
+            }
         });
         let index = if let Some(idx) = reuse_index {
             sqlx::query(
@@ -2429,6 +2852,8 @@ pub(crate) async fn import_external_questions(
             next_i += 1;
             idx
         };
+        let q_no = q.question_no.clone();
+        let q_stem = q.stem.clone();
         stage_question(
             state,
             task,
@@ -2441,7 +2866,15 @@ pub(crate) async fn import_external_questions(
             space_id,
         )
         .await?;
+        existing.retain(|item| staged_index_str(item) != Some(index.as_str()));
+        existing.push(serde_json::json!({
+            "index": index,
+            "parsed": { "question_no": q_no, "stem": q_stem }
+        }));
         imported += 1;
+    }
+    if imported > 0 {
+        resort_staged_questions_by_paper_no(state, task.id).await?;
     }
     Ok(imported)
 }
@@ -2599,7 +3032,7 @@ async fn parse_stage2_chunk(
         }
     };
 
-    let mut chunk_questions = match post_process_batch(&raw_json, &state.pool).await {
+    let mut chunk_questions = match post_process_batch(&raw_json, &state.pool, true).await {
         Ok(qs) if !qs.is_empty() => qs,
         other => {
             let detail = match other {
@@ -3685,6 +4118,110 @@ mod tests {
         assert_eq!(candidates, 0, "暂存阶段不应写 tag_candidates");
     }
 
+    #[tokio::test]
+    async fn test_ocr_export_defers_tagging_until_start() {
+        let Some((state, user_id)) = test_state().await else {
+            eprintln!("跳过：未配置 DATABASE_URL_TEST");
+            return;
+        };
+        let pool = state.pool.clone();
+        let username = format!("wkr_{}", Uuid::new_v4().simple().to_string().get(..8).unwrap_or("x"));
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, email, role, global_role, display_name) VALUES ($1, $2, 'x', $3, 'user', 'teacher', '测试用户')",
+        )
+        .bind(user_id)
+        .bind(&username)
+        .bind(format!("{username}@test.com"))
+        .execute(&pool)
+        .await
+        .expect("插入用户失败");
+        let space_id = ensure_personal_space(&pool, user_id, "测试用户")
+            .await
+            .expect("创建个人空间失败");
+        let doc_id = Uuid::new_v4();
+        let mut task = fake_task(user_id, doc_id);
+        task.paper_meta = json!({ "document_type": "class_exercise", "pipeline": "ocr_export" });
+        task.progress = json!({ "pipeline": "ocr_export", "idempotency_map": {} });
+        sqlx::query(
+            "INSERT INTO documents (id, creator_id, file_name, page_count, status, document_type, title) VALUES ($1, $2, 't.pdf', 1, 'confirmed', 'class_exercise', '课堂练习')",
+        )
+        .bind(doc_id)
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .expect("插入文档失败");
+        sqlx::query(
+            "INSERT INTO ai_parse_tasks (id, creator_id, raw_text, status, document_id, progress, paper_meta, created_at, updated_at) VALUES ($1, $2, '', 'success', $3, $4, $5, NOW(), NOW())",
+        )
+        .bind(task.id)
+        .bind(user_id)
+        .bind(doc_id)
+        .bind(&task.progress)
+        .bind(&task.paper_meta)
+        .execute(&pool)
+        .await
+        .expect("插入任务失败");
+
+        let uid = Uuid::new_v4().simple().to_string();
+        let parsed = fake_parsed(Some("1"), &format!("站外导入题干{uid}"));
+        stage_question(&state, &task, "p1_i0", parsed, None, None, None, false, space_id)
+            .await
+            .expect("stage 失败");
+
+        let staged: serde_json::Value = sqlx::query_scalar(
+            "SELECT progress->'staged_questions'->0 FROM ai_parse_tasks WHERE id = $1",
+        )
+        .bind(task.id)
+        .fetch_one(&pool)
+        .await
+        .expect("查询暂存失败");
+        let queued: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM ai_tagging_tasks WHERE parse_task_id = $1 AND source_index = $2",
+        )
+        .bind(task.id)
+        .bind("p1_i0")
+        .fetch_one(&pool)
+        .await
+        .expect("查询打标队列失败");
+        assert_eq!(queued, 0, "站外导入不应自动入队打标：{staged}");
+
+        match staged.get("tagging_status").and_then(|s| s.as_str()) {
+            Some("idle") => {
+                let (started, _) = start_staged_tagging(&state, task.id)
+                    .await
+                    .expect("开始打标失败");
+                assert_eq!(started, 1, "idle 题应入队 1 个打标任务");
+                let status: String = sqlx::query_scalar(
+                    "SELECT progress->'staged_questions'->0->>'tagging_status' FROM ai_parse_tasks WHERE id = $1",
+                )
+                .bind(task.id)
+                .fetch_one(&pool)
+                .await
+                .expect("查询状态失败");
+                assert_eq!(status, "pending");
+                reset_pending_staged_tagging(&pool, task.id)
+                    .await
+                    .expect("重置失败");
+                let status: String = sqlx::query_scalar(
+                    "SELECT progress->'staged_questions'->0->>'tagging_status' FROM ai_parse_tasks WHERE id = $1",
+                )
+                .bind(task.id)
+                .fetch_one(&pool)
+                .await
+                .expect("查询状态失败");
+                assert_eq!(status, "idle", "停止打标后应回到 idle");
+            }
+            Some("done") => {
+                let (started, skipped) = start_staged_tagging(&state, task.id)
+                    .await
+                    .expect("开始打标失败");
+                assert_eq!(started, 0, "无文本模型时同步打标已完成，不应再入队");
+                assert!(skipped >= 1);
+            }
+            other => panic!("ocr_export 暂存 tagging_status 异常：{other:?}，staged={staged}"),
+        }
+    }
+
     // -----------------------------------------------------------------------
     // PDF 直传路径：map_pdf_poll_progress 纯映射（无需数据库）
     // -----------------------------------------------------------------------
@@ -4042,5 +4579,35 @@ A. ${0<x<1}$\n\
             r#"{"error":{"message":"Provider returned error","code":400,"metadata":{"raw":"ERROR","provider_name":"Stealth"}}}"#.into(),
         );
         assert_eq!(map_ai_error_msg(&or_err), OPENROUTER_PROVIDER_ERROR_USER_MESSAGE);
+    }
+
+    #[test]
+    fn test_staged_paper_order_prefers_question_no() {
+        let q14 = serde_json::json!({"parsed": {"question_no": "14", "stem": "填空"}});
+        let q4 = serde_json::json!({"parsed": {"question_no": 4, "stem": "选择"}});
+        let q1 = serde_json::json!({"parsed": {"question_no": "1", "stem": "选择"}});
+        let mut items = vec![q14, q4, q1];
+        items.sort_by(|a, b| staged_paper_order_key(a).cmp(&staged_paper_order_key(b)));
+        let nos: Vec<_> = items
+            .iter()
+            .map(|v| staged_question_no(v).unwrap())
+            .collect();
+        assert_eq!(nos, vec!["1", "4", "14"]);
+    }
+
+    #[test]
+    fn test_dedupe_parsed_questions_by_no_and_stem() {
+        let qs = vec![
+            fake_parsed(Some("1"), "已知复数 z"),
+            fake_parsed(Some("1."), "已知复数 z"),
+            fake_parsed(Some("13"), "已知 alpha 为第一象限角"),
+            fake_parsed(None, "已知 alpha 为第一象限角"),
+            fake_parsed(Some("14"), "第 14 题表格"),
+        ];
+        let out = dedupe_parsed_questions(qs);
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].question_no.as_deref(), Some("1"));
+        assert_eq!(out[1].question_no.as_deref(), Some("13"));
+        assert_eq!(out[2].question_no.as_deref(), Some("14"));
     }
 }

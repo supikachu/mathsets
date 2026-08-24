@@ -3,6 +3,7 @@
 //! - `POST /questions/ai-tagging-tasks` → 202 + task id（进行中任务幂等复用，不重复扣配额）
 //! - `GET /questions/ai-tagging-tasks/{id}` → 状态 + suggestion（不含题文）
 //! - `POST /questions/ai-tagging-tasks/{id}/cancel`
+//! - `POST /ai/parse-task/{id}/start-tagging` → 为暂存题入队打标（站外结构化需用户点击）
 //! - `POST /ai/parse-task/{id}/cancel-tagging` → 批量终止某解析任务下未完成的打标任务
 
 use axum::{
@@ -344,10 +345,56 @@ pub async fn cancel_tagging_task(
     Ok(Json(json!({ "id": id, "status": "cancelling" })))
 }
 
+/// POST /api/v1/ai/parse-task/{id}/start-tagging
+///
+/// 站外结构化导入后题目为 idle，需用户点击才入队。全自动路径一般已是 pending/done，此时为 0。
+pub async fn start_parse_tagging_tasks(
+    Extension(auth): Extension<AuthUser>,
+    State(state): State<AppState>,
+    Path(parse_task_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let row: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT creator_id FROM ai_parse_tasks WHERE id = $1",
+    )
+    .bind(parse_task_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| db_err(format!("查询解析任务失败: {e}")))?;
+    let Some((creator_id,)) = row else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "解析任务不存在"})),
+        ));
+    };
+    if creator_id != auth.id && !is_admin_user(&auth) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "无权启动该任务的打标"})),
+        ));
+    }
+
+    let (started, skipped) = crate::workers::ai_parse_worker::start_staged_tagging(&state, parse_task_id)
+        .await
+        .map_err(|e| db_err(e))?;
+
+    let message = if started == 0 {
+        "没有待打标的题目".to_string()
+    } else {
+        format!("已开始打标 {started} 道题")
+    };
+
+    Ok(Json(json!({
+        "started": started,
+        "skipped": skipped,
+        "message": message,
+    })))
+}
+
 /// POST /api/v1/ai/parse-task/{id}/cancel-tagging
 ///
-/// 识别结果已全部确认保存后调用。此时该解析任务下未完成的打标任务已经没有落点
-/// （建议无法自动挂到已落库的题目上），继续跑只会白耗额度与算力。
+/// 用户停止打标、离开录入，或题目已全部确认保存后调用。
+/// pending 立即终止；processing 打取消标记由 worker 收敛。
+/// 未保存暂存项的 tagging_status 从 pending 回到 idle，便于再次开始。
 pub async fn cancel_parse_tagging_tasks(
     Extension(auth): Extension<AuthUser>,
     State(state): State<AppState>,
@@ -355,11 +402,22 @@ pub async fn cancel_parse_tagging_tasks(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let is_admin = is_admin_user(&auth);
 
+    let owner: Option<Uuid> = sqlx::query_scalar(
+        "SELECT creator_id FROM ai_parse_tasks WHERE id = $1",
+    )
+    .bind(parse_task_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| db_err(format!("查询解析任务失败: {e}")))?;
+    let can_manage_parse = owner
+        .map(|id| id == auth.id || is_admin)
+        .unwrap_or(false);
+
     let cancelled = sqlx::query(
         r#"
         UPDATE ai_tagging_tasks
         SET status = 'cancelled',
-            error_message = COALESCE(error_message, '题目已保存，打标任务已终止'),
+            error_message = COALESCE(error_message, '打标任务已终止'),
             completed_at = NOW(), updated_at = NOW(),
             locked_at = NULL, worker_id = NULL
         WHERE parse_task_id = $1
@@ -399,8 +457,22 @@ pub async fn cancel_parse_tagging_tasks(
             parse_task_id = %parse_task_id,
             cancelled,
             cancelling,
-            "题目已保存，终止该解析任务下未完成的打标任务"
+            "终止该解析任务下未完成的打标任务"
         );
+    }
+
+    if can_manage_parse {
+        if let Err(e) = crate::workers::ai_parse_worker::reset_pending_staged_tagging(
+            &state.pool,
+            parse_task_id,
+        )
+        .await
+        {
+            tracing::warn!(
+                parse_task_id = %parse_task_id,
+                "重置暂存打标状态失败: {e}"
+            );
+        }
     }
 
     Ok(Json(json!({

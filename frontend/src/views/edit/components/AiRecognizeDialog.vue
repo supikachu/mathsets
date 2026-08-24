@@ -5,12 +5,14 @@ import {
   collectionApi,
   questionApi,
   aiTaskApi,
+  isTimeoutError,
   type ParsedQuestion,
   type DocumentMeta,
   type ConfirmDocumentRequest,
   type QuestionDetail,
   type QuestionCollectionSummary,
   type AiStagedQuestion,
+  type AiParseTaskDetail,
   type TagMatch,
   type TaggingMatch,
   type TaggingUnmatched,
@@ -22,6 +24,11 @@ import { typeLabel, typeBadgeColor, diffLabel, diffBadgeColor } from '@/utils/qu
 import { useToast } from '@/composables/useToast'
 import { useAiParsePolling } from '@/composables/useAiParsePolling'
 import { normalizeChoiceAnswerBlank } from '@/utils/parseMarkdown'
+import {
+  comparePaperQuestionOrder,
+  resolvedQuestionNo,
+  sortByPaperQuestionNo,
+} from '@/utils/paperQuestionOrder'
 import { STAGE2_EXTERNAL_PROMPT } from '@/prompts/stage2External'
 import { compressImage, blobToFile } from '@/utils/imageCompressor'
 import { withBackoffRetry, isAbortError } from '@/utils/concurrency'
@@ -102,6 +109,8 @@ const ingestMode = ref<'full' | 'ocr_export'>('full')
 const ocrMarkdown = ref('')
 const jsonImportText = ref('')
 const importingJson = ref(false)
+const startingTagging = ref(false)
+const stoppingTagging = ref(false)
 const ocrCopied = ref(false)
 const previewQuestions = ref<ParsedQuestion[]>([])
 const ocrFileName = ref('')
@@ -181,6 +190,7 @@ const fileInputRef = ref<HTMLInputElement | null>(null)
 const snapshotOverwriteConfirm = ref(false)
 const snapshotRestoreConfirm = ref(false)
 let pendingUploadAction: (() => void) | null = null
+let pendingOverwriteSnapshot: BatchSnapshot | null = null
 let pendingSnapshotRestore: BatchSnapshot | null = null
 
 // Copied functions
@@ -210,12 +220,12 @@ async function copyOcrMarkdown() {
   }
 }
 
-function openOcrTab() {
+function openLeftOcrTab() {
   if (!ocrMarkdown.value) {
     toast.warning('OCR 尚未完成')
     return
   }
-  rightPaneTab.value = 'ocr'
+  leftPaneTab.value = 'ocr'
 }
 
 async function importExternalJson() {
@@ -231,31 +241,126 @@ async function importExternalJson() {
   }
   importingJson.value = true
   try {
-    const { data } = await aiTaskApi.importParseQuestions(id, {
-      raw,
-      replace: previewCount.value === 0,
-    })
-    toast.success(data.message || `已导入 ${data.imported} 道题`)
+    // 等外部模型较久后再导入时，空闲 keep-alive 可能已失效；先探活再 POST。
+    try {
+      await aiTaskApi.getParseTask(id, { timeout: 4000 })
+    } catch {
+      /* 半开连接在此失败，后续导入会走新连接 */
+    }
+    let imported = 0
+    let message = ''
+    try {
+      const { data } = await aiTaskApi.importParseQuestions(id, { raw, replace: true })
+      imported = data.imported
+      message = data.message
+    } catch (e: unknown) {
+      if (!isTimeoutError(e)) throw e
+      const recovered = await recoverImportedStaged(id)
+      if (!recovered) {
+        const { data } = await aiTaskApi.importParseQuestions(id, { raw, replace: true })
+        imported = data.imported
+        message = data.message
+      } else {
+        imported = recovered.staged.length
+        message = `已导入 ${imported} 道题，可点击「智能打标」开始打标`
+      }
+    }
     jsonImportText.value = ''
-    rightPaneTab.value = 'preview'
-    presentedParseTaskId.value = ''
-    await resumePolling(id)
+    const { data: task } = await aiTaskApi.getParseTask(id)
+    applyImportedPreview(id, task, message || `已导入 ${imported} 道题`)
   } catch (e: any) {
-    toast.error(e?.response?.data?.error || e?.message || '导入失败')
+    toast.error(
+      e?.response?.data?.error
+      || (isTimeoutError(e) ? '导入超时，请再试一次' : e?.message)
+      || '导入失败',
+    )
   } finally {
     importingJson.value = false
   }
 }
 
-const previewCards = computed(() => {
+function applyImportedPreview(id: string, task: AiParseTaskDetail, successMessage: string) {
+  if (task.ocr_markdown) ocrMarkdown.value = task.ocr_markdown
+  const staged = (task.staged_questions ?? []).filter(s => !s.saved && !s.merged_into)
+  const questions = dedupePreviewQuestions(sortByPaperQuestionNo(
+    staged.map(s => stagedToParsed(s, id)),
+    q => q,
+  ))
+  previewQuestions.value = questions
+  aiResult.value = questions[0] ?? null
+  parseFailMessage.value = ''
+  presentedParseTaskId.value = id
+  emit('batch-parsed', questions)
+  rightPaneTab.value = 'preview'
+  taggingPanelOpen.value = false
+  toast.success(successMessage || `已导入 ${questions.length} 道题`)
+}
+
+async function recoverImportedStaged(taskId: string): Promise<{ staged: AiStagedQuestion[] } | null> {
+  for (let i = 0; i < 6; i++) {
+    if (i > 0) await new Promise(r => setTimeout(r, 1500))
+    try {
+      const { data } = await aiTaskApi.getParseTask(taskId)
+      const staged = (data.staged_questions ?? []).filter(s => !s.saved && !s.merged_into)
+      if (staged.length > 0) return { staged }
+    } catch {
+      /* 轮询确认时忽略瞬时失败 */
+    }
+  }
+  return null
+}
+
+type PreviewCard = ParsedQuestion & { origIndex: number }
+
+function previewIdentityKey(q: ParsedQuestion, fallback: number): string {
+  const no = resolvedQuestionNo(q)
+  if (no) return `no:${no}`
+  const stem = (q.stem || '').replace(/\s+/g, '').slice(0, 96)
+  if (stem) return `stem:${stem}`
+  return `idx:${q.ai_meta?.staged_index ?? fallback}`
+}
+
+function dedupePreviewQuestions(items: ParsedQuestion[]): ParsedQuestion[] {
+  const seen = new Set<string>()
+  const out: ParsedQuestion[] = []
+  items.forEach((q, i) => {
+    const key = previewIdentityKey(q, i)
+    if (seen.has(key)) return
+    seen.add(key)
+    out.push(q)
+  })
+  return out
+}
+
+function findSnapshotForPreview(q: ParsedQuestion, snapshots: any[], fallbackIndex: number) {
+  const staged = q.ai_meta?.staged_index
+  if (staged) {
+    const hit = snapshots.find((s: any) => s?.aiMeta?.staged_index === staged)
+    if (hit) return hit
+  }
+  const no = resolvedQuestionNo(q)
+  if (no) {
+    const hit = snapshots.find((s: any) => String(s?.question_no ?? '').trim() === String(no))
+    if (hit) return hit
+  }
+  return snapshots[fallbackIndex]
+}
+
+const previewCards = computed((): PreviewCard[] => {
   const snapshots = props.editedSnapshots ?? []
+  let items: ParsedQuestion[]
   if (previewQuestions.value.length) {
-    return previewQuestions.value.map((q, i) => overlayParsedFromSnapshot(q, snapshots[i]))
+    items = previewQuestions.value.map((q, i) => overlayParsedFromSnapshot(q, findSnapshotForPreview(q, snapshots, i)))
+  } else if (snapshots.length) {
+    items = snapshots.map((s) => overlayParsedFromSnapshot(parsedStubFromSnapshot(s), s))
+  } else if (aiResult.value) {
+    items = [aiResult.value]
+  } else {
+    items = []
   }
-  if (snapshots.length) {
-    return snapshots.map((s) => overlayParsedFromSnapshot(parsedStubFromSnapshot(s), s))
-  }
-  return aiResult.value ? [aiResult.value] : []
+  return dedupePreviewQuestions(items)
+    .map((question, origIndex) => ({ ...question, origIndex }))
+    .sort((a, b) => comparePaperQuestionOrder(a, b) || a.origIndex - b.origIndex)
 })
 
 const previewCount = computed(() => previewCards.value.length)
@@ -264,8 +369,9 @@ const unsavedPreviewCount = computed(() =>
 )
 const canSaveAll = computed(() => (props.editedSnapshots?.length ?? 0) > 0)
 
-type RightPaneTab = 'source' | 'preview' | 'ocr'
+type RightPaneTab = 'source' | 'preview' | 'ocr' | 'tagging'
 const rightPaneTab = ref<RightPaneTab>('source')
+const leftPaneTab = ref<'source' | 'ocr'>('source')
 
 const sourceTabHint = computed(() => {
   const s = sourceState.value
@@ -274,7 +380,18 @@ const sourceTabHint = computed(() => {
 })
 
 watch(previewCount, (n, prev) => {
-  if (n > 0 && !prev) rightPaneTab.value = 'preview'
+  if (n > 0 && !prev && rightPaneTab.value !== 'ocr') {
+    rightPaneTab.value = 'preview'
+  }
+})
+
+watch(ingestMode, (mode) => {
+  if (mode !== 'ocr_export') {
+    taggingPanelOpen.value = false
+    if (rightPaneTab.value === 'ocr' || rightPaneTab.value === 'tagging') {
+      rightPaneTab.value = previewCount.value > 0 ? 'preview' : 'source'
+    }
+  }
 })
 
 watch(currentDoc, (doc) => {
@@ -287,6 +404,11 @@ watch(currentDoc, (doc) => {
 })
 function cardSaved(idx: number) {
   return Boolean(props.editedSnapshots?.[idx]?.saved)
+}
+
+function previewQuestionLabel(card: PreviewCard, displayIdx: number): string {
+  const no = resolvedQuestionNo(card)
+  return no ? `第 ${no} 题` : `第 ${displayIdx + 1} 题`
 }
 
 const progressStripPct = computed(() => {
@@ -305,9 +427,156 @@ const showOriginalSource = computed(() => Boolean(sourcePreviewUrl.value))
 const ingestLocked = computed(
   () => docFlowState.value === 'progress' || docFlowState.value === 'uploading',
 )
-const showOcrTab = computed(
-  () => Boolean(ocrMarkdown.value) || ingestMode.value === 'ocr_export',
+const showJsonTab = computed(() => ingestMode.value === 'ocr_export')
+const showTaggingAction = computed(() => ingestMode.value === 'ocr_export' && previewCount.value > 0)
+const taggingPanelOpen = ref(false)
+const taggingPanelVisible = computed(() =>
+  showTaggingAction.value && (taggingPanelOpen.value || taggingStats.value.running),
 )
+
+function toggleTaggingPanel() {
+  if (taggingStats.value.running) {
+    taggingPanelOpen.value = true
+    return
+  }
+  taggingPanelOpen.value = !taggingPanelOpen.value
+}
+
+const taggingStats = computed(() => {
+  const items = previewQuestions.value
+  const total = items.length
+  let pending = 0
+  let done = 0
+  let failed = 0
+  let idle = 0
+  for (const q of items) {
+    const s = q.tagging_status
+    if (s === 'pending') pending++
+    else if (s === 'done') done++
+    else if (s === 'failed') failed++
+    else idle++
+  }
+  return {
+    total,
+    pending,
+    done,
+    failed,
+    idle,
+    running: pending > 0,
+    startable: idle + failed > 0,
+  }
+})
+
+function currentParseTaskId(): string {
+  return pollTaskId.value
+    || pollTask.value?.id
+    || previewQuestions.value[0]?.ai_meta?.task_id
+    || ''
+}
+
+function parseTaskIdsFromQuestions(questions: Array<{ ai_meta?: { task_id?: string } }> | undefined | null): string[] {
+  if (!Array.isArray(questions)) return []
+  const ids = new Set<string>()
+  for (const q of questions) {
+    const id = q?.ai_meta?.task_id
+    if (typeof id === 'string' && id.length > 0) ids.add(id)
+  }
+  return [...ids]
+}
+
+/** 丢弃未确认暂存：清本地预览，并请求后端删掉未保存的 staged_questions */
+async function discardParseStaged(extraIds: string[] = []) {
+  const ids = new Set(extraIds.filter(Boolean))
+  const cur = currentParseTaskId()
+  if (cur) ids.add(cur)
+  previewQuestions.value = []
+  aiResult.value = null
+  taggingPanelOpen.value = false
+  presentedParseTaskId.value = ''
+  stopPolling()
+  if (!ids.size) return
+  await Promise.all([...ids].map((id) =>
+    aiTaskApi.clearParseStaged(id).catch((e: any) => {
+      console.warn('[AiRecognizeDialog] 清空暂存失败:', e?.message)
+    }),
+  ))
+}
+
+function markPreviewTaggingPending() {
+  previewQuestions.value = previewQuestions.value.map((q) => {
+    if (q.tagging_status === 'done' || q.tagging_status === 'pending') return q
+    return {
+      ...q,
+      tagging_status: 'pending',
+      warnings: [
+        ...(q.warnings ?? []).filter(w => w !== '标签识别中，完成后自动回填'),
+        '标签识别中，完成后自动回填',
+      ],
+    }
+  })
+  emit('tagging-ready', previewQuestions.value)
+}
+
+async function startTagging() {
+  const id = currentParseTaskId()
+  if (!id) {
+    toast.error('没有可打标的识别任务')
+    return
+  }
+  if (taggingStats.value.running) return
+  startingTagging.value = true
+  try {
+    const { data } = await aiTaskApi.startParseTagging(id)
+    if (!data.started) {
+      toast.warning(data.message || '没有待打标的题目')
+      return
+    }
+    presentedParseTaskId.value = id
+    markPreviewTaggingPending()
+    toast.success(data.message || `已开始打标 ${data.started} 道题`)
+    await resumePolling(id)
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error || e?.message || '开始打标失败')
+  } finally {
+    startingTagging.value = false
+  }
+}
+
+async function stopTagging() {
+  const id = currentParseTaskId()
+  if (!id) return
+  stoppingTagging.value = true
+  try {
+    await aiTaskApi.cancelParseTagging(id)
+    stopPolling()
+    const { data } = await aiTaskApi.getParseTask(id)
+    const staged = (data.staged_questions ?? []).filter(s => !s.saved && !s.merged_into)
+    if (staged.length) {
+      applyStagedPreview(staged, id, true)
+    } else {
+      previewQuestions.value = previewQuestions.value.map((q) => (
+        q.tagging_status === 'pending' ? { ...q, tagging_status: 'idle' } : q
+      ))
+      emit('tagging-ready', previewQuestions.value)
+    }
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error || e?.message || '停止打标失败')
+  } finally {
+    stoppingTagging.value = false
+  }
+}
+
+function getTaggingProgress() {
+  const s = taggingStats.value
+  return {
+    running: s.running,
+    pending: s.pending,
+    done: s.done,
+    failed: s.failed,
+    idle: s.idle,
+    total: s.total,
+  }
+}
 
 /** 打标尚未回写：此时卡片上只有 OCR 推断的名称，保存不会带上标签 */
 function cardTaggingPending(q: ParsedQuestion): boolean {
@@ -381,6 +650,8 @@ function parsedStubFromSnapshot(s: any): ParsedQuestion {
     tagging_matches: Array.isArray(s?.taggingMatches) ? s.taggingMatches : [],
     tagging_suggestion_id: s?.taggingSuggestionId || null,
     ai_meta: s?.aiMeta,
+    question_no: s?.question_no ?? null,
+    display_order: typeof s?.display_order === 'number' ? s.display_order : null,
   }
 }
 
@@ -424,6 +695,8 @@ function overlayParsedFromSnapshot(q: ParsedQuestion, s: any): ParsedQuestion {
       ? s.taggingMatches
       : q.tagging_matches,
     knowledge_points: kpFromNodes.length ? kpFromNodes : q.knowledge_points,
+    question_no: s.question_no ?? q.question_no,
+    display_order: typeof s.display_order === 'number' ? s.display_order : q.display_order,
   }
 }
 
@@ -440,6 +713,7 @@ function setSourceFile(file: File) {
   ocrFileName.value = file.name
   sourceKind.value = isPdfFile(file) ? 'pdf' : 'image'
   sourcePreviewUrl.value = URL.createObjectURL(file)
+  leftPaneTab.value = 'source'
   void saveAiSourceFile(file, sourceKind.value)
 }
 
@@ -476,6 +750,8 @@ function clearEditor() {
   ocrMarkdown.value = ''
   jsonImportText.value = ''
   ingestMode.value = 'full'
+  leftPaneTab.value = 'source'
+  if (rightPaneTab.value === 'ocr') rightPaneTab.value = 'source'
   revokeSourcePreview()
 }
 
@@ -600,10 +876,12 @@ async function fetchDocByFileName(fileName?: string): Promise<DocumentMeta | nul
 }
 
 function applyStagedPreview(staged: AiStagedQuestion[], taskId: string, emitReady: boolean) {
-  const questions = staged.map(s => stagedToParsed(s, taskId))
+  const questions = dedupePreviewQuestions(staged.map(s => stagedToParsed(s, taskId)))
   previewQuestions.value = questions
   if (questions[0]) aiResult.value = questions[0]
-  rightPaneTab.value = 'preview'
+  if (rightPaneTab.value !== 'ocr') {
+    rightPaneTab.value = 'preview'
+  }
   if (emitReady) emit('tagging-ready', questions)
 }
 
@@ -626,7 +904,10 @@ async function restorePreviewFromParseTask(taskId: string) {
     applyStagedPreview(staged, taskId, true)
     const taggingPending = staged.some(s => s.tagging_status === 'pending')
     if (taggingPending) {
+      taggingPanelOpen.value = true
       await resumePolling(taskId)
+    } else if (data.pipeline === 'ocr_export') {
+      rightPaneTab.value = 'preview'
     }
   } catch (e) {
     console.warn('[AiRecognizeDialog] 恢复识别预览失败', e)
@@ -701,8 +982,9 @@ function mergeStagedTagging(staged: AiStagedQuestion[], taskId: string) {
 }
 
 function presentParsedQuestions(questions: ParsedQuestion[], message: string, keepPolling = false) {
-  previewQuestions.value = questions
-  aiResult.value = questions[0] ?? null
+  const ordered = dedupePreviewQuestions(sortByPaperQuestionNo(questions, q => q))
+  previewQuestions.value = ordered
+  aiResult.value = ordered[0] ?? null
   parseFailMessage.value = ''
   // 识别完成只结束进度，保留 currentDoc / 试卷信息，避免切回「试卷信息」时表单被卸载清空
   docFlowState.value = 'idle'
@@ -715,7 +997,7 @@ function presentParsedQuestions(questions: ParsedQuestion[], message: string, ke
   pdfFallbackReason.value = ''
   pdfFallbackSubmitting.value = false
   toast.success(message)
-  emit('batch-parsed', questions)
+  emit('batch-parsed', ordered)
 }
 
 function applyAiResult() {
@@ -848,6 +1130,7 @@ async function startFileParse(file: File) {
   }
   const oldSnapshot = await hasUnfinishedSnapshot()
   if (oldSnapshot) {
+    pendingOverwriteSnapshot = oldSnapshot
     pendingUploadAction = () => doStartFileParse(file)
     snapshotOverwriteConfirm.value = true
     return
@@ -870,6 +1153,9 @@ function doStartFileParse(file: File) {
 
 async function executePendingUpload() {
   snapshotOverwriteConfirm.value = false
+  const extraIds = parseTaskIdsFromQuestions(pendingOverwriteSnapshot?.questions)
+  pendingOverwriteSnapshot = null
+  await discardParseStaged(extraIds)
   await clearBatchSnapshot()
   if (pendingUploadAction) {
     pendingUploadAction()
@@ -879,6 +1165,7 @@ async function executePendingUpload() {
 
 function dismissSnapshotOverwrite() {
   pendingUploadAction = null
+  pendingOverwriteSnapshot = null
 }
 
 /** 图片通道：压缩 → 上传（file_type=image，无原始 PDF）→ AI 分类 → 类型确认 */
@@ -1231,6 +1518,10 @@ function stagedToParsed(s: AiStagedQuestion, taskId: string): ParsedQuestion {
     warnings: s.tagging_status === 'pending'
       ? [...(Array.isArray(p.warnings) ? p.warnings : []), '标签识别中，完成后自动回填']
       : (Array.isArray(p.warnings) ? p.warnings : []),
+    question_no: p.question_no != null && String(p.question_no).trim() !== ''
+      ? String(p.question_no).trim()
+      : null,
+    display_order: typeof p.display_order === 'number' ? p.display_order : null,
   }
 }
 
@@ -1251,8 +1542,9 @@ watch(pollTask, async (t) => {
       && (t.pipeline === 'ocr_export' || t.phase === 'ocr_ready')
     ) {
       stopPolling()
+      leftPaneTab.value = 'source'
       rightPaneTab.value = 'ocr'
-      toast.success('OCR 已完成，请复制 Prompt，将 JSON 粘贴到右侧导入')
+      toast.success('OCR 已完成，可在左侧切换查看文本，将 JSON 粘贴到右侧导入')
       docFlowState.value = 'idle'
       return
     }
@@ -1402,6 +1694,12 @@ defineExpose({
   getSourceState: () => sourceState.value,
   getCurrentDoc: () => currentDoc.value,
   getPreviewQuestions: () => previewQuestions.value,
+  getParseTaskId: () => currentParseTaskId(),
+  isTaggingRunning: () => taggingStats.value.running,
+  getTaggingProgress,
+  startTagging,
+  stopTagging,
+  discardParseStaged,
 })
 
 onBeforeUnmount(() => {
@@ -1435,23 +1733,61 @@ onBeforeUnmount(() => {
           <section class="ai-split-pane">
             <header class="ai-split-head">
               <div class="ai-split-title-row">
-                <span class="ai-split-title">{{ showOriginalSource ? '原文' : '智能录入' }}</span>
-                <div class="ai-mode-radios" role="radiogroup" aria-label="录入模式">
-                  <label class="ai-mode-radio">
+                <div
+                  v-if="showOriginalSource"
+                  class="ai-pane-tabs ai-src-tabs"
+                  role="tablist"
+                  aria-label="左侧内容"
+                >
+                  <button
+                    type="button"
+                    role="tab"
+                    class="ai-pane-tab"
+                    :class="{ active: leftPaneTab === 'source' }"
+                    :aria-selected="leftPaneTab === 'source'"
+                    @click="leftPaneTab = 'source'"
+                  >
+                    原文
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    class="ai-pane-tab"
+                    :class="{ active: leftPaneTab === 'ocr' }"
+                    :aria-selected="leftPaneTab === 'ocr'"
+                    :disabled="!ocrMarkdown"
+                    @click="openLeftOcrTab"
+                  >
+                    OCR
+                  </button>
+                </div>
+                <span v-else class="ai-split-title">智能录入</span>
+                <div class="ai-mode-seg" role="radiogroup" aria-label="录入模式">
+                  <label
+                    class="ai-mode-seg-item"
+                    :class="{ active: ingestMode === 'full', disabled: ingestLocked }"
+                  >
                     <input type="radio" v-model="ingestMode" value="full" :disabled="ingestLocked">
                     全自动
                   </label>
-                  <label class="ai-mode-radio">
+                  <label
+                    class="ai-mode-seg-item"
+                    :class="{ active: ingestMode === 'ocr_export', disabled: ingestLocked }"
+                  >
                     <input type="radio" v-model="ingestMode" value="ocr_export" :disabled="ingestLocked">
                     站外结构化
                   </label>
                 </div>
               </div>
-              <div class="ai-split-head-actions">
-                <button type="button" class="ai-icon-btn" @click="copyPrompt">{{ promptCopied ? '已复制' : '复制 Prompt' }}</button>
-                <button type="button" class="ai-icon-btn" :disabled="!ocrMarkdown" @click="openOcrTab">查看 OCR</button>
-                <button type="button" class="ai-icon-btn" @click="fileInputRef?.click()">上传文件</button>
-                <button type="button" class="ai-icon-btn" @click="clearEditor">清空</button>
+              <div class="ai-tool-row">
+                <button type="button" class="ai-tool-btn is-accent" @click="copyPrompt">
+                  <AppIcon name="copy" :size="13" />
+                  {{ promptCopied ? '已复制' : '复制 Prompt' }}
+                </button>
+                <button type="button" class="ai-tool-btn is-muted" @click="clearEditor">
+                  <AppIcon name="trash" :size="13" />
+                  清空
+                </button>
               </div>
             </header>
             <div
@@ -1467,11 +1803,26 @@ onBeforeUnmount(() => {
                 class="ai-drop-empty"
                 @click="fileInputRef?.click()"
               >
-                <AppIcon name="upload" :size="32" />
-                <p>将 PDF 或图片拖到此处，或点击上传</p>
-                <span>全自动会继续切题；站外结构化只做 OCR，由你导入 JSON</span>
+                <div class="ai-drop-glyph">
+                  <AppIcon name="upload" :size="26" />
+                </div>
+                <p>将 PDF 或图片拖到此处</p>
+                <span>全自动会继续切题；站外结构化只做 OCR。复制 Prompt 后与 OCR 一并发给外部模型，LaTeX 反斜杠须在 JSON 里双写</span>
               </div>
-              <div v-if="showOriginalSource" class="ai-source-preview">
+              <div
+                v-else-if="leftPaneTab === 'ocr'"
+                class="ai-ocr-view"
+              >
+                <header class="ai-ocr-view-head">
+                  <span>OCR 文本</span>
+                  <button type="button" class="ai-tool-btn" :disabled="!ocrMarkdown" @click="copyOcrMarkdown">
+                    <AppIcon name="copy" :size="13" />
+                    {{ ocrCopied ? '已复制' : '复制全文' }}
+                  </button>
+                </header>
+                <pre class="ai-ocr-pre">{{ ocrMarkdown || '识别完成后将在此显示 OCR 文本。' }}</pre>
+              </div>
+              <div v-else class="ai-source-preview">
                 <iframe
                   v-if="sourceKind === 'pdf'"
                   class="ai-source-frame"
@@ -1569,7 +1920,12 @@ onBeforeUnmount(() => {
           <!-- 右侧：试卷信息 / 题目预览 可切换 -->
           <section class="ai-split-pane">
             <header class="ai-split-head">
-              <div class="ai-pane-tabs" :class="{ 'is-three': showOcrTab }" role="tablist" aria-label="右侧内容">
+              <div
+                class="ai-pane-tabs"
+                :class="{ 'is-three': showJsonTab }"
+                role="tablist"
+                aria-label="右侧内容"
+              >
                 <button
                   type="button"
                   role="tab"
@@ -1592,7 +1948,7 @@ onBeforeUnmount(() => {
                   <span v-if="previewCount > 0" class="ai-tab-count">{{ previewCount }}</span>
                 </button>
                 <button
-                  v-if="showOcrTab"
+                  v-if="showJsonTab"
                   type="button"
                   role="tab"
                   class="ai-pane-tab"
@@ -1600,7 +1956,7 @@ onBeforeUnmount(() => {
                   :aria-selected="rightPaneTab === 'ocr'"
                   @click="rightPaneTab = 'ocr'"
                 >
-                  OCR 文本
+                  外部 JSON
                 </button>
               </div>
               <div class="ai-split-head-actions">
@@ -1639,15 +1995,95 @@ onBeforeUnmount(() => {
                 >重新识别来源</button>
               </div>
               <div v-show="rightPaneTab === 'preview'" class="ai-preview-pane">
-                <button
-                  v-if="currentDoc && sourceTabHint"
-                  type="button"
-                  class="ai-source-summary"
-                  @click="rightPaneTab = 'source'"
+                <div
+                  v-if="(currentDoc && sourceTabHint) || showTaggingAction"
+                  class="ai-preview-toolbar"
                 >
-                  <span>{{ sourceTabHint }}</span>
-                  <span>编辑</span>
-                </button>
+                  <button
+                    v-if="currentDoc && sourceTabHint"
+                    type="button"
+                    class="ai-source-summary"
+                    @click="rightPaneTab = 'source'"
+                  >
+                    <span>{{ sourceTabHint }}</span>
+                  </button>
+                  <div class="ai-preview-toolbar-actions">
+                    <button
+                      v-if="showTaggingAction"
+                      type="button"
+                      class="ai-preview-action"
+                      :class="{ 'is-active': taggingPanelVisible }"
+                      @click="toggleTaggingPanel"
+                    >
+                      {{ taggingStats.running
+                        ? `打标中 ${taggingStats.done + taggingStats.failed}/${taggingStats.total}`
+                        : '智能打标' }}
+                      <span v-if="taggingStats.pending > 0" class="ai-tab-count">{{ taggingStats.pending }}</span>
+                    </button>
+                    <button
+                      v-if="currentDoc && sourceTabHint"
+                      type="button"
+                      class="ai-preview-action"
+                      @click="rightPaneTab = 'source'"
+                    >
+                      编辑
+                    </button>
+                  </div>
+                </div>
+                <div v-if="taggingPanelVisible" class="ai-tagging-inline">
+                  <section class="ai-inset-card">
+                    <span class="ai-inset-label">智能打标</span>
+                    <template v-if="taggingStats.running">
+                      <p class="ai-inset-hint">
+                        正在打标 {{ taggingStats.done + taggingStats.failed }} / {{ taggingStats.total }}
+                        （进行中 {{ taggingStats.pending }} 题）
+                      </p>
+                      <div class="ai-tagging-bar">
+                        <div
+                          class="ai-tagging-bar-fill"
+                          :style="{ width: Math.round(((taggingStats.done + taggingStats.failed) / Math.max(taggingStats.total, 1)) * 100) + '%' }"
+                        />
+                      </div>
+                      <p class="ai-inset-hint">离开录入界面将终止未完成的打标。</p>
+                    </template>
+                    <template v-else-if="taggingStats.total > 0 && taggingStats.done === taggingStats.total">
+                      <p class="ai-inset-hint">{{ taggingStats.done }} 道题已打标完成，可在下方卡片核对后全部保存。</p>
+                    </template>
+                    <template v-else>
+                      <p class="ai-inset-hint">
+                        已导入 {{ taggingStats.total }} 道题。打标会填写知识点、章节与通法，需消耗 AI 额度；只有点击开始后才会执行。
+                      </p>
+                      <p v-if="taggingStats.failed > 0" class="ai-inset-hint">
+                        其中 {{ taggingStats.failed }} 题上次打标失败，可重新开始。
+                      </p>
+                      <p v-if="taggingStats.done > 0" class="ai-inset-hint">
+                        已完成 {{ taggingStats.done }} 题，开始后只会处理尚未打标的题目。
+                      </p>
+                    </template>
+                  </section>
+                  <AppButton
+                    v-if="taggingStats.running"
+                    class="ai-import-cta"
+                    variant="outline"
+                    block
+                    :loading="stoppingTagging"
+                    :disabled="stoppingTagging"
+                    @click="stopTagging"
+                  >
+                    停止打标
+                  </AppButton>
+                  <AppButton
+                    v-else
+                    class="ai-import-cta"
+                    variant="primary"
+                    block
+                    :loading="startingTagging"
+                    :disabled="!taggingStats.startable || startingTagging"
+                    @click="startTagging"
+                  >
+                    {{ taggingStats.failed > 0 && taggingStats.idle === 0 ? '重新打标失败项' : '开始打标' }}
+                  </AppButton>
+                </div>
                 <div
                   v-if="previewCount === 0"
                   class="ai-preview-empty"
@@ -1661,18 +2097,24 @@ onBeforeUnmount(() => {
                 </div>
                 <div v-else class="ai-q-card-list">
                   <p class="ai-preview-hint">点卡片进入该题编辑；校对完成后可一次性全部保存</p>
+                  <p
+                    v-if="showTaggingAction && taggingStats.startable && !taggingStats.running"
+                    class="ai-preview-hint"
+                  >
+                    题目已导入，尚未打标。请点击「智能打标」开始，系统不会自动打标。
+                  </p>
                   <article
                     v-for="(card, idx) in previewCards"
-                    :key="idx"
+                    :key="card.ai_meta?.staged_index || card.origIndex"
                     class="ai-q-card"
-                    :class="{ 'is-saved': cardSaved(idx) }"
+                    :class="{ 'is-saved': cardSaved(card.origIndex) }"
                     role="button"
                     tabindex="0"
-                    @click="openPreviewCard(idx)"
-                    @keydown.enter.prevent="openPreviewCard(idx)"
+                    @click="openPreviewCard(card.origIndex)"
+                    @keydown.enter.prevent="openPreviewCard(card.origIndex)"
                   >
-                    <span class="ai-q-index">第 {{ idx + 1 }} 题</span>
-                    <span v-if="cardSaved(idx)" class="ai-q-saved">已保存</span>
+                    <span class="ai-q-index">{{ previewQuestionLabel(card, idx) }}</span>
+                    <span v-if="cardSaved(card.origIndex)" class="ai-q-saved">已保存</span>
                     <div class="ai-q-card-header">
                       <div class="ai-q-card-tags">
                         <AppBadge :color="typeBadgeColor(cardQuestionType(card))" class="flex-shrink-0">
@@ -1714,31 +2156,26 @@ onBeforeUnmount(() => {
                 </div>
               </div>
               <div v-show="rightPaneTab === 'ocr'" class="ai-ocr-pane">
-                <div class="ai-ocr-toolbar">
-                  <span class="ai-empty-kicker">OCR 文本</span>
-                  <button type="button" class="ai-icon-btn" :disabled="!ocrMarkdown" @click="copyOcrMarkdown">
-                    {{ ocrCopied ? '已复制全文' : '复制全文' }}
-                  </button>
-                </div>
-                <pre class="ai-ocr-pre">{{ ocrMarkdown || '上传文件并完成 OCR 后，将在此显示识别文本。' }}</pre>
-                <template v-if="ingestMode === 'ocr_export'">
-                  <label class="ai-empty-kicker" for="ai-json-import">粘贴外部模型 JSON</label>
+                <section class="ai-inset-card">
+                  <label class="ai-inset-label" for="ai-json-import">粘贴外部模型 JSON</label>
+                  <p class="ai-inset-hint">须为可 parse 的 JSON；公式只用 $...$，LaTeX 命令写成 \\frac、\\odot（导入时会再修一层非法转义）</p>
                   <textarea
                     id="ai-json-import"
                     v-model="jsonImportText"
-                    class="ai-json-import"
+                    class="ai-json-import ai-json-import--fill"
                     placeholder='{"questions":[...]} 或题目数组'
                   />
-                  <AppButton
-                    variant="primary"
-                    size="sm"
-                    :loading="importingJson"
-                    :disabled="!jsonImportText.trim() || !pollTaskId"
-                    @click="importExternalJson"
-                  >
-                    导入题目
-                  </AppButton>
-                </template>
+                </section>
+                <AppButton
+                  class="ai-import-cta"
+                  variant="primary"
+                  block
+                  :loading="importingJson"
+                  :disabled="!jsonImportText.trim() || !pollTaskId"
+                  @click="importExternalJson"
+                >
+                  导入题目
+                </AppButton>
               </div>
             </div>
           </section>
@@ -1815,8 +2252,8 @@ onBeforeUnmount(() => {
   min-height: 0;
   display: grid;
   grid-template-columns: minmax(0, 1.08fr) minmax(280px, 0.92fr);
-  gap: 14px;
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  gap: 16px;
+  font-family: var(--font-cn-isolated, -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif);
 }
 
 @container ai-workspace (max-width: 920px) {
@@ -1864,12 +2301,10 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   background: var(--bg-card, #fff);
-  border: 1px solid color-mix(in srgb, var(--text-primary, #1d1d1f) 8%, transparent);
-  border-radius: 18px;
+  border: 1px solid var(--divider, rgba(0, 0, 0, 0.06));
+  border-radius: var(--radius-xl, 22px);
   overflow: hidden;
-  box-shadow:
-    0 1px 2px rgba(0, 0, 0, 0.03),
-    0 10px 28px rgba(0, 0, 0, 0.04);
+  box-shadow: var(--shadow-sm);
 }
 
 .ai-split-head {
@@ -1877,47 +2312,125 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  padding: 10px 12px;
-  background: color-mix(in srgb, var(--bg-card, #fff) 72%, transparent);
-  border-bottom: 1px solid color-mix(in srgb, var(--text-primary, #1d1d1f) 6%, transparent);
-  backdrop-filter: saturate(180%) blur(16px);
+  gap: 12px;
+  padding: 12px 14px;
+  background: color-mix(in srgb, var(--bg-card, #fff) 78%, transparent);
+  border-bottom: 1px solid var(--divider, rgba(0, 0, 0, 0.06));
+  backdrop-filter: var(--blur-nav, saturate(180%) blur(20px));
+  -webkit-backdrop-filter: var(--blur-nav, saturate(180%) blur(20px));
   flex-wrap: wrap;
 }
 
 .ai-split-title {
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 650;
-  letter-spacing: -0.01em;
+  letter-spacing: -0.022em;
   color: var(--text-primary);
 }
 
 .ai-split-title-row {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   flex-wrap: wrap;
   min-width: 0;
 }
 
-.ai-mode-radios {
-  display: inline-flex;
-  gap: 8px;
+.ai-mode-seg {
+  display: inline-grid;
+  grid-template-columns: 1fr 1fr;
+  padding: 2px;
+  background: rgba(118, 118, 128, 0.12);
+  border-radius: 9px;
 }
 
-.ai-mode-radio {
+.ai-mode-seg-item {
+  position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  justify-content: center;
+  min-height: 26px;
+  padding: 0 12px;
+  border-radius: 7px;
   font-size: 12px;
   font-weight: 600;
+  letter-spacing: -0.01em;
   color: var(--text-secondary, #6e6e73);
   cursor: pointer;
   user-select: none;
+  white-space: nowrap;
 }
 
-.ai-mode-radio input {
+.ai-mode-seg-item.active {
+  color: var(--text-primary);
+  background: var(--bg-card, #fff);
+  box-shadow:
+    0 1px 1px rgba(0, 0, 0, 0.04),
+    0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+.ai-mode-seg-item.disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.ai-mode-seg-item input {
+  position: absolute;
+  inset: 0;
   margin: 0;
+  opacity: 0;
+  cursor: inherit;
+}
+
+.ai-tool-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.ai-tool-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 28px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: rgba(118, 118, 128, 0.12);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  cursor: pointer;
+}
+
+.ai-tool-btn:hover:not(:disabled) {
+  background: rgba(118, 118, 128, 0.18);
+}
+
+.ai-tool-btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.ai-tool-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.ai-tool-btn.is-accent {
+  background: var(--accent-light, rgba(0, 113, 227, 0.1));
+  color: var(--accent, #0071e3);
+}
+
+.ai-tool-btn.is-accent:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent, #0071e3) 16%, transparent);
+}
+
+.ai-tool-btn.is-muted {
+  color: var(--text-secondary, #6e6e73);
 }
 
 .ai-drop-empty {
@@ -1927,22 +2440,35 @@ onBeforeUnmount(() => {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  padding: 24px;
+  gap: 10px;
+  padding: 32px 24px;
   text-align: center;
   color: var(--text-secondary, #6e6e73);
   cursor: pointer;
+  background:
+    radial-gradient(ellipse at 50% 0%, color-mix(in srgb, var(--accent, #0071e3) 6%, transparent), transparent 62%);
+}
+
+.ai-drop-glyph {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 16px;
+  background: var(--accent-light, rgba(0, 113, 227, 0.1));
+  color: var(--accent, #0071e3);
 }
 
 .ai-drop-empty p {
   margin: 0;
-  font-size: 14px;
-  font-weight: 600;
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
   color: var(--text-primary);
 }
 
 .ai-drop-empty span {
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.5;
   max-width: 280px;
 }
@@ -1950,59 +2476,156 @@ onBeforeUnmount(() => {
 .ai-ocr-pane {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 12px;
   height: 100%;
   min-height: 0;
   padding: 12px;
+  background: var(--bg-primary, #f5f5f7);
+  overflow: auto;
 }
 
-.ai-ocr-toolbar {
+.ai-inset-card {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg-card, #fff);
+  border-radius: 12px;
+  box-shadow: var(--shadow-xs);
+  overflow: hidden;
+}
+
+.ai-ocr-pane .ai-inset-card:first-child {
+  flex: 1;
+}
+
+.ai-inset-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  padding: 10px 12px 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary, #6e6e73);
+}
+
+.ai-inset-label {
+  display: block;
+  padding: 12px 14px 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary, #6e6e73);
+}
+
+.ai-inset-hint {
+  margin: 0;
+  padding: 0 14px 8px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-muted, #8e8e93);
+}
+
+.ai-tagging-bar {
+  margin: 4px 14px 10px;
+  height: 6px;
+  border-radius: 99px;
+  background: rgba(118, 118, 128, 0.16);
+  overflow: hidden;
+}
+
+.ai-tagging-bar-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent, #0071e3);
+  transition: width 0.25s ease;
+}
+
+pre.ai-ocr-pre,
+.ai-json-import {
+  font-family:
+    var(--font-mono, "SF Mono", Menlo, Consolas),
+    "PingFang SC",
+    "Hiragino Sans GB",
+    "Noto Sans SC",
+    "Microsoft YaHei",
+    monospace;
+  font-size: 13px;
+  font-variant-ligatures: none;
+  line-height: 1.55;
+  color: var(--text-primary);
 }
 
 .ai-ocr-pre {
   flex: 1;
   min-height: 140px;
   margin: 0;
-  padding: 10px 12px;
+  padding: 4px 14px 16px;
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
-  font-size: 12px;
-  line-height: 1.55;
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--text-primary, #1d1d1f) 4%, transparent);
-  color: var(--text-primary);
+  border: 0;
+  background: transparent;
 }
 
 .ai-json-import {
-  min-height: 120px;
+  min-height: 132px;
   resize: vertical;
-  padding: 10px 12px;
-  border-radius: 10px;
-  border: 1px solid color-mix(in srgb, var(--text-primary, #1d1d1f) 12%, transparent);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
-  line-height: 1.5;
+  margin: 0;
+  padding: 0 14px 14px;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  outline: none;
+}
+
+.ai-json-import--fill {
+  flex: 1;
+  min-height: 220px;
+  resize: none;
+}
+
+.ai-import-cta {
+  flex-shrink: 0;
+}
+
+.ai-import-cta :deep(.btn) {
+  min-height: 44px;
+  border-radius: 12px;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.022em;
 }
 
 .ai-pane-tabs.is-three {
   grid-template-columns: 1fr 1fr 1fr;
-  max-width: 360px;
+  max-width: 400px;
+}
+
+.ai-pane-tabs.is-four {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  max-width: 560px;
+}
+
+.ai-pane-tabs.is-four .ai-pane-tab {
+  font-size: 12px;
+  padding: 5px 4px;
 }
 
 .ai-pane-tabs {
   display: inline-grid;
   grid-template-columns: 1fr 1fr;
-  min-width: min(210px, 100%);
-  flex: 1 1 180px;
-  max-width: 280px;
-  padding: 3px;
-  background: color-mix(in srgb, var(--text-primary, #1d1d1f) 7%, transparent);
-  border-radius: 10px;
+  min-width: min(240px, 100%);
+  flex: 1 1 200px;
+  max-width: 320px;
+  padding: 2px;
+  background: rgba(118, 118, 128, 0.12);
+  border-radius: 9px;
+}
+
+.ai-src-tabs {
+  flex: 0 0 auto;
+  min-width: 148px;
+  max-width: 168px;
 }
 
 .ai-pane-tab {
@@ -2013,22 +2636,26 @@ onBeforeUnmount(() => {
   min-height: 28px;
   padding: 0 12px;
   border: 0;
-  border-radius: 8px;
+  border-radius: 7px;
   background: transparent;
   color: var(--text-secondary, #6e6e73);
   font-size: 12px;
   font-weight: 600;
   letter-spacing: -0.01em;
   cursor: pointer;
-  transition: background 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
 }
 
 .ai-pane-tab.active {
   color: var(--text-primary, #1d1d1f);
   background: var(--bg-card, #fff);
   box-shadow:
-    0 1px 2px rgba(0, 0, 0, 0.08),
-    0 2px 8px rgba(0, 0, 0, 0.05);
+    0 1px 1px rgba(0, 0, 0, 0.04),
+    0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+.ai-pane-tab:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .ai-tab-count {
@@ -2043,8 +2670,17 @@ onBeforeUnmount(() => {
   line-height: 16px;
 }
 
+[data-theme='dark'] .ai-mode-seg,
+[data-theme='dark'] .ai-pane-tabs,
+[data-theme='dark'] .ai-tool-btn {
+  background: rgba(118, 118, 128, 0.24);
+}
+
+[data-theme='dark'] .ai-mode-seg-item.active,
 [data-theme='dark'] .ai-pane-tab.active {
-  background: var(--bg-elevated, #3a3a3c);
+  background: #636366;
+  color: #fff;
+  box-shadow: none;
 }
 
 [data-theme='dark'] .ai-progress-strip {
@@ -2172,7 +2808,7 @@ onBeforeUnmount(() => {
 
 .ai-preview-body {
   overflow: auto;
-  background: var(--bg-muted, #f5f5f7);
+  background: var(--bg-primary, #f5f5f7);
 }
 
 .ai-source-pane,
@@ -2192,7 +2828,9 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  margin: 12px 14px 0;
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
   padding: 10px 12px;
   border: 0;
   border-radius: 12px;
@@ -2205,9 +2843,47 @@ onBeforeUnmount(() => {
   text-align: left;
 }
 
-.ai-source-summary span:last-child {
+.ai-preview-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 12px 14px 0;
+}
+
+.ai-preview-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.ai-preview-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  border-radius: 10px;
+  padding: 8px 12px;
+  background: var(--bg-card, #fff);
   color: var(--accent, #0071e3);
-  font-weight: 550;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ai-preview-action.is-active {
+  background: color-mix(in srgb, var(--accent, #0071e3) 12%, #fff);
+}
+
+.ai-tagging-inline {
+  margin: 10px 14px 0;
+}
+
+.ai-tagging-inline .ai-import-cta {
+  margin-top: 10px;
 }
 
 .ai-reclassify-link {
@@ -2252,7 +2928,32 @@ onBeforeUnmount(() => {
 .ai-source-preview {
   flex: 1;
   min-height: 0;
-  background: var(--bg-muted, #e8eaed);
+  overflow: hidden;
+  background: #e8eaed;
+}
+
+.ai-ocr-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-primary, #f5f5f7);
+}
+
+.ai-ocr-view-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 10px 12px 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary, #6e6e73);
+}
+
+.ai-ocr-view .ai-ocr-pre {
+  min-height: 0;
 }
 
 .ai-source-frame {
@@ -2321,9 +3022,9 @@ onBeforeUnmount(() => {
 .ai-q-card {
   position: relative;
   background: var(--bg-card, #fff);
-  border-radius: 16px;
-  border: 1px solid color-mix(in srgb, var(--text-primary, #1d1d1f) 6%, transparent);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  border-radius: 18px;
+  border: 0;
+  box-shadow: var(--shadow-xs, 0 1px 2px rgba(0, 0, 0, 0.04));
   cursor: pointer;
   transition: transform 0.18s ease, box-shadow 0.18s ease;
 }

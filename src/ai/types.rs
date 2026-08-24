@@ -35,13 +35,34 @@ mod llm_null {
         let raw: Option<Vec<Option<T>>> = Option::deserialize(deserializer)?;
         Ok(raw.map(|arr| arr.into_iter().flatten().collect()))
     }
+
+    /// 题号可能是 `"14"` 或 JSON 数字 `14`。
+    pub fn opt_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let v = Option::<serde_json::Value>::deserialize(deserializer)?;
+        Ok(match v {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(s)) => {
+                let t = s.trim();
+                if t.is_empty() {
+                    None
+                } else {
+                    Some(t.to_string())
+                }
+            }
+            Some(serde_json::Value::Number(n)) => Some(n.to_string()),
+            Some(other) => other.as_str().map(str::to_string),
+        })
+    }
 }
 
 /// 多小题答案单元（解答题）
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SubAnswer {
     /// 小题序号，从 1 开始
-    #[serde(default)]
+    #[serde(default, alias = "id")]
     pub sub_id: i32,
     /// 该小题答案，含 $...$ 公式与 ![配图](IMAGE_PLACEHOLDER_N)
     #[serde(default, deserialize_with = "llm_null::as_default")]
@@ -126,7 +147,7 @@ impl ParsedAnswer {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ParsedQuestion {
     /// "choice" | "fill" | "solution"
-    #[serde(default, deserialize_with = "llm_null::as_default")]
+    #[serde(default, alias = "type", deserialize_with = "llm_null::as_default")]
     pub question_type: String,
     /// 选择题多选时为 "multi"
     pub sub_type: Option<String>,
@@ -169,7 +190,7 @@ pub struct ParsedQuestion {
 
     // ── V2.1.1 批量录题扩展（全部可选，向后兼容） ──
     /// 题号（如 "17(2)" / "1" / "一、1"），只属于 PaperQuestion/CollectionQuestion
-    #[serde(default)]
+    #[serde(default, deserialize_with = "llm_null::opt_string")]
     pub question_no: Option<String>,
     /// 展示顺序（缺省由 Worker 按序编号）
     #[serde(default)]
@@ -337,5 +358,50 @@ mod tests {
         assert_eq!(opts.len(), 1);
         assert_eq!(opts[0].label, "A");
         assert_eq!(opts[0].content, "");
+    }
+
+    #[test]
+    fn test_doubao_shaped_question_deserializes() {
+        let raw = serde_json::json!({
+            "question_type": "choice",
+            "sub_type": "multi",
+            "difficulty": null,
+            "stem": "曲线 C 过原点",
+            "options": [
+                {"label": "A", "content": "$a=-2$"},
+                {"label": "B", "content": "点在 C 上"}
+            ],
+            "correct_answer": {"kind": "choice", "value": {"options": ["A", "B"]}},
+            "analysis": [{"title": "解析", "content": "代入原点"}],
+            "knowledge_points": ["曲线与方程"],
+            "confidence": 1.0,
+            "warnings": [],
+            "image_placeholders": [],
+            "image_urls": [],
+            "question_no": "11",
+            "display_order": 1,
+            "chapter_path": ["解析几何"],
+            "solution_methods": [{"name": "特例法", "confidence": 0.8}]
+        });
+        let q: ParsedQuestion = serde_json::from_value(raw).expect("豆包 Stage2 JSON 应能反序列化");
+        assert_eq!(q.question_type, "choice");
+        assert_eq!(q.sub_type.as_deref(), Some("multi"));
+        assert_eq!(q.question_no.as_deref(), Some("11"));
+        assert!(matches!(
+            q.correct_answer,
+            Some(ParsedAnswer::Choice { ref options }) if options == &["A".to_string(), "B".to_string()]
+        ));
+    }
+
+    #[test]
+    fn test_question_no_accepts_json_number() {
+        let raw = serde_json::json!({
+            "question_type": "fill",
+            "stem": "填空",
+            "analysis": [],
+            "question_no": 14
+        });
+        let q: ParsedQuestion = serde_json::from_value(raw).expect("题号数字应能反序列化");
+        assert_eq!(q.question_no.as_deref(), Some("14"));
     }
 }

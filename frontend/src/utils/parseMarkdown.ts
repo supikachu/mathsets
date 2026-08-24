@@ -348,11 +348,119 @@ export function restoreLatexFromJsonControls(s: string): string {
   return s
     .replace(/\u000C/g, '\\f')
     .replace(/\u0008/g, '\\b')
+    .replace(/\t/g, '\\t')
     .replace(/[⬆↑⇧]\s*rac/g, '\\frac')
 }
 
+/** 豆包常把 `\therefore` 写成 `$$\\(\therefore\)`；数学模式里去掉 `\(` `\)`，并改成 `$`/`$$`。 */
+export function normalizeLlmLatex(s: string): string {
+  let t = s
+  for (;;) {
+    const n = t
+      .replace(/\\\\\(/g, '\\(')
+      .replace(/\\\\\)/g, '\\)')
+      .replace(/\\\\\[/g, '\\[')
+      .replace(/\\\\\]/g, '\\]')
+    if (n === t) break
+    t = n
+  }
+  t = t.replace(/\$\$([\s\S]+?)\$\$/g, (_m, inner: string) => `$$${inner.replace(/\\[()[\]]/g, '')}$$`)
+  t = t.replace(/\$([^$]+)\$/g, (_m, inner: string) => `$${inner.replace(/\\[()[\]]/g, '')}$`)
+  t = t.replace(/\\\[([\s\S]*?)\\\]/g, (_m, inner: string) => `$$${inner}$$`)
+  t = t.replace(/\\\(([\s\S]*?)\\\)/g, (_m, inner: string) => `$${inner}$`)
+  return t
+}
+
 export function sanitizeQuestionMarkup(s: string): string {
-  return htmlTablesToMarkdown(unescapeLiteralNewlines(restoreLatexFromJsonControls(s)))
+  return normalizeLlmLatex(htmlTablesToMarkdown(unescapeLiteralNewlines(restoreLatexFromJsonControls(s))))
+}
+
+/** GFM 分隔行 `| --- | --- |` */
+function isMarkdownTableSep(line: string): boolean {
+  return /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line)
+}
+
+function splitMarkdownTableRow(line: string): string[] {
+  const trimmed = line.trim().replace(/^\|/, '').replace(/\|$/, '')
+  return trimmed.split('|').map((c) => c.trim())
+}
+
+/** 至少两列的 `| a | b |` 行（不含分隔行） */
+function isMarkdownTableRow(line: string): boolean {
+  const t = line.trim()
+  if (!/^\|.*\|\s*$/.test(t) || isMarkdownTableSep(t)) return false
+  return splitMarkdownTableRow(t).length >= 2
+}
+
+function looksLikeTableHeader(cells: string[]): boolean {
+  return cells.some((c) => /[\u4e00-\u9fffA-Za-z]/.test(c.replace(/\$/g, '')))
+}
+
+/**
+ * 把 Markdown 管道表格转成 HTML。
+ * 站外模型常省略 GFM 表头分隔行，只输出连续 `| a | b |`，这里同样识别。
+ */
+export function renderMarkdownTables(html: string): string {
+  const lines = html.split('\n')
+  const out: string[] = []
+  const cell = (text: string, tag: 'th' | 'td') => `<${tag}>${text}</${tag}>`
+  const emitTable = (header: string[] | null, body: string[][]) => {
+    let table = '<table class="latex-table">'
+    if (header) {
+      table += `<thead><tr>${header.map((c) => cell(c, 'th')).join('')}</tr></thead>`
+    }
+    table += '<tbody>'
+    for (const row of body) {
+      table += `<tr>${row.map((c) => cell(c, 'td')).join('')}</tr>`
+    }
+    table += '</tbody></table>'
+    out.push(table)
+  }
+
+  let i = 0
+  while (i < lines.length) {
+    if (isMarkdownTableRow(lines[i])) {
+      const first = splitMarkdownTableRow(lines[i])
+      let j = i + 1
+      let hasSep = false
+      if (j < lines.length && isMarkdownTableSep(lines[j])) {
+        hasSep = true
+        j++
+      }
+      const body: string[][] = []
+      while (j < lines.length) {
+        if (isMarkdownTableSep(lines[j])) {
+          j++
+          continue
+        }
+        if (isMarkdownTableRow(lines[j])) {
+          const row = splitMarkdownTableRow(lines[j])
+          if (Math.abs(row.length - first.length) <= 1) {
+            body.push(row)
+            j++
+            continue
+          }
+        }
+        if (!lines[j].trim() && j + 1 < lines.length && isMarkdownTableRow(lines[j + 1])) {
+          j++
+          continue
+        }
+        break
+      }
+      if (hasSep || body.length >= 1) {
+        if (hasSep || looksLikeTableHeader(first)) {
+          emitTable(first, body)
+        } else {
+          emitTable(null, [first, ...body])
+        }
+        i = j
+        continue
+      }
+    }
+    out.push(lines[i])
+    i++
+  }
+  return out.join('\n')
 }
 
 /** 剥离选择题题干末尾残留的 A/B/C/D 选项块（与后端 strip_options_residue_from_stem 对齐） */

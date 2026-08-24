@@ -9,7 +9,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, watch } from 'vue'
 import katex from 'katex'
-import { sanitizeQuestionMarkup } from '@/utils/parseMarkdown'
+import { renderMarkdownTables, sanitizeQuestionMarkup } from '@/utils/parseMarkdown'
 
 export interface ImageConfig {
   width?: number
@@ -320,22 +320,39 @@ function processImgRow(html: string, store: string[]): string {
 }
 
 /**
- * 清除元素前后所有连续的 <br> 兄弟节点。
+ * 纯空白文本节点（含 ![](url) 后误敲的空格）。
+ * 判定独立成行时必须跳过，否则 nextSibling 是空格而非 BR，会被误判为行内图。
+ */
+function isWhitespaceText(n: Node | null): boolean {
+  return !!n && n.nodeType === Node.TEXT_NODE && !n.textContent?.trim()
+}
+
+function skipWhitespaceSiblings(n: Node | null, dir: 'prev' | 'next'): Node | null {
+  let cur = n
+  while (cur && isWhitespaceText(cur)) {
+    cur = dir === 'prev' ? cur.previousSibling : cur.nextSibling
+  }
+  return cur
+}
+
+/**
+ * 清除元素前后所有连续的 <br> 与纯空白文本兄弟节点。
  *
  * 用于后处理阶段：图片或图组容器前后的 <br> 会与 display:block 的元素
  * 叠加产生巨大空白（<br> 换行约 25px + block 隐式换行约 25px + margin 12px ≈ 62px）。
+ * 同时清掉 `![](url) ` 残留空格，避免块级图前后多出空隙。
  *
  * 抽取为独立函数，供「带配置图片」「无配置图片」「图组容器」共用。
  */
 function clearAdjacentBR(el: Node): void {
   let p = el.previousSibling
-  while (p && p.nodeName === 'BR') {
+  while (p && (p.nodeName === 'BR' || isWhitespaceText(p))) {
     const toRemove = p
     p = p.previousSibling
     toRemove.remove()
   }
   let n = el.nextSibling
-  while (n && n.nodeName === 'BR') {
+  while (n && (n.nodeName === 'BR' || isWhitespaceText(n))) {
     const toRemove = n
     n = n.nextSibling
     toRemove.remove()
@@ -360,44 +377,6 @@ function renderKatex(formula: string, displayMode: boolean): string {
   } catch {
     return `<span class="katex-error">${escapeHtml(formula)}</span>`
   }
-}
-
-function renderMarkdownTables(html: string): string {
-  const lines = html.split('\n')
-  const out: string[] = []
-  const isSep = (line: string) =>
-    /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line)
-  const isRow = (line: string) => /^\s*\|.*\|\s*$/.test(line)
-  const splitRow = (line: string) => {
-    const trimmed = line.trim().replace(/^\|/, '').replace(/\|$/, '')
-    return trimmed.split('|').map((c) => c.trim())
-  }
-
-  let i = 0
-  while (i < lines.length) {
-    if (i + 1 < lines.length && isRow(lines[i]) && isSep(lines[i + 1])) {
-      const header = splitRow(lines[i])
-      i += 2
-      const body: string[][] = []
-      while (i < lines.length && isRow(lines[i]) && !isSep(lines[i])) {
-        body.push(splitRow(lines[i]))
-        i++
-      }
-      const cell = (text: string, tag: 'th' | 'td') => `<${tag}>${text}</${tag}>`
-      let table = '<table class="latex-table"><thead><tr>'
-      table += header.map((c) => cell(c, 'th')).join('')
-      table += '</tr></thead><tbody>'
-      for (const row of body) {
-        table += `<tr>${row.map((c) => cell(c, 'td')).join('')}</tr>`
-      }
-      table += '</tbody></table>'
-      out.push(table)
-      continue
-    }
-    out.push(lines[i])
-    i++
-  }
-  return out.join('\n')
 }
 
 function render() {
@@ -493,8 +472,10 @@ function render() {
     }
 
     // 无配置图片：判定 block/inline
-    const prev = img.previousSibling
-    const next = img.nextSibling
+    // 跳过纯空白文本：`![](url) ` 后的空格会变成 text 节点，
+    // 若直接看 nextSibling 会把独立成行的配图误判为 img-inline（1.5em 小图且无点击态）
+    const prev = skipWhitespaceSiblings(img.previousSibling, 'prev')
+    const next = skipWhitespaceSiblings(img.nextSibling, 'next')
     const isBlock =
       (!prev || (prev.nodeName === 'BR')) &&
       (!next || (next.nodeName === 'BR'))
@@ -569,11 +550,13 @@ onBeforeUnmount(() => {
 }
 
 .latex-render .latex-table {
+  display: table;
   border-collapse: collapse;
   margin: 10px 0;
   font-size: 13px;
   line-height: 1.45;
   max-width: 100%;
+  overflow-x: auto;
 }
 
 .latex-render .latex-table th,

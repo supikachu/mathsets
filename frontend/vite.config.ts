@@ -31,6 +31,8 @@ export default defineConfig({
       '/api': {
         target: 'http://127.0.0.1:3000',
         changeOrigin: true,
+        timeout: 180000,
+        proxyTimeout: 180000,
       },
       // 用户头像等上传文件 — 直接由后端 ServeDir 提供
       '/uploads': {
