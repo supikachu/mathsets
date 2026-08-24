@@ -43,6 +43,7 @@ import {
   type TreeMetaInfo,
 } from '@/composables/useKnowledgeTreeCache'
 import { useSpaceStore } from '@/stores/space'
+import { taggingTextFromParts, type QuestionPart } from '@/utils/questionParts'
 
 // ─────────────────────────────────────────────────────────────────────
 // v-model 绑定
@@ -88,6 +89,7 @@ const props = defineProps<{
     options: { label: string; content: string }[]
     sub_answers: string[]
     solutions: string[]
+    parts?: QuestionPart[]
     // ── 知识树动态加载依赖：学段 / 学科（提交时进 metadata） ──
     stage: 'junior' | 'senior'
     subject: 'math' | 'physics'
@@ -1004,13 +1006,18 @@ function buildTaggingContent(): string {
   if (props.form.options?.length) {
     parts.push(props.form.options.map((o) => `${o.label}. ${o.content}`).join('\n'))
   }
-  if (props.form.sub_answers?.length) {
-    const ans = props.form.sub_answers.filter((s) => s.trim())
-    if (ans.length) parts.push('参考答案：' + ans.join('；'))
-  }
-  if (props.form.solutions?.length) {
-    const sol = props.form.solutions.filter((s) => s.trim())
-    if (sol.length) parts.push('解析：' + sol.join('\n'))
+  if (props.form.question_type === 'solution' && props.form.parts?.length) {
+    const treeText = taggingTextFromParts(props.form.parts)
+    if (treeText) parts.push(treeText)
+  } else {
+    if (props.form.sub_answers?.length) {
+      const ans = props.form.sub_answers.filter((s) => s.trim())
+      if (ans.length) parts.push('参考答案：' + ans.join('；'))
+    }
+    if (props.form.solutions?.length) {
+      const sol = props.form.solutions.filter((s) => s.trim())
+      if (sol.length) parts.push('解析：' + sol.join('\n'))
+    }
   }
   return parts.filter(Boolean).join('\n\n')
 }

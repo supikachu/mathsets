@@ -438,12 +438,13 @@ pub fn tagging_content_from_parsed(q: &ParsedQuestion) -> String {
     if let Some(ans) = answer_text_from_parsed(q) {
         parts.push(format!("参考答案：{ans}"));
     }
-    let analysis: Vec<&str> = q
+    let mut analysis: Vec<String> = q
         .analysis
         .iter()
-        .map(|a| a.content.as_str())
+        .map(|a| a.content.clone())
         .filter(|s| !s.trim().is_empty())
         .collect();
+    collect_part_analysis(&q.parts, &mut analysis);
     if !analysis.is_empty() {
         let joined = analysis.join("\n");
         let clipped: String = joined.chars().take(TAGGING_ANALYSIS_MAX_CHARS).collect();
@@ -454,10 +455,51 @@ pub fn tagging_content_from_parsed(q: &ParsedQuestion) -> String {
         };
         parts.push(format!("解析：{clipped}{suffix}"));
     }
+    // 问树局部题干也参与打标
+    collect_part_stems(&q.parts, &mut parts);
     parts.join("\n\n")
 }
 
+fn collect_part_stems(nodes: &[crate::ai::types::ParsedPart], out: &mut Vec<String>) {
+    for p in nodes {
+        if !p.stem.trim().is_empty() {
+            out.push(format!("{} {}", p.label, p.stem.trim()));
+        }
+        collect_part_stems(&p.children, out);
+    }
+}
+
+fn collect_part_analysis(nodes: &[crate::ai::types::ParsedPart], out: &mut Vec<String>) {
+    for p in nodes {
+        for a in &p.analyses {
+            if !a.content.trim().is_empty() {
+                out.push(a.content.clone());
+            }
+        }
+        collect_part_analysis(&p.children, out);
+    }
+}
+
+fn leaf_answers(nodes: &[crate::ai::types::ParsedPart], out: &mut Vec<String>) {
+    for p in nodes {
+        if p.children.is_empty() {
+            if let Some(a) = p.answer.as_ref().filter(|s| !s.trim().is_empty()) {
+                out.push(a.clone());
+            }
+        } else {
+            leaf_answers(&p.children, out);
+        }
+    }
+}
+
 fn answer_text_from_parsed(q: &ParsedQuestion) -> Option<String> {
+    if !q.parts.is_empty() {
+        let mut out = Vec::new();
+        leaf_answers(&q.parts, &mut out);
+        if !out.is_empty() {
+            return Some(out.join("；"));
+        }
+    }
     match q.correct_answer.as_ref()? {
         ParsedAnswer::Choice { options } => {
             let t = options
@@ -1019,6 +1061,7 @@ mod tests {
             image_placeholders: vec![],
             image_urls: vec![],
             kp_matches: vec![],
+            parts: vec![],
             question_no: None,
             display_order: None,
             score: None,
@@ -1096,6 +1139,7 @@ mod tests {
             image_placeholders: vec![],
             image_urls: vec![],
             kp_matches: vec![],
+            parts: vec![],
             question_no: None,
             display_order: None,
             score: None,
@@ -1129,6 +1173,7 @@ mod tests {
             image_placeholders: vec![],
             image_urls: vec![],
             kp_matches: vec![],
+            parts: vec![],
             question_no: None,
             display_order: None,
             score: None,

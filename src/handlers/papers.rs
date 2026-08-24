@@ -228,7 +228,7 @@ pub async fn get_paper(
         SELECT pq.id, pq.paper_id, pq.question_id, pq.sort_order, pq.score, pq.section,
                pq.question_no, pq.display_order, pq.created_at,
                q.stem, q.question_type::text, q.difficulty::text,
-               q.options, q.correct_answer, q.analysis
+               q.options, q.correct_answer, q.analysis, q.structure
         FROM paper_questions pq
         JOIN questions q ON q.id = pq.question_id
         WHERE pq.paper_id = $1
@@ -275,6 +275,7 @@ pub async fn get_paper(
                 options: q.options,
                 correct_answer: q.correct_answer,
                 analysis: q.analysis,
+                structure: q.structure,
             })
             .collect(),
         year: paper.year,
@@ -757,6 +758,7 @@ struct PaperQuestionRow {
     options: Option<serde_json::Value>,
     correct_answer: Option<serde_json::Value>,
     analysis: Option<String>,
+    structure: Option<serde_json::Value>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -903,7 +905,7 @@ async fn get_paper_internal(
         SELECT pq.id, pq.paper_id, pq.question_id, pq.sort_order, pq.score, pq.section,
                pq.question_no, pq.display_order, pq.created_at,
                q.stem, q.question_type::text, q.difficulty::text,
-               q.options, q.correct_answer, q.analysis
+               q.options, q.correct_answer, q.analysis, q.structure
         FROM paper_questions pq
         JOIN questions q ON q.id = pq.question_id
         WHERE pq.paper_id = $1
@@ -950,6 +952,7 @@ async fn get_paper_internal(
                 options: q.options,
                 correct_answer: q.correct_answer,
                 analysis: q.analysis,
+                structure: q.structure,
             })
             .collect(),
         year: paper.year,

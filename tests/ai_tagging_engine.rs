@@ -105,6 +105,7 @@ fn parsed(knowledge: Vec<String>, chapter: Vec<String>, methods: Vec<String>) ->
         image_placeholders: vec![],
         image_urls: vec![],
         kp_matches: vec![],
+        parts: vec![],
         question_no: None,
         display_order: None,
         score: None,

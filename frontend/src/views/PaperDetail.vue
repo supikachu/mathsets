@@ -5,10 +5,12 @@ import { paperApi, type PaperDetail, type PaperQuestionItemDetail } from '@/api/
 import { AppIcon } from '@/components/ui'
 import LatexRender from '@/components/LatexRender.vue'
 import QuestionOptions from '@/components/QuestionOptions.vue'
+import QuestionStructureView from '@/components/QuestionStructureView.vue'
 import { useToast } from '@/composables/useToast'
 import { useQuestionBasket } from '@/composables/useQuestionBasket'
 import { displayPaperSource } from '@/utils/questionSource'
 import { typeLabel, diffLabel } from '@/utils/questionDisplay'
+import { partsFromStructureJson } from '@/utils/questionParts'
 
 const route = useRoute()
 const router = useRouter()
@@ -155,6 +157,10 @@ function formatAnswerText(q: PaperQuestionItemDetail): string {
   } catch {
     return String(ans)
   }
+}
+
+function paperSolutionParts(q: PaperQuestionItemDetail) {
+  return partsFromStructureJson(q.structure)
 }
 
 // 题目是否展开答案
@@ -453,6 +459,11 @@ onMounted(async () => {
                       <div class="apple-q-index">{{ q.question_no || (idx + 1) }}.</div>
                       <div class="apple-q-stem">
                         <LatexRender :text="getParsedQuestion(q).stem" />
+                        <QuestionStructureView
+                          v-if="q.question_type === 'solution' && paperSolutionParts(q).length"
+                          section="stems"
+                          :parts="paperSolutionParts(q)"
+                        />
                       </div>
                     </div>
 
@@ -479,7 +490,10 @@ onMounted(async () => {
                       <div class="ans-section-item">
                         <div class="ans-tag-label">【参考答案】</div>
                         <div class="ans-value-box">
-                          <template v-if="getCorrectLabels(q).length">
+                          <template v-if="q.question_type === 'solution' && paperSolutionParts(q).length">
+                            <QuestionStructureView section="answers" :parts="paperSolutionParts(q)" />
+                          </template>
+                          <template v-else-if="getCorrectLabels(q).length">
                             <span class="ans-hero-pill">
                               <LatexRender :text="`$\\mathrm{${getCorrectLabels(q).join('')}}$`" :inline="true" />
                             </span>
@@ -493,7 +507,13 @@ onMounted(async () => {
                       </div>
 
                       <!-- 试题解析 -->
-                      <div class="ans-section-item">
+                      <div v-if="q.question_type === 'solution' && paperSolutionParts(q).length" class="ans-section-item">
+                        <div class="ans-tag-label">【试题解析】</div>
+                        <div class="ans-analysis-content">
+                          <QuestionStructureView section="analyses" :parts="paperSolutionParts(q)" />
+                        </div>
+                      </div>
+                      <div v-else-if="q.question_type !== 'solution'" class="ans-section-item">
                         <div class="ans-tag-label">【试题解析】</div>
                         <div class="ans-analysis-content">
                           <LatexRender :text="q.analysis || '暂无详细试题解析'" />

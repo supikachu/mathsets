@@ -731,8 +731,9 @@ async fn test_question_delete_draft_only() {
             "stem": "临时题目",
             "question_type": "solution",
             "difficulty": 1,
-            "correct_answer": ["证明略"],
-            "analysis": "略证过程"
+            "correct_answer": null,
+            "analysis": null,
+            "structure": mathset::testing::solution_structure_json("证明略", "略证过程")
         }),
         &token,
     )
@@ -984,8 +985,9 @@ async fn test_non_creator_cannot_submit() {
             "stem": "提交权限测试",
             "question_type": "solution",
             "difficulty": 1,
-            "correct_answer": ["证明略"],
-            "analysis": "略证过程"
+            "correct_answer": null,
+            "analysis": null,
+            "structure": mathset::testing::solution_structure_json("证明略", "略证过程")
         }),
         &token_a,
     )
@@ -1210,4 +1212,149 @@ async fn test_ai_parse_task_empty_body() {
     // 缺少 document_id → 422（serde 校验）
     let (status, _) = post_auth(&mut app, "/api/v1/ai/parse-task", json!({}), &token).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn test_solution_structure_round_trip_and_completeness() {
+    let mut app = match create_test_app().await {
+        Some(app) => app,
+        None => return,
+    };
+    let token = register_and_login(&mut app).await;
+
+    // 空结构无法提交
+    let (status, body) = post_auth(
+        &mut app,
+        "/api/v1/questions",
+        json!({
+            "stem": "已知函数 $f(x)$",
+            "question_type": "solution",
+            "difficulty": 3,
+            "correct_answer": null,
+            "analysis": null,
+            "structure": { "version": 1, "parts": [] }
+        }),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let empty_id = body["id"].as_str().unwrap().to_string();
+    let (status, body) = post_auth(
+        &mut app,
+        &format!("/api/v1/questions/{empty_id}/submit"),
+        json!({}),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["code"], "ERR_ANSWER_INCOMPLETE");
+
+    // 图 2 结构 round-trip
+    let fig2 = mathset::testing::fig2_structure_json();
+    let (status, body) = post_auth(
+        &mut app,
+        "/api/v1/questions",
+        json!({
+            "stem": "已知函数 $f(x)=ax^3+bx^2+cx+d$",
+            "question_type": "solution",
+            "difficulty": 4,
+            "correct_answer": null,
+            "analysis": null,
+            "structure": fig2
+        }),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let qid = body["id"].as_str().unwrap().to_string();
+    assert!(body["correct_answer"].is_null());
+    assert!(body["analysis"].is_null());
+    assert_eq!(body["structure"]["parts"].as_array().unwrap().len(), 2);
+    assert_eq!(body["structure"]["parts"][0]["children"].as_array().unwrap().len(), 2);
+    assert_eq!(body["structure"]["parts"][1]["analyses"].as_array().unwrap().len(), 2);
+
+    let (status, detail) = get_auth(&mut app, &format!("/api/v1/questions/{qid}"), &token).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["structure"]["parts"][0]["label"], "I");
+    assert_eq!(detail["structure"]["parts"][0]["children"][0]["answer"], "$m=-1$");
+    assert_eq!(detail["structure"]["parts"][1]["analyses"][1]["title"], "解法二");
+
+    let (status, _) = post_auth(
+        &mut app,
+        &format!("/api/v1/questions/{qid}/submit"),
+        json!({}),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let fig3 = mathset::testing::fig3_structure_json();
+    let (status, body) = post_auth(
+        &mut app,
+        "/api/v1/questions",
+        json!({
+            "stem": "已知偶函数 $f(x)$",
+            "question_type": "solution",
+            "difficulty": 3,
+            "correct_answer": null,
+            "analysis": null,
+            "structure": fig3
+        }),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["structure"]["parts"][0]["children"].as_array().unwrap().len(), 0);
+    assert_eq!(body["structure"]["parts"][1]["children"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn test_solution_normalized_hash_ignores_leaf_analysis() {
+    let mut app = match create_test_app().await {
+        Some(app) => app,
+        None => return,
+    };
+    let token = register_and_login(&mut app).await;
+    let stem = format!("嵌套 hash 题 {}", Uuid::new_v4());
+
+    let (status, b1) = post_auth(
+        &mut app,
+        "/api/v1/questions",
+        json!({
+            "stem": stem,
+            "question_type": "solution",
+            "difficulty": 2,
+            "correct_answer": null,
+            "structure": mathset::testing::solution_structure_json("$2$", "解法甲")
+        }),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{b1}");
+    let (status, b2) = post_auth(
+        &mut app,
+        "/api/v1/questions",
+        json!({
+            "stem": stem,
+            "question_type": "solution",
+            "difficulty": 2,
+            "correct_answer": null,
+            "structure": mathset::testing::solution_structure_json("$2$", "解法乙完全不同")
+        }),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{b2}");
+
+    // 通过详情 metadata 无法拿到 hash，走列表不够；用 GET 后由创建响应不带 hash。
+    // 两次创建的 normalized 去重：第二题不应因解析不同而变成另一道内容。
+    // 这里用库内 hash 函数对照。
+    let s1 = mathset::testing::solution_structure_json("$2$", "解法甲");
+    let s2 = mathset::testing::solution_structure_json("$2$", "解法乙完全不同");
+    let n1 = mathset::util::normalize::compute_normalized_content_hash_ex(&stem, None, &Value::Null, Some(&s1));
+    let n2 = mathset::util::normalize::compute_normalized_content_hash_ex(&stem, None, &Value::Null, Some(&s2));
+    let c1 = mathset::util::normalize::compute_content_hash_ex(&stem, None, &Value::Null, None, Some(&s1));
+    let c2 = mathset::util::normalize::compute_content_hash_ex(&stem, None, &Value::Null, None, Some(&s2));
+    assert_eq!(n1, n2, "normalized hash 应去掉叶子 analyses");
+    assert_ne!(c1, c2, "content hash 应包含叶子解法");
 }

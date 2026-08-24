@@ -246,6 +246,59 @@ fn normalize_solution_methods(mut q_val: serde_json::Value) -> serde_json::Value
     q_val
 }
 
+/// 站外模型常漏 `kind`/`value`，只写 `{"options":[]}` / `{"blanks":[]}` / `{"subs":[]}`。
+/// 不补全则整题反序列化失败被跳过。
+fn normalize_correct_answer(mut q_val: serde_json::Value) -> serde_json::Value {
+    let qtype = q_val
+        .get("question_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let Some(ans) = q_val.get("correct_answer").cloned() else {
+        return q_val;
+    };
+    if ans.is_null() {
+        return q_val;
+    }
+    if ans.get("kind").and_then(|k| k.as_str()).is_some() && ans.get("value").is_some() {
+        return q_val;
+    }
+    let inferred = if ans.get("options").is_some()
+        || ans.get("value").and_then(|v| v.get("options")).is_some()
+    {
+        "choice"
+    } else if ans.get("blanks").is_some()
+        || ans.get("value").and_then(|v| v.get("blanks")).is_some()
+    {
+        "fill"
+    } else if ans.get("subs").is_some() || ans.get("value").and_then(|v| v.get("subs")).is_some() {
+        "solution"
+    } else {
+        match qtype.as_str() {
+            "choice" | "multiple" => "choice",
+            "fill" => "fill",
+            _ => "solution",
+        }
+    };
+    let value = if let Some(v) = ans.get("value") {
+        v.clone()
+    } else {
+        match inferred {
+            "choice" => json!({
+                "options": ans.get("options").cloned().unwrap_or_else(|| json!([]))
+            }),
+            "fill" => json!({
+                "blanks": ans.get("blanks").cloned().unwrap_or_else(|| json!([]))
+            }),
+            _ => json!({
+                "subs": ans.get("subs").cloned().unwrap_or_else(|| json!([]))
+            }),
+        }
+    };
+    q_val["correct_answer"] = json!({ "kind": inferred, "value": value });
+    q_val
+}
+
 /// 批量后处理：清洗 → 截断检测(补丁七) → 逐题隔离解析(补丁十防连坐) → 知识点匹配
 ///
 /// v1.1（T1.12）：当 Stage 2 输出被 `max_tokens` 截断导致 JSON 残缺时，
@@ -314,7 +367,7 @@ pub(crate) async fn post_process_batch(
     for (i, q_val) in questions_val.iter().enumerate() {
         // solution_methods 容错归一化：LLM 常输出 ["数形结合"] 字符串数组而非
         // [{"name":"..."}] 对象数组 → 先转对象再反序列化，避免整题因类型不匹配被丢弃
-        let q_val = normalize_solution_methods(q_val.clone());
+        let q_val = normalize_correct_answer(normalize_solution_methods(q_val.clone()));
         match serde_json::from_value::<ParsedQuestion>(q_val.clone()) {
             Ok(mut q) => {
                 // 校验 question_type
@@ -322,8 +375,8 @@ pub(crate) async fn post_process_batch(
                     tracing::warn!("第 {} 题题型无效: {}，跳过", i + 1, q.question_type);
                     continue;
                 }
-                if q.stem.trim().is_empty() {
-                    tracing::warn!("第 {} 题题干为空，跳过", i + 1);
+                if !q.has_visible_body() {
+                    tracing::warn!("第 {} 题题干与问树均为空，跳过", i + 1);
                     continue;
                 }
                 // 字面量 \n、HTML 表格 → 真换行 / Markdown 表
@@ -1627,6 +1680,7 @@ mod tests {
             image_placeholders: vec![],
             image_urls: vec![],
             kp_matches: vec![],
+            parts: vec![],
             question_no: None,
             display_order: None,
             score: None,
@@ -1669,6 +1723,35 @@ mod tests {
         let q: ParsedQuestion =
             serde_json::from_value(normalize_solution_methods(full)).unwrap();
         assert_eq!(q.solution_methods[0].name, "配方法");
+    }
+
+    #[test]
+    fn normalizes_untagged_correct_answer() {
+        let choice = serde_json::json!({
+            "question_type": "choice",
+            "stem": "选错的是",
+            "correct_answer": { "options": [] },
+            "analysis": [],
+            "knowledge_points": [],
+            "confidence": 0.0,
+            "warnings": [],
+            "image_placeholders": []
+        });
+        let q: ParsedQuestion =
+            serde_json::from_value(normalize_correct_answer(choice)).unwrap();
+        assert!(matches!(
+            q.correct_answer,
+            Some(ParsedAnswer::Choice { ref options }) if options.is_empty()
+        ));
+
+        let fill = serde_json::json!({
+            "question_type": "fill",
+            "stem": "填空",
+            "correct_answer": { "blanks": [] },
+            "analysis": []
+        });
+        let q: ParsedQuestion = serde_json::from_value(normalize_correct_answer(fill)).unwrap();
+        assert!(matches!(q.correct_answer, Some(ParsedAnswer::Fill { .. })));
     }
 
     #[test]

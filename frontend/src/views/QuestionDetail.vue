@@ -82,6 +82,12 @@
             <!-- 题干 -->
             <div class="paper-stem">
               <LatexRender :text="q?.stem || ''" />
+              <QuestionStructureView
+                v-if="q?.question_type === 'solution' && solutionParts.length"
+                class="detail-part-stems"
+                section="stems"
+                :parts="solutionParts"
+              />
             </div>
 
             <!-- 选择题选项 -->
@@ -107,9 +113,9 @@
             </div>
 
             <!-- 答案与解析区 — 材质化卡片 -->
-            <div v-if="hasAnswer || q?.analysis || hasGrading" class="answer-solution-block">
+            <div v-if="hasAnswer || q?.analysis || hasGrading || solutionParts.length" class="answer-solution-block">
               <!-- 参考答案卡片（莫兰迪极淡蓝底） -->
-              <div v-if="hasAnswer" class="answer-card">
+              <div v-if="hasAnswer || (q?.question_type === 'solution' && solutionParts.length)" class="answer-card">
                 <div class="card-section-title">参考答案</div>
                 <!-- 选择题答案：统一 $\mathrm{...}$ 格式 KaTeX 渲染 -->
                 <div v-if="(q?.question_type === 'choice' || q?.question_type === 'multiple') && correctLabels.length" class="card-answer-content">
@@ -121,17 +127,21 @@
                     {{ i + 1 }}. <LatexRender :text="item.answer || String(item)" :inline="true" :sub-question-badge="true" />
                   </span>
                 </div>
-                <!-- 解答题答案 — 逐小问 Flex 隔离布局 -->
+                <!-- 解答题：按树缩进渲染各问答案与解法 -->
                 <div v-else-if="q?.question_type === 'solution'" class="card-answer-content">
-                  <div v-for="(ans, i) in (q!.correct_answer as string[])" :key="i" class="answer-item-row">
-                    <span class="sub-question-badge">{{ i + 1 }}</span>
-                    <div class="answer-item-body"><LatexRender :text="ans" /></div>
-                  </div>
+                  <QuestionStructureView v-if="solutionParts.length" section="answers" :parts="solutionParts" />
+                  <span v-else class="paper-muted">—</span>
                 </div>
               </div>
 
-              <!-- 解析卡片（苹果系统柔和灰底） -->
-              <div v-if="q?.analysis" class="analysis-card">
+              <!-- 解析卡片 -->
+              <div v-if="q?.question_type === 'solution' && solutionParts.length" class="analysis-card">
+                <div class="card-section-title">解析</div>
+                <div class="paper-analysis-content">
+                  <QuestionStructureView section="analyses" :parts="solutionParts" />
+                </div>
+              </div>
+              <div v-else-if="q?.question_type !== 'solution' && q?.analysis" class="analysis-card">
                 <div class="card-section-title-row">
                   <span class="card-section-title">解析</span>
                   <div v-if="detailSolutions.length > 1" class="sol-seg">
@@ -286,10 +296,12 @@ import client from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
 import { useSpaceStore } from '@/stores/space'
 import LatexRender from '@/components/LatexRender.vue'
+import QuestionStructureView from '@/components/QuestionStructureView.vue'
 import { AppButton, AppBadge, AppModal, AppConfirm, AppIcon } from '@/components/ui'
 import { useToast } from '@/composables/useToast'
 import { typeLabel, typeBadgeColor, statusLabel, statusIcon, formatTime } from '@/utils/questionDisplay'
 import { useOptionsLayout } from '@/composables/useOptionsLayout'
+import { partsFromStructureJson, walkLeaves } from '@/utils/questionParts'
 
 const route = useRoute()
 const router = useRouter()
@@ -391,6 +403,8 @@ function cnNum(n: number): string {
   return cnNums[n - 1] || String(n)
 }
 
+const solutionParts = computed(() => partsFromStructureJson(q.value?.structure))
+
 const activeSolution = ref(0)
 
 const detailSolutions = computed(() => {
@@ -421,6 +435,9 @@ function splitSolution(text: string): { body: string; conclusion: string } {
 
 // 是否有参考答案
 const hasAnswer = computed(() => {
+  if (q.value?.question_type === 'solution') {
+    return walkLeaves(solutionParts.value).some((l) => (l.answer || '').trim())
+  }
   const ans = q.value?.correct_answer
   if (!ans) return false
   if (Array.isArray(ans)) return ans.length > 0
@@ -966,6 +983,10 @@ watch(() => route.params.id, (newId, oldId) => {
 
 .paper-stem :deep(p) {
   margin: 0 0 8px;
+}
+
+.detail-part-stems {
+  margin-top: 8px;
 }
 
 /* 选项 — 自适应网格 */

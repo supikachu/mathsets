@@ -24,7 +24,10 @@ use crate::models::question::{
     AiCreateMeta, CreateQuestionRequest, KnowledgeNodeSummary, Question, QuestionDetail,
     QuestionPaperBrief, QuestionQuery, QuestionStatus, QuestionSummary, QuestionType, RejectRequest,
     SubmitReviewRequest, TagSummary, TransferQuestionRequest, UpdateQuestionRequest,
-    is_answer_empty, refresh_system_flags,
+    is_answer_empty, refresh_system_flags_typed,
+};
+use crate::models::question_structure::{
+    is_solution_analysis_missing, is_solution_answer_empty, parse_structure, structure_text_blobs,
 };
 use crate::models::space::SpaceKind;
 use crate::models::user::{GlobalRole, User};
@@ -467,6 +470,31 @@ pub(crate) fn db_err(msg: impl Into<String>) -> (StatusCode, Json<serde_json::Va
 fn validate_question_completeness(
     question: &Question,
 ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    if question.question_type == QuestionType::Solution {
+        let parsed = parse_structure(question.structure.as_ref());
+        if is_solution_answer_empty(parsed.as_ref()) {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "error": "题目尚未补全答案，无法提交审核",
+                    "code": "ERR_ANSWER_INCOMPLETE",
+                    "missing": ["correct_answer"]
+                })),
+            ));
+        }
+        if is_solution_analysis_missing(parsed.as_ref()) {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "error": "题目尚未补全解析，无法提交审核",
+                    "code": "ERR_ANALYSIS_INCOMPLETE",
+                    "missing": ["analysis"]
+                })),
+            ));
+        }
+        return Ok(());
+    }
+
     // 1. 答案校验
     if is_answer_empty(&question.correct_answer) {
         return Err((
@@ -1233,33 +1261,53 @@ pub async fn create_question(
 
     // ── V2.1.1 去重 hash（创建接口即时计算，计划书 §八） ──
     // 空答案统一按 JSON null 参与 hash（与下方 INSERT 写入值一致）
-    let answer_for_hash = req.correct_answer.as_ref().unwrap_or(&serde_json::Value::Null);
-    let content_hash = crate::util::normalize::compute_content_hash(
+    let is_solution = req.question_type == QuestionType::Solution;
+    let persist_structure = if is_solution {
+        req.structure.clone()
+    } else {
+        None
+    };
+    let persist_answer = if is_solution {
+        None
+    } else {
+        req.correct_answer.clone()
+    };
+    let persist_analysis = if is_solution { None } else { req.analysis.clone() };
+    let answer_for_hash = persist_answer.as_ref().unwrap_or(&serde_json::Value::Null);
+    let content_hash = crate::util::normalize::compute_content_hash_ex(
         &req.stem,
         req.options.as_ref(),
         answer_for_hash,
-        req.analysis.as_deref(),
+        persist_analysis.as_deref(),
+        persist_structure.as_ref(),
     );
-    let normalized_content_hash = crate::util::normalize::compute_normalized_content_hash(
+    let normalized_content_hash = crate::util::normalize::compute_normalized_content_hash_ex(
         &req.stem,
         req.options.as_ref(),
         answer_for_hash,
+        persist_structure.as_ref(),
     );
 
     // ── 异步补全：刷新 metadata.system_flags（pending_answer / missing_analysis） ──
     let mut metadata = req.metadata.clone().unwrap_or_else(|| serde_json::json!({}));
-    refresh_system_flags(&mut metadata, &req.correct_answer, &req.analysis);
+    refresh_system_flags_typed(
+        &mut metadata,
+        &persist_answer,
+        &persist_analysis,
+        Some(&req.question_type),
+        persist_structure.as_ref(),
+    );
 
     sqlx::query(
         r#"
         INSERT INTO questions (id, stem, question_type, difficulty, status,
-            options, correct_answer, analysis, metadata,
+            options, correct_answer, analysis, structure, metadata,
             images, parent_id, sub_order,
             creator_id, created_at, updated_at, version, space_id,
             content_hash, normalized_content_hash)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, '{}'::jsonb),
-            $10, $11, $12,
-            $13, $14, $15, $16, $17, $18, $19)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10, '{}'::jsonb),
+            $11, $12, $13,
+            $14, $15, $16, $17, $18, $19, $20)
         "#,
     )
     .bind(id)
@@ -1269,8 +1317,9 @@ pub async fn create_question(
     .bind(QuestionStatus::Draft)
     .bind(&req.options)
     // 空答案统一写入 JSON null（非 SQL NULL，不违反 NOT NULL 约束）
-    .bind(req.correct_answer.as_ref().unwrap_or(&serde_json::Value::Null))
-    .bind(&req.analysis)
+    .bind(persist_answer.as_ref().unwrap_or(&serde_json::Value::Null))
+    .bind(&persist_analysis)
+    .bind(&persist_structure)
     .bind(&metadata)
     .bind(&req.images)
     .bind(&req.parent_id)
@@ -1515,6 +1564,9 @@ pub async fn update_question(
             if let Some(f) = cap.get(1) { old_images.insert(f.as_str().to_string()); }
         }
     }
+    for cap in re.captures_iter(&structure_text_blobs(existing.structure.as_ref())) {
+        if let Some(f) = cap.get(1) { old_images.insert(f.as_str().to_string()); }
+    }
 
     // 提取新文本中的图片集合（COALESCE 语义：未提供的字段保留旧值）
     let new_stem = req.stem.as_deref().unwrap_or(&existing.stem);
@@ -1533,6 +1585,15 @@ pub async fn update_question(
         for cap in re.captures_iter(&options.to_string()) {
             if let Some(f) = cap.get(1) { new_images.insert(f.as_str().to_string()); }
         }
+    }
+    let effective_type = req.question_type.as_ref().unwrap_or(&existing.question_type);
+    let persist_structure = if *effective_type == QuestionType::Solution {
+        req.structure.clone().or_else(|| existing.structure.clone())
+    } else {
+        None
+    };
+    for cap in re.captures_iter(&structure_text_blobs(persist_structure.as_ref())) {
+        if let Some(f) = cap.get(1) { new_images.insert(f.as_str().to_string()); }
     }
 
     // 差集：存在于旧文本中但已不存在于新文本中的图片 = 被遗弃的旧图片
@@ -1553,15 +1614,24 @@ pub async fn update_question(
         .metadata
         .clone()
         .unwrap_or_else(|| existing.metadata.clone());
-    let effective_answer = req
-        .correct_answer
-        .clone()
-        .or_else(|| existing.correct_answer.clone());
-    let effective_analysis = req.analysis.clone().or(existing.analysis.clone());
-    refresh_system_flags(
+    let persist_answer = if *effective_type == QuestionType::Solution {
+        None
+    } else {
+        req.correct_answer
+            .clone()
+            .or_else(|| existing.correct_answer.clone())
+    };
+    let persist_analysis = if *effective_type == QuestionType::Solution {
+        None
+    } else {
+        req.analysis.clone().or(existing.analysis.clone())
+    };
+    refresh_system_flags_typed(
         &mut effective_metadata,
-        &effective_answer,
-        &effective_analysis,
+        &persist_answer,
+        &persist_analysis,
+        Some(effective_type),
+        persist_structure.as_ref(),
     );
 
     let query_result = sqlx::query(
@@ -1571,8 +1641,9 @@ pub async fn update_question(
             question_type = COALESCE($2, question_type),
             difficulty = COALESCE($3, difficulty),
             options = COALESCE($4, options),
-            correct_answer = COALESCE($5, correct_answer),
-            analysis = COALESCE($6, analysis),
+            correct_answer = CASE WHEN $18 THEN 'null'::jsonb ELSE COALESCE($5, correct_answer) END,
+            analysis = CASE WHEN $18 THEN NULL ELSE COALESCE($6, analysis) END,
+            structure = $17,
             metadata = COALESCE($7, metadata),
             images = COALESCE($8, images),
             parent_id = COALESCE($9, parent_id),
@@ -1600,6 +1671,8 @@ pub async fn update_question(
     .bind(id)
     .bind(old_version)
     .bind(new_status)
+    .bind(&persist_structure)
+    .bind(*effective_type == QuestionType::Solution)
     .execute(&mut *tx)
     .await
     .map_err(|e| db_err(format!("更新题目失败: {}", e)))?;
@@ -1841,6 +1914,11 @@ fn extract_image_filenames(
                     if let Some(f) = cap.get(1) {
                         filenames.push(f.as_str().to_string());
                     }
+                }
+            }
+            for cap in re.captures_iter(&structure_text_blobs(q.structure.as_ref())) {
+                if let Some(f) = cap.get(1) {
+                    filenames.push(f.as_str().to_string());
                 }
             }
         }
@@ -2841,17 +2919,17 @@ async fn copy_question(
         r#"
         INSERT INTO questions (
             id, stem, stem_text, images, question_type, difficulty, status,
-            options, correct_answer, analysis, metadata,
+            options, correct_answer, analysis, structure, metadata,
             parent_id, sub_order,
             creator_id, created_at, updated_at, version, space_id, origin_question_id,
             content_hash, normalized_content_hash
         )
         VALUES (
             $1, $2, $3, $4, $5, $6, 'published'::question_status,
-            $7, $8, $9, COALESCE($10, '{}'::jsonb),
-            $11, $12,
-            $13, $14, $15, 1, $16, $17,
-            $18, $19
+            $7, $8, $9, $10, COALESCE($11, '{}'::jsonb),
+            $12, $13,
+            $14, $15, $16, 1, $17, $18,
+            $19, $20
         )
         "#,
     )
@@ -2864,6 +2942,7 @@ async fn copy_question(
     .bind(&src.options)
     .bind(&src.correct_answer)
     .bind(&src.analysis)
+    .bind(&src.structure)
     .bind(&src.metadata)
     .bind(&src.parent_id)
     .bind(src.sub_order)

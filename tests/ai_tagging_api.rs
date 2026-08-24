@@ -268,8 +268,9 @@ fn solution_payload(stem: &str) -> Value {
         "stem": stem,
         "question_type": "solution",
         "difficulty": 3,
-        "correct_answer": {"kind": "solution", "value": {"subs": [{"sub_id": 1, "content": "解。"}]}},
-        "analysis": "解析。"
+        "correct_answer": null,
+        "analysis": null,
+        "structure": mathset::testing::solution_structure_json("解。", "解析。")
     })
 }
 
@@ -308,6 +309,7 @@ async fn test_finalizer_apply_source_idempotent_and_candidates() {
         image_placeholders: vec![],
         image_urls: vec![],
         kp_matches: vec![],
+        parts: vec![],
         question_no: None,
         display_order: None,
         score: None,
@@ -470,6 +472,7 @@ async fn test_unconfirmed_does_not_write_candidates_and_foreign_suggestion_forbi
         image_placeholders: vec![],
         image_urls: vec![],
         kp_matches: vec![],
+        parts: vec![],
         question_no: None,
         display_order: None,
         score: None,
@@ -821,6 +824,7 @@ async fn test_claim_suggestion_after_question_saved() {
         image_placeholders: vec![],
         image_urls: vec![],
         kp_matches: vec![],
+        parts: vec![],
         question_no: None,
         display_order: None,
         score: None,
@@ -960,6 +964,7 @@ async fn test_alias_maps_write_suggested_node_id() {
         image_placeholders: vec![],
         image_urls: vec![],
         kp_matches: vec![],
+        parts: vec![],
         question_no: None,
         display_order: None,
         score: None,

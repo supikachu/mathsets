@@ -3,6 +3,8 @@ import { computed, ref, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { AppIcon } from '@/components/ui'
 import LatexRender, { type ImageClickPayload } from '@/components/LatexRender.vue'
 import QuestionOptions from '@/components/QuestionOptions.vue'
+import QuestionStructureView from '@/components/QuestionStructureView.vue'
+import { isSimpleTree, partsHaveContent, type QuestionPart } from '@/utils/questionParts'
 
 const props = defineProps<{
   form: {
@@ -13,14 +15,17 @@ const props = defineProps<{
     blanks: { position: number; answer: string }[]
     sub_answers: string[]
     solutions: string[]
+    parts?: QuestionPart[]
     difficulty: string
     difficulty_coefficient: number
   }
   imageEditable?: boolean
+  expandedPartId?: string
 }>()
 
 const emit = defineEmits<{
   (e: 'image-click', payload: ImageClickPayload): void
+  (e: 'select-part', id: string): void
 }>()
 
 const previewOptions = computed(() => {
@@ -80,6 +85,13 @@ const difficultyStars = computed(() => {
 
 const activeSolution = ref(0)
 const previewSolutions = computed(() => props.form.solutions.filter(s => s.trim()))
+const solutionParts = computed(() => props.form.parts || [])
+const isPreviewEmpty = computed(() =>
+  !props.form.stem
+  && !previewSolutions.value.length
+  && props.form.options.every(o => !o.content)
+  && !partsHaveContent(solutionParts.value),
+)
 
 watch(() => previewSolutions.value.length, (newLen) => {
   if (activeSolution.value >= newLen) {
@@ -130,7 +142,7 @@ function splitSolution(text: string): { body: string; conclusion: string } {
   <div ref="previewRootRef" class="preview-col border-none bg-transparent">
     <div class="preview-col-inner p-0">
       <!-- 骨架屏（无输入时） -->
-      <div v-if="!form.stem && !form.solutions.some(s => s.trim()) && form.options.every(o => !o.content)" class="preview-skeleton">
+      <div v-if="isPreviewEmpty" class="preview-skeleton">
         <div class="skeleton-line skeleton-title"></div>
         <div class="skeleton-line skeleton-text"></div>
         <div class="skeleton-line skeleton-text skeleton-short"></div>
@@ -173,60 +185,96 @@ function splitSolution(text: string): { body: string; conclusion: string } {
           @image-click="emit('image-click', $event)"
         />
 
-        <!-- 答案 & 解析 -->
-        <div class="paper-answer-block">
-          <div class="paper-answer-label">答案</div>
-          <div class="paper-answer-content">
-            <template v-if="form.question_type === 'choice' && hasCorrectAnswer">
-              <!-- 答案统一用 $\mathrm{...}$ 格式，通过 LatexRender 渲染 -->
-              <LatexRender :text="displayCorrectAnswer" :inline="true" />
-            </template>
-            <template v-else-if="form.question_type === 'fill' && form.blanks.some(b => b.answer)">
-              <span v-for="(blank, i) in form.blanks.filter(b => b.answer)" :key="i">
-                {{ form.blanks.indexOf(blank) + 1 }}. <LatexRender :text="blank.answer" :inline="true" />&nbsp;
-              </span>
-            </template>
-            <template v-else-if="form.question_type === 'solution' && form.sub_answers.some(a => a.trim())">
-              <div v-for="(ans, i) in form.sub_answers" :key="i" class="paper-sub-answer">
-                <span class="paper-sub-num">({{ i + 1 }})</span>
-                <LatexRender :text="ans" :inline="false" />
-              </div>
-            </template>
-            <span class="paper-muted" v-else>—</span>
-          </div>
-        </div>
+        <!-- 解答题：小问题干紧跟总前提 -->
+        <QuestionStructureView
+          v-if="form.question_type === 'solution' && solutionParts.length"
+          section="stems"
+          :parts="solutionParts"
+          :image-editable="imageEditable"
+          :selected-id="expandedPartId"
+          @select="emit('select-part', $event)"
+          @image-click="emit('image-click', $event)"
+        />
 
-        <div v-if="previewSolutions.length" class="paper-answer-block paper-analysis">
-          <div class="paper-answer-label flex justify-between items-center">
-            <span>解析</span>
-            <div v-if="previewSolutions.length > 1" class="sol-seg">
-              <button
-                v-for="(s, i) in previewSolutions"
-                :key="i"
-                class="sol-seg-btn"
-                :class="{ active: activeSolution === i }"
-                @click="activeSolution = i"
-              >解法{{ cnNum(i + 1) }}</button>
+        <!-- 解答题：答案、解析分块 -->
+        <template v-if="form.question_type === 'solution' && solutionParts.length && (!isSimpleTree(solutionParts) || partsHaveContent(solutionParts) || form.stem)">
+          <div class="paper-answer-block">
+            <div class="paper-answer-label">答案</div>
+            <div class="paper-answer-content">
+              <QuestionStructureView
+                section="answers"
+                :parts="solutionParts"
+                :image-editable="imageEditable"
+                :selected-id="expandedPartId"
+                @select="emit('select-part', $event)"
+                @image-click="emit('image-click', $event)"
+              />
             </div>
           </div>
-          <div class="paper-answer-content">
-            <Transition name="sol-fade" mode="out-in">
+          <div class="paper-answer-block paper-analysis">
+            <div class="paper-answer-label">解析</div>
+            <div class="paper-answer-content">
+              <QuestionStructureView
+                section="analyses"
+                :parts="solutionParts"
+                :image-editable="imageEditable"
+                :selected-id="expandedPartId"
+                @select="emit('select-part', $event)"
+                @image-click="emit('image-click', $event)"
+              />
+            </div>
+          </div>
+        </template>
+
+        <!-- 选择题/填空题：答案 & 解析 -->
+        <template v-else-if="form.question_type !== 'solution'">
+          <div class="paper-answer-block">
+            <div class="paper-answer-label">答案</div>
+            <div class="paper-answer-content">
+              <template v-if="form.question_type === 'choice' && hasCorrectAnswer">
+                <LatexRender :text="displayCorrectAnswer" :inline="true" />
+              </template>
+              <template v-else-if="form.question_type === 'fill' && form.blanks.some(b => b.answer)">
+                <span v-for="(blank, i) in form.blanks.filter(b => b.answer)" :key="i">
+                  {{ form.blanks.indexOf(blank) + 1 }}. <LatexRender :text="blank.answer" :inline="true" />&nbsp;
+                </span>
+              </template>
+              <span class="paper-muted" v-else>—</span>
+            </div>
+          </div>
+
+          <div v-if="previewSolutions.length" class="paper-answer-block paper-analysis">
+            <div class="paper-answer-label flex justify-between items-center">
+              <span>解析</span>
+              <div v-if="previewSolutions.length > 1" class="sol-seg">
+                <button
+                  v-for="(s, i) in previewSolutions"
+                  :key="i"
+                  class="sol-seg-btn"
+                  :class="{ active: activeSolution === i }"
+                  @click="activeSolution = i"
+                >解法{{ cnNum(i + 1) }}</button>
+              </div>
+            </div>
+            <div class="paper-answer-content">
+              <Transition name="sol-fade" mode="out-in">
+                <LatexRender
+                  :key="activeSolution"
+                  :text="splitSolution(previewSolutions[activeSolution]).body"
+                  :mode="imageEditable ? 'editable' : 'readonly'"
+                  @image-click="emit('image-click', $event)"
+                />
+              </Transition>
+            </div>
+            <div v-if="splitSolution(previewSolutions[activeSolution]).conclusion" class="paper-conclusion">
               <LatexRender
-                :key="activeSolution"
-                :text="splitSolution(previewSolutions[activeSolution]).body"
+                :text="splitSolution(previewSolutions[activeSolution]).conclusion"
                 :mode="imageEditable ? 'editable' : 'readonly'"
                 @image-click="emit('image-click', $event)"
               />
-            </Transition>
+            </div>
           </div>
-          <div v-if="splitSolution(previewSolutions[activeSolution]).conclusion" class="paper-conclusion">
-            <LatexRender
-              :text="splitSolution(previewSolutions[activeSolution]).conclusion"
-              :mode="imageEditable ? 'editable' : 'readonly'"
-              @image-click="emit('image-click', $event)"
-            />
-          </div>
-        </div>
+        </template>
       </div>
     </div>
   </div>

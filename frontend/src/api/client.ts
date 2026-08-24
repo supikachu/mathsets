@@ -216,6 +216,8 @@ export interface QuestionDetail {
   options: { label: string; content: string }[] | null
   correct_answer: unknown
   analysis: string | null
+  /// 解答题题内嵌套结构；其它题型为 null
+  structure?: { version?: number; parts?: unknown[] } | null
   grading_criteria: unknown | null
 
   // ── 难度与评估 ──
@@ -329,7 +331,8 @@ export interface CreateQuestionRequest {
   default_score?: number
   options?: unknown
   correct_answer: unknown
-  analysis?: string
+  analysis?: string | null
+  structure?: { version?: number; parts?: unknown[] } | null
   grading_criteria?: unknown
   source?: string
   exam_type?: ExamType
@@ -366,7 +369,8 @@ export interface UpdateQuestionRequest {
   default_score?: number
   options?: unknown
   correct_answer?: unknown
-  analysis?: string
+  analysis?: string | null
+  structure?: { version?: number; parts?: unknown[] } | null
   grading_criteria?: unknown
   source?: string
   exam_type?: ExamType
@@ -572,6 +576,7 @@ export interface PaperQuestionItemDetail {
   options?: { label: string; content: string }[] | null
   correct_answer?: unknown
   analysis?: string | null
+  structure?: { version?: number; parts?: unknown[] } | null
 }
 
 export interface PaperDetail {
@@ -1150,6 +1155,18 @@ export interface KpMatch {
   kind?: string
 }
 
+export interface ParsedPart {
+  id?: string
+  label?: string
+  stem?: string
+  children?: ParsedPart[]
+  answer?: string | null
+  analyses?: AnalysisMethod[]
+  no_analysis_needed?: boolean
+  label_dirty?: boolean
+  labelDirty?: boolean
+}
+
 export interface ParsedQuestion {
   /// B3：新增 'multiple' 题型
   question_type: 'choice' | 'multiple' | 'fill' | 'solution'
@@ -1163,6 +1180,8 @@ export interface ParsedQuestion {
   options?: ParsedOption[]
   correct_answer: ParsedAnswer
   analysis: AnalysisMethod[]
+  /// 解答题问树；选择题/填空为空
+  parts?: ParsedPart[]
   knowledge_points: string[]
   confidence: number
   warnings: string[]

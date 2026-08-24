@@ -46,7 +46,7 @@ use crate::handlers::ai::{post_process_batch, resolve_ai_config, resolve_ocr_con
 use crate::handlers::collections::{get_or_create_collection, link_question_to_collection};
 use crate::models::ai_task::{AiParseTask, AiTaskSourceType, AiTaskStatus};
 use crate::models::document::is_paper_type;
-use crate::util::normalize::compute_normalized_content_hash;
+use crate::util::normalize::compute_normalized_content_hash_ex;
 use crate::AppState;
 
 // ---------------------------------------------------------------------------
@@ -889,25 +889,14 @@ async fn localize_external_images(parsed: &mut ParsedQuestion, upload_dir: &str)
     let re =
         regex::Regex::new(r"!\[[^\]]*\]\((https?://[^)\s]+)\)").expect("外链图片正则必然合法");
     let mut externals: Vec<String> = Vec::new();
-    {
-        let mut push = |text: &str| {
-            for cap in re.captures_iter(text) {
-                let url = cap[1].to_string();
-                if !externals.contains(&url) {
-                    externals.push(url);
-                }
-            }
-        };
-        push(&parsed.stem);
-        if let Some(opts) = parsed.options.as_ref() {
-            for o in opts {
-                push(&o.content);
+    parsed.visit_strings(|t| {
+        for cap in re.captures_iter(t) {
+            let url = cap[1].to_string();
+            if !externals.contains(&url) {
+                externals.push(url);
             }
         }
-        for a in &parsed.analysis {
-            push(&a.content);
-        }
-    }
+    });
     if externals.is_empty() {
         return;
     }
@@ -985,7 +974,7 @@ async fn localize_external_images(parsed: &mut ParsedQuestion, upload_dir: &str)
     }
 
     // 3. 替换所有字段中的外链 URL（含 image_urls 汇总数组）
-    let rewrite = |s: &mut String| {
+    parsed.visit_strings_mut(|s| {
         if !re.is_match(s) {
             return;
         }
@@ -997,16 +986,7 @@ async fn localize_external_images(parsed: &mut ParsedQuestion, upload_dir: &str)
                 }
             })
             .into_owned();
-    };
-    rewrite(&mut parsed.stem);
-    if let Some(opts) = parsed.options.as_mut() {
-        for o in opts {
-            rewrite(&mut o.content);
-        }
-    }
-    for a in parsed.analysis.iter_mut() {
-        rewrite(&mut a.content);
-    }
+    });
     for u in parsed.image_urls.iter_mut() {
         if let Some(new_url) = url_map.get(u) {
             *u = new_url.clone();
@@ -1045,17 +1025,13 @@ fn harvest_markdown_image_urls(md: &str) -> Vec<(usize, String)> {
 }
 
 fn question_body_text(parsed: &ParsedQuestion) -> String {
-    let mut s = parsed.stem.clone();
-    if let Some(opts) = &parsed.options {
-        for o in opts {
+    let mut s = String::new();
+    parsed.visit_strings(|t| {
+        if !t.is_empty() {
+            s.push_str(t);
             s.push('\n');
-            s.push_str(&o.content);
         }
-    }
-    for a in &parsed.analysis {
-        s.push('\n');
-        s.push_str(&a.content);
-    }
+    });
     s
 }
 
@@ -1180,15 +1156,7 @@ fn replace_placeholders_with_url(parsed: &mut ParsedQuestion, url: &str) {
         *s = t.into_owned();
     };
 
-    sub(&mut parsed.stem);
-    if let Some(opts) = parsed.options.as_mut() {
-        for o in opts {
-            sub(&mut o.content);
-        }
-    }
-    for a in parsed.analysis.iter_mut() {
-        sub(&mut a.content);
-    }
+    parsed.visit_strings_mut(sub);
 }
 
 fn inject_block_image(text: &str, url: &str) -> String {
@@ -1205,14 +1173,13 @@ fn inject_block_image(text: &str, url: &str) -> String {
 }
 
 fn has_placeholder(parsed: &ParsedQuestion) -> bool {
-    parsed.stem.contains("IMAGE_PLACEHOLDER")
-        || parsed.options.as_ref().is_some_and(|opts| {
-            opts.iter().any(|o| o.content.contains("IMAGE_PLACEHOLDER"))
-        })
-        || parsed
-            .analysis
-            .iter()
-            .any(|a| a.content.contains("IMAGE_PLACEHOLDER"))
+    let mut hit = false;
+    parsed.visit_strings(|t| {
+        if t.contains("IMAGE_PLACEHOLDER") {
+            hit = true;
+        }
+    });
+    hit
 }
 
 /// 图片占位符解析：`![配图](IMAGE_PLACEHOLDER_N)` → 真实可访问 URL
@@ -1362,19 +1329,22 @@ async fn stage_question(
     localize_external_images(&mut parsed, &state.upload_dir).await;
     let image_urls = resolve_question_images(&mut parsed, page_image_url);
 
+    parsed.ensure_solution_parts();
     let options_json = parsed
         .options
         .as_ref()
         .map(|opts| serde_json::to_value(opts).unwrap_or(serde_json::Value::Null));
     let correct_answer_json = serde_json::to_value(&parsed.correct_answer)
         .map_err(|e| format!("序列化 correct_answer 失败: {e}"))?;
+    let structure_json = parsed.structure_json();
 
     // hash 去重（只读查询）：命中已有题目 → 暂存 existing_question_id，
     // 保存时前端提示"复用已有题目"而非重复创建
-    let normalized_hash = compute_normalized_content_hash(
+    let normalized_hash = compute_normalized_content_hash_ex(
         &parsed.stem,
         options_json.as_ref(),
         &correct_answer_json,
+        structure_json.as_ref(),
     );
     let existing_question_id: Option<Uuid> = sqlx::query_scalar(
         "SELECT id FROM questions WHERE normalized_content_hash = $1 LIMIT 1",
@@ -2611,7 +2581,7 @@ fn dedupe_parsed_questions(questions: Vec<ParsedQuestion>) -> Vec<ParsedQuestion
     let mut seen_stem = HashSet::new();
     let mut out = Vec::with_capacity(questions.len());
     for q in questions {
-        if q.stem.trim().is_empty() {
+        if !q.has_visible_body() {
             continue;
         }
         if let Some(key) = question_no_identity(q.question_no.as_deref()) {
@@ -2809,7 +2779,7 @@ pub(crate) async fn import_external_questions(
     });
     questions = dedupe_parsed_questions(questions);
     for q in questions {
-        if q.stem.trim().is_empty() {
+        if !q.has_visible_body() {
             continue;
         }
         let no_key = question_no_identity(q.question_no.as_deref());
@@ -3068,6 +3038,7 @@ fn draft_question_from_chunk(chunk: &str, reason: &str) -> ParsedQuestion {
         image_placeholders: vec![],
         image_urls: vec![],
         kp_matches: vec![],
+        parts: vec![],
         question_no: extract_chunk_question_no(chunk),
         display_order: None,
         score: None,
@@ -3607,6 +3578,7 @@ mod tests {
             image_placeholders: vec![],
             image_urls: vec![],
             kp_matches: vec![],
+            parts: vec![],
             question_no: question_no.map(|s| s.to_string()),
             display_order: Some(1),
             score: Some(8),

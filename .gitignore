@@ -57,3 +57,4 @@ frontend/*.tsbuildinfo
 # 前端本地环境变量
 frontend/.env.local
 frontend/.env.*.local   
+/target-itest/

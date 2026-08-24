@@ -531,6 +531,9 @@
                   <span class="q-dot" :class="`q-dot--${statusBadgeColor(card.status)}`"></span>
                   {{ statusLabel(card.status) }}
                 </span>
+                <span v-if="card.partCount > 1" class="q-ghost-tag flex-shrink-0">
+                  {{ card.partCount }} 问
+                </span>
                 <span v-if="card.systemFlags?.pending_answer" class="q-flag-tag q-flag--answer flex-shrink-0">
                   <AppIcon name="alert-circle" :size="11" :stroke="2" />
                   答案待补全
@@ -564,6 +567,12 @@
             <div class="q-card-body" @click="goDetail(card)">
               <div class="q-stem">
                 <LatexRender :text="card.stem" />
+                <QuestionStructureView
+                  v-if="card.question_type === 'solution' && card.structureParts.length"
+                  class="q-part-stems"
+                  section="stems"
+                  :parts="card.structureParts"
+                />
               </div>
               <!-- 选择题选项（列表页不标注正确答案）— 紧凑型 4/2/1 动态列数控制 -->
               <QuestionOptions
@@ -587,7 +596,21 @@
                   </div>
 
                   <!-- 答案与解析材质化卡片（镜像 QuestionDetail.vue 结构）-->
-                  <div v-if="card.correctAnswer || card.analysis" class="q-ans-sol-block">
+                  <div v-if="card.question_type === 'solution' && card.structureParts.length" class="q-ans-sol-block">
+                    <div class="q-ans-card">
+                      <div class="q-ans-card-title">参考答案</div>
+                      <div class="q-ans-card-content">
+                        <QuestionStructureView section="answers" :parts="card.structureParts" />
+                      </div>
+                    </div>
+                    <div class="q-ana-card">
+                      <div class="q-ana-card-title">解析</div>
+                      <div class="q-ana-card-content">
+                        <QuestionStructureView section="analyses" :parts="card.structureParts" />
+                      </div>
+                    </div>
+                  </div>
+                  <div v-else-if="card.correctAnswer || card.analysis" class="q-ans-sol-block">
                     <!-- 参考答案卡片 — 莫兰迪极淡蓝底 -->
                     <div v-if="card.correctAnswer" class="q-ans-card">
                       <div class="q-ans-card-title">参考答案</div>
@@ -800,6 +823,7 @@ import { useRouter, useRoute } from 'vue-router'
 import { questionApi, paperApi, type QuestionSummary, type QuestionDetail, type QuestionQuery, type GradeLevel, type SemesterType, type ExamType, type KnowledgeNodeSummary, type PaperSummary, type PaperListQuery } from '@/api/client'
 import LatexRender from '@/components/LatexRender.vue'
 import QuestionOptions from '@/components/QuestionOptions.vue'
+import QuestionStructureView from '@/components/QuestionStructureView.vue'
 import { DynamicScroller, DynamicScrollerItem } from 'vue-virtual-scroller'
 import 'vue-virtual-scroller/dist/vue-virtual-scroller.css'
 import KnowledgeTreeNav from '@/components/KnowledgeTreeNav.vue'
@@ -825,6 +849,7 @@ import {
   diffBadgeColor,
   statusBadgeColor,
 } from '@/utils/questionDisplay'
+import { leafCount, partsFromStructureJson, type QuestionPart } from '@/utils/questionParts'
 
 // keep-alive 缓存匹配名：AppLayout 中 <keep-alive :include="['QuestionList']"> 据此识别
 defineOptions({ name: 'QuestionList' })
@@ -1167,6 +1192,8 @@ interface QuestionCard {
   parsedOptions: { label: string; content: string }[]
   correctAnswer: string
   analysis: string | null
+  structureParts: QuestionPart[]
+  partCount: number
   knowledgeNodes: KnowledgeNodeSummary[]
   systemFlags: { pending_answer?: boolean; missing_analysis?: boolean; no_analysis_needed?: boolean }
   papers: { id: string; title: string }[]
@@ -1692,6 +1719,8 @@ async function fetchList() {
         parsedOptions: parseOptions(detail?.options),
         correctAnswer: parseAnswer(detail?.correct_answer),
         analysis: detail?.analysis ?? null,
+        structureParts: partsFromStructureJson(detail?.structure),
+        partCount: leafCount(partsFromStructureJson(detail?.structure)),
         knowledgeNodes: detail?.knowledge_nodes ?? [],
         systemFlags: {
           pending_answer: !!rawFlags.pending_answer,
@@ -3002,6 +3031,10 @@ onBeforeUnmount(() => {
   margin: 8px 0;
 }
 
+.q-part-stems {
+  margin-top: 8px;
+}
+
 /* ---- Options (choice question — QuestionOptions component) ---- */
 .q-options {
   margin-top: 14px;
@@ -3144,6 +3177,7 @@ onBeforeUnmount(() => {
 }
 
 .q-ans-card-content,
+.q-ana-card-content,
 .q-ana-card-body {
   font-size: 13.5px;
   line-height: 1.8;

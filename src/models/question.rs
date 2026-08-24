@@ -181,6 +181,8 @@ pub struct Question {
     /// 答案 JSONB。允许为空（None / JSON null）以支持「异步补全」草稿
     pub correct_answer: Option<serde_json::Value>,
     pub analysis: Option<String>,
+    /// 解答题问树；其它题型为 NULL
+    pub structure: Option<serde_json::Value>,
 
     // ── 难度与评估 ────────────────────────────────
     /// 难度 1-5（5 星制）
@@ -227,6 +229,9 @@ pub struct CreateQuestionRequest {
     #[serde(default)]
     pub correct_answer: Option<serde_json::Value>,
     pub analysis: Option<String>,
+    /// 解答题问树（唯一结构来源）
+    #[serde(default)]
+    pub structure: Option<serde_json::Value>,
     /// 长尾元数据（academic_year, exam_region, paper_name 等）
     pub metadata: Option<serde_json::Value>,
     // 配图
@@ -276,6 +281,8 @@ pub struct UpdateQuestionRequest {
     pub options: Option<serde_json::Value>,
     pub correct_answer: Option<serde_json::Value>,
     pub analysis: Option<String>,
+    #[serde(default)]
+    pub structure: Option<serde_json::Value>,
     pub metadata: Option<serde_json::Value>,
     // 配图
     pub images: Option<serde_json::Value>,
@@ -420,6 +427,7 @@ pub struct QuestionDetail {
     pub options: Option<serde_json::Value>,
     pub correct_answer: Option<serde_json::Value>,
     pub analysis: Option<String>,
+    pub structure: Option<serde_json::Value>,
 
     // ── 难度与评估 ──
     pub difficulty: Difficulty,
@@ -468,6 +476,7 @@ impl From<(Question, Vec<KnowledgeNodeSummary>)> for QuestionDetail {
             options: q.options,
             correct_answer: q.correct_answer,
             analysis: q.analysis,
+            structure: q.structure,
             difficulty: q.difficulty,
             metadata: q.metadata,
             parent_id: q.parent_id,
@@ -531,15 +540,26 @@ pub fn is_answer_empty(answer: &Option<serde_json::Value>) -> bool {
 
 /// 根据答案与解析状态刷新 `metadata.system_flags`
 ///
-/// - `pending_answer`：`is_answer_empty(answer)`
-/// - `missing_analysis`：analysis 为空且 `no_analysis_needed != true`
-/// - `no_analysis_needed=true` 时强制 `missing_analysis=false`（豁免，T2-7）
+/// - 选择题/填空：`pending_answer` = `is_answer_empty(answer)`；
+///   `missing_analysis` = analysis 为空且 `no_analysis_needed != true`
+/// - 解答题：按 `structure` 叶子判定；全部叶子勾选无需解析时写入 `no_analysis_needed=true`
 ///
 /// 注意：调用方需保证传入的 metadata 为 JSON 对象（非对象时会被重置为 `{}`）。
 pub fn refresh_system_flags(
     metadata: &mut serde_json::Value,
     answer: &Option<serde_json::Value>,
     analysis: &Option<String>,
+) {
+    refresh_system_flags_typed(metadata, answer, analysis, None, None);
+}
+
+/// 带题型与问树的系统标记刷新
+pub fn refresh_system_flags_typed(
+    metadata: &mut serde_json::Value,
+    answer: &Option<serde_json::Value>,
+    analysis: &Option<String>,
+    question_type: Option<&QuestionType>,
+    structure: Option<&serde_json::Value>,
 ) {
     if !metadata.is_object() {
         *metadata = serde_json::json!({});
@@ -553,6 +573,30 @@ pub fn refresh_system_flags(
     let flags_obj = flags
         .as_object_mut()
         .expect("system_flags 应为 JSON 对象");
+    let parsed = crate::models::question_structure::parse_structure(structure);
+    let is_solution = matches!(question_type, Some(QuestionType::Solution));
+
+    if is_solution {
+        let skip_all = crate::models::question_structure::all_leaves_skip_analysis(parsed.as_ref());
+        flags_obj.insert(
+            "no_analysis_needed".to_string(),
+            serde_json::Value::Bool(skip_all),
+        );
+        flags_obj.insert(
+            "pending_answer".to_string(),
+            serde_json::Value::Bool(
+                crate::models::question_structure::is_solution_answer_empty(parsed.as_ref()),
+            ),
+        );
+        flags_obj.insert(
+            "missing_analysis".to_string(),
+            serde_json::Value::Bool(
+                crate::models::question_structure::is_solution_analysis_missing(parsed.as_ref()),
+            ),
+        );
+        return;
+    }
+
     let no_analysis_needed = flags_obj
         .get("no_analysis_needed")
         .and_then(|v| v.as_bool())

@@ -104,7 +104,11 @@
       </div>
 
       <!-- ==================== 主内容 三栏：编辑 + 预览 + 属性面板 ==================== -->
-      <div class="main-content" v-show="showManualWorkbench">
+      <div v-if="isNarrowWorkbench" class="workbench-seg">
+        <button type="button" :class="{ active: workbenchTab === 'edit' }" @click="workbenchTab = 'edit'">编辑</button>
+        <button type="button" :class="{ active: workbenchTab === 'preview' }" @click="workbenchTab = 'preview'">预览</button>
+      </div>
+      <div class="main-content" :class="'narrow-' + workbenchTab" v-show="showManualWorkbench">
         <!-- 左栏：编辑 -->
         <div class="edit-col interactive-column">
           <div class="edit-col-inner">
@@ -173,6 +177,13 @@
                   <span>上传配图</span>
                 </button>
               </div>
+              <EditFormSolution
+                v-if="form.question_type === 'solution'"
+                class="sol-stems"
+                section="stems"
+                v-model:parts="form.parts"
+                v-model:expandedId="expandedPartId"
+              />
             </section>
 
             <!-- 答案 -->
@@ -200,54 +211,67 @@
                 v-else-if="form.question_type === 'fill'"
                 v-model:blanks="form.blanks"
               />
-              <!-- 解答题 -->
+              <!-- 解答题叶子答案 -->
               <EditFormSolution
                 v-else-if="form.question_type === 'solution'"
-                v-model:subAnswers="form.sub_answers"
+                section="answers"
+                v-model:parts="form.parts"
+                v-model:expandedId="expandedPartId"
               />
             </section>
 
-            <!-- 解析（多解法） -->
-            <section class="edit-section" :class="{ 'ai-highlight': aiGeneratedFields.has('solutions') }">
+            <!-- 解析：选择题/填空整题多解法；解答题按叶子 -->
+            <section
+              class="edit-section"
+              :class="{ 'ai-highlight': aiGeneratedFields.has('solutions') || aiGeneratedFields.has('sub_answers') }"
+            >
               <div class="section-label-row">
                 <div class="section-label">
                   <AppIcon name="lightbulb" :size="16" />
                   <span>解析</span>
                 </div>
               </div>
-              <div class="solutions-list">
-                <div v-for="(sol, i) in form.solutions" :key="i" class="solution-item">
-                  <div class="solution-head">
-                    <span class="solution-name">解法{{ cnNum(i + 1) }}</span>
-                    <div class="solution-head-right">
-                      <button type="button" class="quick-tool-btn solution-indent-btn" @click="insertSolutionIndent(i)">首行缩进</button>
-                      <button type="button" class="quick-tool-btn solution-indent-btn" @click="insertSolutionImgRow(i)">并排图组</button>
-                      <button v-if="form.solutions.length > 1" class="solution-del" @click="removeSolution(i)" title="删除此解法">
-                        <AppIcon name="trash-2" :size="14" />
+              <EditFormSolution
+                v-if="form.question_type === 'solution'"
+                section="analyses"
+                v-model:parts="form.parts"
+                v-model:expandedId="expandedPartId"
+              />
+              <template v-else>
+                <div class="solutions-list">
+                  <div v-for="(sol, i) in form.solutions" :key="i" class="solution-item">
+                    <div class="solution-head">
+                      <span class="solution-name">解法{{ cnNum(i + 1) }}</span>
+                      <div class="solution-head-right">
+                        <button type="button" class="quick-tool-btn solution-indent-btn" @click="insertSolutionIndent(i)">首行缩进</button>
+                        <button type="button" class="quick-tool-btn solution-indent-btn" @click="insertSolutionImgRow(i)">并排图组</button>
+                        <button v-if="form.solutions.length > 1" class="solution-del" @click="removeSolution(i)" title="删除此解法">
+                          <AppIcon name="trash-2" :size="14" />
+                        </button>
+                      </div>
+                    </div>
+                    <div class="solution-textarea-wrap">
+                      <textarea
+                        v-model="form.solutions[i]"
+                        class="edit-textarea solution-textarea"
+                        :placeholder="`解法${cnNum(i + 1)}的解题思路，支持 $...$ LaTeX`"
+                        @keydown.tab.prevent="handleTabIndent($event, 'solution', i)"
+                      ></textarea>
+                      <button type="button" class="img-upload-btn" @click="handleSolutionImageUpload(i)">
+                        <AppIcon name="paperclip" :size="13" />
+                        <span>上传配图</span>
                       </button>
                     </div>
                   </div>
-                  <div class="solution-textarea-wrap">
-                    <textarea
-                      v-model="form.solutions[i]"
-                      class="edit-textarea solution-textarea"
-                      :placeholder="`解法${cnNum(i + 1)}的解题思路，支持 $...$ LaTeX`"
-                      @keydown.tab.prevent="handleTabIndent($event, 'solution', i)"
-                    ></textarea>
-                    <button type="button" class="img-upload-btn" @click="handleSolutionImageUpload(i)">
-                      <AppIcon name="paperclip" :size="13" />
-                      <span>上传配图</span>
-                    </button>
-                  </div>
                 </div>
-              </div>
-              <button class="add-solution-btn" @click="addSolution">
-                <AppIcon name="plus" :size="15" /> 添加新解法
-              </button>
-              <label class="no-analysis-check">
-                <input type="checkbox" v-model="noAnalysisNeeded" />
-                <span>无需解析（如纯计算题/默写题）</span>
-              </label>
+                <button class="add-solution-btn" @click="addSolution">
+                  <AppIcon name="plus" :size="15" /> 添加新解法
+                </button>
+                <label class="no-analysis-check">
+                  <input type="checkbox" v-model="noAnalysisNeeded" />
+                  <span>无需解析（如纯计算题/默写题）</span>
+                </label>
+              </template>
             </section>
 
             <!-- 高级设置 -->
@@ -288,8 +312,10 @@
           tabindex="0"
           @click="focusColumn"
           :form="form"
+          :expanded-part-id="expandedPartId"
           :image-editable="true"
           @image-click="handleImageClick"
+          @select-part="expandedPartId = $event"
         />
 
         <!-- 右栏：常驻属性面板（含 AI 智能打标） -->
@@ -449,6 +475,19 @@ import { clearAiSourceFile } from '@/utils/aiSourceFile'
 import { processMarkdownImages, type UploadCache } from '@/utils/markdownImages'
 import { normalizeChoiceAnswerBlank } from '@/utils/parseMarkdown'
 import { sortByPaperQuestionNo } from '@/utils/paperQuestionOrder'
+import {
+  allLeavesSkipAnalysis,
+  cloneParts,
+  collectPartTexts,
+  defaultStructure,
+  mapPartTexts,
+  normalizeIncomingParts,
+  partsFromFlatAnswers,
+  partsFromParsed,
+  toStructureApiJson,
+  walkLeaves,
+  type QuestionPart,
+} from '@/utils/questionParts'
 import {
   applySourceStateToQuestionFields,
   normalizeSubjectCode,
@@ -650,6 +689,7 @@ function resetToBlankQuestion() {
       blanks: [{ position: 1, answer: '' }],
       solutionAnswer: '',
       sub_answers: [''],
+      parts: defaultStructure().parts,
       gradingSteps: [],
       knowledgeNodeIds: [],
       chapterNodeIds: [],
@@ -1047,7 +1087,10 @@ const competenceTags = ref<Tag[]>([])
 const schoolTags = ref<Tag[]>([])
 
 // 右侧属性面板折叠状态（小屏场景把空间还给编辑器）
-const panelCollapsed = ref(false)
+const panelCollapsed = ref(typeof window !== 'undefined' ? window.innerWidth < 1440 : false)
+const workbenchTab = ref<'edit' | 'preview'>('edit')
+const isNarrowWorkbench = ref(typeof window !== 'undefined' ? window.innerWidth < 1200 : false)
+const expandedPartId = ref('')
 
 // 草稿自动保存状态指示：'idle' | 'saving' | 'saved'
 const draftStatus = ref<'idle' | 'saving' | 'saved'>('idle')
@@ -1357,6 +1400,7 @@ const form = reactive({
   blanks: [{ position: 1, answer: '' }] as { position: number; answer: string }[],
   solutionAnswer: '',
   sub_answers: [''] as string[],
+  parts: defaultStructure().parts as QuestionPart[],
   gradingSteps: [] as { label: string; points: number; description: string }[],
   knowledgeNodeIds: [] as string[],
   // ── 知识树动态加载依赖：学段 / 学科（提交时进 metadata） ──
@@ -1404,6 +1448,12 @@ function difficultyNumToString(n: number | null | undefined): string {
 }
 
 const hasCorrectAnswer = computed(() => {
+  if (form.question_type === 'solution') {
+    return walkLeaves(form.parts).some((l) => (l.answer || '').trim())
+  }
+  if (form.question_type === 'fill') {
+    return form.blanks.some((b) => (b.answer || '').trim())
+  }
   if (Array.isArray(form.correctAnswer)) return form.correctAnswer.length > 0
   return !!form.correctAnswer
 })
@@ -1692,7 +1742,6 @@ function buildPayloadFromSource(src: any, extra?: {
   const subjectCode = normalizeSubjectCode(String(subjectRaw ?? '')) || (subjectRaw === 'math' || subjectRaw === 'physics' ? subjectRaw : form.subject)
   metadata.subject = subjectCode
   if (src.cognitive_level) metadata.cognitive_level = src.cognitive_level
-  metadata.system_flags = { no_analysis_needed: extra?.noAnalysisNeeded ?? false }
 
   if (srcState?.source_category) {
     metadata.source_category = srcState.source_category
@@ -1717,6 +1766,11 @@ function buildPayloadFromSource(src: any, extra?: {
   const rawType = src.question_type || 'choice'
   const isMultiChoice = rawType === 'multiple' || src.sub_type === 'multi' || src.sub_type === 'multiple'
   const qType = isMultiChoice ? 'multiple' : rawType
+  metadata.system_flags = {
+    no_analysis_needed: qType === 'solution'
+      ? allLeavesSkipAnalysis(Array.isArray(src.parts) ? src.parts : [])
+      : (extra?.noAnalysisNeeded ?? false),
+  }
   const payload: any = {
     stem: src.stem,
     question_type: qType,
@@ -1724,7 +1778,9 @@ function buildPayloadFromSource(src: any, extra?: {
     difficulty_score: Math.max(1, Math.min(10, Math.round((1 - (src.difficulty_coefficient ?? 0.5)) * 9) + 1)),
     default_score: src.default_score ?? 5,
     metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
-    analysis: (src.solutions || []).filter((s: string) => s?.trim()).join('\n\n---\n\n') || null,
+    analysis: qType === 'solution'
+      ? null
+      : ((src.solutions || []).filter((s: string) => s?.trim()).join('\n\n---\n\n') || null),
     knowledge_node_ids: mergedNodeIds.length > 0 ? mergedNodeIds : null,
     primary_knowledge_node_id: src.primaryKnowledgeNodeId || null,
     tag_ids: src.tagIds || [],
@@ -1756,7 +1812,8 @@ function buildPayloadFromSource(src: any, extra?: {
         .map((b: { position: number; answer: string }) => ({ position: b.position, answer: b.answer.trim() }))
       break
     case 'solution':
-      payload.correct_answer = (src.sub_answers || []).filter((a: string) => a?.trim())
+      payload.correct_answer = null
+      payload.structure = toStructureApiJson(Array.isArray(src.parts) && src.parts.length ? src.parts : defaultStructure().parts)
       break
   }
   return payload
@@ -1794,11 +1851,14 @@ async function persistSourceImages(src: {
   stem: string
   solutions?: string[]
   options?: { label: string; content: string }[]
+  parts?: QuestionPart[]
 }) {
+  const partTexts = src.parts ? collectPartTexts(src.parts) : []
   const hasBlob =
     BLOB_URL_QUICK_CHECK.test(src.stem || '') ||
     (src.solutions || []).some((s) => BLOB_URL_QUICK_CHECK.test(s || '')) ||
-    (src.options || []).some((o) => BLOB_URL_QUICK_CHECK.test(o.content || ''))
+    (src.options || []).some((o) => BLOB_URL_QUICK_CHECK.test(o.content || '')) ||
+    partTexts.some((s) => BLOB_URL_QUICK_CHECK.test(s || ''))
   if (!hasBlob) return
 
   const cache: UploadCache = new Map()
@@ -1815,6 +1875,9 @@ async function persistSourceImages(src: {
           opt.content = await processMarkdownImages(opt.content || '', cache)
         }),
       )
+    }
+    if (src.parts?.length) {
+      await mapPartTexts(src.parts, (s) => processMarkdownImages(s || '', cache))
     }
   } catch (e) {
     console.error('[persistSourceImages] 持久化流程异常:', e)
@@ -2340,7 +2403,7 @@ async function doRestoreDraft() {
   // 单题草稿恢复（原逻辑）
   if (!pendingDraft) return
   const fields = ['stem', 'question_type', 'sub_type', 'difficulty', 'default_score', 'grade', 'semester',
-    'solutions', 'options', 'correctAnswer', 'blanks', 'solutionAnswer', 'sub_answers',
+    'solutions', 'options', 'correctAnswer', 'blanks', 'solutionAnswer', 'sub_answers', 'parts',
     'gradingSteps', 'tagIds', 'difficulty_coefficient', 'grade_semester',
     'year', 'region_province', 'region_city', 'source_type', 'sub_source_type',
     'reviewer', 'reviewer_ids', 'internal_note']
@@ -2621,9 +2684,8 @@ async function loadQuestion() {
     } else if (d.question_type === 'fill' && Array.isArray(d.correct_answer)) {
       form.blanks = (d.correct_answer as any[]).map((b: any) => ({ position: b.position, answer: b.answer }))
     } else if (d.question_type === 'solution') {
-      if (Array.isArray(d.correct_answer) && d.correct_answer.length > 0) {
-        form.sub_answers = d.correct_answer.map((a: any) => typeof a === 'string' ? a : String(a))
-      }
+      const rawStruct = (d as { structure?: { parts?: unknown } }).structure
+      form.parts = normalizeIncomingParts(rawStruct?.parts)
     }
     form.hasUnsaved = false
   } catch { /* handled */ }
@@ -2761,6 +2823,7 @@ function applyFormSnapshot(s: any) {
     : [{ position: 1, answer: '' }]
   form.solutionAnswer = s.solutionAnswer ?? ''
   form.sub_answers = Array.isArray(s.sub_answers) ? [...s.sub_answers] : ['']
+  form.parts = Array.isArray(s.parts) && s.parts.length ? cloneParts(s.parts) : defaultStructure().parts
   form.gradingSteps = Array.isArray(s.gradingSteps) ? [...s.gradingSteps] : []
   form.knowledgeNodeIds = Array.isArray(s.knowledgeNodeIds) ? [...s.knowledgeNodeIds] : []
   form.tagIds = Array.isArray(s.tagIds) ? [...s.tagIds] : []
@@ -2917,6 +2980,7 @@ function loadBatchMockData() {
       default_score: 5,
       solutions: ['由 $x^2 - 5x + 6 = 0$ 解得 $x = 2$ 或 $x = 3$，故 $A = \\{2, 3\\}$，$A \\cap B = \\{2, 3\\}$。'],
       sub_answers: ['$A \\cap B = \\{2, 3\\}$'],
+      parts: partsFromFlatAnswers(['$A \\cap B = \\{2, 3\\}$'], ['由 $x^2 - 5x + 6 = 0$ 解得 $x = 2$ 或 $x = 3$，故 $A = \\{2, 3\\}$，$A \\cap B = \\{2, 3\\}$。']),
       correctAnswer: '',
       options: [
         { label: 'A', content: '' },
@@ -2944,6 +3008,7 @@ function loadBatchMockData() {
       default_score: 5,
       solutions: ['$\\sqrt{12} - \\sqrt{3} = 2\\sqrt{3} - \\sqrt{3} = \\sqrt{3}$。'],
       sub_answers: ['$\\sqrt{3}$'],
+      parts: partsFromFlatAnswers(['$\\sqrt{3}$'], ['$\\sqrt{12} - \\sqrt{3} = 2\\sqrt{3} - \\sqrt{3} = \\sqrt{3}$。']),
       correctAnswer: '',
       options: [
         { label: 'A', content: '' },
@@ -3099,6 +3164,7 @@ function parsedQuestionToSnapshot(q: ParsedQuestion): any {
     correctAnswer,
     blanks,
     sub_answers,
+    parts: questionType === 'solution' ? partsFromParsed(q) : defaultStructure().parts,
     solutionAnswer: '',
     solutions: q.analysis.map(a => a.content),
     gradingSteps: [],
@@ -3257,6 +3323,12 @@ function handleBeforeUnload(e: BeforeUnloadEvent) {
 
 onMounted(() => {
   window.addEventListener('beforeunload', handleBeforeUnload)
+  const onResize = () => {
+    isNarrowWorkbench.value = window.innerWidth < 1200
+    if (window.innerWidth < 1440) panelCollapsed.value = true
+  }
+  window.addEventListener('resize', onResize)
+  onResize()
   loadSpaceMembers()
   loadTags()
 
@@ -3358,6 +3430,7 @@ watch(() => form.question_type, () => {
     form.blanks = [{ position: 1, answer: '' }]
     form.solutionAnswer = ''
     form.sub_answers = ['']
+    form.parts = defaultStructure().parts
     form.gradingSteps = []
   }
 })
@@ -4022,6 +4095,40 @@ async function handleCropped(blob: Blob) {
   align-items: stretch;
 }
 
+.workbench-seg {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  background: rgba(118, 118, 128, 0.12);
+  border-radius: 9px;
+  flex-shrink: 0;
+  width: fit-content;
+}
+.workbench-seg button {
+  height: 28px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.workbench-seg button.active {
+  background: var(--bg-card);
+  color: var(--text-primary);
+}
+
+@media (max-width: 1199px) {
+  .main-content.narrow-edit :deep(.preview-col) {
+    display: none;
+  }
+  .main-content.narrow-preview .edit-col {
+    display: none;
+  }
+}
+
 /* 知识树分类失败提示条（pendingNodes 暂存重试） */
 .classify-retry-banner {
   display: flex;
@@ -4371,6 +4478,10 @@ async function handleCropped(blob: Blob) {
 .stem-wrap:focus-within,
 .solution-textarea-wrap:focus-within {
   border-color: var(--accent);
+}
+
+.sol-stems {
+  margin-top: 12px;
 }
 
 .edit-textarea {

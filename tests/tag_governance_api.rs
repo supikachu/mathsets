@@ -152,8 +152,9 @@ async fn create_question(app: &mut axum::Router, token: &str, stem: &str) -> Str
             "stem": stem,
             "question_type": "solution",
             "difficulty": 3,
-            "correct_answer": {"kind": "solution", "value": {"subs": [{"sub_id": 1, "content": "解。"}]}},
-            "analysis": "解析。"
+            "correct_answer": null,
+            "analysis": null,
+            "structure": mathset::testing::solution_structure_json("解。", "解析。")
         }),
         token,
     )
