@@ -13,6 +13,7 @@
 ## ✨ 项目亮点
 
 - **🤖 AI 智能录入** — 拍照或粘贴题目文本，大模型自动识别题型、知识点、难度，秒级完成结构化标注
+- **🏷️ 统一智能打标** — 编辑页与录题共用五维引擎（章节 / 知识点 / 题型专题 / 通用方法 / 核心素养），确认保存后才落库与进候选
 - **📐 公式完美渲染** — 基于 KaTeX 的 LaTeX 公式渲染引擎，支持空集符号、多行公式对齐等国内教材特化适配
 - **👥 协同题库** — 个人 / 团队 / 公共三种空间模式，支持题目审核流转、版本快照、多人协作
 - **🎨 Apple 级 UI** — 遵循 Apple HIG 设计规范，胶囊分段控件、微阴影层级、流畅动效，告别传统后台管理系统的干瘪感
@@ -105,6 +106,27 @@ cargo install sqlx-cli --no-default-features --features postgres
 sqlx migrate run
 ```
 
+### 3.1 配置测试数据库（`cargo test`）
+
+集成测试**只**连接 `DATABASE_URL_TEST`，不会回退到开发库 `DATABASE_URL`。
+
+```bash
+# Windows（PowerShell）
+.\scripts\setup_test_db.ps1
+
+# macOS / Linux
+chmod +x scripts/setup_test_db.sh && ./scripts/setup_test_db.sh
+```
+
+在 `.env` 中确认（用户名/密码与 `DATABASE_URL` 一致，库名不同即可）：
+
+```bash
+DATABASE_URL=postgres://user:password@localhost:5432/mathset
+DATABASE_URL_TEST=postgres://user:password@localhost:5432/mathset_test
+```
+
+测试库可定期用 `scripts/clean_test_data.sql` 清理残留前缀数据（`lt_`、`tk_` 等）。
+
 ### 4. 启动后端
 
 ```bash
@@ -141,16 +163,18 @@ cargo build --release
 | [设计系统规范](docs/design-system-rules.md) | Apple HIG 风格指南 |
 | [开发日志](docs/dev-diary.md) | 迭代记录与技术决策 |
 | [AI 解析接口](docs/api/ai_parse.md) | AI 智能录入 API |
+| [智能打标签统一改造](docs/智能打标签统一改造.md) | 五维契约、确认保存与异步打标 |
 
 ## 🗺️ Roadmap
 
 - [x] 基础 CRUD：题目创建、编辑、删除、列表
 - [x] 多维筛选：题型、难度、知识点、来源、年份等
 - [x] AI 智能录入：文本/图片 → 结构化题目
+- [x] 统一智能打标：五维引擎、确认保存、异步任务与候选治理
 - [x] 协同空间：个人 / 团队 / 公共题库
 - [x] 审核流程：提交 → 审核 → 通过/驳回
 - [x] 版本快照：题目修改历史与回滚
-- [x] 知识点树：章节 → 知识点 → 解题方法三级体系
+- [x] 知识点树：章节 / 知识点 / 题型专题 + 通用方法标签
 - [ ] 🚧 试卷生成：智能组卷、难度配比
 - [ ] 🚧 批量导入：Word/PDF 题库解析
 - [ ] 🚧 数据大屏：班级正确率、知识点覆盖分析

@@ -45,7 +45,9 @@ function close() {
 
 <template>
   <Teleport to="body">
-    <div v-if="modelValue" class="modal-overlay" @click.self="close">
+    <!-- 遮罩不可点击关闭：录题弹窗内有未提交文本/上传进度，
+         误触遮罩直接关闭会丢失数据；仅允许 ✕ 按钮与底部取消按钮主动关闭 -->
+    <div v-if="modelValue" class="modal-overlay">
       <div class="modal" :class="{ 'modal-rigid': isRigid }" :style="modalStyle">
         <div v-if="title || $slots.header" class="modal-header">
           <slot name="header">

@@ -6,8 +6,12 @@
       <KnowledgeTreeNav
         :selected-id="navNodeId"
         :open="isKnowledgeTreeOpen"
+        :view="navView"
+        :selected-source-kind="paperFilters.sourceKind"
         @select="handleKnowledgeNodeSelect"
         @context-change="handleContextChange"
+        @view-change="handleViewChange"
+        @source-kind-select="handleSourceKindSelect"
       />
 
       <!-- 右侧：工具栏 + 列表区 -->
@@ -68,7 +72,7 @@
                 class="absolute left-0 top-full mt-1.5 w-36 z-[100] bg-white dark:bg-slate-900 rounded-xl shadow-xl border border-gray-100 dark:border-slate-800 overflow-hidden p-1 flex flex-col gap-0.5"
               >
                 <button
-                  v-for="tab in statusTabs"
+                  v-for="tab in activeStatusTabs"
                   :key="tab.value"
                   type="button"
                   class="flex items-center justify-between w-full px-3 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-slate-800/60 transition-colors rounded-lg cursor-pointer text-left"
@@ -95,7 +99,7 @@
             <input
               v-model="query.keyword"
               class="ql-search-input w-full bg-gray-100/70 dark:bg-slate-800/70 border border-transparent text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 pl-9 pr-4 h-9 rounded-lg transition-colors outline-none focus:outline-none focus-visible:outline-none focus:bg-white dark:focus:bg-slate-900 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
-              placeholder="搜索题目（输入即搜）"
+              :placeholder="navView === 'papers' ? '搜索试卷标题 / 学校' : '搜索题目（输入即搜）'"
               @input="onSearchInput"
               @keydown.enter="onSearchSubmit"
               @focus="isSearchFocused = true"
@@ -121,6 +125,7 @@
 
           <!-- 筛选按钮 (Outline 胶囊按钮) -->
           <button
+            v-if="navView !== 'papers'"
             class="ql-filter-btn flex items-center gap-2 px-4 h-9 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 text-gray-700 dark:text-gray-200 hover:border-blue-500 hover:text-blue-500 rounded-full text-sm font-medium transition-colors cursor-pointer shadow-sm shrink-0"
             :class="{ '!border-blue-500 !text-blue-600 !bg-blue-50/50 dark:!bg-blue-950/30': showFilter || hasAnyFilter }"
             @click="toggleFilter"
@@ -132,7 +137,7 @@
 
           <!-- 试题篮按钮 (胶囊按钮) -->
           <button
-            v-if="basket.count.value > 0"
+            v-if="basket.count.value > 0 && navView !== 'papers'"
             class="ql-basket-btn relative flex items-center h-9 px-3 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-full text-sm text-gray-700 dark:text-gray-200 hover:border-blue-500 hover:text-blue-500 transition-colors shrink-0 shadow-sm"
             @click="toast.info(`试题篮中有 ${basket.count.value} 道题目`)"
           >
@@ -158,9 +163,14 @@
            外层 grid 切换 grid-template-rows，内层 .ql-filter-clip 裁剪
            overflow 延迟切换：展开后 0.3s 切到 visible（让下拉菜单溢出），
            收起时立即切回 hidden（裁剪内容） -->
-      <div class="ql-filter-grid" :class="{ 'is-open': showFilter }">
+      <div class="ql-filter-grid" :class="{ 'is-open': navView === 'papers' || showFilter }">
         <div class="ql-filter-clip">
-        <div class="ql-matrix-panel">
+        <PaperFilterBar
+          v-if="navView === 'papers'"
+          :model-value="paperFilters"
+          @update:model-value="onPaperFiltersUpdate"
+        />
+        <div v-else class="ql-matrix-panel">
 
           <!-- ── 顶层平铺标签组 ── -->
           <!-- 来源 -->
@@ -340,6 +350,29 @@
                 </div>
               </div>
 
+              <!-- V2.1.1 资料类型（来源维度） -->
+              <div class="ql-matrix-dropdown" :class="{ 'is-open': openDropdown === 'docType' }">
+                <button v-if="!isFilterActive('docType')" class="ql-dd-plain" @click.stop="toggleDropdown('docType')">
+                  <span>资料类型</span>
+                  <AppIcon name="chevron-down" :size="11" class="ql-dd-caret" />
+                </button>
+                <span v-else class="ql-dd-chip">
+                  {{ docTypeLabel(filters.docType) }}
+                  <button class="ql-dd-chip-x" @click.stop="clearFilter('docType')">
+                    <AppIcon name="x" :size="10" />
+                  </button>
+                </span>
+                <div v-if="openDropdown === 'docType'" class="ql-dd-panel">
+                  <button
+                    v-for="opt in docTypeOptions"
+                    :key="opt.value"
+                    class="ql-dd-opt"
+                    :class="{ active: filters.docType === opt.value }"
+                    @click.stop="selectFilter('docType', opt.value); openDropdown = null"
+                  >{{ opt.label }}</button>
+                </div>
+              </div>
+
               <!-- 状态 -->
               <div class="ql-matrix-dropdown" :class="{ 'is-open': openDropdown === 'status' }">
                 <button v-if="!isFilterActive('status')" class="ql-dd-plain" @click.stop="toggleDropdown('status')">
@@ -383,7 +416,50 @@
 
     <!-- ===== 可滚动列表区域 ===== -->
     <div class="ql-scroll-area">
+      <div v-if="fromPaper && navView !== 'papers'" class="ql-from-paper">
+        <span>来自试卷：{{ fromPaper.title || '已选试卷' }}</span>
+        <button type="button" class="ql-from-paper-x" title="清除试卷筛选" @click="clearFromPaper">
+          <AppIcon name="x" :size="12" />
+        </button>
+      </div>
+
       <div v-if="loading" class="loading-hint">加载中…</div>
+
+      <template v-else-if="navView === 'papers'">
+        <div v-if="paperList.length === 0" class="ql-empty-state">
+          <div class="ql-empty-icon">
+            <AppIcon name="file-text" :size="36" :stroke="1.5" />
+          </div>
+          <div class="ql-empty-title">暂无已录入试卷</div>
+          <div class="ql-empty-desc">从智能导入创建试卷后，将显示在这里</div>
+          <button
+            v-if="hasAnyFilter"
+            type="button"
+            class="ql-empty-action"
+            @click="clearAllFilters"
+          >
+            <AppIcon name="x" :size="14" />
+            清空筛选条件
+          </button>
+        </div>
+        <div v-else class="pr-list">
+          <PaperRowCard
+            v-for="p in paperList"
+            :key="p.id"
+            :paper="p"
+            @open="openPaper(p)"
+            @download="downloadPaper(p)"
+            @fill="fillPaper(p)"
+            @analysis="analyzePaper(p)"
+          />
+        </div>
+        <AppPagination
+          v-if="paperList.length > 0"
+          :page="page"
+          :has-more="hasMore"
+          @update:page="onPageChange"
+        />
+      </template>
 
       <template v-else>
         <!-- 空状态：居中缺省页 + 清空筛选快捷按钮 -->
@@ -463,6 +539,16 @@
                   <AppIcon name="alert-circle" :size="11" :stroke="2" />
                   解析待补全
                 </span>
+                <button
+                  v-if="card.papers.length"
+                  type="button"
+                  class="q-paper-tag flex-shrink-0"
+                  :title="card.papers.map(p => p.title).join('、')"
+                  @click.stop="goPaper(card.papers[0].id)"
+                >
+                  <AppIcon name="file-text" :size="11" :stroke="1.8" />
+                  <span class="q-paper-tag-text">{{ paperTagLabel(card) }}</span>
+                </button>
               </div>
               <!-- 多选 Checkbox（批量提交审核） -->
               <label class="q-select-check flex-shrink-0" @click.stop>
@@ -481,7 +567,7 @@
               </div>
               <!-- 选择题选项（列表页不标注正确答案）— 紧凑型 4/2/1 动态列数控制 -->
               <QuestionOptions
-                v-if="card.question_type === 'choice' && card.parsedOptions.length > 0"
+                v-if="(card.question_type === 'choice' || card.question_type === 'multiple') && card.parsedOptions.length > 0"
                 :options="card.parsedOptions"
               />
             </div>
@@ -710,8 +796,8 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onBeforeUnmount, onActivated, watch, nextTick } from 'vue'
-import { useRouter } from 'vue-router'
-import { questionApi, type QuestionSummary, type QuestionDetail, type QuestionQuery, type GradeLevel, type SemesterType, type ExamType, type KnowledgeNodeSummary } from '@/api/client'
+import { useRouter, useRoute } from 'vue-router'
+import { questionApi, paperApi, type QuestionSummary, type QuestionDetail, type QuestionQuery, type GradeLevel, type SemesterType, type ExamType, type KnowledgeNodeSummary, type PaperSummary, type PaperListQuery } from '@/api/client'
 import LatexRender from '@/components/LatexRender.vue'
 import QuestionOptions from '@/components/QuestionOptions.vue'
 import { DynamicScroller, DynamicScrollerItem } from 'vue-virtual-scroller'
@@ -722,6 +808,16 @@ import { AppButton, AppSelect, AppPagination, AppIcon, AppBadge, AppModal } from
 import { useQuestionBasket } from '@/composables/useQuestionBasket'
 import { useToast } from '@/composables/useToast'
 import { useSpaceStore } from '@/stores/space'
+import {
+  SOURCE_CATEGORY_LABELS,
+  PAPER_KIND_OPTIONS,
+  PRACTICE_KIND_OPTIONS,
+  OTHER_KIND_OPTIONS,
+  sourceKindLabel,
+  sourceCategoryLabel,
+} from '@/utils/questionSource'
+import PaperFilterBar, { type PaperFilterState } from '@/views/papers/PaperFilterBar.vue'
+import PaperRowCard from '@/views/papers/PaperRowCard.vue'
 import {
   typeLabel,
   typeBadgeColor,
@@ -734,9 +830,36 @@ import {
 defineOptions({ name: 'QuestionList' })
 
 const router = useRouter()
+const route = useRoute()
 const toast = useToast()
 const space = useSpaceStore()
 const basket = useQuestionBasket()
+
+const navView = ref<'questions' | 'papers'>(
+  route.query.view === 'papers' ? 'papers' : 'questions',
+)
+const paperList = ref<PaperSummary[]>([])
+const paperStatus = ref('ALL')
+const fromPaper = ref<{ id: string; title: string } | null>(null)
+const paperFilters = reactive<PaperFilterState>({
+  year: '全部',
+  grade: '',
+  semester: '',
+  sourceKind: '',
+  region: '全部',
+  city: '',
+})
+
+const paperStatusTabs = [
+  { label: '全部', value: 'ALL', icon: 'list' },
+  { label: '草稿', value: 'draft', icon: 'pencil' },
+  { label: '已发布', value: 'published', icon: 'check' },
+  { label: '已归档', value: 'archived', icon: 'archive' },
+] as const
+
+const activeStatusTabs = computed(() =>
+  navView.value === 'papers' ? paperStatusTabs : statusTabs,
+)
 
 // 左侧知识树导航选中的节点 ID（空字符串 = 全部题目）
 const navNodeId = ref('')
@@ -772,12 +895,18 @@ const isSearchFocused = ref(false)
 
 // 当前状态的中文标签（用于窄屏下拉触发按钮显示）
 const currentStatusLabel = computed(() => {
-  const tab = statusTabs.find((t) => t.value === currentStatus.value)
+  const tab = activeStatusTabs.value.find((t) => t.value === currentStatus.value)
   return tab?.label ?? '全部'
 })
 
 function switchStatus(value: string) {
   currentStatus.value = value
+  if (navView.value === 'papers') {
+    paperStatus.value = value
+    page.value = 1
+    fetchList()
+    return
+  }
   // 同步到 query.status（ALL → undefined 表示不过滤；incomplete 保留原值，由 fetchList 拦截转换）
   if (value === 'ALL') {
     query.status = undefined
@@ -842,6 +971,81 @@ function handleContextChange(payload: { stage: string; subject: string }) {
   fetchList()
 }
 
+function syncListQuery() {
+  const next: Record<string, string> = {}
+  if (navView.value === 'papers') next.view = 'papers'
+  if (fromPaper.value) next.paper_id = fromPaper.value.id
+  router.replace({ query: next })
+}
+
+function handleViewChange(view: 'questions' | 'papers') {
+  navView.value = view
+  currentStatus.value = 'ALL'
+  paperStatus.value = 'ALL'
+  query.status = undefined
+  page.value = 1
+  selectedIds.value = new Set()
+  if (view === 'papers') {
+    query.paper_id = undefined
+    fromPaper.value = null
+    showFilter.value = true
+  }
+  syncListQuery()
+  fetchList()
+}
+
+function handleSourceKindSelect(kind: string) {
+  if (paperFilters.sourceKind === kind) return
+  paperFilters.sourceKind = kind
+  if (navView.value === 'papers') {
+    page.value = 1
+    fetchList()
+  }
+}
+
+function onPaperFiltersUpdate(v: PaperFilterState) {
+  Object.assign(paperFilters, v)
+  if (navView.value === 'papers') {
+    page.value = 1
+    fetchList()
+  }
+}
+
+function openPaper(p: PaperSummary) {
+  router.push(`/papers/${p.id}`)
+}
+
+function downloadPaper(p: PaperSummary) {
+  router.push(`/papers/${p.id}`)
+}
+
+function fillPaper(p: PaperSummary) {
+  router.push({ path: '/questions/new', query: { paperId: p.id } })
+}
+
+function analyzePaper(p: PaperSummary) {
+  router.push(`/papers/${p.id}`)
+}
+
+function viewPaperQuestions(p: PaperSummary) {
+  fromPaper.value = { id: p.id, title: p.title }
+  query.paper_id = p.id
+  navView.value = 'questions'
+  currentStatus.value = 'ALL'
+  query.status = undefined
+  page.value = 1
+  syncListQuery()
+  fetchList()
+}
+
+function clearFromPaper() {
+  fromPaper.value = null
+  query.paper_id = undefined
+  page.value = 1
+  syncListQuery()
+  fetchList()
+}
+
 // ---- 筛选面板展开状态 ----
 const showFilter = ref(false)
 
@@ -853,11 +1057,23 @@ function toggleFilter() {
 
 // 是否有任何筛选条件被激活（用于显示"清空筛选"按钮）
 const hasAnyFilter = computed(() => {
+  if (navView.value === 'papers') {
+    return !!(
+      query.keyword ||
+      (paperFilters.year && paperFilters.year !== '全部') ||
+      paperFilters.grade ||
+      paperFilters.sourceKind ||
+      (paperFilters.region && paperFilters.region !== '全部') ||
+      paperFilters.city ||
+      (paperStatus.value && paperStatus.value !== 'ALL')
+    )
+  }
   return !!(
     query.keyword ||
     query.question_type ||
     query.difficulty ||
     query.status ||
+    query.paper_id ||
     (query.knowledge_node_ids && query.knowledge_node_ids.length > 0)
   )
 })
@@ -870,7 +1086,9 @@ function clearAllFilters() {
   query.system_flag = undefined
   query.knowledge_node_ids = undefined
   query.include_descendants = undefined
+  query.paper_id = undefined
   navNodeId.value = ''
+  fromPaper.value = null
   // 重置多维筛选 UI 状态
   filters.source = '全部'
   filters.subSource = '全部高考模拟'
@@ -882,9 +1100,18 @@ function clearAllFilters() {
   filters.semester = '全部'
   filters.region = '全部'
   filters.city = '全部'
+  filters.docType = '全部'
+  paperFilters.year = '全部'
+  paperFilters.grade = ''
+  paperFilters.semester = ''
+  paperFilters.sourceKind = ''
+  paperFilters.region = '全部'
+  paperFilters.city = ''
+  paperStatus.value = 'ALL'
   openDropdown.value = null
   currentStatus.value = 'ALL'
   page.value = 1
+  syncListQuery()
   fetchList()
 }
 
@@ -942,6 +1169,7 @@ interface QuestionCard {
   analysis: string | null
   knowledgeNodes: KnowledgeNodeSummary[]
   systemFlags: { pending_answer?: boolean; missing_analysis?: boolean; no_analysis_needed?: boolean }
+  papers: { id: string; title: string }[]
 }
 
 const cardList = ref<QuestionCard[]>([])
@@ -966,7 +1194,7 @@ function updateKpExpandState(cardId: string, e: MouseEvent) {
   kpExpandIds.value = next
 }
 
-/** 知识点标签按维度着色：chapter→灰、knowledge→蓝、ability→紫 */
+/** 知识点标签按维度着色：chapter→灰、knowledge→蓝、ability→紫（题型专题） */
 function kpTagClass(kind: string): string {
   if (kind === 'chapter') return 'kp-kind-chapter'
   if (kind === 'ability') return 'kp-kind-method'
@@ -1033,6 +1261,7 @@ const query = reactive<QuestionQuery>({
   // 从 localStorage 恢复学段/学科（与 KnowledgeTreeNav 初始值保持同步）
   stage: (localStorage.getItem('nav_selected_stage') as string) || 'junior',
   subject: (localStorage.getItem('nav_selected_subject') as string) || 'math',
+  paper_id: undefined,
   page: 1,
   page_size: pageSize,
 })
@@ -1077,6 +1306,18 @@ function schoolName(card: QuestionCard): string {
   return schools.join(' / ')
 }
 
+/** 卡片关联试卷展示：单卷用全名，多卷用「首卷名 + 等N份」 */
+function paperTagLabel(card: QuestionCard): string {
+  const papers = card.papers || []
+  if (!papers.length) return ''
+  if (papers.length === 1) return papers[0].title
+  return `${papers[0].title} 等${papers.length}份`
+}
+
+function goPaper(paperId: string) {
+  router.push(`/papers/${paperId}`)
+}
+
 // ============================================================================
 // 多维属性矩阵筛选 — 数据字典
 // ============================================================================
@@ -1096,7 +1337,7 @@ const subSourceOptions = [
 const questionTypeOptions = [
   { label: '全部', value: '__all' },
   { label: '单选题', value: 'choice' },
-  { label: '多选题', value: 'choice' },
+  { label: '多选题', value: 'multiple' },
   { label: '填空题', value: 'fill' },
   { label: '解答题', value: 'solution' },
   { label: '判断题', value: 'judgment' },
@@ -1148,7 +1389,22 @@ const filters = reactive({
   semester: '全部',
   region: '全部',
   city: '全部',
+  // V2.1.1 资料类型筛选（来源维度）
+  docType: '全部',
 })
+
+/// V2.1.1 资料类型选项（来源大类 + 子类）
+const docTypeOptions: { value: string; label: string }[] = [
+  ...Object.entries(SOURCE_CATEGORY_LABELS).map(([value, label]) => ({ value, label })),
+  ...PAPER_KIND_OPTIONS.map((o) => ({ value: o.value, label: `试卷 · ${o.label}` })),
+  ...PRACTICE_KIND_OPTIONS.map((o) => ({ value: o.value, label: `练习 · ${o.label}` })),
+  ...OTHER_KIND_OPTIONS.map((o) => ({ value: o.value, label: `其他 · ${o.label}` })),
+]
+
+const docTypeLabel = (value: string): string => {
+  if (value in SOURCE_CATEGORY_LABELS) return sourceCategoryLabel(value)
+  return sourceKindLabel(value) || docTypeOptions.find(o => o.value === value)?.label || value
+}
 
 // 级联逻辑：source 切换非"高考模拟"时，重置 subSource 并隐藏子行
 const showSubSource = computed(() => filters.source === '高考模拟')
@@ -1167,7 +1423,7 @@ watch(() => filters.region, () => {
 })
 
 // 底部下拉面板展开状态（同时只展开一个）
-const openDropdown = ref<null | 'year' | 'grade' | 'semester' | 'region' | 'city' | 'status' | 'header-status'>(null)
+const openDropdown = ref<null | 'year' | 'grade' | 'semester' | 'region' | 'city' | 'status' | 'docType' | 'header-status'>(null)
 function toggleDropdown(key: typeof openDropdown.value) {
   openDropdown.value = openDropdown.value === key ? null : key
 }
@@ -1189,6 +1445,7 @@ function clearFilter(field: keyof typeof filters) {
   const defaults: Record<string, string> = {
     source: '全部', subSource: '全部高考模拟', type: '__all', difficulty: '__all',
     status: '__all', year: '全部', grade: '全部', semester: '全部', region: '全部', city: '全部',
+    docType: '全部',
   }
   ;(filters as any)[field] = defaults[field] ?? '全部'
   // 地区清除时同步清空市级
@@ -1210,7 +1467,30 @@ function applyFilters() {
   // 状态：同步到 segmented tab（incomplete 保留原值，由 fetchList 拦截转换）
   query.status = filters.status === '__all' ? undefined : (filters.status as any)
   currentStatus.value = filters.status === '__all' ? 'ALL' : filters.status
-  // TODO: source / subSource / year / grade / semester / region 待后端支持后映射
+  // V2.1.1：试卷元数据 + 资料类型过滤（后端已支持）
+  query.year = filters.year === '全部' ? undefined : Number(filters.year)
+  const semesterMap: Record<string, string> = { 上学期: 'first', 下学期: 'second' }
+  query.semester = (semesterMap[filters.semester] ?? undefined) as any
+  query.region = filters.city !== '全部' ? filters.city : (filters.region === '全部' ? undefined : filters.region)
+  const sourceMap: Record<string, string> = {
+    高考真题: 'exam', 高考模拟: 'mock_exam', 期中: 'midterm', 期末: 'final', 月考: 'daily', 其他: 'other',
+  }
+  query.source_type = filters.source === '全部' ? undefined : sourceMap[filters.source]
+  // 大类 → source_category；子类 → source_kind；兼容旧 document_type
+  const dt = filters.docType
+  if (dt === '全部') {
+    query.document_type = undefined
+    query.source_category = undefined
+    query.source_kind = undefined
+  } else if (dt === 'paper' || dt === 'practice' || dt === 'other') {
+    query.source_category = dt
+    query.source_kind = undefined
+    query.document_type = undefined
+  } else {
+    query.source_kind = dt
+    query.source_category = undefined
+    query.document_type = dt
+  }
   page.value = 1
   fetchList()
 }
@@ -1326,9 +1606,37 @@ function isCorrectOption(card: QuestionCard, label: string): boolean {
 // 根治 N+1 需后端扩展 list 接口返回完整字段，此缓存作为前端缓解：命中缓存的题目零请求。
 const detailCache = new Map<string, QuestionDetail>()
 
+async function fetchPaperList() {
+  const params: PaperListQuery = {
+    page: page.value,
+    page_size: pageSize,
+    stage: query.stage,
+    subject: query.subject,
+  }
+  if (paperStatus.value !== 'ALL') params.status = paperStatus.value
+  const kw = (query.keyword || '').trim()
+  if (kw) params.keyword = kw
+  if (paperFilters.year === '更早以前') params.year_lt = 2020
+  else if (paperFilters.year && paperFilters.year !== '全部') params.year = Number(paperFilters.year)
+  if (paperFilters.grade) params.grade = paperFilters.grade
+  if (paperFilters.semester) params.semester = paperFilters.semester
+  if (paperFilters.sourceKind) params.source_type = paperFilters.sourceKind
+  if (paperFilters.city) params.region = paperFilters.city
+  else if (paperFilters.region && paperFilters.region !== '全部') params.region = paperFilters.region
+
+  const res = await paperApi.list(params)
+  paperList.value = res.data
+  totalCount.value = res.total ?? res.data.length
+  hasMore.value = res.data.length >= pageSize
+}
+
 async function fetchList() {
   loading.value = true
   try {
+    if (navView.value === 'papers') {
+      await fetchPaperList()
+      return
+    }
     // 拦截 incomplete 虚拟状态：深拷贝 query，在 apiParams 上替换，绝不污染响应式 state
     // incomplete → system_flag=incomplete（pending_answer OR missing_analysis 并集），与 incomplete_count 的 total 逻辑一致
     // 不限制 status，因为"待补全"本质是 system_flag 维度的筛选，不是 status 维度
@@ -1390,6 +1698,7 @@ async function fetchList() {
           missing_analysis: !!rawFlags.missing_analysis,
           no_analysis_needed: !!rawFlags.no_analysis_needed,
         },
+        papers: Array.isArray(s.papers) ? s.papers.filter(p => p?.id && p?.title) : [],
       }
     })
   } catch (e: any) {
@@ -1492,13 +1801,22 @@ function closeBatchResult() {
 
 // 左侧导航节点变化已由 handleKnowledgeNodeSelect 处理，无需 watch
 
-watch(() => space.currentSpaceId, (newId) => {
-  query.space_id = newId || undefined
-  page.value = 1
-  fetchList()
-})
+function applyRouteQuery() {
+  if (route.query.view === 'papers') {
+    navView.value = 'papers'
+    showFilter.value = true
+  }
+  if (typeof route.query.paper_id === 'string' && route.query.paper_id) {
+    query.paper_id = route.query.paper_id
+    if (!fromPaper.value || fromPaper.value.id !== route.query.paper_id) {
+      fromPaper.value = { id: route.query.paper_id, title: fromPaper.value?.title || '' }
+    }
+    navView.value = 'questions'
+  }
+}
 
 onMounted(() => {
+  applyRouteQuery()
   fetchList()
   fetchPendingCount()
   fetchIncompleteCount()
@@ -1507,6 +1825,7 @@ onMounted(() => {
 // keep-alive 缓存组件从详情页返回时触发 —— onMounted 不会再次执行
 // 确保删除/编辑后列表数据为最新
 onActivated(() => {
+  applyRouteQuery()
   // 清除模块级详情缓存，避免 fetchList 命中旧数据跳过 API 请求
   detailCache.clear()
   fetchList()
@@ -1936,7 +2255,7 @@ onBeforeUnmount(() => {
 
 /* 选中态：仅品牌蓝文字，无背景 */
 .ql-mtag.active {
-  color: #1890ff;
+  color: var(--accent);
   font-weight: 600;
   background: transparent;
   border: none;
@@ -2204,6 +2523,40 @@ onBeforeUnmount(() => {
 }
 
 /* ===== 空状态：居中缺省页 ===== */
+.ql-from-paper {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 4px 4px;
+  padding: 6px 10px;
+  border-radius: 9999px;
+  background: #e6f7ff;
+  color: #1890ff;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.ql-from-paper-x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 9999px;
+  background: transparent;
+  color: #1890ff;
+  cursor: pointer;
+}
+
+.ql-from-paper-x:hover {
+  background: rgba(24, 144, 255, 0.12);
+}
+
+.pr-list {
+  padding: 0 8px 24px;
+}
+
 .ql-empty-state {
   display: flex;
   flex-direction: column;
@@ -2408,6 +2761,46 @@ onBeforeUnmount(() => {
   color: #a16207; /* yellow-700 */
 }
 
+/* 关联试卷：标签行内联，点击进试卷详情 */
+.q-paper-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: min(280px, 42vw);
+  padding: 2px 8px;
+  border: none;
+  border-radius: 6px;
+  background: rgba(59, 130, 246, 0.08);
+  color: #1d4ed8;
+  font-size: 11.5px;
+  font-weight: 550;
+  line-height: 1.5;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.q-paper-tag:hover {
+  background: rgba(59, 130, 246, 0.14);
+  color: #1e40af;
+}
+
+.q-paper-tag-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+[data-theme='dark'] .q-paper-tag {
+  background: rgba(96, 165, 250, 0.14);
+  color: #93c5fd;
+}
+
+[data-theme='dark'] .q-paper-tag:hover {
+  background: rgba(96, 165, 250, 0.22);
+  color: #bfdbfe;
+}
+
 [data-theme='dark'] .q-flag--answer {
   background: rgba(251, 146, 60, 0.16);
   color: #fdba74;
@@ -2495,7 +2888,7 @@ onBeforeUnmount(() => {
   color: var(--accent, #2563eb);
 }
 
-/* 解题方法 (ability)：紫色调 */
+/* 题型专题 (ability)：紫色调 */
 .q-kp-tag.kp-kind-method {
   background: var(--purple-light, #f3e8ff);
   color: var(--purple, #8b5cf6);

@@ -10,7 +10,8 @@ use crate::auth::middleware::AuthUser;
 use crate::auth::permissions::is_admin_user;
 use crate::models::paper::{
     AddQuestionRequest, CreatePaperRequest, PaperBrief, PaperDetail, PaperQuestionItem,
-    PaperStatus, PaperSummary, QuestionPaperItem, UpdatePaperQuestionRequest, UpdatePaperRequest,
+    PaperStatus, PaperSummary, QuestionPaperItem, QuestionSourceItem, UpdatePaperQuestionRequest,
+    UpdatePaperRequest,
 };
 use crate::models::PageResult;
 use crate::AppState;
@@ -29,28 +30,13 @@ pub async fn list_papers(
     let page_size = query.page_size.unwrap_or(20).min(100);
     let offset = (page - 1) * page_size;
 
-    // 统计总数（参数绑定，避免 SQL 注入）
-    let mut count_sql = String::from("SELECT COUNT(*) FROM papers p WHERE 1=1");
-    let mut count_bind_status: Option<String> = None;
-    let mut count_bind_subject: Option<String> = None;
-    if let Some(ref status) = query.status {
-        count_sql.push_str(" AND p.status = $1");
-        count_bind_status = Some(status.clone());
-    }
-    if let Some(ref subject) = query.subject {
-        let idx = if count_bind_status.is_some() { 2 } else { 1 };
-        count_sql.push_str(&format!(" AND p.subject = ${}", idx));
-        count_bind_subject = Some(subject.clone());
-    }
-
-    let mut count_query = sqlx::query_scalar::<_, i64>(&count_sql);
-    if let Some(s) = count_bind_status {
-        count_query = count_query.bind(s);
-    }
-    if let Some(s) = count_bind_subject {
-        count_query = count_query.bind(s);
-    }
-    let total: i64 = count_query
+    // 统计总数（与主查询同一组过滤，参数绑定避免注入）
+    let mut count_builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+        "SELECT COUNT(*) FROM papers p WHERE 1=1",
+    );
+    apply_paper_filters(&mut count_builder, &query);
+    let total: i64 = count_builder
+        .build_query_scalar()
         .fetch_one(&state.pool)
         .await
         .map_err(|e| {
@@ -70,13 +56,7 @@ pub async fn list_papers(
         "#,
     );
 
-    // 筛选（使用参数绑定，避免 SQL 注入）
-    if let Some(ref status) = query.status {
-        query_builder.push(" AND p.status = ").push_bind(status.clone());
-    }
-    if let Some(ref subject) = query.subject {
-        query_builder.push(" AND p.subject = ").push_bind(subject.clone());
-    }
+    apply_paper_filters(&mut query_builder, &query);
 
     query_builder
         .push(" ORDER BY p.updated_at DESC LIMIT ")
@@ -135,11 +115,12 @@ pub async fn get_question_papers(
 ) -> Result<Json<Vec<QuestionPaperItem>>, (StatusCode, Json<serde_json::Value>)> {
     let papers = sqlx::query_as::<_, QuestionPaperItem>(
         r#"
-        SELECT pq.paper_id, p.title, pq.sort_order, pq.score, pq.section, pq.created_at
+        SELECT pq.paper_id, p.title, pq.sort_order, pq.score, pq.section,
+               pq.question_no, pq.display_order, pq.created_at
         FROM paper_questions pq
         JOIN papers p ON p.id = pq.paper_id
         WHERE pq.question_id = $1
-        ORDER BY pq.sort_order, pq.created_at
+        ORDER BY pq.display_order, pq.sort_order, pq.created_at
         "#,
     )
     .bind(id)
@@ -153,6 +134,66 @@ pub async fn get_question_papers(
     })?;
 
     Ok(Json(papers))
+}
+
+/// GET /api/v1/questions/:id/sources — 统一来源视图（P0-D，计划书 §九）
+///
+/// 返回该题目被引用的所有来源：kind=paper（试卷）与 kind=collection（集合），
+/// 均携带 Document 层信息，形成 Document → Paper/Collection → Question 链路。
+pub async fn get_question_sources(
+    State(state): State<AppState>,
+    Extension(_auth): Extension<AuthUser>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<QuestionSourceItem>>, (StatusCode, Json<serde_json::Value>)> {
+    // 1. 试卷来源
+    let papers = sqlx::query_as::<_, QuestionSourceItem>(
+        r#"
+        SELECT 'paper' AS kind, p.id, p.title, p.sub_source_type AS type_label,
+               pq.question_no, pq.display_order, pq.score, pq.section,
+               p.document_id, d.title AS document_title, d.document_type
+        FROM paper_questions pq
+        JOIN papers p ON p.id = pq.paper_id
+        LEFT JOIN documents d ON d.id = p.document_id
+        WHERE pq.question_id = $1
+        "#,
+    )
+    .bind(id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("查询题目来源失败: {}", e)})),
+        )
+    })?;
+
+    // 2. 集合来源
+    let collections = sqlx::query_as::<_, QuestionSourceItem>(
+        r#"
+        SELECT 'collection' AS kind, c.id, c.title, c.collection_type AS type_label,
+               cq.question_no, cq.display_order, cq.score, cq.section,
+               c.document_id, d.title AS document_title, d.document_type
+        FROM collection_questions cq
+        JOIN question_collections c ON c.id = cq.collection_id
+        LEFT JOIN documents d ON d.id = c.document_id
+        WHERE cq.question_id = $1
+        "#,
+    )
+    .bind(id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("查询题目来源失败: {}", e)})),
+        )
+    })?;
+
+    // 合并：试卷在前，集合在后，各自按展示顺序
+    let mut sources = papers;
+    sources.extend(collections);
+
+    Ok(Json(sources))
 }
 
 /// GET /api/v1/papers/:id — 试卷详情
@@ -184,12 +225,14 @@ pub async fn get_paper(
     // 获取题目列表
     let questions = sqlx::query_as::<_, PaperQuestionRow>(
         r#"
-        SELECT pq.id, pq.paper_id, pq.question_id, pq.sort_order, pq.score, pq.section, pq.created_at,
-               q.stem, q.question_type::text, q.difficulty::text
+        SELECT pq.id, pq.paper_id, pq.question_id, pq.sort_order, pq.score, pq.section,
+               pq.question_no, pq.display_order, pq.created_at,
+               q.stem, q.question_type::text, q.difficulty::text,
+               q.options, q.correct_answer, q.analysis
         FROM paper_questions pq
         JOIN questions q ON q.id = pq.question_id
         WHERE pq.paper_id = $1
-        ORDER BY pq.sort_order, pq.created_at
+        ORDER BY pq.display_order, pq.sort_order, pq.created_at
         "#,
     )
     .bind(id)
@@ -224,11 +267,26 @@ pub async fn get_paper(
                 sort_order: q.sort_order,
                 score: q.score,
                 section: q.section,
+                question_no: q.question_no,
+                display_order: q.display_order,
                 stem: q.stem,
                 question_type: q.question_type,
                 difficulty: q.difficulty,
+                options: q.options,
+                correct_answer: q.correct_answer,
+                analysis: q.analysis,
             })
             .collect(),
+        year: paper.year,
+        stage: paper.stage,
+        semester: paper.semester,
+        region_province: paper.region_province,
+        region_city: paper.region_city,
+        school_name: paper.school_name,
+        source_type: paper.source_type,
+        sub_source_type: paper.sub_source_type,
+        document_id: paper.document_id,
+        metadata: paper.metadata,
     }))
 }
 
@@ -251,8 +309,12 @@ pub async fn create_paper(
 
     sqlx::query(
         r#"
-        INSERT INTO papers (id, title, description, subject, grade, total_score, duration_minutes, status, creator_id, created_at, updated_at, version)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        INSERT INTO papers (id, title, description, subject, grade, total_score, duration_minutes,
+            status, creator_id, created_at, updated_at, version,
+            year, stage, semester, region_province, region_city, school_name,
+            source_type, sub_source_type, document_id, metadata)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+            $13, $14, $15, $16, $17, $18, $19, $20, $21, COALESCE($22, '{}'::jsonb))
         "#,
     )
     .bind(id)
@@ -267,6 +329,16 @@ pub async fn create_paper(
     .bind(now)
     .bind(now)
     .bind(1)
+    .bind(req.year)
+    .bind(&req.stage)
+    .bind(&req.semester)
+    .bind(&req.region_province)
+    .bind(&req.region_city)
+    .bind(&req.school_name)
+    .bind(&req.source_type)
+    .bind(&req.sub_source_type)
+    .bind(req.document_id)
+    .bind(&req.metadata)
     .execute(&state.pool)
     .await
     .map_err(|e| {
@@ -317,9 +389,18 @@ pub async fn update_paper(
             grade = COALESCE($4, grade),
             total_score = COALESCE($5, total_score),
             duration_minutes = COALESCE($6, duration_minutes),
-            updated_at = $7,
+            year = COALESCE($7, year),
+            stage = COALESCE($8, stage),
+            semester = COALESCE($9, semester),
+            region_province = COALESCE($10, region_province),
+            region_city = COALESCE($11, region_city),
+            school_name = COALESCE($12, school_name),
+            source_type = COALESCE($13, source_type),
+            sub_source_type = COALESCE($14, sub_source_type),
+            metadata = COALESCE($15, metadata),
+            updated_at = $16,
             version = version + 1
-        WHERE id = $8
+        WHERE id = $17
         "#,
     )
     .bind(&req.title)
@@ -328,6 +409,15 @@ pub async fn update_paper(
     .bind(&req.grade)
     .bind(req.total_score)
     .bind(req.duration_minutes)
+    .bind(req.year)
+    .bind(&req.stage)
+    .bind(&req.semester)
+    .bind(&req.region_province)
+    .bind(&req.region_city)
+    .bind(&req.school_name)
+    .bind(&req.source_type)
+    .bind(&req.sub_source_type)
+    .bind(&req.metadata)
     .bind(now)
     .bind(id)
     .execute(&state.pool)
@@ -444,11 +534,12 @@ pub async fn add_question_to_paper(
     let id = Uuid::new_v4();
     let sort_order = req.sort_order.unwrap_or(0);
     let score = req.score.unwrap_or(0);
+    let display_order = req.display_order.unwrap_or(sort_order);
 
     sqlx::query(
         r#"
-        INSERT INTO paper_questions (id, paper_id, question_id, sort_order, score, section, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        INSERT INTO paper_questions (id, paper_id, question_id, sort_order, score, section, question_no, display_order, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         "#,
     )
     .bind(id)
@@ -457,6 +548,8 @@ pub async fn add_question_to_paper(
     .bind(sort_order)
     .bind(score)
     .bind(&req.section)
+    .bind(&req.question_no)
+    .bind(display_order)
     .bind(chrono::Utc::now())
     .execute(&state.pool)
     .await
@@ -506,13 +599,17 @@ pub async fn update_paper_question(
         UPDATE paper_questions SET
             score = COALESCE($1, score),
             sort_order = COALESCE($2, sort_order),
-            section = COALESCE($3, section)
-        WHERE paper_id = $4 AND question_id = $5
+            section = COALESCE($3, section),
+            question_no = COALESCE($4, question_no),
+            display_order = COALESCE($5, display_order)
+        WHERE paper_id = $6 AND question_id = $7
         "#,
     )
     .bind(req.score)
     .bind(req.sort_order)
     .bind(&req.section)
+    .bind(&req.question_no)
+    .bind(req.display_order)
     .bind(paper_id)
     .bind(question_id)
     .execute(&state.pool)
@@ -651,10 +748,15 @@ struct PaperQuestionRow {
     sort_order: i32,
     score: i32,
     section: Option<String>,
+    question_no: Option<String>,
+    display_order: i32,
     created_at: chrono::DateTime<chrono::Utc>,
     stem: String,
     question_type: String,
     difficulty: String,
+    options: Option<serde_json::Value>,
+    correct_answer: Option<serde_json::Value>,
+    analysis: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -663,6 +765,112 @@ pub struct PaperListQuery {
     pub page_size: Option<i64>,
     pub status: Option<String>,
     pub subject: Option<String>,
+    // ── V2.1.1 元数据组合过滤（P1 检索） ──
+    pub year: Option<i32>,
+    /// 更早以前：year < year_lt（与 year 同时存在时以 year 为准）
+    pub year_lt: Option<i32>,
+    pub stage: Option<String>,
+    pub grade: Option<String>,
+    pub semester: Option<String>,
+    pub region: Option<String>,
+    pub source_type: Option<String>,
+    pub sub_source_type: Option<String>,
+    pub document_type: Option<String>,
+    pub keyword: Option<String>,
+}
+
+/// 来源码与中文/历史别名互认，避免 OCR 写中文、列表筛 code 对不上
+fn source_type_aliases(raw: &str) -> Vec<String> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return Vec::new();
+    }
+    const GROUPS: &[&[&str]] = &[
+        &["monthly_test", "月测", "月考", "daily"],
+        &["unit_test", "单元测", "单元测试"],
+        &["stage_test", "阶段测", "阶段检测"],
+        &["midterm", "期中"],
+        &["final", "期末"],
+        &["gaokao", "高考真题", "exam"],
+        &["mock", "模拟题", "高考模拟", "mock_exam"],
+    ];
+    for group in GROUPS {
+        if group.iter().any(|a| *a == s) {
+            return group.iter().map(|a| (*a).to_string()).collect();
+        }
+    }
+    vec![s.to_string()]
+}
+
+fn subject_aliases(raw: &str) -> Vec<String> {
+    match raw.trim() {
+        "math" | "数学" => vec!["math".into(), "数学".into()],
+        "physics" | "物理" => vec!["physics".into(), "物理".into()],
+        other => vec![other.to_string()],
+    }
+}
+
+fn apply_paper_filters<'a>(
+    builder: &mut sqlx::QueryBuilder<'a, sqlx::Postgres>,
+    query: &'a PaperListQuery,
+) {
+    if let Some(ref status) = query.status {
+        builder.push(" AND p.status = ").push_bind(status.clone());
+    }
+    if let Some(ref subject) = query.subject {
+        let aliases = subject_aliases(subject);
+        builder.push(" AND p.subject = ANY(").push_bind(aliases).push(")");
+    }
+    if let Some(year) = query.year {
+        builder.push(" AND p.year = ").push_bind(year);
+    } else if let Some(year_lt) = query.year_lt {
+        builder.push(" AND p.year IS NOT NULL AND p.year < ").push_bind(year_lt);
+    }
+    if let Some(ref stage) = query.stage {
+        builder.push(" AND p.stage = ").push_bind(stage.clone());
+    }
+    if let Some(ref grade) = query.grade {
+        builder.push(" AND p.grade = ").push_bind(grade.clone());
+    }
+    if let Some(ref semester) = query.semester {
+        builder.push(" AND p.semester = ").push_bind(semester.clone());
+    }
+    if let Some(ref region) = query.region {
+        builder
+            .push(" AND (p.region_province = ")
+            .push_bind(region.clone())
+            .push(" OR p.region_city = ")
+            .push_bind(region.clone())
+            .push(")");
+    }
+    if let Some(ref source_type) = query.source_type {
+        let aliases = source_type_aliases(source_type);
+        builder.push(" AND (p.source_type = ANY(");
+        builder.push_bind(aliases.clone());
+        builder.push(") OR p.sub_source_type = ANY(");
+        builder.push_bind(aliases);
+        builder.push("))");
+    }
+    if let Some(ref sub) = query.sub_source_type {
+        builder.push(" AND p.sub_source_type = ").push_bind(sub.clone());
+    }
+    if let Some(ref document_type) = query.document_type {
+        builder
+            .push(" AND EXISTS (SELECT 1 FROM documents d WHERE d.id = p.document_id AND d.document_type = ")
+            .push_bind(document_type.clone())
+            .push(")");
+    }
+    if let Some(ref keyword) = query.keyword {
+        let trimmed = keyword.trim();
+        if !trimmed.is_empty() {
+            let pat = format!("%{trimmed}%");
+            builder.push(" AND (p.title ILIKE ");
+            builder.push_bind(pat.clone());
+            builder.push(" OR COALESCE(p.school_name, '') ILIKE ");
+            builder.push_bind(pat);
+            builder.push(")");
+        }
+    }
 }
 
 /// 获取试卷详情（内部使用）
@@ -692,12 +900,14 @@ async fn get_paper_internal(
 
     let questions = sqlx::query_as::<_, PaperQuestionRow>(
         r#"
-        SELECT pq.id, pq.paper_id, pq.question_id, pq.sort_order, pq.score, pq.section, pq.created_at,
-               q.stem, q.question_type::text, q.difficulty::text
+        SELECT pq.id, pq.paper_id, pq.question_id, pq.sort_order, pq.score, pq.section,
+               pq.question_no, pq.display_order, pq.created_at,
+               q.stem, q.question_type::text, q.difficulty::text,
+               q.options, q.correct_answer, q.analysis
         FROM paper_questions pq
         JOIN questions q ON q.id = pq.question_id
         WHERE pq.paper_id = $1
-        ORDER BY pq.sort_order, pq.created_at
+        ORDER BY pq.display_order, pq.sort_order, pq.created_at
         "#,
     )
     .bind(id)
@@ -732,11 +942,26 @@ async fn get_paper_internal(
                 sort_order: q.sort_order,
                 score: q.score,
                 section: q.section,
+                question_no: q.question_no,
+                display_order: q.display_order,
                 stem: q.stem,
                 question_type: q.question_type,
                 difficulty: q.difficulty,
+                options: q.options,
+                correct_answer: q.correct_answer,
+                analysis: q.analysis,
             })
             .collect(),
+        year: paper.year,
+        stage: paper.stage,
+        semester: paper.semester,
+        region_province: paper.region_province,
+        region_city: paper.region_city,
+        school_name: paper.school_name,
+        source_type: paper.source_type,
+        sub_source_type: paper.sub_source_type,
+        document_id: paper.document_id,
+        metadata: paper.metadata,
     })
 }
 
@@ -745,7 +970,8 @@ async fn update_paper_total_score(
     pool: &sqlx::PgPool,
     paper_id: Uuid,
 ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
-    let total: Option<i32> = sqlx::query_scalar(
+    // SUM(INT) 在 PostgreSQL 中返回 BIGINT，必须用 i64 解码
+    let total: Option<i64> = sqlx::query_scalar(
         "SELECT COALESCE(SUM(score), 0) FROM paper_questions WHERE paper_id = $1",
     )
     .bind(paper_id)
@@ -759,7 +985,7 @@ async fn update_paper_total_score(
     })?;
 
     sqlx::query("UPDATE papers SET total_score = $1 WHERE id = $2")
-        .bind(total.unwrap_or(0))
+        .bind(total.map(|t| t as i32).unwrap_or(0))
         .bind(paper_id)
         .execute(pool)
         .await

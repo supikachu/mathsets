@@ -1,9 +1,9 @@
 //! 知识点匹配结果类型（B3 重构）
 //!
-//! 旧的 `match_knowledge_points` 函数已删除，
-//! 新的匹配逻辑在 `handlers::ai_tagging::match_knowledge_nodes` 中实现，
-//! 基于 PostgreSQL pg_trgm + JSONB aliases 做三级模糊匹配（exact/alias/fuzzy），
-//! 性能和准确度均优于旧的 Rust 端 Levenshtein 实现。
+//! 旧的 `match_knowledge_points` 函数已删除。
+//! 权威五维打标在 `crate::ai::tagging::engine`（TaggingEngine）。
+//! 解析预览仍可走 `handlers::ai_tagging::match_knowledge_nodes`（旧 Top1，含 fuzzy），
+//! 基于 PostgreSQL pg_trgm + JSONB aliases（exact/alias/fuzzy）。
 //!
 //! 本文件仅保留 `KpMatch` 结构体，作为 `ParsedQuestion.kp_matches` 字段类型，
 //! 供 AI 解析后处理流程填充匹配结果。

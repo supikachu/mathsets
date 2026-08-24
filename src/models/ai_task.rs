@@ -7,18 +7,51 @@ use uuid::Uuid;
 // ---------------------------------------------------------------------------
 
 /// AI 解析任务状态（对应数据库 ai_task_status 枚举）
+///
+/// 状态机（计划书 §五）：pending → processing →（retrying ⇄ pending）→
+/// success / partial_success / failed / cancelled
+/// 历史值 completed 保留兼容，API 读出时映射为 success。
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq)]
-#[sqlx(type_name = "ai_task_status", rename_all = "lowercase")]
-#[serde(rename_all = "lowercase")]
+#[sqlx(type_name = "ai_task_status", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum AiTaskStatus {
     /// 排队中，等待 worker 拾取
     Pending,
     /// 解析中，LLM 正在处理
     Processing,
-    /// 成功，已生成题目（question_id 已填入）
-    Completed,
-    /// 失败，error_message 记录详细原因
+    /// 可重试失败（LLM 超时/上游错误/JSON 非法），回到队列
+    Retrying,
+    /// 全部成功
+    Success,
+    /// 部分成功（部分题目失败）
+    PartialSuccess,
+    /// 失败（不可重试或重试次数用尽）
     Failed,
+    /// 用户取消（已落库题目保留）
+    Cancelled,
+    /// 历史兼容：旧成功状态，读出时映射为 success
+    Completed,
+}
+
+impl AiTaskStatus {
+    /// 是否终态
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            AiTaskStatus::Success
+                | AiTaskStatus::PartialSuccess
+                | AiTaskStatus::Failed
+                | AiTaskStatus::Cancelled
+        )
+    }
+
+    /// 读出视图：completed → success
+    pub fn to_view(&self) -> AiTaskStatus {
+        match self {
+            AiTaskStatus::Completed => AiTaskStatus::Success,
+            other => other.clone(),
+        }
+    }
 }
 
 /// AI 解析任务来源类型（M4 新增，对应数据库 ai_task_source_type 枚举）
@@ -42,19 +75,19 @@ pub enum AiTaskSourceType {
 // 实体
 // ---------------------------------------------------------------------------
 
-/// AI 解析任务（数据库行）
+/// AI 解析任务（数据库行）— V2.1.1 扩展：Document 关联 + 计数 + 租约 + 取消
 ///
-/// v1.1（M4）：扩展支持 image/pdf 来源任务。
-/// - `raw_text` 改为 `Option<String>`，image/pdf 任务不填
+/// M4（image-optimization）：扩展支持 image/pdf 来源任务。
+/// - `raw_text` 为 `Option<String>`，image/pdf 任务不填
 /// - `image_b64` / `pdf_bytes` 用于 image/pdf 任务的二进制负载
 /// - `question_ids` 用于多题批处理场景，前端优先读取此字段获取所有题目 UUID
 /// - `question_id` 保留为单个 UUID，存首题 ID（向后兼容旧前端）
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct AiParseTask {
     pub id: Uuid,
-    /// 发起任务的教师
+    /// 发起任务的用户
     pub creator_id: Uuid,
-    /// 文本类任务的原始 OCR Markdown（image/pdf 任务为 None）
+    /// 文本类任务的原始 OCR Markdown（image/pdf 任务为 None；V2.1.1 新文本任务存空字符串）
     pub raw_text: Option<String>,
     /// 任务来源类型（text/image/pdf）
     pub source_type: AiTaskSourceType,
@@ -65,7 +98,7 @@ pub struct AiParseTask {
     /// 可选 OCR 引擎覆盖（用户上传时临时指定，覆盖个人偏好）
     pub ocr_provider_override: Option<String>,
     pub status: AiTaskStatus,
-    /// 当状态为 completed 时，填入生成的题目 ID（首题，向后兼容）
+    /// 历史字段：旧单题任务的题目 ID（新任务用 progress.idempotency_map）
     pub question_id: Option<Uuid>,
     /// M4：所有生成的题目 UUID 数组（多题批处理场景）
     pub question_ids: Option<serde_json::Value>,
@@ -73,4 +106,97 @@ pub struct AiParseTask {
     pub error_message: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+
+    // ── V2.1.1 ──
+    /// 来源 Document（1:N，不唯一）
+    pub document_id: Option<Uuid>,
+    /// 输入快照：{document_type, title, paper_meta?, collections[]}
+    pub paper_meta: serde_json::Value,
+    pub total_count: i32,
+    pub processed_count: i32,
+    pub success_count: i32,
+    pub failed_count: i32,
+    pub retry_count: i32,
+    pub current_page: Option<i32>,
+    pub total_pages: Option<i32>,
+    pub current_question_no: Option<String>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+    /// 幂等映射：{"idempotency_map": {"p1_i2": "<question_id>"}}
+    pub progress: serde_json::Value,
+    /// 租约：认领时间 / worker 标识 / 心跳时间
+    pub locked_at: Option<DateTime<Utc>>,
+    pub worker_id: Option<String>,
+    pub heartbeat_at: Option<DateTime<Utc>>,
+    /// 用户取消标记（pending/processing/retrying 可取消）
+    pub cancel_requested_at: Option<DateTime<Utc>>,
+}
+
+/// 任务进度视图（GET /ai/parse-task/{id} 响应）
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskStatusResponse {
+    pub id: Uuid,
+    /// completed → success 映射后的视图状态
+    pub status: AiTaskStatus,
+    pub error_message: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+
+    // 计数与进度
+    pub total_count: i32,
+    pub processed_count: i32,
+    pub success_count: i32,
+    pub failed_count: i32,
+    pub retry_count: i32,
+    pub current_page: Option<i32>,
+    pub total_pages: Option<i32>,
+    pub current_question_no: Option<String>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+
+    // 结果关联（懒查询填充）
+    /// 来源资料 ID（恢复识别页「试卷信息」时按此拉取 Document）
+    pub document_id: Option<Uuid>,
+    pub paper_id: Option<Uuid>,
+    pub collection_ids: Vec<Uuid>,
+    /// 任务产出（已确认保存）的题目 ID 列表（按解析顺序）
+    pub question_ids: Vec<Uuid>,
+    /// 本任务产生、待审核的未匹配标签候选数（章节/知识点/方法）
+    pub pending_candidate_count: i64,
+    /// 暂存题目（解析完成、待人工确认保存；按原文顺序排序）
+    ///
+    /// 结构：`{index, parsed, images, page_image_url, space_id, paper_id,
+    /// collection_id, is_mixed, existing_question_id, matched[], unmatched{},
+    /// order?, merged_into?, saved, saved_question_id?}`
+    pub staged_questions: Vec<serde_json::Value>,
+    /// OCR 全文 Markdown（`progress.ocr_markdown`）。站外结构化模式导入前展示。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ocr_markdown: Option<String>,
+    /// `full`（默认，OCR+Stage2）或 `ocr_export`（仅 OCR，等待外部 JSON 导入）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pipeline: Option<String>,
+    /// 流水线阶段，如 `ocr_ready`（OCR 已完成、等待导入）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AiTaskStatus;
+
+    #[test]
+    fn test_partial_success_serializes_as_snake_case() {
+        let json = serde_json::to_string(&AiTaskStatus::PartialSuccess).unwrap();
+        assert_eq!(json, "\"partial_success\"");
+        let back: AiTaskStatus = serde_json::from_str("\"partial_success\"").unwrap();
+        assert_eq!(back, AiTaskStatus::PartialSuccess);
+    }
+
+    #[test]
+    fn test_other_statuses_remain_lowercase_words() {
+        assert_eq!(serde_json::to_string(&AiTaskStatus::Failed).unwrap(), "\"failed\"");
+        assert_eq!(serde_json::to_string(&AiTaskStatus::Success).unwrap(), "\"success\"");
+        assert_eq!(serde_json::to_string(&AiTaskStatus::Processing).unwrap(), "\"processing\"");
+    }
 }

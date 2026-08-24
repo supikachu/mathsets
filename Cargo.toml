@@ -9,20 +9,23 @@ axum = { version = "0.8", features = ["multipart"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
+# join_all：Stage2 切块 N 路并发（借用 state / provider，无法用需要 'static 的 JoinSet）
+futures = "0.3"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Database (Postgres)
-sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono", "rust_decimal"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono", "rust_decimal", "json"] }
 
 # HTTP middleware
 tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
 
 # Logging
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-appender = "0.2"
 
 # IDs & timestamps
 uuid = { version = "1", features = ["v4", "serde"] }
@@ -64,6 +67,8 @@ dashmap = "6"
 tokio-stream = "0.1"
 axum-extra = { version = "0.12.6", features = ["query"] }
 
+# V2.1.1 题目去重 hash（content_hash / normalized_content_hash，SHA-256）
+sha2 = "0.10"
 # ZIP 解压（MinerU 云端 Precision API 返回 zip 包，内含 full.md）
 zip = "2"
 

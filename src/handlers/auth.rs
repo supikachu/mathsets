@@ -15,58 +15,101 @@ use crate::models::user::{
 };
 use crate::AppState;
 
-/// 复制全局知识点树（space_id = NULL）到新用户的个人空间
-/// 递归复制，保持 parent_id 关系
+/// 复制全局知识树（space_id = NULL 的 trees + nodes）到新用户的个人空间
+///
+/// 旧实现读写已废弃的 knowledge_points 表（20260721000001 迁移已将其
+/// RENAME 为 knowledge_points_deprecated，数据迁入 knowledge_nodes），
+/// 自该迁移起本函数一直静默失败。现按新 schema 重写：
+/// - tree：code 在个人空间内唯一（部分唯一索引允许与全局同 code），整树复制
+/// - node：path/depth 由 code 链构成、与 id 无关，层级不变则直接沿用；
+///   question_count 清 0（个人空间计数独立于全局树）
+/// - 递归保持 parent_id 关系（父节点先插入）
 async fn copy_default_knowledge_tree(
     pool: &sqlx::PgPool,
     target_space_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    // 查询所有全局知识点（space_id IS NULL），按 sort_order 排序保证父节点先于子节点插入
-    let global_kps = sqlx::query_as::<_, (Uuid, Option<Uuid>, String, Option<String>, i32)>(
-        "SELECT id, parent_id, name, grade, sort_order FROM knowledge_points WHERE space_id IS NULL ORDER BY sort_order, name",
+    // 1. 复制全局树（space_id IS NULL）
+    let global_trees = sqlx::query_as::<_, (Uuid, String, String, String, Option<String>)>(
+        "SELECT id, code, name, kind::text, description FROM knowledge_trees WHERE space_id IS NULL AND is_active = TRUE",
     )
     .fetch_all(pool)
     .await?;
 
-    if global_kps.is_empty() {
+    if global_trees.is_empty() {
         return Ok(());
     }
 
     let now = chrono::Utc::now();
-
-    // 建立 旧ID -> 新ID 的映射
-    let mut id_map: std::collections::HashMap<Uuid, Uuid> = std::collections::HashMap::new();
-    for (old_id, _, _, _, _) in &global_kps {
-        id_map.insert(*old_id, Uuid::new_v4());
-    }
-
-    // 逐条插入（parent_id 使用映射后的新 ID）
-    // 注意：若 parent_id 引用了非全局知识点（数据异常），则降级为顶层节点（NULL），
-    // 避免外键约束报错阻断注册流程
-    for (old_id, old_parent, name, grade, sort_order) in &global_kps {
-        let new_id = id_map[old_id];
-        let new_parent = old_parent.and_then(|p| id_map.get(&p).copied());
+    let mut tree_map: std::collections::HashMap<Uuid, Uuid> = std::collections::HashMap::new();
+    for (old_id, code, name, kind, description) in &global_trees {
+        let new_id = Uuid::new_v4();
         sqlx::query(
             r#"
-            INSERT INTO knowledge_points (id, parent_id, name, grade, sort_order, created_at, space_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO knowledge_trees (id, code, name, kind, space_id, description, is_active, created_at, updated_at)
+            VALUES ($1, $2, $3, $4::knowledge_tree_kind, $5, $6, TRUE, $7, $7)
             "#,
         )
         .bind(new_id)
-        .bind(new_parent)
+        .bind(code)
         .bind(name)
-        .bind(grade)
-        .bind(sort_order)
-        .bind(now)
+        .bind(kind)
         .bind(target_space_id)
+        .bind(description)
+        .bind(now)
         .execute(pool)
         .await?;
+        tree_map.insert(*old_id, new_id);
+    }
+
+    // 2. 复制全局节点（按 depth 排序保证父节点先于子节点插入）
+    // 注：knowledge_nodes 无 space_id 列，空间隔离经 tree_id → knowledge_trees.space_id
+    let global_nodes = sqlx::query_as::<_, (Uuid, Option<Uuid>, Uuid)>(
+        r#"
+        SELECT n.id, n.parent_id, n.tree_id
+        FROM knowledge_nodes n
+        JOIN knowledge_trees t ON t.id = n.tree_id
+        WHERE t.space_id IS NULL
+          AND n.is_active = TRUE
+        ORDER BY n.depth, n.sort_order
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut node_map: std::collections::HashMap<Uuid, Uuid> = std::collections::HashMap::new();
+    for (old_id, old_parent, old_tree) in &global_nodes {
+        // 节点的 tree 不在全局树集合内（数据异常）则跳过，避免外键错误阻断注册
+        let Some(new_tree) = tree_map.get(old_tree) else {
+            continue;
+        };
+        let new_id = Uuid::new_v4();
+        let new_parent = old_parent.and_then(|p| node_map.get(&p).copied());
+        // path/depth 由 code 链构成、与 id 无关，层级不变直接由源行复制
+        sqlx::query(
+            r#"
+            INSERT INTO knowledge_nodes
+              (id, tree_id, parent_id, code, path, depth, name, aliases, description,
+               sort_order, question_count, is_active, created_at, updated_at)
+            SELECT $1, $2, $3, src.code, src.path, src.depth, src.name, src.aliases,
+                   src.description, src.sort_order, 0, src.is_active, $4, $4
+            FROM knowledge_nodes src WHERE src.id = $5
+            "#,
+        )
+        .bind(new_id)
+        .bind(new_tree)
+        .bind(new_parent)
+        .bind(now)
+        .bind(old_id)
+        .execute(pool)
+        .await?;
+        node_map.insert(*old_id, new_id);
     }
 
     println!(
-        "[register] 已为空间 {} 复制 {} 个默认知识点",
+        "[register] 已为空间 {} 复制 {} 棵全局树 / {} 个知识点",
         target_space_id,
-        global_kps.len()
+        global_trees.len(),
+        global_nodes.len()
     );
     Ok(())
 }

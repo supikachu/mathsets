@@ -2,8 +2,8 @@
 //!
 //! 知识树（KnowledgeTree）是知识点的容器，支持多棵树：
 //! - 数学知识树（knowledge）
-//! - 数学能力树（ability）
-//! - 教材章节树（chapter，按版本细分：人教版/北师大版）
+//! - 题型专题树（ability，code = math_method_*）
+//! - 教材章节树（chapter）
 //!
 //! 权限模型：
 //! - 查询（list）：任意登录用户

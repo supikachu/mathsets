@@ -86,6 +86,7 @@ const NODE_SELECT_FIELDS: &str = r#"
     path::text AS path,
     depth, name, aliases, description,
     sort_order, question_count, is_active,
+    canonical_id, status, source,
     created_at, updated_at
 "#;
 
@@ -350,6 +351,8 @@ pub async fn create_node(
         )
     })?;
 
+    crate::ai::embedding::spawn_refresh_node_embedding(state.pool.clone(), node.id);
+
     Ok((StatusCode::CREATED, Json(node)))
 }
 
@@ -397,6 +400,8 @@ pub async fn update_node(
             Json(json!({"error": "知识点节点不存在"})),
         )
     })?;
+
+    crate::ai::embedding::spawn_refresh_node_embedding(state.pool.clone(), node.id);
 
     Ok(Json(node))
 }

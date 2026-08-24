@@ -127,7 +127,7 @@ pub enum ExamType {
 pub enum TagCategory {
     /// 核心素养
     CoreCompetence,
-    /// 解题方法 / 数学思想
+    /// 解题方法 / 数学思想（扁平 tags，与题型专题树拆分）
     Method,
     /// 学校来源
     School,
@@ -144,9 +144,9 @@ pub enum TagCategory {
 pub enum KnowledgeTreeKind {
     /// 知识树（核心，按数学学科结构）
     Knowledge,
-    /// 能力树（核心素养 + 布鲁姆）
+    /// 题型专题 / 专题技法树（存于 math_method_*，历史枚举名 ability）
     Ability,
-    /// 章节树（教材版本，如人教版/北师大版）
+    /// 章节树（教材版本：高中人教 A 版 / 初中浙教版）
     Chapter,
 }
 
@@ -190,6 +190,10 @@ pub struct Question {
     /// 长尾元数据 JSONB（academic_year, exam_region, paper_name,
     /// paper_page, textbook_version 等长尾字段统一存此 JSON）
     pub metadata: serde_json::Value,
+
+    // ── V2.1.1 去重 hash（SHA-256；历史数据由离线 Job 回填） ──────
+    pub content_hash: Option<String>,
+    pub normalized_content_hash: Option<String>,
 
     // ── 复合题结构 ────────────────────────────────
     pub parent_id: Option<Uuid>,
@@ -245,6 +249,22 @@ pub struct CreateQuestionRequest {
     /// 关联试卷 ID 列表（同步写入 paper_questions 关联表）
     #[serde(default)]
     pub paper_ids: Option<Vec<Uuid>>,
+    /// AI 智能录入来源元数据：提供时后端从 ai_parse_tasks.progress.staged_questions
+    /// 读取对应暂存项，完成容器关联、AI 标签写入、未匹配候选写入，并标记暂存项已保存。
+    #[serde(default)]
+    pub ai_meta: Option<AiCreateMeta>,
+    /// 统一打标确认：建议 ID + 勾选进入候选的 unmatched.id
+    #[serde(default)]
+    pub ai_tagging_confirmation: Option<crate::ai::tagging::AiTaggingConfirmation>,
+}
+
+/// AI 智能录入创建来源（确认保存时携带，指向待落库的暂存项）
+#[derive(Debug, Clone, Deserialize)]
+pub struct AiCreateMeta {
+    /// 解析任务 ID
+    pub task_id: Uuid,
+    /// 暂存项 index（如 `p1_i0` / `c0_i2`）
+    pub staged_index: String,
 }
 
 /// 更新题目请求（B2 重构）
@@ -271,6 +291,9 @@ pub struct UpdateQuestionRequest {
     /// 关联试卷 ID 列表（同步写入 paper_questions 关联表，全量覆盖）
     #[serde(default)]
     pub paper_ids: Option<Vec<Uuid>>,
+    /// 统一打标确认（编辑页 AI 打标后保存）
+    #[serde(default)]
+    pub ai_tagging_confirmation: Option<crate::ai::tagging::AiTaggingConfirmation>,
 }
 
 /// 自建标签输入（B2 重构：category 改为 enum，新增 parent_id 支持层级）
@@ -314,6 +337,33 @@ pub struct QuestionQuery {
     ///
     /// 使用 `@>` 包含操作符过滤 `metadata->'system_flags'`，避免 `->>` 退化为 Seq Scan。
     pub system_flag: Option<String>,
+
+    // ── V2.1.1 来源/试卷元数据过滤（P1 检索，计划书 §五十三） ──
+    /// 试卷年份（题目被某年份试卷引用）
+    pub year: Option<i32>,
+    /// 试卷学期（first/second/full_year）
+    pub semester: Option<String>,
+    /// 试卷地区（省或市匹配）
+    pub region: Option<String>,
+    /// 试卷来源类型
+    pub source_type: Option<String>,
+    /// 资料类型（兼容：Document.document_type 或 metadata）
+    pub document_type: Option<String>,
+    /// 来源大类：paper | practice | other（题目 metadata）
+    pub source_category: Option<String>,
+    /// 来源子类 slug（题目 metadata）
+    pub source_kind: Option<String>,
+    /// 集合 ID（题目属于该集合）
+    pub collection_id: Option<Uuid>,
+    /// 试卷 ID（题目被该试卷引用；列表按卷内 display_order 排序）
+    pub paper_id: Option<Uuid>,
+}
+
+/// 题目列表中的关联试卷摘要
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuestionPaperBrief {
+    pub id: Uuid,
+    pub title: String,
 }
 
 /// 题目列表响应项
@@ -330,6 +380,10 @@ pub struct QuestionSummary {
     pub updated_at: DateTime<Utc>,
     pub version: i32,
     pub space_id: Uuid,
+    /// 关联试卷（列表接口二次填充；FromRow 跳过）
+    #[sqlx(skip)]
+    #[serde(default)]
+    pub papers: Vec<QuestionPaperBrief>,
 }
 
 impl From<Question> for QuestionSummary {
@@ -346,6 +400,7 @@ impl From<Question> for QuestionSummary {
             updated_at: q.updated_at,
             version: q.version,
             space_id: q.space_id,
+            papers: vec![],
         }
     }
 }
@@ -588,7 +643,7 @@ pub struct PublicLibrarySubmissionDetail {
 // 知识树与知识点（B2 全新设计，替代旧 KnowledgePoint 系列）
 // ===========================================================================
 
-/// 知识树（多树支持：知识树 / 能力树 / 章节树）
+/// 知识树（多树支持：知识树 / 题型专题树 / 章节树）
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct KnowledgeTree {
     pub id: Uuid,
@@ -629,6 +684,12 @@ pub struct KnowledgeNode {
     /// 反规范化缓存：关联题目数
     pub question_count: i32,
     pub is_active: bool,
+    /// V2.1.1：合并目标（status=merged 时指向最终 active 标签；不物理删除）
+    pub canonical_id: Option<Uuid>,
+    /// V2.1.1：生命周期 pending_review/active/merged/deprecated/rejected
+    pub status: String,
+    /// V2.1.1：来源 system/admin/ai/import
+    pub source: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -647,6 +708,10 @@ pub struct KnowledgeNodeTreeNode {
     pub description: Option<String>,
     pub sort_order: i32,
     pub question_count: i32,
+    /// V2.1.1
+    pub canonical_id: Option<Uuid>,
+    pub status: String,
+    pub source: String,
     pub children: Vec<KnowledgeNodeTreeNode>,
 }
 
@@ -664,6 +729,9 @@ impl From<KnowledgeNode> for KnowledgeNodeTreeNode {
             description: n.description,
             sort_order: n.sort_order,
             question_count: n.question_count,
+            canonical_id: n.canonical_id,
+            status: n.status,
+            source: n.source,
             children: vec![],
         }
     }

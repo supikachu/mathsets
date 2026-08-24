@@ -485,6 +485,8 @@
 }
 
 /* ---- Modals ---- */
+/* z-index: 2000 全局弹窗顶层：盖过一切页面内浮层（含侧边栏折叠把手、
+   下拉面板等）；toast(9999)/Select(10000)/Cropper(10000) 仍在弹窗之上 */
 .modal-overlay {
   position: fixed;
   top: 0;
@@ -494,7 +496,7 @@
   background: var(--bg-modal);
   backdrop-filter: var(--blur-modal);
   -webkit-backdrop-filter: var(--blur-modal);
-  z-index: 200;
+  z-index: 2000;
   display: flex;
   align-items: center;
   justify-content: center;

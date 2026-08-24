@@ -4,6 +4,8 @@ pub mod config;
 pub mod db;
 pub mod handlers;
 pub mod models;
+pub mod testing;
+pub mod util;
 pub mod workers;
 
 use axum::{
@@ -12,7 +14,6 @@ use axum::{
     routing::{delete, get, post, put},
     Router,
 };
-use tower::limit::GlobalConcurrencyLimitLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
@@ -111,8 +112,44 @@ pub fn build_app(state: AppState) -> Router {
         .route("/knowledge-nodes/{id}", delete(handlers::knowledge_nodes::delete_node))
         .route("/knowledge-nodes/{id}/descendants", get(handlers::knowledge_nodes::get_descendants))
         .route("/knowledge-nodes/{id}/move", post(handlers::knowledge_nodes::move_node))
-        // AI 智能打标 — B3 新增：LLM 提取 + pg_trgm/JSONB 三级模糊匹配
+        // V2.1.1 标签治理：canonical 合并（环检测 + 审计，不物理删除）
+        .route(
+            "/knowledge-nodes/{id}/merge",
+            post(handlers::tag_governance::merge_knowledge_node),
+        )
+        // V2.1.1 标签候选审核队列（仅管理员）
+        .route(
+            "/admin/tag-candidates",
+            get(handlers::tag_governance::list_tag_candidates),
+        )
+        .route(
+            "/admin/tag-candidates/{id}",
+            get(handlers::tag_governance::get_tag_candidate),
+        )
+        .route(
+            "/admin/tag-candidates/{id}/approve",
+            post(handlers::tag_governance::approve_tag_candidate),
+        )
+        .route(
+            "/admin/tag-candidates/{id}/reject",
+            post(handlers::tag_governance::reject_tag_candidate),
+        )
+        // V2.1.1 标签使用情况
+        .route("/tags/{id}/usage", get(handlers::tag_governance::get_tag_usage))
+        // AI 智能打标 — 同步回退 + 异步任务（必须在 /questions/{id} 之前）
         .route("/questions/ai-tagging", post(handlers::ai_tagging::ai_tagging))
+        .route(
+            "/questions/ai-tagging-tasks",
+            post(handlers::ai_tagging_tasks::create_tagging_task),
+        )
+        .route(
+            "/questions/ai-tagging-tasks/{id}",
+            get(handlers::ai_tagging_tasks::get_tagging_task),
+        )
+        .route(
+            "/questions/ai-tagging-tasks/{id}/cancel",
+            post(handlers::ai_tagging_tasks::cancel_tagging_task),
+        )
         // 当前用户信息
         .route("/auth/me", get(handlers::auth::me))
         // 用户中心（个人资料 + 头像 + 密码）
@@ -209,6 +246,16 @@ pub fn build_app(state: AppState) -> Router {
             "/questions/{id}/papers",
             get(handlers::papers::get_question_papers),
         )
+        // V2.1.1 统一来源视图（Document → Paper/Collection → Question）
+        .route(
+            "/questions/{id}/sources",
+            get(handlers::papers::get_question_sources),
+        )
+        // V2.1.1 数据质量概览（仅管理员）
+        .route(
+            "/admin/data-quality/summary",
+            get(handlers::admin::data_quality_summary),
+        )
         // 试卷 CRUD
         .route("/papers", get(handlers::papers::list_papers))
         .route("/papers", post(handlers::papers::create_paper))
@@ -222,24 +269,66 @@ pub fn build_app(state: AppState) -> Router {
         .route("/papers/{paper_id}/questions", post(handlers::papers::add_question_to_paper))
         .route("/papers/{paper_id}/questions/{question_id}", put(handlers::papers::update_paper_question))
         .route("/papers/{paper_id}/questions/{question_id}", delete(handlers::papers::remove_question_from_paper))
-        // AI 智能录入
-        .route("/ai/parse-text", post(handlers::ai::parse_text))
+        // V2.1.1 题目集合（QuestionCollection）
+        .route("/collections", get(handlers::collections::list_collections))
+        .route("/collections/{id}", get(handlers::collections::get_collection))
+        .route(
+            "/collections/{id}/questions/batch",
+            post(handlers::collections::batch_add_questions),
+        )
+        .route(
+            "/collections/{id}/questions/{question_id}",
+            delete(handlers::collections::remove_collection_question),
+        )
+        // AI 智能录入（设置）
         .route("/ai/settings", get(handlers::ai::get_settings))
         .route("/ai/settings", put(handlers::ai::update_settings))
-        // OCR 引擎连接测试（轻量探测，不消耗配额，不走 GlobalConcurrencyLimit）
+        // OCR 引擎连接测试（轻量探测，不消耗配额）
         .route("/ai/ocr/test-connection", post(handlers::ai::test_ocr_connection))
-        // AI 异步解析任务队列（POST 入队 + GET 查询状态）
-        .route("/ai/parse", post(handlers::ai_tasks::submit_parse_task))
-        .route("/ai/parse/{id}", get(handlers::ai_tasks::get_task_status))
-        // parse-image 路由单独套全局限流层 + body 限制（补丁六后端：全局最多 10 个并发 OCR 请求）
+        .route("/ai/llm/test-connection", post(handlers::ai::test_llm_connection))
+        // V2.1.1 异步解析任务（POST 创建 + GET 进度 + 取消）
+        .route("/ai/parse-task", post(handlers::ai_tasks::submit_parse_task))
+        .route(
+            "/ai/parse-task/{id}",
+            get(handlers::ai_tasks::get_task_status),
+        )
+        .route(
+            "/ai/parse-task/{id}/cancel",
+            post(handlers::ai_tasks::cancel_task),
+        )
+        .route(
+            "/ai/parse-task/{id}/import-questions",
+            post(handlers::ai_tasks::import_questions),
+        )
+        .route(
+            "/ai/parse-task/{id}/clear-staged",
+            post(handlers::ai_tasks::clear_staged_questions),
+        )
+        .route(
+            "/ai/parse-task/{id}/start-tagging",
+            post(handlers::ai_tagging_tasks::start_parse_tagging_tasks),
+        )
+        // 停止打标 / 离开录入 / 全部保存后终止未完成的打标任务
+        .route(
+            "/ai/parse-task/{id}/cancel-tagging",
+            post(handlers::ai_tagging_tasks::cancel_parse_tagging_tasks),
+        )
+        // V2.1.1 资料/Document：上传页图集 + 列表 + 详情
+        .route("/ai/documents", get(handlers::documents::list_documents))
+        .route("/ai/documents/{id}", get(handlers::documents::get_document))
+        .route(
+            "/ai/documents/{id}/classify",
+            post(handlers::documents::classify_document),
+        )
+        .route(
+            "/ai/documents/{id}/confirm",
+            post(handlers::documents::confirm_document),
+        )
+        // 资料上传单独套大体积限制（≤30 页 × 10MB）
         .merge(
             Router::new()
-                .route("/ai/parse-image", post(handlers::ai::parse_image))
-                .route("/ai/parse-image-v2", post(handlers::ai::parse_image_v2))
-                // M4：图片/PDF 异步任务提交（Multipart），共享全局限流与 body 限制
-                .route("/ai/parse-task", post(handlers::ai_tasks::submit_parse_task_media))
-                .layer(GlobalConcurrencyLimitLayer::new(10))
-                .layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
+                .route("/ai/documents", post(handlers::documents::upload_document))
+                .layer(DefaultBodyLimit::max(80 * 1024 * 1024)),
         )
         // 标签管理
         .route("/tags", get(handlers::tags::list_tags))

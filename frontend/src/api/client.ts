@@ -18,6 +18,12 @@ const client = axios.create({
 /// 后端额度耗尽错误码 — 见 src/handlers/ai.rs::consume_ai_quota
 export const AI_QUOTA_EXCEEDED_CODE = 'ERR_QUOTA_EXCEEDED'
 
+/// 判断一个 axios 错误是否为请求超时（默认 10s 或调用方指定 timeout）
+export function isTimeoutError(e: unknown): boolean {
+  const err = e as { code?: string; message?: string }
+  return err?.code === 'ECONNABORTED' || /timeout of \d+ms exceeded/i.test(err?.message ?? '')
+}
+
 /// 判断一个 axios 错误是否为「今日 AI 额度已耗尽」
 export function isQuotaExceededError(e: unknown): boolean {
   const err = e as { response?: { status?: number; data?: { code?: string } } }
@@ -121,7 +127,7 @@ export type TagCategory =
   | 'scene'
   | 'error_prone'
 
-/// 知识树类型（lowercase）
+/// 知识树类型（lowercase）。ability = 题型专题树（math_method_*），非核心素养
 export type KnowledgeTreeKind = 'knowledge' | 'ability' | 'chapter'
 
 /// 知识点关联来源（lowercase）— 审计用
@@ -171,6 +177,11 @@ export const authApi = {
 // ===========================================================================
 
 /// 题目列表项（B2：移除 grade，difficulty 改为 number，新增 grade_level）
+export interface QuestionPaperBrief {
+  id: string
+  title: string
+}
+
 export interface QuestionSummary {
   id: string
   stem: string
@@ -186,6 +197,8 @@ export interface QuestionSummary {
   updated_at: string
   version: number
   space_id: string
+  /// 关联试卷（有则列表卡片展示试卷名）
+  papers?: QuestionPaperBrief[]
 }
 
 /// 题目详情（B2：新增 stem_text/images/metadata/exam_type/cognitive_level 等，
@@ -289,6 +302,16 @@ export interface QuestionQuery {
   /// 异步补全机制：按系统标记过滤（命中 GIN 索引）
   /// 'incomplete' = pending_answer OR missing_analysis 并集（与 incomplete_count 的 total 一致）
   system_flag?: 'pending_answer' | 'missing_analysis' | 'incomplete'
+
+  // ── V2.1.1 来源/试卷元数据过滤（P1 检索） ──
+  year?: number
+  region?: string
+  source_type?: string
+  document_type?: string
+  source_category?: string
+  source_kind?: string
+  collection_id?: string
+  paper_id?: string
 }
 
 /// 自建标签输入（B2：category 改为 enum，新增 parent_id）
@@ -325,6 +348,14 @@ export interface CreateQuestionRequest {
   primary_knowledge_node_id?: string
   space_id?: string
   input_method?: string
+  /// AI 智能录入来源（暂存项 task_id + staged_index）；保存时后端据此完成容器关联/候选/标记
+  ai_meta?: { task_id: string; staged_index: string }
+  /// 统一打标确认：建议 ID + 勾选进入候选的 unmatched.id + 等于已有节点的映射
+  ai_tagging_confirmation?: {
+    suggestion_id: string
+    unmatched_ids?: string[]
+    alias_maps?: TaggingAliasMap[]
+  }
 }
 
 /// 更新题目请求（B2：与后端 UpdateQuestionRequest 对齐，所有字段可选）
@@ -352,6 +383,12 @@ export interface UpdateQuestionRequest {
   new_tags?: NewTagInput[]
   knowledge_node_ids?: string[]
   primary_knowledge_node_id?: string
+  paper_ids?: string[]
+  ai_tagging_confirmation?: {
+    suggestion_id: string
+    unmatched_ids?: string[]
+    alias_maps?: TaggingAliasMap[]
+  }
 }
 
 export interface QuestionStats {
@@ -384,6 +421,10 @@ export const questionApi = {
   },
   get(id: string) {
     return client.get<QuestionDetail>(`/questions/${id}`)
+  },
+  /// V2.1.1 统一来源视图（试卷 + 集合 + Document 链路）
+  getSources(id: string) {
+    return client.get<QuestionSourceItem[]>(`/questions/${id}/sources`)
   },
   create(data: CreateQuestionRequest) {
     return client.post<QuestionDetail>('/questions', data)
@@ -456,14 +497,155 @@ export interface QuestionPaperItem {
   created_at: string
 }
 
+/// V2.1.1 统一来源视图（GET /questions/{id}/sources）
+export interface QuestionSourceItem {
+  kind: 'paper' | 'collection'
+  id: string
+  title: string
+  type_label: string | null
+  question_no: string | null
+  display_order: number
+  score: number | null
+  section: string | null
+  document_id: string | null
+  document_title: string | null
+  document_type: string | null
+}
+
+export type PaperStatus = 'draft' | 'published' | 'archived'
+
+export interface PaperListQuery {
+  page?: number
+  page_size?: number
+  status?: PaperStatus | string
+  subject?: string
+  year?: number
+  year_lt?: number
+  stage?: string
+  grade?: string
+  semester?: string
+  region?: string
+  source_type?: string
+  sub_source_type?: string
+  document_type?: string
+  keyword?: string
+}
+
+export interface PaperSummary {
+  id: string
+  title: string
+  description: string | null
+  subject: string
+  grade: string | null
+  total_score: number
+  duration_minutes: number | null
+  status: PaperStatus
+  creator_id: string | null
+  creator_name: string | null
+  created_at: string
+  updated_at: string
+  version: number
+  question_count: number
+  year: number | null
+  stage: string | null
+  semester: string | null
+  region_province: string | null
+  region_city: string | null
+  school_name: string | null
+  source_type: string | null
+  sub_source_type: string | null
+  document_id: string | null
+  metadata: Record<string, unknown>
+}
+
+export interface PaperQuestionItemDetail {
+  id: string
+  question_id: string
+  sort_order: number
+  score: number
+  section: string | null
+  question_no: string | null
+  display_order: number
+  stem: string
+  question_type: string
+  difficulty: string
+  options?: { label: string; content: string }[] | null
+  correct_answer?: unknown
+  analysis?: string | null
+}
+
+export interface PaperDetail {
+  id: string
+  title: string
+  description: string | null
+  subject: string
+  grade: string | null
+  total_score: number
+  duration_minutes: number | null
+  status: PaperStatus
+  creator_id: string | null
+  creator_name: string | null
+  created_at: string
+  updated_at: string
+  version: number
+  questions: PaperQuestionItemDetail[]
+  year: number | null
+  stage: string | null
+  semester: string | null
+  region_province: string | null
+  region_city: string | null
+  school_name: string | null
+  source_type: string | null
+  sub_source_type: string | null
+  document_id: string | null
+  metadata: Record<string, unknown>
+}
+
+function unwrapPaperList(
+  data: PageResult<PaperSummary> | PaperSummary[],
+): { items: PaperSummary[]; total: number } {
+  if (Array.isArray(data)) return { items: data, total: data.length }
+  return { items: data?.items ?? [], total: data?.total ?? 0 }
+}
+
 export const paperApi = {
+  async list(params?: PaperListQuery) {
+    const res = await client.get<PageResult<PaperSummary> | PaperSummary[]>('/papers', { params })
+    const { items, total } = unwrapPaperList(res.data as any)
+    return { ...res, data: items, total }
+  },
+  get(id: string) {
+    return client.get<PaperDetail>(`/papers/${id}`)
+  },
   /// 试卷轻量列表（仅 id + title，供下拉选择）
   listBrief() {
     return client.get<PaperBrief[]>('/papers/brief')
   },
-  /// 反向查询：题目被引用的试卷列表
+  /// 反向查询：题目被引用的试卷列表（历史兼容；新链路用 questionApi.getSources）
   getQuestionPapers(questionId: string) {
     return client.get<QuestionPaperItem[]>(`/questions/${questionId}/papers`)
+  },
+}
+
+// ===========================================================================
+// 管理端（数据质量）
+// ===========================================================================
+
+export interface DataQualitySummary {
+  orphan_paper_questions: number
+  orphan_collection_questions: number
+  papers_without_questions: number
+  collections_without_questions: number
+  documents_without_sources: number
+  duplicate_paper_question_no_groups: number
+  duplicate_collection_question_no_groups: number
+  questions_without_sources: number
+  generated_at: string
+}
+
+export const adminApi = {
+  dataQualitySummary() {
+    return client.get<DataQualitySummary>('/admin/data-quality/summary')
   },
 }
 
@@ -578,7 +760,7 @@ export const publicLibraryApi = {
 // 知识树 & 知识点节点（B2/B3 新增，替代旧 KnowledgePoint）
 // ===========================================================================
 
-/// 知识树（多树容器：知识树 / 能力树 / 章节树）
+/// 知识树（多树容器：知识树 / 题型专题树 / 章节树）
 export interface KnowledgeTree {
   id: string
   code: string
@@ -638,7 +820,7 @@ export interface KnowledgeNodeSummary {
   name: string
   path: string
   depth: number
-  /// 所属知识树类型（chapter / knowledge / ability）
+  /// 所属知识树类型（chapter / knowledge / ability=题型专题）
   kind: string
   /// 是否主知识点（每题最多 1 个）
   is_primary: boolean
@@ -682,8 +864,8 @@ export interface UpdateKnowledgeNodeRequest {
 }
 
 export const knowledgeTreeApi = {
-  list() {
-    return client.get<KnowledgeTree[]>('/knowledge-trees')
+  list(params?: { kind?: KnowledgeTreeKind; space_id?: string }) {
+    return client.get<KnowledgeTree[]>('/knowledge-trees', { params })
   },
   create(data: CreateKnowledgeTreeRequest) {
     return client.post<KnowledgeTree>('/knowledge-trees', data)
@@ -726,6 +908,105 @@ export const knowledgeNodeApi = {
   /// 移动节点（改 parent_id，后端重算 path 与 depth）
   move(id: string, newParentId: string | null) {
     return client.post(`/knowledge-nodes/${id}/move`, { new_parent_id: newParentId })
+  },
+  /// V2.1.1 canonical 合并（环检测 + 审计，不物理删除）
+  merge(id: string, targetId: string, reason?: string) {
+    return client.post<{ message: string; migrated_relations: number }>(
+      `/knowledge-nodes/${id}/merge`,
+      { target_id: targetId, reason },
+    )
+  },
+}
+
+// ===========================================================================
+// V2.1.1 标签治理：候选审核队列
+// ===========================================================================
+
+export interface TagCandidate {
+  id: string
+  kind: 'chapter' | 'knowledge' | 'method' | 'pattern' | 'core_competence'
+  target_type: 'knowledge_node' | 'tag'
+  raw_name: string
+  normalized_name: string
+  suggested_node_id: string | null
+  suggested_tag_id: string | null
+  ai_confidence: string | null
+  match_score: string | null
+  source_task_id: string | null
+  source_question_id: string | null
+  status: 'pending' | 'approved' | 'rejected' | 'merged'
+  reviewed_by: string | null
+  reviewed_at: string | null
+  review_note: string | null
+  created_at: string
+}
+
+export interface TagCandidateSuggestedNode {
+  id: string
+  name: string
+  name_path: string
+  tree_name: string
+  tree_kind: string
+}
+
+export interface TagCandidateSuggestedTag {
+  id: string
+  name: string
+  category: string
+}
+
+export interface TagCandidateSourceQuestion {
+  id: string
+  stem: string
+  question_type: string
+  options: { label: string; content: string }[] | string[] | null
+}
+
+export interface TagCandidateDetail {
+  candidate: TagCandidate
+  source_stem: string | null
+  source_question?: TagCandidateSourceQuestion | null
+  source_task_id: string | null
+  suggested_node?: TagCandidateSuggestedNode | null
+  suggested_tag?: TagCandidateSuggestedTag | null
+}
+
+export interface TagCandidateListResponse {
+  items: TagCandidate[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export interface ApproveCandidateRequest {
+  /// new_node | alias | merge
+  action: 'new_node' | 'alias' | 'merge'
+  tree_id?: string
+  parent_id?: string
+  name?: string
+  target_node_id?: string
+  target_tag_id?: string
+  reason?: string
+}
+
+export const tagCandidateApi = {
+  list(params?: { status?: string; kind?: string; target_type?: string; page?: number; page_size?: number }) {
+    return client.get<TagCandidateListResponse>('/admin/tag-candidates', { params })
+  },
+  get(id: string) {
+    return client.get<TagCandidateDetail>(`/admin/tag-candidates/${id}`)
+  },
+  approve(id: string, body: ApproveCandidateRequest) {
+    return client.post<{
+      message: string
+      action: string
+      status?: string
+      target_node_id?: string | null
+      target_tag_id?: string | null
+    }>(`/admin/tag-candidates/${id}/approve`, body)
+  },
+  reject(id: string, reason?: string) {
+    return client.post<{ message: string }>(`/admin/tag-candidates/${id}/reject`, { reason })
   },
 }
 
@@ -817,6 +1098,12 @@ export const tagsApi = {
   merge(sourceId: string, targetId: string) {
     return client.post(`/tags/${sourceId}/merge`, { target_id: targetId })
   },
+  /// V2.1.1 标签使用情况
+  usage(id: string) {
+    return client.get<{ tag_id: string; name: string; category: string; use_count: number; question_count: number }>(
+      `/tags/${id}/usage`,
+    )
+  },
 }
 
 // ===========================================================================
@@ -857,6 +1144,10 @@ export interface KpMatch {
   matched_id: string | null
   matched_name: string | null
   score: number
+  /// 匹配节点所属树类型（'chapter'|'knowledge'|'ability'）；
+  /// AI 录入回填时由题目详情的 knowledge_nodes.kind 携带，
+  /// 工作台据此分发到 章节/知识点/题型专题 三个已选数组（缺失时兜底按知识点处理）
+  kind?: string
 }
 
 export interface ParsedQuestion {
@@ -878,6 +1169,28 @@ export interface ParsedQuestion {
   image_placeholders: string[]
   image_urls: string[]
   kp_matches: KpMatch[]
+  /// AI 智能录入暂存来源：提供时保存走 create + ai_meta（后端从暂存项落库）；
+  /// 与 id（已落库）互斥，用于"解析结果暂存、确认后入库"链路
+  ai_meta?: { task_id: string; staged_index: string }
+  /// 统一打标建议 ID（确认保存时回传）
+  tagging_suggestion_id?: string | null
+  tagging_unmatched?: TaggingUnmatched[]
+  tag_matches?: TagMatch[]
+  existing_question_id?: string | null
+  /** 与编辑页「AI 智能打标」同一套 matches；OCR 回填时优先于 kp_matches */
+  tagging_matches?: TaggingMatch[]
+  grade_level?: string | null
+  cognitive_level?: string | null
+  tagging_difficulty?: number | null
+  tagging_question_type?: string | null
+  /** junior | senior，OCR worker 打标时使用的学段 */
+  tagging_stage?: 'junior' | 'senior' | null
+  /** pending：题目已出，打标尚未回写；idle：站外导入后尚未开始打标 */
+  tagging_status?: 'idle' | 'pending' | 'done' | 'failed' | null
+  /** 试卷题号，如 "14" / "17(2)" */
+  question_no?: string | null
+  /** 卷内展示顺序 */
+  display_order?: number | null
 }
 
 export interface AiSettings {
@@ -885,28 +1198,22 @@ export interface AiSettings {
   has_api_key: boolean
   model_text: string | null
   model_vision: string | null
+  model_tagging: string | null
   // M3：OCR 引擎配置（脱敏）
   ocr_provider: string
   has_doc2x_key: boolean
   mineru_endpoint: string | null
   has_mineru_key: boolean
+  llm_base_url: string | null
+  /** 打标独立服务商；null 表示与解析共用 */
+  tagging_provider: string | null
+  has_tagging_api_key: boolean
+  tagging_llm_base_url: string | null
+  stage2_concurrency: number
+  tagging_concurrency: number
 }
 
 export const aiApi = {
-  parseText(text: string) {
-    return client.post<{ data: ParsedQuestion }>('/ai/parse-text', { text })
-  },
-  parseImage(file: File, ocr_provider?: string) {
-    const formData = new FormData()
-    formData.append('image', file)
-    if (ocr_provider) {
-      formData.append('ocr_provider', ocr_provider)
-    }
-    // 不要手动设置 Content-Type — axios + FormData 需要自动生成 boundary
-    return client.post<{ data: ParsedQuestion[] }>('/ai/parse-image-v2', formData, {
-      timeout: 120000,
-    })
-  },
   getSettings() {
     return client.get<AiSettings>('/ai/settings')
   },
@@ -915,10 +1222,17 @@ export const aiApi = {
     api_key?: string
     model_text?: string
     model_vision?: string
+    model_tagging?: string
     ocr_provider?: string
     doc2x_api_key?: string
     mineru_endpoint?: string
     mineru_api_key?: string
+    llm_base_url?: string
+    tagging_provider?: string
+    tagging_api_key?: string
+    tagging_llm_base_url?: string
+    stage2_concurrency?: number
+    tagging_concurrency?: number
   }) {
     return client.put<AiSettings>('/ai/settings', data)
   },
@@ -926,6 +1240,14 @@ export const aiApi = {
   testOcrConnection(data: { provider: string; api_key?: string; endpoint?: string }) {
     return client.post<{ ok: boolean; latency_ms: number; message: string }>(
       '/ai/ocr/test-connection',
+      data,
+      { timeout: 15000 },
+    )
+  },
+  /// 文本模型连接测试（自定义 / OpenRouter）
+  testLlmConnection(data: { api_key?: string; endpoint?: string }) {
+    return client.post<{ ok: boolean; latency_ms: number; message: string }>(
+      '/ai/llm/test-connection',
       data,
       { timeout: 15000 },
     )
@@ -942,6 +1264,50 @@ export interface AiTaggingRequest {
   content: string
   /// 可选空间 ID（限定在该空间的知识树 + 全局树内匹配）
   space_id?: string
+  question_id?: string
+  /** 学段 junior | senior，约束只召回对应学段知识树 */
+  stage?: 'junior' | 'senior'
+}
+
+export type TaggingDimension =
+  | 'chapter'
+  | 'knowledge'
+  | 'pattern'
+  | 'method'
+  | 'core_competence'
+
+export type TaggingTargetType = 'knowledge_node' | 'tag'
+
+export interface TaggingMatch {
+  dimension: TaggingDimension
+  target_type: TaggingTargetType
+  ai_name: string
+  target_id: string
+  target_name: string
+  tree_id?: string | null
+  path?: string | null
+  depth?: number | null
+  category?: string | null
+  score: number
+  match_type: string
+}
+
+export interface TaggingUnmatched {
+  id: string
+  dimension: TaggingDimension
+  target_type: TaggingTargetType
+  raw_name: string
+  normalized_name: string
+  confidence: number | null
+  reason: string
+  eligible_for_candidate: boolean
+}
+
+/** 编辑页把未匹配指到已有节点/标签；与后端 AiTaggingConfirmation.alias_maps 对齐 */
+export interface TaggingAliasMap {
+  unmatched_id: string
+  node_id?: string | null
+  tag_id?: string | null
 }
 
 /// AI 打标返回的单个知识点匹配结果
@@ -964,7 +1330,7 @@ export interface KnowledgeNodeMatch {
   match_type: string
 }
 
-/// AI 打标返回的单个标签匹配结果（核心素养 / 解题方法）
+/// AI 打标返回的单个标签匹配结果（核心素养 / 通用方法）
 export interface TagMatch {
   /// AI 返回的原始名称
   ai_name: string
@@ -986,7 +1352,7 @@ export interface AiTaggingResponse {
   knowledge_nodes: KnowledgeNodeMatch[]
   /// 匹配成功的核心素养标签列表
   competency_tags: TagMatch[]
-  /// 匹配成功的解题方法标签列表
+  /// 匹配成功的通用方法标签列表
   method_tags: TagMatch[]
   /// AI 推断的难度（1-5）
   difficulty: number | null
@@ -998,21 +1364,152 @@ export interface AiTaggingResponse {
   cognitive_level: CognitiveLevel | null
   /// AI 返回但未匹配上的知识点名称（前端可提示用户手动选择）
   unmatched_knowledge_points: string[]
+  /// 统一建议 ID（确认保存时回传）
+  suggestion_id?: string | null
+  engine_version?: string
+  needs_review?: boolean
+  unmatched?: TaggingUnmatched[]
+  matches?: TaggingMatch[]
 }
 
 export const aiTaggingApi = {
   /// 智能打标：分析题目文本 → LLM 提取标签 → pg_trgm 三级匹配知识点 UUID
   tag(data: AiTaggingRequest) {
-    return client.post<AiTaggingResponse>('/questions/ai-tagging', data)
+    return client.post<AiTaggingResponse>('/questions/ai-tagging', data, { timeout: 180000 })
+  },
+  createTask(data: AiTaggingRequest) {
+    return client.post<{ id: string; status: string; reused: boolean }>(
+      '/questions/ai-tagging-tasks',
+      data,
+    )
+  },
+  getTask(id: string) {
+    return client.get<AiTaggingTaskDetail>(`/questions/ai-tagging-tasks/${id}`)
+  },
+  cancelTask(id: string) {
+    return client.post<{ id: string; status: string }>(`/questions/ai-tagging-tasks/${id}/cancel`)
   },
 }
 
+export type AiTaggingTaskStatus =
+  | 'pending'
+  | 'processing'
+  | 'retrying'
+  | 'success'
+  | 'failed'
+  | 'cancelled'
+  | 'cancelling'
+
+export interface AiTaggingTaskDetail {
+  id: string
+  status: AiTaggingTaskStatus
+  retry_count: number
+  error_message: string | null
+  suggestion_id: string | null
+  suggestion: AiTaggingResponse | null
+  cancelling?: boolean
+  created_at: string
+  started_at: string | null
+  completed_at: string | null
+  updated_at: string
+}
+
 // ===========================================================================
-// AI 异步解析任务队列
+// V2.1.1 AI 异步解析任务（Document → Task → Worker）
 // ===========================================================================
 
-export type AiTaskStatus = 'pending' | 'processing' | 'completed' | 'failed'
-export type AiTaskSourceType = 'text' | 'image' | 'pdf'
+export type AiTaskStatus =
+  | 'pending'
+  | 'processing'
+  | 'retrying'
+  | 'success'
+  | 'partial_success'
+  | 'failed'
+  | 'cancelled'
+  | 'completed'
+
+export interface AiParseTaskDetail {
+  id: string
+  /// completed → success 映射后的视图状态
+  status: AiTaskStatus
+  error_message: string | null
+  created_at: string
+  updated_at: string
+  total_count: number
+  processed_count: number
+  success_count: number
+  failed_count: number
+  retry_count: number
+  current_page: number | null
+  total_pages: number | null
+  current_question_no: string | null
+  started_at: string | null
+  completed_at: string | null
+  /// 来源资料 ID（恢复识别页试卷信息）
+  document_id?: string | null
+  /// 结果关联
+  paper_id: string | null
+  collection_ids: string[]
+  question_ids: string[]
+  /** 本任务产生、待审核的未匹配标签候选数（章节/知识点/通用方法/题型专题） */
+  pending_candidate_count: number
+  /** 暂存题目（解析完成、待人工确认保存；按原文顺序） */
+  staged_questions: AiStagedQuestion[]
+  /** OCR 全文 Markdown（站外结构化导入前展示） */
+  ocr_markdown?: string | null
+  /** full | ocr_export */
+  pipeline?: string | null
+  /** 如 ocr_ready */
+  phase?: string | null
+}
+
+/// AI 智能录入暂存项（对应后端 progress.staged_questions 数组元素）
+export interface AiStagedQuestion {
+  index: string
+  /// 后端 ParsedQuestion 序列化结果（含 chapter_path / solution_methods / question_no 等）
+  parsed: Record<string, unknown>
+  images: string[]
+  page_image_url?: string | null
+  space_id: string
+  paper_id?: string | null
+  collection_id?: string | null
+  is_mixed?: boolean
+  /// hash 命中已有题目时携带（前端提示复用，不重复创建）
+  existing_question_id?: string | null
+  matched: AiStagedMatch[]
+  unmatched?: Record<string, string[]>
+  saved: boolean
+  saved_question_id?: string | null
+  merged_into?: string
+  order?: { question_no?: string | null; display_order?: number | null }
+  suggestion_id?: string | null
+  engine_version?: string | null
+  suggestion?: {
+    suggestion_id?: string | null
+    unmatched?: TaggingUnmatched[]
+    matches?: TaggingMatch[]
+    difficulty?: number | null
+    question_type?: string | null
+    grade_level?: string | null
+    cognitive_level?: string | null
+  } | null
+  /** OCR worker 打标时使用的学段，与编辑页 AI 智能打标一致 */
+  tagging_stage?: 'junior' | 'senior' | null
+  /** pending：题目已出，打标尚未回写；idle：尚未开始打标 */
+  tagging_status?: 'idle' | 'pending' | 'done' | 'failed' | null
+}
+
+export interface AiStagedMatch {
+  node_id: string
+  node_name: string
+  ai_name: string
+  tree_id?: string
+  path?: string
+  depth?: number
+  score: number
+  match_type: string
+  kind: string
+}
 
 export interface SubmitParseTaskResponse {
   task_id: string
@@ -1020,39 +1517,295 @@ export interface SubmitParseTaskResponse {
   created_at: string
 }
 
-export interface AiParseTaskDetail {
+/// 解析模式：pdf_direct=仅 PDF 直连（失败回前端引导）/ page=仅逐页 OCR / 缺省=自动降级
+export type ParseMode = 'pdf_direct' | 'page'
+export type ParsePipeline = 'full' | 'ocr_export'
+
+export const aiTaskApi = {
+  createParseTask(document_id: string, parse_mode?: ParseMode, pipeline?: ParsePipeline) {
+    return client.post<SubmitParseTaskResponse>('/ai/parse-task', {
+      document_id,
+      ...(parse_mode ? { parse_mode } : {}),
+      ...(pipeline ? { pipeline } : {}),
+    })
+  },
+  getParseTask(task_id: string, opts?: { timeout?: number }) {
+    return client.get<AiParseTaskDetail>(`/ai/parse-task/${task_id}`, opts)
+  },
+  cancelParseTask(task_id: string) {
+    return client.post<{ message: string }>(`/ai/parse-task/${task_id}/cancel`, {})
+  },
+  importParseQuestions(
+    task_id: string,
+    body: { raw?: string; questions?: unknown; replace?: boolean },
+  ) {
+    return client.post<{ imported: number; message: string }>(
+      `/ai/parse-task/${task_id}/import-questions`,
+      body,
+      { timeout: 120000 },
+    )
+  },
+  startParseTagging(task_id: string) {
+    return client.post<{ started: number; skipped: number; message: string }>(
+      `/ai/parse-task/${task_id}/start-tagging`,
+      {},
+    )
+  },
+  /// 停止打标 / 离开录入 / 全部保存后终止未完成的打标任务
+  cancelParseTagging(task_id: string) {
+    return client.post<{ cancelled: number; cancelling: number }>(
+      `/ai/parse-task/${task_id}/cancel-tagging`,
+      {},
+    )
+  },
+  /// 丢弃未确认的暂存题（已保存项保留），并终止该任务下未完成的打标
+  clearParseStaged(task_id: string) {
+    return client.post<{ removed: number; kept: number; message: string }>(
+      `/ai/parse-task/${task_id}/clear-staged`,
+      {},
+    )
+  },
+}
+
+// ===========================================================================
+// V2.1.1 资料/Document（上传页图集 → AI 分类 → 用户确认）
+// ===========================================================================
+
+/// DocumentType：文件整体是什么（与后端白名单一致）
+export type DocumentType =
+  | 'exam'
+  | 'mock_exam'
+  | 'class_exercise'
+  | 'class_example'
+  | 'homework'
+  | 'preview_exercise'
+  | 'textbook_example'
+  | 'teaching_material'
+  | 'exercise_book'
+  | 'chapter_exercise'
+  | 'unit_exercise'
+  | 'special_training'
+  | 'wrong_question'
+  | 'mixed'
+  | 'unknown'
+  | 'other'
+
+/// CollectionType：这一组题是什么（不含 exam/mock_exam/mixed/unknown）
+export type CollectionType =
+  | 'class_exercise'
+  | 'class_example'
+  | 'homework'
+  | 'preview_exercise'
+  | 'textbook_example'
+  | 'teaching_material'
+  | 'exercise_book'
+  | 'chapter_exercise'
+  | 'unit_exercise'
+  | 'special_training'
+  | 'wrong_question'
+  | 'other'
+
+export type DocumentStatus =
+  | 'uploaded'
+  | 'classifying'
+  | 'classified'
+  | 'confirmed'
+  | 'parsing'
+  | 'done'
+  | 'failed'
+  | 'cancelled'
+
+export interface AiPaperMetaSuggestion {
+  title?: string
+  year?: number
+  stage?: string
+  grade?: string
+  subject?: string
+  semester?: string
+  region_province?: string
+  region_city?: string
+  school_name?: string
+  source_type?: string
+  sub_source_type?: string
+}
+
+export interface AiClassification {
+  source_category?: string
+  source_kind?: string
+  document_type: DocumentType | string
+  title?: string
+  confidence: number
+  reason?: string
+  level: number
+  checked_pages: number
+  create_paper?: boolean
+  paper_meta?: AiPaperMetaSuggestion
+}
+
+export interface DocumentMeta {
   id: string
-  source_type: AiTaskSourceType
-  status: AiTaskStatus
-  question_id: string | null
-  /** M4：多题批处理场景下所有生成题目的 UUID 数组（image/pdf 任务优先读取此字段） */
-  question_ids?: string[]
-  error_message: string | null
+  creator_id: string
+  file_name: string
+  file_size: number | null
+  mime: string | null
+  page_count: number
+  document_type: DocumentType | null
+  type_label: string | null
+  title: string | null
+  source_type: string | null
+  sub_source_type: string | null
+  status: DocumentStatus
+  ai_classification: AiClassification | null
+  metadata: Record<string, any>
+  conversion_engine: string | null
   created_at: string
   updated_at: string
 }
 
-export const aiTaskApi = {
-  /// 文本类异步解析（JSON）
-  submitParseTask(raw_text: string) {
-    return client.post<SubmitParseTaskResponse>('/ai/parse', { raw_text })
-  },
-  /// 图片 / PDF 异步解析（Multipart，自动判定 source_type）
-  ///
-  /// - 大图或多页 PDF 走异步队列，避免同步接口超时
-  /// - `ocrProvider` 可选引擎覆盖（doc2x / mineru_local / qwen_vl）
-  submitParseTaskMedia(file: File | Blob, ocrProvider?: string) {
-    const form = new FormData()
-    form.append('file', file)
-    if (ocrProvider) {
-      form.append('ocr_provider', ocrProvider)
+export interface PaperMetaInput {
+  title: string
+  year?: number
+  stage?: string
+  grade?: string
+  subject?: string
+  semester?: string
+  region_province?: string
+  region_city?: string
+  school_name?: string
+  source_type?: string
+  sub_source_type?: string
+  paper_id?: string
+}
+
+export interface CollectionMetaInput {
+  title: string
+  collection_type: CollectionType
+  type_label?: string
+  source_type?: string
+  subject?: string
+  stage?: string
+  grade?: string
+  semester?: string
+  chapter_id?: string
+}
+
+export interface ConfirmDocumentRequest {
+  source_category?: string
+  source_kind?: string
+  create_paper?: boolean
+  /** @deprecated 兼容旧调用 */
+  document_type?: DocumentType | string
+  type_label?: string
+  title?: string
+  source_type?: string
+  sub_source_type?: string
+  paper_meta?: PaperMetaInput
+  collections?: CollectionMetaInput[]
+}
+
+export const documentApi = {
+  /// 上传页面图片集（PDF 前端渲染为页图后上传）
+  /// pdf：原始 PDF 二进制（可选），后端保留供 Doc2X/MinerU 整档直传 OCR 快速路径
+  upload(pages: File[], meta: { file_name?: string; file_type?: string; pdf?: File }, signal?: AbortSignal) {
+    const formData = new FormData()
+    for (const page of pages) {
+      formData.append('pages', page)
     }
-    return client.post<SubmitParseTaskResponse>('/ai/parse-task', form, {
-      headers: { 'Content-Type': 'multipart/form-data' },
+    if (meta.file_name) formData.append('file_name', meta.file_name)
+    if (meta.file_type) formData.append('file_type', meta.file_type)
+    if (meta.pdf) formData.append('pdf', meta.pdf)
+    return client.post<{ data: DocumentMeta }>('/ai/documents', formData, {
+      timeout: 120000,
+      signal,
     })
   },
-  getTaskStatus(task_id: string) {
-    return client.get<AiParseTaskDetail>(`/ai/parse/${task_id}`)
+  classify(id: string, signal?: AbortSignal) {
+    return client.post<{ data: DocumentMeta; ai_classification: AiClassification }>(
+      `/ai/documents/${id}/classify`,
+      {},
+      { timeout: 120000, signal },
+    )
+  },
+  confirm(id: string, body: ConfirmDocumentRequest) {
+    return client.post<{ data: DocumentMeta; paper_id?: string | null }>(`/ai/documents/${id}/confirm`, body)
+  },
+  list() {
+    return client.get<{ data: DocumentMeta[] }>('/ai/documents')
+  },
+  get(id: string) {
+    return client.get<{ data: DocumentMeta }>(`/ai/documents/${id}`)
+  },
+}
+
+// ===========================================================================
+// V2.1.1 题目集合（QuestionCollection / CollectionQuestion）
+// ===========================================================================
+
+export interface QuestionCollectionSummary {
+  id: string
+  document_id: string
+  creator_id: string
+  title: string
+  collection_type: CollectionType
+  type_label: string | null
+  source_type: string | null
+  subject: string | null
+  stage: string | null
+  grade: string | null
+  semester: string | null
+  chapter_id: string | null
+  metadata: Record<string, any>
+  created_at: string
+  updated_at: string
+}
+
+export interface CollectionQuestionItem {
+  id: string
+  question_id: string
+  question_no: string | null
+  display_order: number
+  score: number | null
+  stem: string
+  question_type: string
+  difficulty: string
+}
+
+export interface CollectionDetail extends QuestionCollectionSummary {
+  document_title: string | null
+  document_type: string | null
+  questions: CollectionQuestionItem[]
+}
+
+export interface CollectionListResponse {
+  items: QuestionCollectionSummary[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export interface BatchAddQuestionsInput {
+  question_id: string
+  question_no?: string
+  display_order?: number
+  score?: number
+  section?: string
+}
+
+export const collectionApi = {
+  list(params?: { document_id?: string; page?: number; page_size?: number }) {
+    return client.get<CollectionListResponse>('/collections', { params })
+  },
+  get(id: string) {
+    return client.get<CollectionDetail>(`/collections/${id}`)
+  },
+  batchAddQuestions(id: string, questions: BatchAddQuestionsInput[]) {
+    return client.post<{ inserted: number; skipped: number }>(
+      `/collections/${id}/questions/batch`,
+      { questions },
+    )
+  },
+  removeQuestion(id: string, questionId: string) {
+    return client.delete<{ message: string }>(`/collections/${id}/questions/${questionId}`)
   },
 }
 
@@ -1061,11 +1814,10 @@ export const aiTaskApi = {
 // ===========================================================================
 
 export interface UserQuota {
-  ocr_quota_daily: number
-  ocr_quota_used: number
-  ocr_quota_remaining: number
-  ocr_quota_reset_at: string
-  ai_token_quota: number
+  daily_quota: number
+  used_today: number
+  remaining: number
+  reset_at: string
 }
 
 export interface UserProfile {

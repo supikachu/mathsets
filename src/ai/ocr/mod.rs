@@ -43,6 +43,21 @@ pub(crate) fn map_ai_to_ocr_error(e: crate::ai::provider::AiError) -> OcrError {
     }
 }
 
+/// PDF 直传进度回调：参数为 0~100 百分比
+///
+/// 引擎轮询期间周期性触发（如 Doc2X 每 3s 一次）；
+/// 无数值进度的引擎（MinerU 云端）不触发，调用方依赖心跳保活。
+pub type PdfProgressCallback = std::sync::Arc<dyn Fn(u8) + Send + Sync>;
+
+/// 从 JSON Value 解析百分比（0~100）：支持数字与数字字符串，其余 → None
+pub(crate) fn parse_percent_value(v: &serde_json::Value) -> Option<f64> {
+    match v {
+        serde_json::Value::Number(n) => n.as_f64(),
+        serde_json::Value::String(s) => s.trim().parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
 /// OCR 引擎 trait
 ///
 /// 每个引擎实现本 trait 即可被 `create_ocr_provider` 工厂装配到两阶段流水线。
@@ -70,6 +85,18 @@ pub trait OcrProvider: Send + Sync {
     async fn ocr_pdf_async(&self, _pdf_bytes: &[u8]) -> Result<String, OcrError> {
         Err(OcrError::UnsupportedPdf)
     }
+
+    /// PDF 直传（带进度回调）→ 全文 Markdown
+    ///
+    /// 默认委托 `ocr_pdf_async`（不触发回调）；有数值进度的引擎（Doc2X）
+    /// 覆盖本方法在轮询循环中上报 0~100 百分比。
+    async fn ocr_pdf_async_with_progress(
+        &self,
+        pdf_bytes: &[u8],
+        _on_progress: &PdfProgressCallback,
+    ) -> Result<String, OcrError> {
+        self.ocr_pdf_async(pdf_bytes).await
+    }
 }
 
 /// OCR 引擎配置（由 `resolve_ocr_config` 填充后传入工厂）
@@ -88,6 +115,8 @@ pub struct OcrConfig {
     pub model: Option<String>,
     /// 题目图片落盘根目录（如 "./uploads"），用于 MinerU 云端模式解压 zip 时搬运 images/*
     pub upload_dir: Option<String>,
+    /// 解析任务 ID，MinerU 云端 zip 按任务分目录保存
+    pub task_id: Option<uuid::Uuid>,
 }
 
 /// 工厂：按配置创建 OCR 引擎实例
@@ -104,7 +133,8 @@ pub fn create_ocr_provider(cfg: &OcrConfig) -> Box<dyn OcrProvider> {
         )),
         "mineru_local" | "mineru_api" => Box::new(
             MineruProvider::new(cfg.api_key.clone(), cfg.base_url.clone())
-                .with_upload_dir(cfg.upload_dir.clone()),
+                .with_upload_dir(cfg.upload_dir.clone())
+                .with_task_id(cfg.task_id),
         ),
         "qwen_vl" | "auto" | "" => Box::new(QwenVlOcrProvider::new(
             cfg.api_key.clone(),
@@ -158,6 +188,7 @@ mod tests {
             base_url: "https://example.com".into(),
             model: None,
             upload_dir: None,
+            task_id: None,
         };
         let p = create_ocr_provider(&cfg);
         assert_eq!(p.id(), "qwen_vl");
@@ -172,6 +203,7 @@ mod tests {
             base_url: "https://example.com".into(),
             model: Some("qwen-vl-plus".into()),
             upload_dir: None,
+            task_id: None,
         };
         let p = create_ocr_provider(&cfg);
         assert_eq!(p.id(), "qwen_vl");
@@ -187,6 +219,7 @@ mod tests {
             base_url: "https://v2.doc2x.noedgeai.com".into(),
             model: None,
             upload_dir: None,
+            task_id: None,
         };
         let p = create_ocr_provider(&cfg);
         assert_eq!(p.id(), "doc2x");
@@ -202,6 +235,7 @@ mod tests {
             base_url: "http://127.0.0.1:8000".into(),
             model: None,
             upload_dir: None,
+            task_id: None,
         };
         let p = create_ocr_provider(&cfg);
         assert_eq!(p.id(), "mineru_local");
@@ -217,6 +251,7 @@ mod tests {
             base_url: "http://mineru.internal".into(),
             model: None,
             upload_dir: None,
+            task_id: None,
         };
         let p = create_ocr_provider(&cfg);
         assert_eq!(p.id(), "mineru_local");
@@ -230,6 +265,7 @@ mod tests {
             base_url: "https://example.com".into(),
             model: None,
             upload_dir: None,
+            task_id: None,
         };
         let p = create_ocr_provider(&cfg);
         // 未知引擎兜底为 qwen_vl
@@ -244,6 +280,7 @@ mod tests {
             base_url: "https://example.com".into(),
             model: None,
             upload_dir: None,
+            task_id: None,
         };
         let p = create_ocr_provider(&cfg);
         let res = p.ocr_pdf_async(b"fake-pdf").await;

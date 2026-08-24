@@ -156,7 +156,7 @@ fn join_md_strings(md_list: Vec<String>) -> Result<String, OcrError> {
     if md_list.is_empty() {
         return Err(OcrError::Upstream(0, "Doc2X 返回空 Markdown".to_string()));
     }
-    Ok(md_list.join("\n\n"))
+    Ok(md_list.join(&format!("\n\n{}\n\n", crate::ai::layout::LayoutDocument::PAGE_BREAK)))
 }
 
 /// 截断字符串用于日志打印，避免日志过长
@@ -441,10 +441,33 @@ impl OcrProvider for Doc2XProvider {
         extract_pages_md_from_value(parsed.data.as_ref())
     }
 
-    /// PDF 异步 OCR → 全文 Markdown
+    /// PDF 异步 OCR → 全文 Markdown（无进度回调）
     ///
     /// submit (preupload) → PUT 上传 → poll status
     async fn ocr_pdf_async(&self, pdf_bytes: &[u8]) -> Result<String, OcrError> {
+        self.ocr_pdf_async_inner(pdf_bytes, None).await
+    }
+
+    /// PDF 异步 OCR（带进度回调）：processing 期间每 3s 上报 0~100 百分比
+    async fn ocr_pdf_async_with_progress(
+        &self,
+        pdf_bytes: &[u8],
+        on_progress: &crate::ai::ocr::PdfProgressCallback,
+    ) -> Result<String, OcrError> {
+        self.ocr_pdf_async_inner(pdf_bytes, Some(on_progress)).await
+    }
+}
+
+impl Doc2XProvider {
+    /// PDF 直传实现主体
+    ///
+    /// submit (preupload) → PUT 上传 → poll status；
+    /// `on_progress` 存在时在 processing 轮询分支上报 `data.progress` 百分比。
+    async fn ocr_pdf_async_inner(
+        &self,
+        pdf_bytes: &[u8],
+        on_progress: Option<&crate::ai::ocr::PdfProgressCallback>,
+    ) -> Result<String, OcrError> {
         // ── Step 1：preupload 获取上传 url ──
         let preupload_url = self.url("/api/v2/parse/preupload");
         let resp = self
@@ -610,6 +633,16 @@ impl OcrProvider for Doc2XProvider {
                 }
                 // processing / 其他状态 / None → 继续 polling
                 _ => {
+                    // 上报进度（0~100；progress 缺失/不可解析时跳过本轮）
+                    if let (Some(cb), Some(pct)) = (
+                        on_progress,
+                        data.progress
+                            .as_ref()
+                            .and_then(crate::ai::ocr::parse_percent_value)
+                            .map(|f| f.clamp(0.0, 100.0) as u8),
+                    ) {
+                        cb(pct);
+                    }
                     tracing::debug!(
                         uid = %uid,
                         status = ?data.status,
@@ -825,6 +858,14 @@ mod tests {
     fn test_join_md_strings_single() {
         let md = join_md_strings(vec!["only".into()]).unwrap();
         assert_eq!(md, "only");
+    }
+
+    #[test]
+    fn test_join_md_strings_inserts_page_breaks() {
+        let md = join_md_strings(vec!["page-a".into(), "page-b".into()]).unwrap();
+        assert!(md.contains(crate::ai::layout::LayoutDocument::PAGE_BREAK));
+        assert!(md.starts_with("page-a"));
+        assert!(md.ends_with("page-b"));
     }
 
     #[test]

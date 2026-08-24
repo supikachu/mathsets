@@ -7,9 +7,13 @@ use axum_extra::extract::Query;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
+use crate::ai::tagging::{
+    apply_tagging_suggestion, confirmation_or_legacy, insert_confirmed_candidates,
+    repair_applied_suggestion_links,
+};
 use crate::auth::middleware::AuthUser;
 use crate::auth::permissions::{
     can_access_space, can_edit_question, can_publish_question, can_review_question,
@@ -17,10 +21,10 @@ use crate::auth::permissions::{
     is_admin_user, list_reviewers, PermissionError,
 };
 use crate::models::question::{
-    CreateQuestionRequest, KnowledgeNodeSummary, Question, QuestionDetail, QuestionQuery,
-    QuestionStatus, QuestionSummary, QuestionType, RejectRequest, SubmitReviewRequest,
-    TagSummary, TransferQuestionRequest, UpdateQuestionRequest, is_answer_empty,
-    refresh_system_flags,
+    AiCreateMeta, CreateQuestionRequest, KnowledgeNodeSummary, Question, QuestionDetail,
+    QuestionPaperBrief, QuestionQuery, QuestionStatus, QuestionSummary, QuestionType, RejectRequest,
+    SubmitReviewRequest, TagSummary, TransferQuestionRequest, UpdateQuestionRequest,
+    is_answer_empty, refresh_system_flags,
 };
 use crate::models::space::SpaceKind;
 use crate::models::user::{GlobalRole, User};
@@ -108,7 +112,7 @@ pub(crate) async fn update_knowledge_nodes(
         .await?;
     }
 
-    // 4. 插入新增关联（统一标记为 manual；AI 来源只能由 upsert_ai_knowledge_nodes 写入）
+    // 4. 插入新增关联（统一标记为 manual；AI 来源由 TaggingFinalizer 在保存后回写）
     //    保留 retained 关联的 source 与 ai_confidence，避免覆盖 AI 审计数据
     for node_id in &added {
         let is_primary = primary_node_id == Some(*node_id);
@@ -149,73 +153,6 @@ pub(crate) async fn update_knowledge_nodes(
         .bind(primary_id)
         .execute(&mut **tx)
         .await?;
-    }
-
-    Ok(())
-}
-
-/// AI 专用的知识点关联 Upsert（B3 新增）
-///
-/// 与 `update_knowledge_nodes` 的差异：
-/// - `source = 'ai'`（审计追溯，区分人工/AI 标注）
-/// - 将 `KnowledgeNodeMatch.score`（f32）写入 `ai_confidence`（NUMERIC(5,4)）
-/// - `ON CONFLICT DO UPDATE`（覆盖已有 manual 关联的 source 与置信度）
-pub(crate) async fn upsert_ai_knowledge_nodes(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    question_id: Uuid,
-    matches: &[crate::handlers::ai_tagging::KnowledgeNodeMatch],
-    primary_node_id: Option<Uuid>,
-) -> Result<(), sqlx::Error> {
-    sqlx::query("DELETE FROM question_knowledge_nodes WHERE question_id = $1")
-        .bind(question_id)
-        .execute(&mut **tx)
-        .await?;
-
-    for m in matches {
-        let is_primary = primary_node_id == Some(m.node_id);
-        // f32 → rust_decimal::Decimal（ai_confidence 列为 NUMERIC(5,4)）
-        let ai_confidence = {
-            use rust_decimal::prelude::FromPrimitive;
-            rust_decimal::Decimal::from_f32(m.score)
-        };
-
-        sqlx::query(
-            r#"
-            INSERT INTO question_knowledge_nodes
-              (question_id, node_id, is_primary, source, ai_confidence, created_at)
-            VALUES ($1, $2, $3, 'ai', $4, NOW())
-            ON CONFLICT (question_id, node_id) DO UPDATE SET
-              is_primary = EXCLUDED.is_primary,
-              source = 'ai',
-              ai_confidence = EXCLUDED.ai_confidence
-            "#,
-        )
-        .bind(question_id)
-        .bind(m.node_id)
-        .bind(is_primary)
-        .bind(ai_confidence)
-        .execute(&mut **tx)
-        .await?;
-    }
-
-    // 确保 primary 唯一性：若 primary_node_id 不在 matches 中，单独插入
-    if let Some(primary_id) = primary_node_id {
-        if !matches.iter().any(|m| m.node_id == primary_id) {
-            sqlx::query(
-                r#"
-                INSERT INTO question_knowledge_nodes
-                  (question_id, node_id, is_primary, source, created_at)
-                VALUES ($1, $2, TRUE, 'ai', NOW())
-                ON CONFLICT (question_id, node_id) DO UPDATE SET
-                  is_primary = TRUE,
-                  source = 'ai'
-                "#,
-            )
-            .bind(question_id)
-            .bind(primary_id)
-            .execute(&mut **tx)
-            .await?;
-        }
     }
 
     Ok(())
@@ -434,7 +371,7 @@ pub(crate) async fn build_detail(
 ) -> Result<QuestionDetail, sqlx::Error> {
     // 关联数据查询失败时记录日志而非静默吞错（fix：旧实现 unwrap_or_default
     // 会把 SQL 错误吞成空数组，导致 tags/knowledge_nodes 在接口里"神秘消失"）
-    let kns = match get_question_knowledge_nodes(pool, question.id).await {
+    let mut kns = match get_question_knowledge_nodes(pool, question.id).await {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(
@@ -445,7 +382,7 @@ pub(crate) async fn build_detail(
             Vec::new()
         }
     };
-    let tags = match get_question_tags(pool, question.id).await {
+    let mut tags = match get_question_tags(pool, question.id).await {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(
@@ -456,6 +393,24 @@ pub(crate) async fn build_detail(
             Vec::new()
         }
     };
+    if kns.is_empty() && tags.is_empty() {
+        match repair_applied_suggestion_links(pool, question.id).await {
+            Ok(true) => {
+                if let Ok(v) = get_question_knowledge_nodes(pool, question.id).await {
+                    kns = v;
+                }
+                if let Ok(v) = get_question_tags(pool, question.id).await {
+                    tags = v;
+                }
+            }
+            Ok(false) => {}
+            Err(e) => tracing::warn!(
+                "build_detail: 补写题目 {} 打标关联失败: {}",
+                question.id,
+                e
+            ),
+        }
+    }
     let reviewer_ids = match list_reviewers(pool, question.id).await {
         Ok(v) => v,
         Err(e) => {
@@ -525,11 +480,17 @@ fn validate_question_completeness(
     }
 
     // 2. 选择题选项校验
+    // options 的规范存储格式是数组 [{label, content}]（创建接口原样落库、
+    // worker 序列化 Vec<ParsedOption>、前端 API 类型一致）；
+    // 防御性兼容历史对象包裹格式 {"options": [...]}
     if matches!(question.question_type, QuestionType::Choice | QuestionType::Multiple) {
-        let options_empty = question.options.as_ref().map_or(true, |o| {
-            o.get("options")
+        let options_empty = question.options.as_ref().map_or(true, |o| match o {
+            serde_json::Value::Array(a) => a.is_empty(),
+            serde_json::Value::Object(_) => o
+                .get("options")
                 .and_then(|arr| arr.as_array())
-                .map_or(true, |a| a.is_empty())
+                .map_or(true, |a| a.is_empty()),
+            _ => true,
         });
         if options_empty {
             return Err((
@@ -669,16 +630,60 @@ pub async fn list_questions(
     apply_access_filters(&mut builder, &auth, &query);
     apply_question_filters(&mut builder, &query);
 
-    builder.push(" ORDER BY q.updated_at DESC LIMIT ");
+    if let Some(paper_id) = query.paper_id {
+        builder.push(
+            " ORDER BY (SELECT pq.display_order FROM paper_questions pq \
+              WHERE pq.question_id = q.id AND pq.paper_id = ",
+        );
+        builder.push_bind(paper_id);
+        builder.push(" LIMIT 1) ASC NULLS LAST, q.updated_at DESC LIMIT ");
+    } else {
+        builder.push(" ORDER BY q.updated_at DESC LIMIT ");
+    }
     builder.push_bind(page_size as i64);
     builder.push(" OFFSET ");
     builder.push_bind(offset as i64);
 
-    let questions = builder
+    let mut questions = builder
         .build_query_as::<QuestionSummary>()
         .fetch_all(&state.pool)
         .await
         .map_err(|e| db_err(format!("查询题目失败: {}", e)))?;
+
+    // 批量填充关联试卷（避免列表 N+1；有关联时卡片展示试卷名）
+    if !questions.is_empty() {
+        let qids: Vec<Uuid> = questions.iter().map(|q| q.id).collect();
+        #[derive(sqlx::FromRow)]
+        struct PaperLinkRow {
+            question_id: Uuid,
+            paper_id: Uuid,
+            title: String,
+        }
+        let links = sqlx::query_as::<_, PaperLinkRow>(
+            r#"
+            SELECT pq.question_id, p.id AS paper_id, p.title
+            FROM paper_questions pq
+            JOIN papers p ON p.id = pq.paper_id
+            WHERE pq.question_id = ANY($1)
+            ORDER BY pq.display_order, pq.sort_order, pq.created_at
+            "#,
+        )
+        .bind(&qids)
+        .fetch_all(&state.pool)
+        .await
+        .map_err(|e| db_err(format!("查询题目关联试卷失败: {}", e)))?;
+
+        let mut by_qid: HashMap<Uuid, Vec<QuestionPaperBrief>> = HashMap::new();
+        for row in links {
+            by_qid.entry(row.question_id).or_default().push(QuestionPaperBrief {
+                id: row.paper_id,
+                title: row.title,
+            });
+        }
+        for q in &mut questions {
+            q.papers = by_qid.remove(&q.id).unwrap_or_default();
+        }
+    }
 
     Ok(Json(PageResult {
         items: questions,
@@ -838,6 +843,75 @@ fn apply_question_filters<'a>(
         builder.push(" AND q.stem ILIKE ");
         builder.push_bind(format!("%{}%", keyword));
     }
+    // ── V2.1.1 来源/试卷元数据过滤（P1 检索） ──
+    if let Some(year) = query.year {
+        builder.push(" AND EXISTS (SELECT 1 FROM paper_questions pq \
+                      JOIN papers p ON p.id = pq.paper_id \
+                      WHERE pq.question_id = q.id AND p.year = ");
+        builder.push_bind(year);
+        builder.push(")");
+    }
+    if let Some(ref semester) = query.semester {
+        builder.push(" AND EXISTS (SELECT 1 FROM paper_questions pq \
+                      JOIN papers p ON p.id = pq.paper_id \
+                      WHERE pq.question_id = q.id AND p.semester = ");
+        builder.push_bind(semester);
+        builder.push(")");
+    }
+    if let Some(ref region) = query.region {
+        builder.push(" AND EXISTS (SELECT 1 FROM paper_questions pq \
+                      JOIN papers p ON p.id = pq.paper_id \
+                      WHERE pq.question_id = q.id AND (p.region_province = ");
+        builder.push_bind(region);
+        builder.push(" OR p.region_city = ");
+        builder.push_bind(region);
+        builder.push("))");
+    }
+    if let Some(ref source_type) = query.source_type {
+        builder.push(" AND EXISTS (SELECT 1 FROM paper_questions pq \
+                      JOIN papers p ON p.id = pq.paper_id \
+                      WHERE pq.question_id = q.id AND p.source_type = ");
+        builder.push_bind(source_type);
+        builder.push(")");
+    }
+    if let Some(ref document_type) = query.document_type {
+        // 兼容旧 JOIN + 新 metadata（独立题）
+        builder.push(" AND (q.metadata->>'document_type' = ");
+        builder.push_bind(document_type);
+        builder.push(" OR q.metadata->>'source_kind' = ");
+        builder.push_bind(document_type);
+        builder.push(" OR EXISTS (SELECT 1 FROM paper_questions pq \
+                      JOIN papers p ON p.id = pq.paper_id \
+                      JOIN documents d ON d.id = p.document_id \
+                      WHERE pq.question_id = q.id AND d.document_type = ");
+        builder.push_bind(document_type);
+        builder.push(") OR EXISTS (SELECT 1 FROM collection_questions cq \
+                      JOIN question_collections c ON c.id = cq.collection_id \
+                      JOIN documents d ON d.id = c.document_id \
+                      WHERE cq.question_id = q.id AND d.document_type = ");
+        builder.push_bind(document_type);
+        builder.push("))");
+    }
+    if let Some(ref source_category) = query.source_category {
+        builder.push(" AND q.metadata->>'source_category' = ");
+        builder.push_bind(source_category);
+    }
+    if let Some(ref source_kind) = query.source_kind {
+        builder.push(" AND q.metadata->>'source_kind' = ");
+        builder.push_bind(source_kind);
+    }
+    if let Some(ref collection_id) = query.collection_id {
+        builder.push(" AND EXISTS (SELECT 1 FROM collection_questions cq \
+                      WHERE cq.question_id = q.id AND cq.collection_id = ");
+        builder.push_bind(collection_id);
+        builder.push(")");
+    }
+    if let Some(paper_id) = query.paper_id {
+        builder.push(" AND EXISTS (SELECT 1 FROM paper_questions pq \
+                      WHERE pq.question_id = q.id AND pq.paper_id = ");
+        builder.push_bind(paper_id);
+        builder.push(")");
+    }
     // 待补全筛选（T2-6）— 必须用 `@>` 包含操作符命中 GIN 索引
     // `->>` 会将 JSONB 转为 text，绕过 GIN 索引退化为 Seq Scan
     if let Some(ref flag) = query.system_flag {
@@ -857,6 +931,222 @@ fn apply_question_filters<'a>(
             _ => {} // 未知 flag 忽略，避免 SQL 注入
         }
     }
+}
+
+/// 加载并校验 AI 智能录入的暂存项（确认保存时使用）
+///
+/// - 校验任务归属（本人或管理员）
+/// - 按 `staged_index` 从 `progress.staged_questions` 定位暂存项
+/// - 已保存的暂存项原样返回（create 侧做幂等：返回已有题目，不 409）
+async fn load_ai_staged_item(
+    pool: &sqlx::PgPool,
+    meta: &AiCreateMeta,
+    auth: &AuthUser,
+) -> Result<serde_json::Value, (StatusCode, Json<serde_json::Value>)> {
+    let task_row: Option<(Uuid, serde_json::Value)> = sqlx::query_as(
+        "SELECT creator_id, progress FROM ai_parse_tasks WHERE id = $1",
+    )
+    .bind(meta.task_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| db_err(format!("查询解析任务失败: {e}")))?;
+
+    let (creator_id, progress) = task_row
+        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "解析任务不存在"}))))?;
+    if creator_id != auth.id && !is_admin_user(auth) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "解析任务不存在"})),
+        ));
+    }
+
+    let staged = progress
+        .get("staged_questions")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| {
+            arr.iter().find(|item| {
+                item.get("index")
+                    .and_then(staged_index_key)
+                    .as_deref()
+                    == Some(meta.staged_index.as_str())
+            })
+        })
+        .cloned()
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "暂存题目不存在，可能已被保存或丢弃"})),
+            )
+        })?;
+
+    Ok(staged)
+}
+
+fn paper_id_from_staged(staged: &serde_json::Value) -> Option<Uuid> {
+    staged
+        .get("paper_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+}
+
+/// OCR 先行时 Stage 2 可能尚未建卷，保存题目时按任务所属资料补查试卷
+async fn lookup_paper_id_for_parse_task(
+    pool: &sqlx::PgPool,
+    task_id: Uuid,
+) -> Result<Option<Uuid>, (StatusCode, Json<serde_json::Value>)> {
+    sqlx::query_scalar(
+        r#"
+        SELECT p.id
+        FROM ai_parse_tasks t
+        JOIN papers p ON p.document_id = t.document_id
+        WHERE t.id = $1
+        ORDER BY p.updated_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(task_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| db_err(format!("查询试卷失败: {e}")))
+}
+
+async fn resolve_paper_ids_for_create(
+    pool: &sqlx::PgPool,
+    req: &CreateQuestionRequest,
+    staged: Option<&serde_json::Value>,
+) -> Result<Vec<Uuid>, (StatusCode, Json<serde_json::Value>)> {
+    let mut ids = req.paper_ids.clone().unwrap_or_default();
+    if !ids.is_empty() {
+        return Ok(ids);
+    }
+    if let Some(pid) = staged.and_then(paper_id_from_staged) {
+        ids.push(pid);
+        return Ok(ids);
+    }
+    if let Some(meta) = &req.ai_meta {
+        if let Some(pid) = lookup_paper_id_for_parse_task(pool, meta.task_id).await? {
+            ids.push(pid);
+        }
+    }
+    Ok(ids)
+}
+
+fn staged_index_key(v: &serde_json::Value) -> Option<String> {
+    v.as_str()
+        .map(|s| s.to_string())
+        .or_else(|| v.as_i64().map(|n| n.to_string()))
+        .or_else(|| v.as_u64().map(|n| n.to_string()))
+}
+
+fn staged_saved_question_id(staged: &serde_json::Value) -> Option<Uuid> {
+    staged
+        .get("saved_question_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+}
+
+/// 标记 AI 暂存项已保存：写 saved/saved_question_id + 幂等映射（index → 题目 ID）
+async fn mark_ai_staged_saved(
+    pool: &sqlx::PgPool,
+    task_id: Uuid,
+    staged_index: &str,
+    question_id: Uuid,
+) {
+    // 1. 暂存项标记 saved + saved_question_id（供前端防重复提交）
+    let _ = sqlx::query(
+        r#"
+        UPDATE ai_parse_tasks
+        SET progress = jsonb_set(
+              progress,
+              '{staged_questions}',
+              (
+                SELECT COALESCE(jsonb_agg(
+                  CASE WHEN elem->>'index' = $3
+                       THEN elem || jsonb_build_object('saved', true, 'saved_question_id', $2::text)
+                       ELSE elem END
+                  ORDER BY ord
+                ), '[]'::jsonb)
+                FROM jsonb_array_elements(progress->'staged_questions')
+                  WITH ORDINALITY AS t(elem, ord)
+              )
+            ),
+            updated_at = NOW()
+        WHERE id = $1
+        "#,
+    )
+    .bind(task_id)
+    .bind(question_id.to_string())
+    .bind(staged_index)
+    .execute(pool)
+    .await;
+
+    // 2. 幂等映射（供 GET parse-task 返回 question_ids；值为 uuid 字符串）
+    let _ = sqlx::query(
+        r#"
+        UPDATE ai_parse_tasks
+        SET progress = jsonb_set(
+              progress,
+              '{idempotency_map}',
+              COALESCE(progress->'idempotency_map', '{}'::jsonb) || jsonb_build_object($3::text, $2::text)
+            ),
+            updated_at = NOW()
+        WHERE id = $1
+        "#,
+    )
+    .bind(task_id)
+    .bind(question_id.to_string())
+    .bind(staged_index)
+    .execute(pool)
+    .await;
+}
+
+fn merge_primary(mut node_ids: Vec<Uuid>, primary: Option<Uuid>) -> Vec<Uuid> {
+    if let Some(p) = primary {
+        if !node_ids.contains(&p) {
+            node_ids.push(p);
+        }
+    }
+    node_ids
+}
+
+/// 旧录题路径：把暂存 matched 节点标为 AI 来源（无 suggestion 时使用）
+async fn apply_legacy_staged_matches(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    question_id: Uuid,
+    staged: &serde_json::Value,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    let Some(matched) = staged.get("matched").and_then(|m| m.as_array()) else {
+        return Ok(());
+    };
+    use rust_decimal::prelude::FromPrimitive;
+    for m in matched {
+        let Some(node_id) = m
+            .get("node_id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+        else {
+            continue;
+        };
+        let score = m.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+        let ai_confidence = rust_decimal::Decimal::from_f32(score);
+        sqlx::query(
+            r#"
+            INSERT INTO question_knowledge_nodes
+              (question_id, node_id, is_primary, source, ai_confidence, created_at)
+            VALUES ($1, $2, FALSE, 'ai', $3, NOW())
+            ON CONFLICT (question_id, node_id) DO UPDATE SET
+              source = 'ai',
+              ai_confidence = EXCLUDED.ai_confidence
+            "#,
+        )
+        .bind(question_id)
+        .bind(node_id)
+        .bind(ai_confidence)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| db_err(format!("写入 AI 知识树标签失败: {e}")))?;
+    }
+    Ok(())
 }
 
 /// POST /api/v1/questions — 创建草稿
@@ -895,6 +1185,42 @@ pub async fn create_question(
         return Err((StatusCode::FORBIDDEN, Json(json!({"error": "无权在该空间创建题目"}))));
     }
 
+    // ── AI 智能录入：加载暂存项（校验归属）；已保存则幂等返回已有题目 ──
+    let ai_staged: Option<serde_json::Value> = match &req.ai_meta {
+        Some(meta) => {
+            let staged = load_ai_staged_item(&state.pool, meta, &auth_user).await?;
+            let already = staged
+                .get("saved")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if already {
+                if let Some(qid) = staged_saved_question_id(&staged) {
+                    let question = sqlx::query_as::<_, Question>("SELECT * FROM questions WHERE id = $1")
+                        .bind(qid)
+                        .fetch_optional(&state.pool)
+                        .await
+                        .map_err(|e| db_err(format!("查询已保存题目失败: {}", e)))?
+                        .ok_or_else(|| {
+                            (
+                                StatusCode::CONFLICT,
+                                Json(json!({"error": "该题目已保存，请勿重复提交"})),
+                            )
+                        })?;
+                    let detail = build_detail(&state.pool, &auth_user, question, None)
+                        .await
+                        .map_err(|e| db_err(format!("构建详情失败: {}", e)))?;
+                    return Ok((StatusCode::OK, Json(detail)));
+                }
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(json!({"error": "该题目已保存，请勿重复提交"})),
+                ));
+            }
+            Some(staged)
+        }
+        None => None,
+    };
+
     let id = Uuid::new_v4();
     let now = chrono::Utc::now();
     let creator_id = auth_user.id;
@@ -902,50 +1228,23 @@ pub async fn create_question(
 
     let mut tx = state.pool.begin().await.map_err(|e| db_err(format!("开启事务失败: {}", e)))?;
 
-    // ── OCR 配额扣减与跨日重置（事务内，与题目写入保证绝对原子性） ──
-    // 仅当录入方式为 "ocr" 时触发；manual / ai_parse / 缺省均跳过
-    if req.input_method.as_deref() == Some("ocr") {
-        // FOR UPDATE 行锁 — 防止并发请求超额扣减
-        let user_row = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1 FOR UPDATE")
-            .bind(auth_user.id)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|e| db_err(format!("查询用户配额失败: {}", e)))?;
+    // 注：配额已统一由 ai_usage_log 计量（任务创建时原子抢占，见 ai_tasks.rs），
+    // 题目落库本身不再单独扣减配额。
 
-        let now_utc = chrono::Utc::now();
-        // 跨日重置：当前时间已过重置点 → used 清零，reset_at 顺延至明天
-        let (used, reset_at) = if now_utc > user_row.ocr_quota_reset_at {
-            (0i32, now_utc + chrono::Duration::days(1))
-        } else {
-            (user_row.ocr_quota_used, user_row.ocr_quota_reset_at)
-        };
-
-        // 配额不足 — 403 拦截（tx 在 drop 时自动回滚，不污染任何数据）
-        if used >= user_row.ocr_quota_daily {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(json!({
-                    "error": "今日 OCR 配额已用尽，请明日重置后再试",
-                    "code": "ERR_OCR_QUOTA_EXCEEDED",
-                    "quota_daily": user_row.ocr_quota_daily,
-                    "quota_used": used,
-                    "reset_at": reset_at
-                })),
-            ));
-        }
-
-        // 配额充足 — 扣减 1 并写回（同事务内）
-        let new_used = used + 1;
-        sqlx::query(
-            "UPDATE users SET ocr_quota_used = $1, ocr_quota_reset_at = $2 WHERE id = $3",
-        )
-        .bind(new_used)
-        .bind(reset_at)
-        .bind(auth_user.id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| db_err(format!("更新 OCR 配额失败: {}", e)))?;
-    }
+    // ── V2.1.1 去重 hash（创建接口即时计算，计划书 §八） ──
+    // 空答案统一按 JSON null 参与 hash（与下方 INSERT 写入值一致）
+    let answer_for_hash = req.correct_answer.as_ref().unwrap_or(&serde_json::Value::Null);
+    let content_hash = crate::util::normalize::compute_content_hash(
+        &req.stem,
+        req.options.as_ref(),
+        answer_for_hash,
+        req.analysis.as_deref(),
+    );
+    let normalized_content_hash = crate::util::normalize::compute_normalized_content_hash(
+        &req.stem,
+        req.options.as_ref(),
+        answer_for_hash,
+    );
 
     // ── 异步补全：刷新 metadata.system_flags（pending_answer / missing_analysis） ──
     let mut metadata = req.metadata.clone().unwrap_or_else(|| serde_json::json!({}));
@@ -956,10 +1255,11 @@ pub async fn create_question(
         INSERT INTO questions (id, stem, question_type, difficulty, status,
             options, correct_answer, analysis, metadata,
             images, parent_id, sub_order,
-            creator_id, created_at, updated_at, version, space_id)
+            creator_id, created_at, updated_at, version, space_id,
+            content_hash, normalized_content_hash)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, '{}'::jsonb),
             $10, $11, $12,
-            $13, $14, $15, $16, $17)
+            $13, $14, $15, $16, $17, $18, $19)
         "#,
     )
     .bind(id)
@@ -980,6 +1280,8 @@ pub async fn create_question(
     .bind(now)
     .bind(version)
     .bind(space_id)
+    .bind(&content_hash)
+    .bind(&normalized_content_hash)
     .execute(&mut *tx)
     .await
     .map_err(|e| db_err(format!("创建题目失败: {}", e)))?;
@@ -1016,9 +1318,34 @@ pub async fn create_question(
             .map_err(|e| db_err(format!("关联标签失败: {}", e)))?;
     }
 
-    // 同步题目 ↔ 试卷关联（全量覆盖）
-    if let Some(ref paper_ids) = req.paper_ids {
-        sync_question_papers(&mut tx, id, paper_ids)
+    let confirmation = confirmation_or_legacy(
+        req.ai_tagging_confirmation.clone(),
+        ai_staged.as_ref(),
+    );
+    let mut pending_candidates = Vec::new();
+    if let Some(ref conf) = confirmation {
+        let node_ids = merge_primary(
+            req.knowledge_node_ids.clone().unwrap_or_default(),
+            req.primary_knowledge_node_id,
+        );
+        pending_candidates = apply_tagging_suggestion(
+            &mut tx,
+            auth_user.id,
+            id,
+            conf,
+            &node_ids,
+            &all_tag_ids,
+        )
+        .await?;
+    } else if let Some(ref staged) = ai_staged {
+        apply_legacy_staged_matches(&mut tx, id, staged).await?;
+    }
+
+    // 同步题目 ↔ 试卷关联。AI 录入时前端可能尚未带上 paper_id
+    //（解析先于确认），从暂存项或资料对应试卷补齐。
+    let paper_ids = resolve_paper_ids_for_create(&state.pool, &req, ai_staged.as_ref()).await?;
+    if !paper_ids.is_empty() {
+        sync_question_papers(&mut tx, id, &paper_ids)
             .await
             .map_err(|e| db_err(format!("关联试卷失败: {}", e)))?;
     }
@@ -1030,6 +1357,41 @@ pub async fn create_question(
     tx.commit()
         .await
         .map_err(|e| db_err(format!("提交事务失败: {}", e)))?;
+
+    insert_confirmed_candidates(&state.pool, id, &pending_candidates).await;
+
+    // ── AI 智能录入后处理（尽力而为，不阻塞题目已成功创建） ──
+    if let (Some(meta), Some(staged)) = (&req.ai_meta, &ai_staged) {
+        let parsed: Option<crate::ai::types::ParsedQuestion> = staged
+            .get("parsed")
+            .and_then(|p| serde_json::from_value(p.clone()).ok());
+
+        let paper_id = paper_ids
+            .first()
+            .copied()
+            .or_else(|| paper_id_from_staged(staged));
+        let collection_id = staged
+            .get("collection_id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok());
+        let is_mixed = staged.get("is_mixed").and_then(|v| v.as_bool()).unwrap_or(false);
+
+        // 容器关联（试卷/集合），题号/顺序取自暂存项的解析结果
+        if let Some(ref p) = parsed {
+            crate::workers::ai_parse_worker::link_to_container(
+                &state,
+                id,
+                paper_id,
+                collection_id,
+                is_mixed,
+                p,
+            )
+            .await;
+        }
+
+        // 标记暂存项已保存 + 写幂等映射（供 GET parse-task 返回 question_ids）
+        mark_ai_staged_saved(&state.pool, meta.task_id, &meta.staged_index, id).await;
+    }
 
     let question = sqlx::query_as::<_, Question>("SELECT * FROM questions WHERE id = $1")
         .bind(id)
@@ -1293,6 +1655,41 @@ pub async fn update_question(
             .map_err(|e| db_err(format!("更新标签关联失败: {}", e)))?;
     }
 
+    let mut pending_candidates = Vec::new();
+    if let Some(ref conf) = req.ai_tagging_confirmation {
+        let node_ids = if let Some(ref ids) = req.knowledge_node_ids {
+            merge_primary(ids.clone(), req.primary_knowledge_node_id)
+        } else {
+            sqlx::query_scalar::<_, Uuid>(
+                "SELECT node_id FROM question_knowledge_nodes WHERE question_id = $1",
+            )
+            .bind(id)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| db_err(format!("查询知识点关联失败: {e}")))?
+        };
+        let tag_ids = if tag_ids_provided || new_tags_provided {
+            all_tag_ids.clone()
+        } else {
+            sqlx::query_scalar::<_, Uuid>(
+                "SELECT tag_id FROM question_tags_relation WHERE question_id = $1",
+            )
+            .bind(id)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| db_err(format!("查询标签关联失败: {e}")))?
+        };
+        pending_candidates = apply_tagging_suggestion(
+            &mut tx,
+            auth_user.id,
+            id,
+            conf,
+            &node_ids,
+            &tag_ids,
+        )
+        .await?;
+    }
+
     // 同步题目 ↔ 试卷关联（全量覆盖）
     if let Some(ref paper_ids) = req.paper_ids {
         sync_question_papers(&mut tx, id, paper_ids)
@@ -1307,6 +1704,8 @@ pub async fn update_question(
     tx.commit()
         .await
         .map_err(|e| db_err(format!("提交事务失败: {}", e)))?;
+
+    insert_confirmed_candidates(&state.pool, id, &pending_candidates).await;
 
     // ── 删后：异步清理被遗弃的旧图片文件 ──
     //    DB 更新已成功提交，物理文件删除失败不应阻断 API 响应
@@ -1354,11 +1753,16 @@ pub async fn delete_question(
 
     // ── 删除权限：按空间类型分流 ──
     // 个人空间：创建者或管理员可删除
-    // 团队/公共空间：仅超级管理员或空间 Owner 可删除
+    // 团队/公共空间：
+    //   - Draft（未提交草稿）：创建者可丢弃自己的（AI 录题工作台"丢弃未确认题目"依赖，
+    //     未提交草稿无协作价值）；管理员/Owner 亦可
+    //   - 已发布题目：仅超级管理员或空间 Owner 可删除（保持协作保护）
     let can_delete = match space.kind {
         SpaceKind::Personal => existing.creator_id == auth_user.id || is_admin_user(&auth_user),
         SpaceKind::Team | SpaceKind::Public => {
-            is_admin_user(&auth_user) || space.owner_user_id == Some(auth_user.id)
+            (existing.status == QuestionStatus::Draft && existing.creator_id == auth_user.id)
+                || is_admin_user(&auth_user)
+                || space.owner_user_id == Some(auth_user.id)
         }
     };
 
@@ -1475,6 +1879,74 @@ fn cleanup_question_images(upload_dir: &str, filenames: &[String]) {
             }
         }
     });
+}
+
+/// GC：清理 AI 录题孤儿草稿（用户从未确认保存的 worker 落库题目）
+///
+/// 兜底场景：用户关闭浏览器/崩溃，前端"丢弃"通道未触达，草稿永久残留。
+/// 判定（同时满足）：
+/// - `metadata->>'source' = 'ai_parse'`（worker 落库时打标）
+/// - `status = 'draft'`（从未提交审核）
+/// - `version = 1`（用户保存 = update 会递增 version；=1 即从未保存过）
+/// - `created_at < 72h 前`（保留恢复窗口，用户可从批量快照恢复）
+/// 手动创建的草稿经过显式"保存"动作，不受本 GC 影响。
+/// 图片清理复用 delete_question 逻辑，防止物理文件泄漏。
+pub async fn gc_abandoned_ai_drafts(pool: &sqlx::PgPool, upload_dir: &str) {
+    let ids: Vec<Uuid> = match sqlx::query_scalar(
+        r#"
+        SELECT id FROM questions
+        WHERE status = 'draft'
+          AND version = 1
+          AND metadata->>'source' = 'ai_parse'
+          AND created_at < NOW() - INTERVAL '72 hours'
+        LIMIT 500
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("[gc] AI 孤儿草稿查询失败: {e}");
+            return;
+        }
+    };
+    if ids.is_empty() {
+        return;
+    }
+
+    let mut deleted = 0usize;
+    for id in ids {
+        let filenames = match extract_image_filenames(pool, id).await {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!("[gc] 题目 {id} 图片扫描失败，跳过: {:?}", e.1);
+                continue;
+            }
+        };
+        // 与 delete_question 一致：先删子题目再删主题目（parent_id 外键无级联）；
+        // question_knowledge_nodes / paper_questions / collection_questions 为 CASCADE
+        let delete_result: Result<(), sqlx::Error> = async {
+            sqlx::query("DELETE FROM questions WHERE parent_id = $1")
+                .bind(id)
+                .execute(pool)
+                .await?;
+            sqlx::query("DELETE FROM questions WHERE id = $1")
+                .bind(id)
+                .execute(pool)
+                .await?;
+            Ok(())
+        }
+        .await;
+        match delete_result {
+            Ok(()) => {
+                cleanup_question_images(upload_dir, &filenames);
+                deleted += 1;
+            }
+            Err(e) => tracing::warn!("[gc] 题目 {id} 删除失败: {e}"),
+        }
+    }
+    tracing::info!("[gc] AI 孤儿草稿清理完成：删除 {deleted} 题");
 }
 
 // ---------------------------------------------------------------------------
@@ -2371,13 +2843,15 @@ async fn copy_question(
             id, stem, stem_text, images, question_type, difficulty, status,
             options, correct_answer, analysis, metadata,
             parent_id, sub_order,
-            creator_id, created_at, updated_at, version, space_id, origin_question_id
+            creator_id, created_at, updated_at, version, space_id, origin_question_id,
+            content_hash, normalized_content_hash
         )
         VALUES (
             $1, $2, $3, $4, $5, $6, 'published'::question_status,
             $7, $8, $9, COALESCE($10, '{}'::jsonb),
             $11, $12,
-            $13, $14, $15, 1, $16, $17
+            $13, $14, $15, 1, $16, $17,
+            $18, $19
         )
         "#,
     )
@@ -2398,6 +2872,8 @@ async fn copy_question(
     .bind(now)
     .bind(target_space_id)
     .bind(origin_id)
+    .bind(&src.content_hash)
+    .bind(&src.normalized_content_hash)
     .execute(&mut *tx)
     .await?;
 

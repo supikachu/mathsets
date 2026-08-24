@@ -36,6 +36,11 @@ const router = createRouter({
           component: () => import('@/views/QuestionList.vue'),
         },
         {
+          path: 'papers/:id',
+          name: 'PaperDetail',
+          component: () => import('@/views/PaperDetail.vue'),
+        },
+        {
           path: 'questions/new',
           name: 'QuestionNew',
           component: () => import('@/views/QuestionEdit.vue'),
@@ -83,6 +88,17 @@ const router = createRouter({
           name: 'PublicLibraryReview',
           component: () => import('@/views/PublicLibraryReview.vue'),
           meta: { requiresAdmin: true },
+        },
+        {
+          // V2.1.1 P1：标签候选审核
+          path: 'admin/tag-candidates',
+          name: 'TagCandidateReview',
+          component: () => import('@/views/TagCandidateReview.vue'),
+          meta: { requiresAdmin: true },
+        },
+        {
+          path: 'collections/:id?',
+          redirect: '/questions',
         },
         {
           path: 'profile',

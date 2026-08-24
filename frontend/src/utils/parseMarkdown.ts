@@ -290,7 +290,7 @@ export function parseMarkdownToQuestion(md: string): ParsedQuestion {
     question_type: questionType as 'choice' | 'fill' | 'solution',
     sub_type: subType,
     difficulty,
-    stem,
+    stem: normalizeChoiceAnswerBlank(stem, questionType, Boolean(options?.length)),
     options: options ?? undefined,
     correct_answer: correctAnswer,
     analysis,
@@ -301,4 +301,210 @@ export function parseMarkdownToQuestion(md: string): ParsedQuestion {
     image_urls: [],
     kp_matches: [],
   }
+}
+
+/** LLM 常把换行写成两个字符 `\` + `n`。后面是字母时视为 LaTeX（\nu / \neq），不替换。 */
+export function unescapeLiteralNewlines(s: string): string {
+  return s.replace(/\\n([^a-z]|$)/g, '\n$1').replace(/\\t([^a-z]|$)/g, '\t$1')
+}
+
+function stripHtmlCell(raw: string): string {
+  return raw
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/\|/g, '\\|')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function htmlTableFragmentToMarkdown(tableHtml: string): string {
+  const rows: string[][] = []
+  const trRe = /<tr\b[^>]*>([\s\S]*?)<\/tr>/gi
+  let tr: RegExpExecArray | null
+  while ((tr = trRe.exec(tableHtml)) !== null) {
+    const cells: string[] = []
+    const cellRe = /<t[dh]\b[^>]*>([\s\S]*?)<\/t[dh]>/gi
+    let cell: RegExpExecArray | null
+    while ((cell = cellRe.exec(tr[1])) !== null) cells.push(stripHtmlCell(cell[1]))
+    if (cells.length) rows.push(cells)
+  }
+  if (!rows.length) return ''
+  const width = Math.max(...rows.map((r) => r.length))
+  const pad = (row: string[]) => Array.from({ length: width }, (_, i) => row[i] || '')
+  const fmt = (row: string[]) => `| ${pad(row).join(' | ')} |`
+  const sep = `| ${Array.from({ length: width }, () => '---').join(' | ')} |`
+  return `\n${fmt(rows[0])}\n${sep}\n${rows.slice(1).map(fmt).join('\n')}\n`
+}
+
+/** 把误输出的 HTML 表格转成 Markdown 表格 */
+export function htmlTablesToMarkdown(s: string): string {
+  return s.replace(/<table\b[^>]*>[\s\S]*?<\/table>/gi, (m) => htmlTableFragmentToMarkdown(m) || m)
+}
+
+export function restoreLatexFromJsonControls(s: string): string {
+  return s
+    .replace(/\u000C/g, '\\f')
+    .replace(/\u0008/g, '\\b')
+    .replace(/\t/g, '\\t')
+    .replace(/[⬆↑⇧]\s*rac/g, '\\frac')
+}
+
+/** 豆包常把 `\therefore` 写成 `$$\\(\therefore\)`；数学模式里去掉 `\(` `\)`，并改成 `$`/`$$`。 */
+export function normalizeLlmLatex(s: string): string {
+  let t = s
+  for (;;) {
+    const n = t
+      .replace(/\\\\\(/g, '\\(')
+      .replace(/\\\\\)/g, '\\)')
+      .replace(/\\\\\[/g, '\\[')
+      .replace(/\\\\\]/g, '\\]')
+    if (n === t) break
+    t = n
+  }
+  t = t.replace(/\$\$([\s\S]+?)\$\$/g, (_m, inner: string) => `$$${inner.replace(/\\[()[\]]/g, '')}$$`)
+  t = t.replace(/\$([^$]+)\$/g, (_m, inner: string) => `$${inner.replace(/\\[()[\]]/g, '')}$`)
+  t = t.replace(/\\\[([\s\S]*?)\\\]/g, (_m, inner: string) => `$$${inner}$$`)
+  t = t.replace(/\\\(([\s\S]*?)\\\)/g, (_m, inner: string) => `$${inner}$`)
+  return t
+}
+
+export function sanitizeQuestionMarkup(s: string): string {
+  return normalizeLlmLatex(htmlTablesToMarkdown(unescapeLiteralNewlines(restoreLatexFromJsonControls(s))))
+}
+
+/** GFM 分隔行 `| --- | --- |` */
+function isMarkdownTableSep(line: string): boolean {
+  return /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line)
+}
+
+function splitMarkdownTableRow(line: string): string[] {
+  const trimmed = line.trim().replace(/^\|/, '').replace(/\|$/, '')
+  return trimmed.split('|').map((c) => c.trim())
+}
+
+/** 至少两列的 `| a | b |` 行（不含分隔行） */
+function isMarkdownTableRow(line: string): boolean {
+  const t = line.trim()
+  if (!/^\|.*\|\s*$/.test(t) || isMarkdownTableSep(t)) return false
+  return splitMarkdownTableRow(t).length >= 2
+}
+
+function looksLikeTableHeader(cells: string[]): boolean {
+  return cells.some((c) => /[\u4e00-\u9fffA-Za-z]/.test(c.replace(/\$/g, '')))
+}
+
+/**
+ * 把 Markdown 管道表格转成 HTML。
+ * 站外模型常省略 GFM 表头分隔行，只输出连续 `| a | b |`，这里同样识别。
+ */
+export function renderMarkdownTables(html: string): string {
+  const lines = html.split('\n')
+  const out: string[] = []
+  const cell = (text: string, tag: 'th' | 'td') => `<${tag}>${text}</${tag}>`
+  const emitTable = (header: string[] | null, body: string[][]) => {
+    let table = '<table class="latex-table">'
+    if (header) {
+      table += `<thead><tr>${header.map((c) => cell(c, 'th')).join('')}</tr></thead>`
+    }
+    table += '<tbody>'
+    for (const row of body) {
+      table += `<tr>${row.map((c) => cell(c, 'td')).join('')}</tr>`
+    }
+    table += '</tbody></table>'
+    out.push(table)
+  }
+
+  let i = 0
+  while (i < lines.length) {
+    if (isMarkdownTableRow(lines[i])) {
+      const first = splitMarkdownTableRow(lines[i])
+      let j = i + 1
+      let hasSep = false
+      if (j < lines.length && isMarkdownTableSep(lines[j])) {
+        hasSep = true
+        j++
+      }
+      const body: string[][] = []
+      while (j < lines.length) {
+        if (isMarkdownTableSep(lines[j])) {
+          j++
+          continue
+        }
+        if (isMarkdownTableRow(lines[j])) {
+          const row = splitMarkdownTableRow(lines[j])
+          if (Math.abs(row.length - first.length) <= 1) {
+            body.push(row)
+            j++
+            continue
+          }
+        }
+        if (!lines[j].trim() && j + 1 < lines.length && isMarkdownTableRow(lines[j + 1])) {
+          j++
+          continue
+        }
+        break
+      }
+      if (hasSep || body.length >= 1) {
+        if (hasSep || looksLikeTableHeader(first)) {
+          emitTable(first, body)
+        } else {
+          emitTable(null, [first, ...body])
+        }
+        i = j
+        continue
+      }
+    }
+    out.push(lines[i])
+    i++
+  }
+  return out.join('\n')
+}
+
+/** 剥离选择题题干末尾残留的 A/B/C/D 选项块（与后端 strip_options_residue_from_stem 对齐） */
+export function stripChoiceOptionsResidue(stem: string): string {
+  const re = /(?:^|\n|[。；;！？$）])\s*\$?\s*A[.、．)][\s\S]*?B[.、．)][\s\S]*?C[.、．)][\s\S]*?D[.、．)][\s\S]*$/i
+  const m = re.exec(stem)
+  if (!m || m.index == null) return stem
+  let cut = m.index
+  const ch = stem[cut]
+  if (ch === '$' || ch === '）') cut += ch.length
+  let next = stem.slice(0, cut).trimEnd()
+  const dollars = (next.match(/\$/g) || []).length
+  if (next.endsWith('$') && dollars % 2 === 1) next = next.slice(0, -1).trimEnd()
+  return next
+}
+
+/** 选择题题干末尾作答空括号 () / （） → $(\hspace{2em})$ */
+export function normalizeChoiceAnswerBlank(stem: string, questionType?: string, hasOptions = true): string {
+  if (questionType && questionType !== 'choice' && questionType !== 'multiple') {
+    return sanitizeQuestionMarkup(stem)
+  }
+  let normalized = sanitizeQuestionMarkup(stem)
+  if (hasOptions) normalized = stripChoiceOptionsResidue(normalized)
+  const emptyParens = /[（(][\s\u00a0\u3000]*[）)]/g
+  const mathSpans: [number, number][] = []
+  for (let i = 0; i < normalized.length; i++) {
+    if (normalized[i] !== '$') continue
+    const start = i
+    i++
+    while (i < normalized.length && normalized[i] !== '$') i++
+    if (i < normalized.length) mathSpans.push([start, i + 1])
+  }
+  const inMath = (idx: number) => mathSpans.some(([a, b]) => idx >= a && idx < b)
+  let last: { start: number; end: number } | null = null
+  emptyParens.lastIndex = 0
+  let m: RegExpExecArray | null
+  while ((m = emptyParens.exec(normalized)) !== null) {
+    if (inMath(m.index)) continue
+    const before = m.index > 0 ? normalized[m.index - 1] : ''
+    if (/[A-Za-z0-9_\\]/.test(before)) continue
+    last = { start: m.index, end: m.index + m[0].length }
+  }
+  if (!last) return normalized
+  const rest = normalized.slice(last.end)
+  if (!/^(?:\s|!\[[^\]]*\]\([^)]*\))*$/.test(rest)) return normalized
+  return normalized.slice(0, last.start) + '$(\\hspace{2em})$' + rest
 }

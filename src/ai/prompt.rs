@@ -35,6 +35,8 @@ pub const CORE_PARSE_RULES: &str = r#"
 - 绝对禁止自行推导公式（如把题目条件推导为结论）
 - 绝对禁止自行生成解答过程（如自己写一段解析）
 - 绝对禁止补全缺失的答案（如题目没给答案，绝不自行编造）
+【唯一例外】`knowledge_points` / `chapter_path` / `solution_methods` 是标签分类推断，不属于做题：必须根据题目内容主动推断（考查的知识点、所属章节、所用**通用解题方法/数学思想**），不受上述禁止约束。
+不要把题型专题名（如「凹凸反转」「隐零点」「极值点偏移」）写入 `solution_methods`；该字段只放通法（数形结合、分类讨论、换元法、待定系数法等）。
 如果原图/原文中没有答案，`correct_answer` 必须为对应题型的空结构（choice→`{"kind":"choice","value":{"options":[]}}`，fill→`{"kind":"fill","value":{"blanks":[]}}`，solution→`{"kind":"solution","value":{"subs":[]}}`），**绝不允许输出 `null`**。`analysis` 必须为 []。
 
 # 输出 JSON Schema（必须严格遵守）
@@ -61,8 +63,20 @@ pub const CORE_PARSE_RULES: &str = r#"
   "confidence": 0.0-1.0,
   "warnings": [],
   "image_placeholders": [],
-  "image_urls": []
+  "image_urls": [],
+  "question_no": "题号，如 17(2) / 1 / 一、1（无法判断可省略）",
+  "display_order": 整数展示顺序（可省略，按出现顺序）,
+  "score": 分值整数（原图标注的分值，没有可省略）,
+  "chapter_path": ["章节", "子章节"]（推断本题所属教材章节，由大到小，如 ["函数","函数的奇偶性"]；无法判断才为空数组）,
+  "solution_methods": [{"name":"通用解题方法名","confidence":0.0-1.0}]（推断本题用到的通用解题方法/数学思想，如 数形结合、分类讨论、待定系数法；不要写入题型专题名；无法判断才为空数组）
 }
+
+# 三维标签推断规则（chapter_path / solution_methods / knowledge_points）
+这三个字段是标签分类任务，不属于"做题"，必须对每一道题主动推断输出：
+1. `chapter_path`：推断题目所属教材章节，由大到小排列（如 ["函数","函数的奇偶性"]），1-3 层
+2. `solution_methods`：推断解题所用的**通用方法/数学思想**，每题 1-3 个。常见示例：数形结合、分类讨论、待定系数法、换元法、配方法、转化与化归、函数与方程思想、整体思想、构造法、反证法、归纳法、特殊值法。严禁把「凹凸反转」「隐零点」「极值点偏移」等题型专题名写入本字段
+3. `knowledge_points`：推断考查的具体知识点
+【强制】三者在能判断时都必须输出，不允许因为"原文没写"就整体省略字段；确实无法判断才输出空数组。
 
 # 题型识别规则
 - 有 A/B/C/D 选项 → choice
@@ -74,6 +88,7 @@ pub const CORE_PARSE_RULES: &str = r#"
 【严禁数据冗余】`stem`（题干）字段中**绝对不能**包含选项内容。
 - 选择题（choice / multiple）：提取 `stem` 时必须在遇到 'A.'、'A、'、'A)'、'(A)' 等选项前缀时**立即截断**，选项前缀及其后所有选项文本一律不得进入 `stem`
 - 所有选项内容只能存放在 `options` 数组中，绝不允许在 `stem` 中重复出现（否则前端会题干区与选项区重复渲染两次）
+- 每个选项必须是完整对象 `{"label":"A","content":"..."}`，禁止写成 `{"label":"A","..."}`（漏掉 content 键）
 - 示例：原文 "下列结论正确的是\nA. $x>0$\nB. $x<0$\nC. $x=0$\nD. $x\ne0$" →
   `stem` 只保留 "下列结论正确的是"；A/B/C/D 四项全部进 `options` 数组
 - 填空题/解答题不涉及选项，不受此规则约束
@@ -100,10 +115,16 @@ pub const CORE_PARSE_RULES: &str = r#"
 - 示例：
   "在直角坐标系中，抛物线 $y = ax^2 + bx + c$ 经过点 $A(1, 2)$。\n(1) 已知 $a = 1$，求 $b$、$c$ 的值；\n(2) 若函数在 $[1, 2]$ 上单调递增，求 $a$ 的范围。"
 - 大背景与小问之间用 `\n` 分隔，各小问之间也用 `\n` 分隔
-- 不要在 stem 中使用 <br> 或其他 HTML 标签，只用 `\n`
+- 不要在 stem 中使用 <br> 或其他 HTML 标签，只用真正的换行
+- JSON 字符串里的换行必须是真实换行，禁止把两个字符「反斜杠 + n」当作正文写进 stem（不要出现可见的 \n）
+- 表格必须用 GFM Markdown：每行以 `|` 起止；**表头下一行必须是 `| --- | --- |` 分隔行（列数一致，禁止省略）**；数据行各占一行。禁止 `<table>` `<tr>` `<td>`，禁止把多行表挤成一行，禁止改写成纯文字叙述
+- 正确示例：`| 亩产量 | $[900, 950)$ |\n| --- | --- |\n| 频数 | 6 |`；错误：只有 `| 11 | 21 |\n| 12 | 22 |` 而没有分隔行（预览无法渲染成表）
+- 选择题题干末尾用于填答案的空括号（如「…的是 ()」「…的集合是（ ）」）必须写成 `$(\hspace{2em})$`，不要保留裸 `()` / `（）`。函数 `f()`、区间、题号 `(1)(2)` 不要改
 
 # 多解法识别
-- 文本中出现「解法一」「解法二」或「方法 1」「方法 2」 → 拆为 analysis 数组多项
+- 文本中出现「解法一」「解法二」「方法 1」「方法 2」「法一」「法二」「另解」「别解」→ 拆为 analysis 数组多项，每种解法一项
+- `title` 用原文标题；`content` 必须是该解法全文，禁止摘要或删步骤
+- 原文有几种解法就必须输出几项，禁止只保留解法一
 - 只有一种解法 → analysis 数组 1 项
 - 如果原文/原图没有提供解答过程，analysis 为空数组 []
 
@@ -118,17 +139,22 @@ pub const CORE_PARSE_RULES: &str = r#"
 - 不要把公式转义为 Unicode（如 x² 应写 $x^2$）
 
 # 配图链接提取（v1.1，解决几何题丢图）
-- 若输入 Markdown 含 `![...](url)` 真实图片链接（url 以 http/https 开头）：
+- 若输入 Markdown 含 `![...](url)` 真实图片链接（url 以 http/https 开头，或 `/uploads/...`）：
   - 必须在 stem / analysis / options 的对应内联位置保留该 Markdown 图片标记，不得丢弃或改写为纯文本
   - 将所有图片 URL 提取并去重，存入该题 `image_urls` 数组
 - 若仅为 `![配图](IMAGE_PLACEHOLDER_N)` 占位符（非真实 URL）：
   - 仍按既有规则计入 `image_placeholders`，不计入 `image_urls`
 - 即：`image_urls` 只收集真实可访问的图片 URL，占位符走 `image_placeholders`
+- 若题干/选项/解析含「如图」「见图」「下图」「图中」「图示」「图象如下」等配图指代：
+  - 禁止只保留文字而丢掉对应图片标记
+  - 必须把该题所属的 `![配图](url)` 以独立成行形式插回题干（或选项/解析中提到图的位置），并把 URL 写入 `image_urls`
 
 # 严格约束
-- 只输出 JSON，不要任何 Markdown 代码块标记
+- 只输出裸 JSON（以 `{` 开头、以 `}` 结尾），不要用 Markdown 代码围栏包裹，不要任何解释文字
 - 识别不到的字段返回 null 或空数组
 - 不要编造答案；置信度低于 0.5 时在 warnings 中说明
+- 公式只用 `$...$` / `$$...$$`，禁止 `\(` `\)` `\[` `\]`
+- JSON 字符串里每个 LaTeX `\` 必须写成 `\\`（如 `\\frac` `\\odot` `\\widehat`）；单反斜杠 `\(` `\odot` `\frac` 是非法 JSON
 "#;
 
 /// 文本解析 Prompt（发送给 LLM 的系统提示词）
@@ -207,7 +233,7 @@ pub const QWEN_VL_OCR_PROMPT: &str = r#"你是一个数学题图片 OCR 引擎�
 - 只输出 Markdown 文本，绝对不要输出 JSON、不要输出任何 ``` 代码块标记
 - 行内公式用 $...$，块级公式用 $$...$$
 - 多道题用题号或序号分隔，保留原文题号（如「1.」「(1)」「①」）与选项标号（A. B. C. D.）
-- 表格用 Markdown 表格语法
+- 表格用 GFM Markdown：每行 `| 列 |`，表头下一行必须有 `| --- | --- |` 分隔行，禁止 HTML `<table>`
 
 # 图文混排
 - 若含几何图形、函数图象、坐标系、表格等无法用文本和 LaTeX 表达的内容：
@@ -237,7 +263,88 @@ pub const STAGE2_PARSE_SYSTEM_PROMPT: &str = r#"你是一个数学题结构化�
 
 # 配图处理
 - 含 `![配图](IMAGE_PLACEHOLDER_N)` 占位符：计入该题 `image_placeholders`
-- 含 `![...](http...)` 真实图片链接：在内联位置保留标记，并把 URL 收集去重到该题 `image_urls`
+- 含 `![...](http...)` 或 `![...](/uploads/...)` 真实图片链接：在内联位置保留标记，并把 URL 收集去重到该题 `image_urls`
+- 题干含「如图」「见图」「下图」「图中」「图示」时，不得省略图片标记；找不到对应图时把该块中最邻近的图片划给该题
+- **文本模型看不见图片像素**。禁止描述、翻译、根据图选择或计算；不要为看懂图而长时间推理
+- `![...](url)` 必须原样抄进 stem / options（独立成行）。图象选择题的 A/B/C/D 可以只有图片标记
+- 即使题干写「如图」「阴影」「图象可能是」而你无法看见图，也必须立刻输出完整 JSON；无印刷答案时 `correct_answer` 用空结构，`analysis` 为 []
+
+# 切题
+- 输入里每一道独立题号（如 15. / 16.）必须各占 questions 数组一项，禁止把下一题并入上一题的 stem 或 analysis
+- 本块只解析输入中出现的题目，不要补块外题号或臆造未出现的题
+- analysis 只摘录该题解析；原文有几种解法就必须输出几项，禁止只留解法一；过长时保全部解法全文，JSON 必须闭合
+"#;
+
+/// 解析卷 Stage2 附加约束：优先闭合 JSON，但不得删解法
+pub const STAGE2_ANALYSIS_SLIM_RULES: &str = r#"
+# 解析卷输出约束
+- stem / options / correct_answer 必须完整提取
+- 原文有几种解法，analysis 就必须有几项；每种解法全文保留，禁止只留法一、禁止摘要合并
+- 禁止把多道题的解析写进同一题
+- 单题过长时宁可该题单独成段输出，也不要删解法或写「解析已缩短」
+"#;
+
+// ============================================================
+// V2.1.1 资料类型分类 Prompt（classify_document 多级 fallback）
+// ------------------------------------------------------------
+// Level 1：文本模型，输入=文件名
+// Level 2/3：视觉模型，输入=文件名 + 页面图（前 1 / 前 3 页）
+// 输出统一 JSON：{source_category, source_kind, title, confidence, reason}
+// ============================================================
+
+/// 分类输出 JSON Schema（大类 + 子类级联）
+const CLASSIFY_OUTPUT_SCHEMA: &str = r#"**输出格式（严格 JSON，不要 markdown 代码块，不要任何解释文字）**：
+{
+  "source_category": "paper | practice | other",
+  "source_kind": "<子类 slug>",
+  "title": "<资料标题，简洁中文>",
+  "confidence": 0.0 到 1.0 的小数,
+  "reason": "<一句话判断理由>",
+  "create_paper": true 或 false,
+  "paper_meta": {
+    "title": "<试卷名称，去掉扩展名后的规范标题>",
+    "year": 2026,
+    "stage": "junior | senior",
+    "grade": "七年级 | 八年级 | 九年级 | 高一 | 高二 | 高三",
+    "subject": "数学 | 物理",
+    "semester": "first | second | full_year",
+    "region_province": "<省份，不含「省」字亦可>",
+    "region_city": "<城市，不含「市」字亦可>",
+    "school_name": "<学校全称，如能识别>",
+    "sub_source_type": "一模 | 二模 | 三模"
+  }
+}
+
+**source_category / source_kind 枚举**：
+- paper（试卷）：monthly_test 月测 | unit_test 单元测 | stage_test 阶段测 | midterm 期中 | final 期末 | gaokao 高考真题 | mock 模拟题
+- practice（练习）：preview 课前预习 | class_example 课堂例题 | in_class 随堂练习 | homework 课后作业 | unit_review 单元复习
+- other（其他）：special 专题资料 | workbook 教辅练习 | textbook_example 教材例题 | lecture 讲义 | wrong_question 错题
+
+**关键规则**：
+1. 信息不足时：source_category=practice，source_kind=in_class，confidence < 0.6；paper_meta 可省略或字段留空
+2. title 无法确定时用文件名（去掉扩展名）；paper_meta.title 默认同 title
+3. 有得分栏/密封线/大题分值 → paper；含「例题」→ practice/class_example；含「作业」→ practice/homework
+4. 看资料标题与用途，不要仅因知识点章节名输出 special
+5. **从文件名推断试卷字段**（仅 source_category=paper 时填写 paper_meta，其余类别省略 paper_meta）：
+   - 「高考」「新课标」「全国卷」「选考」→ gaokao，stage=senior，create_paper=true
+   - 「一模/二模/三模/模拟」→ mock，并写入 sub_source_type
+   - 「期中」→ midterm；「期末」→ final；「月测」→ monthly_test
+   - 「高一/高二/高三」→ stage=senior + 对应 grade；「初一/初二/初三」或「七年级…」→ stage=junior
+   - 文件名中的 4 位年份写入 year
+   - 省份城市、学校名能从文件名识别则填写，识别不出则省略该字段
+6. create_paper：paper 类且为 midterm/final/gaokao/mock 时建议 true，其余 paper 默认 false"#;
+
+/// 资料类型分类 Prompt（Level 1，文本模式：输入=文件名，完整系统提示词）
+pub const AI_CLASSIFY_DOCUMENT_PROMPT_TEXT: &str = r#"你是一名教研资料分类助手。根据用户上传的文件名判断这份资料属于什么业务类型。
+
+"#;
+
+/// 资料类型分类 Prompt（Level 2/3，视觉模式：输入=文件名 + 页面图）
+/// 调用时需用 format! 追加文件名字段（视觉调用无法传文本 user 内容）：
+/// format!("{AI_CLASSIFY_DOCUMENT_PROMPT_VISION}\n文件名：{file_name}")
+pub const AI_CLASSIFY_DOCUMENT_PROMPT_VISION: &str = r#"你是一名教研资料分类助手。根据文件名与资料页面图片内容，判断这份资料属于什么业务类型。
+注意观察页面特征：试卷有得分栏/密封线/大题分值标注；课堂练习常有"练习"字样；例题常有"例1/例2"；作业常有"作业"字样与日期栏。
+
 "#;
 
 // ============================================================
@@ -266,11 +373,29 @@ pub static BATCH_IMAGE_OCR_FULL_PROMPT: LazyLock<String> = LazyLock::new(|| {
     format!("{}{}", BATCH_IMAGE_OCR_SYSTEM_PROMPT, CORE_PARSE_RULES)
 });
 
+/// 资料类型分类 — 完整文本系统提示词（Level 1：输入=文件名）
+pub static AI_CLASSIFY_FULL_PROMPT_TEXT: LazyLock<String> = LazyLock::new(|| {
+    format!("{}{}", AI_CLASSIFY_DOCUMENT_PROMPT_TEXT, CLASSIFY_OUTPUT_SCHEMA)
+});
+
+/// 资料类型分类 — 完整视觉系统提示词（Level 2/3：调用时需再追加文件名字段）
+pub static AI_CLASSIFY_FULL_PROMPT_VISION: LazyLock<String> = LazyLock::new(|| {
+    format!("{}{}", AI_CLASSIFY_DOCUMENT_PROMPT_VISION, CLASSIFY_OUTPUT_SCHEMA)
+});
+
 /// Stage 2 模式 — 完整系统提示词（Stage 2 特有指令 + 核心规则）
 ///
 /// 用于两阶段流水线第二步：把 OCR Markdown 解析为 `{"questions":[...]}`。
 pub static STAGE2_PARSE_FULL_PROMPT: LazyLock<String> = LazyLock::new(|| {
     format!("{}{}", STAGE2_PARSE_SYSTEM_PROMPT, CORE_PARSE_RULES)
+});
+
+/// 解析卷 Stage2：完整规则 + 缩短 analysis
+pub static STAGE2_PARSE_SLIM_PROMPT: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{}{}{}",
+        STAGE2_PARSE_SYSTEM_PROMPT, CORE_PARSE_RULES, STAGE2_ANALYSIS_SLIM_RULES
+    )
 });
 
 #[cfg(test)]
@@ -299,6 +424,18 @@ mod tests {
         assert!(CORE_PARSE_RULES.contains("答案留空规则"));
         assert!(CORE_PARSE_RULES.contains("绝不允许输出 `null`"));
         assert!(CORE_PARSE_RULES.contains("analysis` 必须为 []"));
+
+        // 验证三维度标签为推断式（chapter/method 不再是"原文有才填"）
+        assert!(CORE_PARSE_RULES.contains("推断本题所属教材章节"));
+        assert!(CORE_PARSE_RULES.contains("通用解题方法"));
+        assert!(CORE_PARSE_RULES.contains("标签分类推断，不属于做题"));
+        assert!(CORE_PARSE_RULES.contains("三维标签推断规则"));
+        assert!(CORE_PARSE_RULES.contains("数形结合、分类讨论、待定系数法"));
+        assert!(CORE_PARSE_RULES.contains("严禁把「凹凸反转」"));
+
+        // GFM 表格必须带分隔行，否则预览画不出表
+        assert!(CORE_PARSE_RULES.contains("| --- | --- |"));
+        assert!(CORE_PARSE_RULES.contains("禁止省略"));
     }
 
     #[test]
@@ -335,6 +472,7 @@ mod tests {
         // v1.1：配图链接提取规则与 image_urls 字段
         assert!(CORE_PARSE_RULES.contains("配图链接提取"));
         assert!(CORE_PARSE_RULES.contains("image_urls"));
+        assert!(CORE_PARSE_RULES.contains("如图"));
     }
 
     #[test]
@@ -342,6 +480,9 @@ mod tests {
         // Stage 2 输出批量数组 + 含核心规则
         assert!(STAGE2_PARSE_FULL_PROMPT.contains("`questions` 数组"));
         assert!(STAGE2_PARSE_FULL_PROMPT.contains("image_urls"));
+        assert!(STAGE2_PARSE_FULL_PROMPT.contains("本块只解析输入中出现的题目"));
+        assert!(STAGE2_PARSE_FULL_PROMPT.contains("文本模型看不见图片像素"));
+        assert!(STAGE2_PARSE_SLIM_PROMPT.contains("解析卷输出约束"));
         // Stage 1 Qwen-VL OCR 输出纯 Markdown（非 JSON）
         assert!(QWEN_VL_OCR_PROMPT.contains("只输出 Markdown 文本"));
         assert!(QWEN_VL_OCR_PROMPT.contains("IMAGE_PLACEHOLDER_N"));

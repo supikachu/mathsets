@@ -4,7 +4,7 @@
  *
  * 三层专业导航架构：
  *   1. 顶层联动：学段（初中 / 高中） + 学科（数学 / 物理）
- *   2. 中部 Tabs：章节选题 / 知识点选题 / 解题方法（Segmented Control 风格）
+ *   2. 中部 Tabs：章节选题 / 知识点选题 / 题型专题（Segmented Control 风格）
  *   3. 底部动态树：依据 stage + subject + treeMode 组合渲染
  *
  * 视觉规范：260px 宽，右侧 1px 分割线，扁平化树渲染，全部 CSS 变量
@@ -16,6 +16,7 @@ import {
   type KnowledgeTreeKind,
   type KnowledgeNodeTreeNode,
 } from '@/api/client'
+import { PAPER_KIND_OPTIONS } from '@/utils/questionSource'
 import {
   unwrapTreeResponse,
   getKnowledgeTreeList,
@@ -30,20 +31,26 @@ const props = withDefaults(
     treeId?: string
     /** 面板全局开关（由父组件 Header Toggle 控制，Notion/Linear 风格） */
     open?: boolean
+    /** 父组件控制的浏览对象：questions 切回章节树，papers 进入试卷类型列表 */
+    view?: 'questions' | 'papers'
+    /** 试卷模式下当前选中的考试类型（空=全部） */
+    selectedSourceKind?: string
   }>(),
-  { selectedId: '', treeId: '', open: true },
+  { selectedId: '', treeId: '', open: true, view: 'questions', selectedSourceKind: '' },
 )
 
 const emit = defineEmits<{
   select: [nodeId: string]
   /** 学段或学科切换时通知父组件（父组件需据此刷新题目列表） */
   contextChange: [payload: { stage: string; subject: string }]
+  viewChange: [view: 'questions' | 'papers']
+  sourceKindSelect: [kind: string]
 }>()
 
 // ─── 学段 / 学科 / 模式 联动状态 ───────────────────────────────────────
 type Stage = 'junior' | 'senior'
 type Subject = 'math' | 'physics'
-type TreeMode = 'chapter' | 'knowledge' | 'method'
+type TreeMode = 'chapter' | 'knowledge' | 'method' | 'papers'
 
 const STAGES: { key: Stage; label: string }[] = [
   { key: 'junior', label: '初中' },
@@ -53,11 +60,12 @@ const SUBJECTS: { key: Subject; label: string }[] = [
   { key: 'math', label: '数学' },
   { key: 'physics', label: '物理' },
 ]
-/** 模式 → 后端 KnowledgeTreeKind 映射；method 暂无原生 kind，复用 ability 语义兜底 */
-const MODES: { key: TreeMode; label: string; kind: KnowledgeTreeKind | null }[] = [
-  { key: 'chapter', label: '章节', kind: 'chapter' },
-  { key: 'knowledge', label: '知识点', kind: 'knowledge' },
-  { key: 'method', label: '解题方法', kind: 'ability' },
+/** 模式 → 后端 KnowledgeTreeKind 映射；method Tab 对应 kind=ability（题型专题树） */
+const MODES: { key: TreeMode; label: string; shortLabel: string; kind: KnowledgeTreeKind | null }[] = [
+  { key: 'chapter', label: '章节', shortLabel: '章节', kind: 'chapter' },
+  { key: 'knowledge', label: '知识点', shortLabel: '知识点', kind: 'knowledge' },
+  { key: 'method', label: '题型专题', shortLabel: '专题', kind: 'ability' },
+  { key: 'papers', label: '试卷', shortLabel: '试卷', kind: null },
 ]
 
 const currentStage = ref<Stage>(
@@ -108,14 +116,17 @@ const SUBJECT_CODE: Record<Subject, string> = {
   math: 'math',
   physics: 'physics',
 }
-const MODE_CODE: Record<TreeMode, string> = {
+const MODE_CODE: Record<Exclude<TreeMode, 'papers'>, string> = {
   chapter: 'chapter',
   knowledge: 'knowledge',
   method: 'method',
 }
 
+const isPapersMode = computed(() => treeMode.value === 'papers')
+
 /** 期望的 tree code，如 'math_chapter_high'（高中数学章节树） */
 const expectedCode = computed(() => {
+  if (treeMode.value === 'papers') return ''
   const subj = SUBJECT_CODE[currentSubject.value]
   const mode = MODE_CODE[treeMode.value]
   const stage = STAGE_CODE[currentStage.value]
@@ -129,10 +140,10 @@ const availableTrees = computed<KnowledgeTree[]>(() =>
     : trees.value.filter((t) => t.kind === expectedKind.value),
 )
 
-/** 物理学科 / 解题方法 等后端尚未覆盖时的兜底提示 */
+/** 物理学科 / 题型专题 等后端尚未覆盖时的兜底提示 */
 const emptyHint = computed(() => {
   if (currentSubject.value === 'physics') return '物理学科资源敬请期待'
-  if (treeMode.value === 'method') return '暂无解题方法树'
+  if (treeMode.value === 'method') return '暂无题型专题树'
   if (availableTrees.value.length === 0) return '当前模式暂无知识树'
   return '无知识点'
 })
@@ -184,6 +195,11 @@ function selectNode(id: string) {
 function selectAll() {
   internalSelected.value = ''
   emit('select', '')
+  if (isPapersMode.value) emit('sourceKindSelect', '')
+}
+
+function selectPaperKind(kind: string) {
+  emit('sourceKindSelect', kind)
 }
 
 function isSelected(id: string): boolean {
@@ -204,6 +220,12 @@ function setSubject(s: Subject) {
 function setMode(m: TreeMode) {
   if (treeMode.value === m) return
   treeMode.value = m
+  const view = m === 'papers' ? 'papers' : 'questions'
+  emit('viewChange', view)
+  if (m === 'papers') {
+    emit('sourceKindSelect', '')
+    emit('select', '')
+  }
 }
 
 // ─── 数据加载 ─────────────────────────────────────────────────────────
@@ -288,26 +310,43 @@ watch(activeTreeId, () => {
 watch([currentStage, currentSubject], () => {
   internalSelected.value = ''
   expandedIds.value = new Set()
+  emit('select', '') // 通知父组件：上下文变了，右侧列表需重载
+  if (treeMode.value === 'papers') return
   // 关键：先置 loading=true，再清 activeTreeId。
   // 这样 loadTreeData 的早退分支（清 treeData）被 loading 遮挡，不会闪现"暂无知识树"空状态。
   loading.value = true
   activeTreeId.value = ''
-  emit('select', '') // 通知父组件：上下文变了，右侧列表需重载
   loadTrees()
 })
 
-// 分类视角切换（章节/知识点/解题方法）：仅重新加载左侧树，不影响右侧列表
-// 右侧列表保持当前数据，直到用户明确点击新树上的某个节点
-watch(treeMode, () => {
+// 分类视角切换：试卷模式不拉树；切回题目三 Tab 才加载对应树
+watch(treeMode, (mode) => {
   expandedIds.value = new Set()
+  if (mode === 'papers') {
+    loading.value = false
+    activeTreeId.value = ''
+    treeData.value = []
+    return
+  }
   loading.value = true
   activeTreeId.value = ''
-  // 不 emit('select', ...) —— 分类视角切换不应触发右侧列表重载
-  // 不清 internalSelected —— 旧选中 ID 在新树中无匹配节点，自然无高亮；切回原模式时恢复高亮
   loadTrees()
 })
 
+watch(
+  () => props.view,
+  (view) => {
+    if (view === 'papers' && treeMode.value !== 'papers') {
+      treeMode.value = 'papers'
+    } else if (view === 'questions' && treeMode.value === 'papers') {
+      treeMode.value = 'chapter'
+    }
+  },
+  { immediate: true },
+)
+
 onMounted(async () => {
+  if (treeMode.value === 'papers') return
   await loadTrees()
   if (activeTreeId.value) await loadTreeData()
 })
@@ -325,11 +364,11 @@ onMounted(async () => {
       <header class="kt-nav-header">
         <div class="kt-nav-title">
           <AppIcon name="list" :size="14" />
-          <span>知识树导航</span>
+          <span>{{ isPapersMode ? '试卷导航' : '知识树导航' }}</span>
         </div>
       </header>
 
-      <!-- 主体内容：固定宽度 260px，外层像"拉窗帘"一样裁切，防止文字换行错乱 -->
+      <!-- 主体内容：固定宽度 260px，支持节点多行换行 -->
       <div v-show="!isCollapsed" class="kt-nav-body">
         <!-- ===== 顶部筛选区组：三行等宽无界 Tab + 底部分割线 ===== -->
         <div class="kt-filter-group">
@@ -375,9 +414,10 @@ onMounted(async () => {
               :class="{ active: treeMode === m.key }"
               role="tab"
               :aria-selected="treeMode === m.key"
+              :title="m.label"
               @click="setMode(m.key)"
             >
-              {{ m.label }}
+              {{ m.shortLabel }}
             </button>
           </div>
         </div>
@@ -386,15 +426,35 @@ onMounted(async () => {
         <button
           type="button"
           class="kt-nav-all"
-          :class="{ active: !internalSelected }"
+          :class="{ active: isPapersMode ? !selectedSourceKind : !internalSelected }"
           @click="selectAll"
         >
           <AppIcon name="list" :size="14" class="kt-nav-all-icon" />
-          <span>全部题目</span>
+          <span>{{ isPapersMode ? '全部试卷' : '全部题目' }}</span>
         </button>
 
+        <!-- 试卷模式：考试类型列表 -->
+        <div v-if="isPapersMode" class="kt-nav-list">
+          <div
+            v-for="kind in PAPER_KIND_OPTIONS"
+            :key="kind.value"
+            class="kt-nav-row"
+            :class="{ selected: selectedSourceKind === kind.value }"
+            @click="selectPaperKind(kind.value)"
+          >
+            <span class="row-expand">
+              <AppIcon
+                name="chevron-right"
+                class="row-expand-icon"
+                :size="12"
+              />
+            </span>
+            <span class="row-name">{{ kind.label }}</span>
+          </div>
+        </div>
+
         <!-- 树列表 -->
-        <div class="kt-nav-list">
+        <div v-else class="kt-nav-list">
           <div v-if="loading" class="kt-nav-loading">加载中…</div>
           <AppEmpty v-else-if="flatList.length === 0" :description="emptyHint" />
           <template v-else>
@@ -526,7 +586,7 @@ onMounted(async () => {
   color: var(--text-muted);
 }
 
-/* ── 滚动主体（右侧留出 14px 内边距，解耦滚动条与右侧浮动折叠按键） ── */
+/* ── 滚动主体（筛选区固定，仅树列表滚动） ── */
 .kt-nav-body {
   flex: 1;
   min-height: 0;
@@ -534,20 +594,7 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  overflow-y: auto;
-  overflow-x: hidden;
-  overscroll-behavior: contain;
-  /* 隐藏滚动条 — Firefox */
-  scrollbar-width: none;
-  /* 隐藏滚动条 — IE 10+ */
-  -ms-overflow-style: none;
-}
-
-/* 隐藏滚动条 — Chrome, Safari, Edge */
-.kt-nav-body::-webkit-scrollbar {
-  display: none;
-  width: 0;
-  height: 0;
+  overflow: hidden;
 }
 
 /* ── 顶部筛选区组：胶囊间距 + 极浅灰色分割线 ── */
@@ -558,6 +605,7 @@ onMounted(async () => {
   padding-bottom: 16px;
   margin-bottom: 16px;
   border-bottom: 1px solid var(--divider);
+  flex-shrink: 0;
 }
 
 /* ═══ 第 1 层：学段 — 全圆角浮岛胶囊 (Pill-in-Pill) ═══ */
@@ -652,16 +700,17 @@ onMounted(async () => {
 
 .kt-mode-item {
   flex: 1;
-  padding: 6px 12px;
+  padding: 6px 2px;
   border: none;
   border-radius: 9999px;
   background: transparent;
   color: var(--text-muted);
-  font-size: 11.5px;
+  font-size: 11px;
   font-weight: 500;
   cursor: pointer;
   transition: transform 0.22s ease;
   text-align: center;
+  white-space: nowrap;
 }
 
 .kt-mode-item:hover:not(.active) {
@@ -693,10 +742,12 @@ onMounted(async () => {
 }
 
 /* "全部题目"快捷项 — 作为树形结构的根目录节点，融入树列表 */
+/* 树列表：占据剩余高度并独立滚动 */
 .kt-nav-all {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-shrink: 0;
   padding: 6px 10px;
   border: none;
   border-radius: 8px;
@@ -736,8 +787,11 @@ onMounted(async () => {
   color: var(--accent);
 }
 
-/* 树列表：左右内边距，避免高亮色块顶满边缘 */
+/* 树列表：占据剩余高度并独立滚动，避免挤压上方面包屑 */
 .kt-nav-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 1px;
@@ -852,13 +906,13 @@ onMounted(async () => {
   background: var(--accent);
 }
 
-/* 节点文本：过长时省略号截断，防止撑开容器宽度 */
+/* 节点文本：过长时自动换行 */
 .row-name {
   flex: 1;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
   padding-top: 1px;
 }
 

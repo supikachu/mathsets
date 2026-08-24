@@ -24,6 +24,8 @@ export function useNavItems() {
       list.splice(4, 0, { path: '/settings/knowledge-trees', label: '知识树', icon: 'book-open', shortLabel: '知识树' })
       // 独立推库审批入口 —— 仅处理各空间推送到公共题库的申请
       list.splice(5, 0, { path: '/admin/public-library-review', label: '推库审批', icon: 'upload', shortLabel: '推库' })
+      // V2.1.1 标签候选审核
+      list.splice(6, 0, { path: '/admin/tag-candidates', label: '标签候选审核', icon: 'inbox', shortLabel: '候选' })
     }
     return list
   })

@@ -15,9 +15,7 @@ use uuid::Uuid;
 // ---------------------------------------------------------------------------
 
 async fn create_test_app() -> Option<axum::Router> {
-    // 加载 .env 文件中的环境变量（如 AI_KEY_ENCRYPTION_KEY）
-    let _ = dotenvy::dotenv();
-    let database_url = std::env::var("DATABASE_URL").ok()?;
+    let database_url = mathset::testing::database_url()?;
     let pool = db::create_pool(&database_url, 5).await;
     db::run_migrations(&pool).await;
     let state = AppState::new(
@@ -49,7 +47,7 @@ async fn request(
 
     let response = app.oneshot(req).await.unwrap();
     let status = response.status();
-    let body_bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+    let body_bytes = axum::body::to_bytes(response.into_body(), 8 * 1024 * 1024)
         .await
         .unwrap();
     let json: Value =
@@ -80,7 +78,7 @@ async fn request_auth(
 
     let response = app.oneshot(req).await.unwrap();
     let status = response.status();
-    let body_bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+    let body_bytes = axum::body::to_bytes(response.into_body(), 8 * 1024 * 1024)
         .await
         .unwrap();
     let json: Value =
@@ -190,7 +188,10 @@ async fn register_leader_and_login(app: &mut axum::Router) -> String {
     .unwrap();
 
     // 用独立连接池升级为 SuperAdmin（拥有审核一票通过权）
-    let pool = mathset::db::create_pool(&std::env::var("DATABASE_URL").unwrap(), 5).await;
+    // 必须与 create_test_app 使用同一测试库
+    let database_url = mathset::testing::database_url()
+        .expect("DATABASE_URL_TEST 未设置，请配置独立测试库");
+    let pool = mathset::db::create_pool(&database_url, 5).await;
     sqlx::query("UPDATE users SET global_role = 'super_admin' WHERE id = $1")
         .bind(claims.sub)
         .execute(&pool)
@@ -229,7 +230,7 @@ async fn test_auth_register_and_login() {
     let mut app = match create_test_app().await {
         Some(app) => app,
         None => {
-            eprintln!("⚠️  跳过 auth 测试: DATABASE_URL 未设置");
+            eprintln!("⚠️  跳过 auth 测试: DATABASE_URL_TEST 未设置");
             return;
         }
     };
@@ -283,6 +284,93 @@ async fn test_auth_register_and_login() {
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+/// 注册复制全局树时必须保留原 kind（ability 不得被写成 knowledge）
+#[tokio::test]
+async fn test_register_preserves_ability_tree_kind() {
+    let mut app = match create_test_app().await {
+        Some(app) => app,
+        None => {
+            eprintln!("⚠️  跳过: DATABASE_URL_TEST 未设置");
+            return;
+        }
+    };
+
+    let database_url = mathset::testing::database_url()
+        .expect("DATABASE_URL_TEST 未设置，请配置独立测试库");
+    let pool = mathset::db::create_pool(&database_url, 5).await;
+    // 清掉本用例历史残留（此前失败时只插不删，全局树会指数膨胀）
+    let _ = sqlx::query("DELETE FROM knowledge_trees WHERE code LIKE 'tp\\_%' ESCAPE '\\'")
+        .execute(&pool)
+        .await;
+
+    let tree_id = Uuid::new_v4();
+    let code = format!("tp_{}", tree_id.simple());
+    sqlx::query(
+        r#"
+        INSERT INTO knowledge_trees (id, code, name, kind, space_id, is_active, created_at, updated_at)
+        VALUES ($1, $2, '测试题型专题树', 'ability', NULL, TRUE, NOW(), NOW())
+        "#,
+    )
+    .bind(tree_id)
+    .bind(&code)
+    .execute(&pool)
+    .await
+    .expect("插入全局 ability 树失败");
+
+    let token = register_and_login(&mut app).await;
+    // 按 code 查库：列表接口未传 space_id 时会倒出全库树，脏库下会撑爆测试读 body 上限
+    let rows: Vec<(Option<Uuid>, String)> = sqlx::query_as(
+        "SELECT space_id, kind::text FROM knowledge_trees WHERE code = $1",
+    )
+    .bind(&code)
+    .fetch_all(&pool)
+    .await
+    .expect("查询复制结果失败");
+    assert!(
+        rows.iter().any(|(s, _)| s.is_none()),
+        "应保留全局树: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|(s, _)| s.is_some()),
+        "注册应复制出空间副本: {rows:?}"
+    );
+    assert!(
+        rows.iter().all(|(_, k)| k == "ability"),
+        "复制后 kind 必须保持 ability: {rows:?}"
+    );
+
+    let (status, body) = get_auth(
+        &mut app,
+        "/api/v1/knowledge-trees?kind=ability",
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "列出知识树失败: {:?}", body);
+    let trees = body
+        .as_array()
+        .or_else(|| body.get("data").and_then(|d| d.as_array()))
+        .expect("知识树列表应为数组");
+    let copies: Vec<_> = trees.iter().filter(|t| t["code"] == code).collect();
+    assert!(
+        !copies.is_empty(),
+        "列表应能看到刚插入的 ability 树，实际: {:?}",
+        copies
+    );
+    for t in &copies {
+        assert_eq!(
+            t["kind"].as_str(),
+            Some("ability"),
+            "复制后 kind 必须保持 ability: {t:?}"
+        );
+    }
+
+    let _ = sqlx::query("DELETE FROM knowledge_trees WHERE code = $1")
+        .bind(&code)
+        .execute(&pool)
+        .await;
+    pool.close().await;
 }
 
 #[tokio::test]
@@ -527,18 +615,21 @@ async fn test_question_full_lifecycle() {
     assert_eq!(status, StatusCode::OK, "审核通过失败: {:?}", body);
     assert_eq!(body["status"], "published");
 
-    // 6. 已发布题目不可编辑
-    let (status, _) = put_auth(
+    // 6. 已发布题目允许纠错编辑：保存后降级为 Pending 重新进入审核
+    //    version 轨迹：create=1 → 编辑=2 → approve=3 → 纠错编辑=4
+    let (status, body) = put_auth(
         &mut app,
         &format!("/api/v1/questions/{}", question_id),
         json!({ "stem": "试图修改" }),
         &token,
     )
     .await;
-    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(status, StatusCode::OK, "已发布题目纠错编辑应成功: {:?}", body);
+    assert_eq!(body["status"], "pending");
+    assert_eq!(body["version"], 4);
 
-    // 7. 列选题目列表
-    let (status, body) = get_auth(&mut app, "/api/v1/questions?status=published", &token).await;
+    // 7. 列选题目列表（纠错降级后按 pending 过滤）
+    let (status, body) = get_auth(&mut app, "/api/v1/questions?status=pending", &token).await;
     assert_eq!(status, StatusCode::OK);
     let list = body["items"].as_array().unwrap();
     assert!(!list.is_empty());
@@ -640,7 +731,8 @@ async fn test_question_delete_draft_only() {
             "stem": "临时题目",
             "question_type": "solution",
             "difficulty": 1,
-            "correct_answer": ["证明略"]
+            "correct_answer": ["证明略"],
+            "analysis": "略证过程"
         }),
         &token,
     )
@@ -678,7 +770,8 @@ async fn test_question_review_reject() {
             "question_type": "choice",
             "difficulty": 1,
             "correct_answer": ["A"],
-            "options": [{"label":"A","content":"OK"},{"label":"B","content":"NO"}]
+            "options": [{"label":"A","content":"OK"},{"label":"B","content":"NO"}],
+            "analysis": "选 A"
         }),
         &token,
     )
@@ -730,7 +823,8 @@ async fn test_question_stats() {
             "question_type": "choice",
             "difficulty": 1,
             "correct_answer": ["A"],
-            "options": [{"label":"A","content":"正确"},{"label":"B","content":"错误"}]
+            "options": [{"label":"A","content":"正确"},{"label":"B","content":"错误"}],
+            "analysis": "选 A"
         }),
         &token,
     )
@@ -842,7 +936,8 @@ async fn test_teacher_cannot_review() {
             "question_type": "choice",
             "difficulty": 1,
             "correct_answer": ["A"],
-            "options": [{"label":"A","content":"正确"},{"label":"B","content":"错误"}]
+            "options": [{"label":"A","content":"正确"},{"label":"B","content":"错误"}],
+            "analysis": "选 A"
         }),
         &teacher_token,
     )
@@ -889,7 +984,8 @@ async fn test_non_creator_cannot_submit() {
             "stem": "提交权限测试",
             "question_type": "solution",
             "difficulty": 1,
-            "correct_answer": ["证明略"]
+            "correct_answer": ["证明略"],
+            "analysis": "略证过程"
         }),
         &token_a,
     )
@@ -934,6 +1030,9 @@ async fn test_ai_settings_default() {
     assert_eq!(status, StatusCode::OK, "获取默认配置失败: {:?}", body);
     assert_eq!(body["provider"], "deepseek");
     assert_eq!(body["has_api_key"], false);
+    assert!(body["tagging_provider"].is_null());
+    assert_eq!(body["stage2_concurrency"], 4);
+    assert_eq!(body["tagging_concurrency"], 4);
 }
 
 #[tokio::test]
@@ -973,70 +1072,142 @@ async fn test_ai_settings_save_and_get() {
         "GET 响应不应包含明文 api_key"
     );
     assert_eq!(body["model_text"], "deepseek-chat");
+    assert!(body["tagging_provider"].is_null());
+    assert_eq!(body["has_tagging_api_key"], false);
+    assert_eq!(body["stage2_concurrency"], 4);
+    assert_eq!(body["tagging_concurrency"], 4);
 }
 
 #[tokio::test]
-async fn test_ai_parse_text_no_key() {
+async fn test_ai_settings_tagging_provider_and_concurrency() {
     let mut app = match create_test_app().await {
         Some(app) => app,
         None => return,
     };
     let token = register_and_login(&mut app).await;
 
-    // 调用 AI 解析 — 行为取决于环境是否配置了平台默认 API Key
-    let (status, body) = post_auth(
+    let (status, body) = put_auth(
         &mut app,
-        "/api/v1/ai/parse-text",
-        json!({"text": "已知函数 f(x) = 2x + 1，求 f(3) 的值。"}),
+        "/api/v1/ai/settings",
+        json!({
+            "provider": "custom",
+            "api_key": "sk-or-v1-parse",
+            "model_text": "stealth/ox-alpha",
+            "llm_base_url": "https://openrouter.ai/api/v1",
+            "tagging_provider": "deepseek",
+            "model_tagging": "deepseek-chat",
+            "stage2_concurrency": 8,
+            "tagging_concurrency": 2
+        }),
         &token,
     )
     .await;
+    assert_eq!(status, StatusCode::OK, "保存打标独立配置失败: {:?}", body);
+    assert_eq!(body["provider"], "custom");
+    assert_eq!(body["tagging_provider"], "deepseek");
+    assert_eq!(body["model_tagging"], "deepseek-chat");
+    assert_eq!(body["has_tagging_api_key"], false);
+    assert_eq!(body["stage2_concurrency"], 8);
+    assert_eq!(body["tagging_concurrency"], 2);
 
-    if status == StatusCode::BAD_REQUEST {
-        // 无 Key 场景：返回 400 + "未配置" 错误信息
-        assert!(
-            body["error"].as_str().unwrap().contains("未配置"),
-            "无 Key 错误信息应包含'未配置': {:?}",
-            body
-        );
-    } else if status == StatusCode::OK {
-        // 已配置 Key 且上游可用：AI 解析成功，返回 200 + 解析结果数据
-        assert!(
-            body["question_type"].is_string() || body["questions"].is_array(),
-            "解析成功响应应包含题目数据: {:?}",
-            body
-        );
-        // 验证返回了题目数据（stem 字段应包含原始题干或 AI 解析结果）
-        assert!(
-            body.get("data").is_some() || body.get("stem").is_some(),
-            "应返回解析数据: {:?}",
-            body
-        );
-    } else {
-        // 上游异常（网络不可达 / Key 失效 / 返回格式损坏）：属于环境相关
-        // 行为，本测试只负责验证"未配置 Key"分支的错误信息，不判定失败
-        eprintln!(
-            "[warn] AI 上游不可用（status={:?} body={:?}），跳过严格断言",
-            status, body
-        );
-    }
+    let (status, body) = get_auth(&mut app, "/api/v1/ai/settings", &token).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["tagging_provider"], "deepseek");
+    assert_eq!(body["stage2_concurrency"], 8);
+    assert_eq!(body["tagging_concurrency"], 2);
+
+    // 空 tagging_provider 表示与解析共用
+    let (status, body) = put_auth(
+        &mut app,
+        "/api/v1/ai/settings",
+        json!({
+            "provider": "custom",
+            "tagging_provider": "",
+            "stage2_concurrency": 99,
+            "tagging_concurrency": 0
+        }),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "清除打标服务商失败: {:?}", body);
+    assert!(body["tagging_provider"].is_null());
+    assert_eq!(body["stage2_concurrency"], 16);
+    assert_eq!(body["tagging_concurrency"], 1);
 }
 
 #[tokio::test]
-async fn test_ai_parse_text_empty() {
+async fn test_ai_settings_custom_openrouter() {
     let mut app = match create_test_app().await {
         Some(app) => app,
         None => return,
     };
     let token = register_and_login(&mut app).await;
 
-    // 空文本 → 400
+    let (status, body) = put_auth(
+        &mut app,
+        "/api/v1/ai/settings",
+        json!({
+            "provider": "openrouter",
+            "api_key": "sk-or-v1-fake",
+            "model_text": "qwen/qwen3-8b:free",
+            "llm_base_url": "https://openrouter.ai/api/v1/"
+        }),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "保存自定义配置失败: {:?}", body);
+    assert_eq!(body["provider"], "custom");
+    assert_eq!(body["has_api_key"], true);
+    assert_eq!(body["model_text"], "qwen/qwen3-8b:free");
+    assert_eq!(body["llm_base_url"], "https://openrouter.ai/api/v1");
+    assert!(body.get("api_key").is_none());
+
+    let (status, body) = get_auth(&mut app, "/api/v1/ai/settings", &token).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["provider"], "custom");
+    assert_eq!(body["llm_base_url"], "https://openrouter.ai/api/v1");
+
+    let (status, body) = put_auth(
+        &mut app,
+        "/api/v1/ai/settings",
+        json!({
+            "provider": "custom",
+            "llm_base_url": "not-a-url"
+        }),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "非法 URL 应拒绝: {:?}", body);
+}
+
+#[tokio::test]
+async fn test_ai_parse_task_requires_confirmed_document() {
+    let mut app = match create_test_app().await {
+        Some(app) => app,
+        None => return,
+    };
+    let token = register_and_login(&mut app).await;
+
+    // 不存在的 Document → 404
     let (status, _) = post_auth(
         &mut app,
-        "/api/v1/ai/parse-text",
-        json!({"text": "   "}),
+        "/api/v1/ai/parse-task",
+        json!({ "document_id": "00000000-0000-0000-0000-000000000000" }),
         &token,
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_ai_parse_task_empty_body() {
+    let mut app = match create_test_app().await {
+        Some(app) => app,
+        None => return,
+    };
+    let token = register_and_login(&mut app).await;
+
+    // 缺少 document_id → 422（serde 校验）
+    let (status, _) = post_auth(&mut app, "/api/v1/ai/parse-task", json!({}), &token).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 }
