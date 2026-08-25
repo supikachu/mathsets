@@ -2057,6 +2057,25 @@ async fn update_progress(
     .await;
 }
 
+async fn set_progress_phase(state: &AppState, task_id: Uuid, phase: &str) {
+    let patch = progress_phase_patch(phase);
+    let _ = sqlx::query(
+        r#"
+        UPDATE ai_parse_tasks
+        SET progress = COALESCE(progress, '{}'::jsonb) || $2::jsonb, updated_at = NOW()
+        WHERE id = $1
+        "#,
+    )
+    .bind(task_id)
+    .bind(&patch)
+    .execute(&state.pool)
+    .await;
+}
+
+pub(crate) fn progress_phase_patch(phase: &str) -> serde_json::Value {
+    serde_json::json!({ "phase": phase })
+}
+
 // ---------------------------------------------------------------------------
 // PDF 直传路径：轮询进度映射（纯函数，供 ocr_pdf_async 接入后使用）
 // ---------------------------------------------------------------------------
@@ -2213,6 +2232,7 @@ async fn run_pdf_fast_path(
         cached
     } else {
         // ── Phase 1：整档 OCR（pin 引擎 future，select 并行处理进度/心跳/取消） ──
+        set_progress_phase(state, task_id, "ocr").await;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<u8>();
         let on_progress: PdfProgressCallback = std::sync::Arc::new(move |p| {
             let _ = tx.send(p);
@@ -2306,6 +2326,7 @@ async fn run_pdf_fast_path(
         analysis_paper,
         stage2_n
     );
+    set_progress_phase(state, task_id, "structuring").await;
 
     let mut outcome = FastPathOutcome {
         cancelled: false,
@@ -2318,6 +2339,8 @@ async fn run_pdf_fast_path(
     let mut pending: Vec<(usize, String)> = chunks.into_iter().enumerate().collect();
     let mut parsed_by_chunk: std::collections::BTreeMap<usize, Vec<ParsedQuestion>> =
         std::collections::BTreeMap::new();
+    let mut high_skip_n = 0u32;
+    let mut llm_n = 0u32;
 
     while !pending.is_empty() {
         refresh_heartbeat(state, task_id).await;
@@ -2331,7 +2354,7 @@ async fn run_pdf_fast_path(
 
         // 通用 N 路：必须覆盖整个 batch。batch 已从 pending 里 drain 出来，漏处理任何一块
         // 都会让该块的题目凭空消失且不报错。
-        let results: Vec<(usize, Result<Vec<ParsedQuestion>, (bool, String)>)> =
+        let results: Vec<(usize, Result<(Vec<ParsedQuestion>, bool), (bool, String)>)> =
             futures::future::join_all(batch.iter().map(|(ci, chunk)| async move {
                 let r = parse_stage2_chunk_cancellable(
                     state, task_id, text_provider, text_model, prompt, *ci, chunk,
@@ -2344,7 +2367,12 @@ async fn run_pdf_fast_path(
         let mut fatal = false;
         for (ci, res) in results {
             match res {
-                Ok(qs) => {
+                Ok((qs, skipped_llm)) => {
+                    if skipped_llm {
+                        high_skip_n += 1;
+                    } else {
+                        llm_n += 1;
+                    }
                     parsed_by_chunk.insert(ci, qs);
                 }
                 Err((is_fatal, msg)) => {
@@ -2370,6 +2398,13 @@ async fn run_pdf_fast_path(
             break;
         }
     }
+
+    tracing::info!(
+        split_via,
+        high_skip_n,
+        llm_n,
+        "任务 {task_id} 块处理完成（切题={split_via}，高置信跳过={high_skip_n}，LLM={llm_n}）"
+    );
 
     let mut flat: Vec<ParsedQuestion> = Vec::new();
     for (_ci, chunk_questions) in parsed_by_chunk {
@@ -2973,7 +3008,7 @@ fn split_stage2_with_layout(
     )
 }
 
-/// Ok(questions) / Err((fatal, message))
+/// Ok((questions, skipped_llm)) / Err((fatal, message))
 async fn parse_stage2_chunk_cancellable(
     state: &AppState,
     task_id: Uuid,
@@ -2982,7 +3017,7 @@ async fn parse_stage2_chunk_cancellable(
     prompt: &str,
     ci: usize,
     chunk: &str,
-) -> Result<Vec<ParsedQuestion>, (bool, String)> {
+) -> Result<(Vec<ParsedQuestion>, bool), (bool, String)> {
     tokio::select! {
         r = parse_stage2_chunk(state, task_id, text_provider, text_model, prompt, ci, chunk) => r,
         _ = wait_until_cancel(state, task_id) => Err((false, "任务已取消".into())),
@@ -2998,7 +3033,7 @@ async fn wait_until_cancel(state: &AppState, task_id: Uuid) {
     }
 }
 
-/// Ok(questions) / Err((fatal, message))
+/// Ok((questions, skipped_llm)) / Err((fatal, message))
 async fn parse_stage2_chunk(
     state: &AppState,
     task_id: Uuid,
@@ -3007,7 +3042,7 @@ async fn parse_stage2_chunk(
     prompt: &str,
     ci: usize,
     chunk: &str,
-) -> Result<Vec<ParsedQuestion>, (bool, String)> {
+) -> Result<(Vec<ParsedQuestion>, bool), (bool, String)> {
     let draft = structure_chunk(chunk);
     tracing::info!(
         confidence = ?draft.confidence,
@@ -3030,7 +3065,7 @@ async fn parse_stage2_chunk(
             if report.schema_ok && !report.method_count_mismatch {
                 assign_chunk_images(chunk, &mut qs);
                 tracing::info!("任务 {task_id} 第 {} 块高置信，跳过 Stage2", ci + 1);
-                return Ok(qs);
+                return Ok((qs, true));
             }
         }
         tracing::info!(
@@ -3058,6 +3093,8 @@ async fn parse_stage2_chunk(
             chunk.chars().count()
         );
     }
+
+    set_progress_phase(state, task_id, "stage2").await;
     let mut last_err: Option<AiError> = None;
     let mut parsed: Option<String> = None;
     for attempt in 0..2u8 {
@@ -3133,7 +3170,7 @@ async fn parse_stage2_chunk(
     }
     recover_chunk_questions(&mut chunk_questions, chunk);
     assign_chunk_images(chunk, &mut chunk_questions);
-    Ok(chunk_questions)
+    Ok((chunk_questions, false))
 }
 
 fn draft_question_from_chunk(chunk: &str, reason: &str) -> ParsedQuestion {
@@ -4332,6 +4369,24 @@ mod tests {
         // 42% × 20 页 → floor(8.4)=8 页完成，正在第 9 页
         let p = map_pdf_poll_progress(Some(&json!(42)), 20, None).unwrap();
         assert_eq!((p.current_page, p.processed_count), (9, 8));
+    }
+
+    #[test]
+    fn test_progress_phase_patch_values() {
+        assert_eq!(progress_phase_patch("ocr")["phase"], "ocr");
+        assert_eq!(progress_phase_patch("structuring")["phase"], "structuring");
+        assert_eq!(progress_phase_patch("stage2")["phase"], "stage2");
+        assert_ne!(progress_phase_patch("structuring")["phase"], "ocr_ready");
+    }
+
+    #[test]
+    fn test_ocr_export_pipeline_detected_from_progress() {
+        let mut task = fake_task(Uuid::nil(), Uuid::nil());
+        task.progress = json!({ "pipeline": "ocr_export", "phase": "ocr_ready" });
+        assert!(is_ocr_export(&task));
+        task.progress = json!({ "pipeline": "full", "phase": "structuring" });
+        task.paper_meta = json!({ "document_type": "class_exercise" });
+        assert!(!is_ocr_export(&task));
     }
 
     #[test]
