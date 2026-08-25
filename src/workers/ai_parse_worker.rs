@@ -24,7 +24,8 @@ use crate::ai::continuation::merge_split_questions;
 use crate::ai::structure::{
     append_validation_warnings, finalize_parsed_question, merge_script_and_llm,
     recover_chunk_questions, recover_parsed_questions, recover_question_sections,
-    restore_script_analysis_if_needed, stage2_llm_input, structure_chunk,
+    restore_script_analysis_if_needed, script_skip_accepted, should_call_llm_with,
+    stage2_llm_input, stage2_patch_user_input, structure_chunk, validate_structured,
 };
 use crate::ai::layout::{
     exam_section_heading, is_implausible_major_no_drop, layout_sidecar_path, load_layout_sidecar,
@@ -35,7 +36,10 @@ use crate::ai::ocr::{
     create_ocr_provider, parse_percent_value, should_fallback, OcrError, OcrProvider,
     PdfProgressCallback,
 };
-use crate::ai::prompt::{BATCH_IMAGE_OCR_FULL_PROMPT, STAGE2_PARSE_FULL_PROMPT, STAGE2_PARSE_SLIM_PROMPT};
+use crate::ai::prompt::{
+    BATCH_IMAGE_OCR_FULL_PROMPT, STAGE2_PARSE_FULL_PROMPT, STAGE2_PARSE_SLIM_PROMPT,
+    STAGE2_PATCH_PROMPT,
+};
 use crate::ai::provider::{
     create_provider, is_transient_openrouter_error, AiError, AiProvider,
     OPENROUTER_PROVIDER_ERROR_USER_MESSAGE, RATE_LIMIT_USER_MESSAGE,
@@ -50,7 +54,9 @@ use crate::ai::paper_order::{
 use crate::ai::types::{ParsedAnswer, ParsedQuestion};
 use crate::auth::middleware::AuthUser;
 use crate::auth::permissions::ensure_personal_space;
-use crate::handlers::ai::{post_process_batch, resolve_ai_config, resolve_ocr_config, ModelKind};
+use crate::handlers::ai::{
+    finalize_script_questions, post_process_batch, resolve_ai_config, resolve_ocr_config, ModelKind,
+};
 use crate::handlers::collections::{get_or_create_collection, link_question_to_collection};
 use crate::models::ai_task::{AiParseTask, AiTaskSourceType, AiTaskStatus};
 use crate::models::document::is_paper_type;
@@ -3007,11 +3013,44 @@ async fn parse_stage2_chunk(
         confidence = ?draft.confidence,
         method_heading_count = draft.method_heading_count,
         question_no = draft.question.question_no.as_deref().unwrap_or("-"),
-        "任务 {task_id} 第 {} 块规则结构化（仍走 Stage2）",
+        skip_llm = script_skip_accepted(&draft),
+        "任务 {task_id} 第 {} 块规则结构化",
         ci + 1
     );
-    let llm_input = stage2_llm_input(chunk);
-    if llm_input.chars().count() != chunk.chars().count() {
+
+    if script_skip_accepted(&draft) {
+        let mut qs =
+            finalize_script_questions(vec![draft.question.clone()], &state.pool, true).await;
+        if !qs.is_empty() {
+            let report = validate_structured(
+                &qs[0],
+                draft.method_heading_count,
+                draft.confidence,
+            );
+            if report.schema_ok && !report.method_count_mismatch {
+                assign_chunk_images(chunk, &mut qs);
+                tracing::info!("任务 {task_id} 第 {} 块高置信，跳过 Stage2", ci + 1);
+                return Ok(qs);
+            }
+        }
+        tracing::info!(
+            "任务 {task_id} 第 {} 块高置信校验失败，回退 Stage2",
+            ci + 1
+        );
+    }
+
+    let use_patch = should_call_llm_with(&draft, false);
+    let llm_input = if use_patch {
+        stage2_patch_user_input(chunk, &draft)
+    } else {
+        stage2_llm_input(chunk)
+    };
+    let prompt = if use_patch {
+        STAGE2_PATCH_PROMPT
+    } else {
+        prompt
+    };
+    if !use_patch && llm_input.chars().count() != chunk.chars().count() {
         tracing::info!(
             "任务 {task_id} 第 {} 块 Stage2 只送题干 {} 字（原文 {} 字，解析由规则回填）",
             ci + 1,

@@ -152,6 +152,25 @@ fn blank_question(question_type: &str) -> ParsedQuestion {
     }
 }
 
+/// Low 置信补丁：OCR 原文 + 规则草稿 JSON，供短 Prompt 一次一题。
+pub fn stage2_patch_user_input(chunk: &str, draft: &ScriptDraft) -> String {
+    let hint = serde_json::json!({
+        "question_type": draft.question.question_type,
+        "question_no": draft.question.question_no,
+        "stem": draft.question.stem,
+        "options": draft.question.options,
+        "analysis": draft.question.analysis,
+        "confidence": format!("{:?}", draft.confidence),
+        "reasons": draft.reasons,
+        "method_heading_count": draft.method_heading_count,
+    });
+    format!(
+        "{}\n\n---\n规则草稿（仅供参考，以 OCR 原文为准）：\n{}",
+        chunk.trim(),
+        hint
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,5 +373,53 @@ D. 丁\n";
         assert_eq!(draft.question.question_no.as_deref(), Some("8"));
         assert!(draft.question.stem.contains("3.14"));
         assert_eq!(draft.confidence, Confidence::High, "{:?}", draft.reasons);
+    }
+
+    #[test]
+    fn high_choice_does_not_need_provider() {
+        let md = "\
+8. 下列结论正确的是\n\
+A. 1\n\
+B. 2\n\
+C. 3\n\
+D. 4\n";
+        let draft = structure_chunk(md);
+        assert_eq!(draft.confidence, Confidence::High, "{:?}", draft.reasons);
+        assert!(!crate::ai::structure::should_call_llm_with(&draft, false));
+        assert!(crate::ai::structure::script_skip_accepted_with(&draft, false));
+    }
+
+    #[test]
+    fn low_analysis_blob_needs_llm() {
+        let md = "\
+8. 已知 $x=1$。\n\
+【解析】\n\
+因为 $x=1$，所以选 A。几种想法糊在一起没有法一法二。\n";
+        let draft = structure_chunk(md);
+        assert_eq!(draft.confidence, Confidence::Low, "{:?}", draft.reasons);
+        assert!(crate::ai::structure::should_call_llm_with(&draft, false));
+        assert!(!crate::ai::structure::script_skip_accepted_with(&draft, false));
+    }
+
+    #[test]
+    fn high_validation_failure_forces_llm() {
+        let md = "\
+8. 下列结论正确的是\n\
+A. 1\n\
+B. 2\n\
+C. 3\n\
+D. 4\n";
+        let mut draft = structure_chunk(md);
+        assert!(crate::ai::structure::script_skip_accepted_with(&draft, false));
+        draft.question.stem.clear();
+        draft.question.options = None;
+        assert!(
+            !crate::ai::structure::script_skip_accepted_with(&draft, false),
+            "校验失败的 High 必须回退 LLM"
+        );
+        assert!(
+            crate::ai::structure::should_call_llm_with(&draft, true),
+            "MATHSET_ALWAYS_STAGE2=1 强制走 LLM"
+        );
     }
 }

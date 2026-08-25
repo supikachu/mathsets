@@ -19,11 +19,16 @@ pub use analysis::{
     recover_question_sections, resplit_nested_methods, split_body_and_tail, split_chunk_analysis,
     stage2_llm_input,
 };
-pub use chunk::{extract_chunk_question_no, guess_chunk_question_type, structure_chunk};
+pub use chunk::{
+    extract_chunk_question_no, guess_chunk_question_type, stage2_patch_user_input, structure_chunk,
+};
 pub use merge::{merge_script_and_llm, restore_script_analysis_if_needed, script_usable};
 pub use validate::{
     append_validation_warnings, llm_core_ok, strip_options_residue_from_stem, validate_structured,
     StructuredValidation,
+};
+pub use confidence::{
+    script_skip_accepted, script_skip_accepted_with, should_call_llm, should_call_llm_with,
 };
 pub(crate) use choice::looks_like_choice_stem;
 

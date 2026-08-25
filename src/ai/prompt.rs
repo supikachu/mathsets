@@ -422,6 +422,20 @@ pub static STAGE2_PARSE_SLIM_PROMPT: LazyLock<String> = LazyLock::new(|| {
     )
 });
 
+/// 全自动低置信补丁：短 Prompt、一次一题。不要注入 `CORE_PARSE_RULES`。
+pub const STAGE2_PATCH_PROMPT: &str = r#"你是数学题结构化校对器。用户消息是一道题的 OCR Markdown，末尾可能附带规则草稿 JSON。
+只输出裸 JSON：{"questions":[恰好一项]}，不要 markdown 围栏，不要解释。
+
+规则：
+- 只提取原文已有内容。禁止做题，禁止编造答案或解析。
+- 选择题把 A–D 放到 options，题干不得残留 A. / A、。
+- （1）（2）留在题干，不要放进 analysis。
+- 原文有几种「法一 / 法二 / 另解」标题，analysis 就必须有几项，禁止丢掉。
+- 只用 $...$ / $$...$$，不要 \( \)。
+- 保留 ![...](url) 原样，不要改 URL。
+- 无答案时 correct_answer 用对应题型空结构，不要 null。
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -526,6 +540,10 @@ mod tests {
         assert!(STAGE2_PARSE_FULL_PROMPT.contains("本块只解析输入中出现的题目"));
         assert!(STAGE2_PARSE_FULL_PROMPT.contains("文本模型看不见图片像素"));
         assert!(STAGE2_PARSE_SLIM_PROMPT.contains("解析卷输出约束"));
+        assert!(STAGE2_PATCH_PROMPT.contains("几种「法一 / 法二 / 另解」"));
+        assert!(STAGE2_PATCH_PROMPT.contains(r#"{"questions":[恰好一项]}"#));
+        assert!(!STAGE2_PATCH_PROMPT.contains("三维标签推断规则"));
+        assert!(!STAGE2_PATCH_PROMPT.contains("【最高指令：禁止做题】"));
         // Stage 1 Qwen-VL OCR 输出纯 Markdown（非 JSON）
         assert!(QWEN_VL_OCR_PROMPT.contains("只输出 Markdown 文本"));
         assert!(QWEN_VL_OCR_PROMPT.contains("IMAGE_PLACEHOLDER_N"));

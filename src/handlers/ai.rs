@@ -327,8 +327,13 @@ pub(crate) async fn post_process_batch(
         }
     }
 
-    let results =
-        finalize_parsed_questions_with_note(parsed, pool, match_knowledge, truncate_warning).await;
+    let results = match truncate_warning {
+        Some(w) => {
+            finalize_parsed_questions_with_note(parsed, pool, match_knowledge, Some(w), true)
+                .await
+        }
+        None => finalize_parsed_questions(parsed, pool, match_knowledge).await,
+    };
 
     if results.is_empty() {
         return Err((
@@ -342,14 +347,22 @@ pub(crate) async fn post_process_batch(
 
 /// 逐题清洗 / 剥选项残留 / 空解析占位 / 知识点匹配。
 ///
-/// `post_process_batch` 仍是 LLM JSON 与导入入口；脚本 High 路径（阶段 3）直接调用。
-#[allow(dead_code)]
+/// `post_process_batch` 仍是 LLM JSON 与导入入口；脚本 High 路径走
+/// [`finalize_script_questions`]（不填空「解法一」占位，避免误伤纯选择题）。
 pub(crate) async fn finalize_parsed_questions(
     qs: Vec<ParsedQuestion>,
     pool: &sqlx::PgPool,
     match_knowledge: bool,
 ) -> Vec<ParsedQuestion> {
-    finalize_parsed_questions_with_note(qs, pool, match_knowledge, None).await
+    finalize_parsed_questions_with_note(qs, pool, match_knowledge, None, true).await
+}
+
+pub(crate) async fn finalize_script_questions(
+    qs: Vec<ParsedQuestion>,
+    pool: &sqlx::PgPool,
+    match_knowledge: bool,
+) -> Vec<ParsedQuestion> {
+    finalize_parsed_questions_with_note(qs, pool, match_knowledge, None, false).await
 }
 
 async fn finalize_parsed_questions_with_note(
@@ -357,6 +370,7 @@ async fn finalize_parsed_questions_with_note(
     pool: &sqlx::PgPool,
     match_knowledge: bool,
     extra_warning: Option<&str>,
+    fill_empty_analysis: bool,
 ) -> Vec<ParsedQuestion> {
     let mut results = Vec::new();
     for (i, mut q) in qs.into_iter().enumerate() {
@@ -368,7 +382,7 @@ async fn finalize_parsed_questions_with_note(
             tracing::warn!("第 {} 题题干与问树均为空，跳过", i + 1);
             continue;
         }
-        apply_parsed_question_cleanup(&mut q);
+        apply_parsed_question_cleanup(&mut q, fill_empty_analysis);
         if match_knowledge && !q.knowledge_points.is_empty() {
             match match_knowledge_nodes(pool, &q.knowledge_points, None, "knowledge").await {
                 Ok((matched, _)) => {
@@ -412,17 +426,19 @@ async fn finalize_parsed_questions_with_note(
     results
 }
 
-fn apply_parsed_question_cleanup(q: &mut ParsedQuestion) {
+fn apply_parsed_question_cleanup(q: &mut ParsedQuestion, fill_empty_analysis: bool) {
     q.sanitize_text_markup();
     strip_options_residue_from_stem(q);
     normalize_choice_answer_blank(q);
     q.sanitize_img_row_fences();
     if q.analysis.is_empty() {
-        q.analysis = vec![AnalysisMethod {
-            title: "解法一".into(),
-            content: "".into(),
-        }];
-        q.warnings.push("AI 返回解析为空，请手动补充".into());
+        if fill_empty_analysis {
+            q.analysis = vec![AnalysisMethod {
+                title: "解法一".into(),
+                content: "".into(),
+            }];
+            q.warnings.push("AI 返回解析为空，请手动补充".into());
+        }
     } else {
         for (ai, a) in q.analysis.iter_mut().enumerate() {
             if a.title.trim().is_empty() {

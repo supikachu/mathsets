@@ -4,6 +4,7 @@ use crate::ai::types::ParsedQuestion;
 
 use super::analysis::{count_method_headings, looks_like_analysis_chunk};
 use super::options::{extract_choice_options, stem_has_option_residue};
+use super::validate::validate_structured;
 use super::{Confidence, ScriptDraft};
 
 pub(crate) const MARKDOWN_FALLBACK_LOW_CHARS: usize = 6000;
@@ -93,6 +94,34 @@ pub(crate) fn evaluate(
     }
     draft.question.warnings.push("规则结构化".into());
     draft.question.confidence = if high { 0.9 } else { 0.4 };
+}
+
+pub fn always_stage2() -> bool {
+    matches!(std::env::var("MATHSET_ALWAYS_STAGE2").as_deref(), Ok("1"))
+}
+
+pub fn should_call_llm(draft: &ScriptDraft) -> bool {
+    should_call_llm_with(draft, always_stage2())
+}
+
+pub fn should_call_llm_with(draft: &ScriptDraft, force: bool) -> bool {
+    force || draft.confidence == Confidence::Low
+}
+
+pub fn script_skip_accepted(draft: &ScriptDraft) -> bool {
+    script_skip_accepted_with(draft, always_stage2())
+}
+
+pub fn script_skip_accepted_with(draft: &ScriptDraft, force: bool) -> bool {
+    if should_call_llm_with(draft, force) {
+        return false;
+    }
+    let report = validate_structured(
+        &draft.question,
+        draft.method_heading_count,
+        draft.confidence,
+    );
+    report.schema_ok && !report.method_count_mismatch
 }
 
 fn fields_blob(q: &ParsedQuestion) -> String {
