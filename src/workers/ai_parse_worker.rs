@@ -22,8 +22,9 @@ use base64::Engine as _;
 use crate::ai::cleaner::clean_and_parse;
 use crate::ai::continuation::merge_split_questions;
 use crate::ai::structure::{
-    finalize_parsed_question, recover_chunk_questions, recover_parsed_questions,
-    recover_question_sections, stage2_llm_input,
+    append_validation_warnings, finalize_parsed_question, merge_script_and_llm,
+    recover_chunk_questions, recover_parsed_questions, recover_question_sections,
+    restore_script_analysis_if_needed, stage2_llm_input, structure_chunk,
 };
 use crate::ai::layout::{
     exam_section_heading, is_implausible_major_no_drop, layout_sidecar_path, load_layout_sidecar,
@@ -3001,7 +3002,7 @@ async fn parse_stage2_chunk(
     ci: usize,
     chunk: &str,
 ) -> Result<Vec<ParsedQuestion>, (bool, String)> {
-    let draft = crate::ai::structure::structure_chunk(chunk);
+    let draft = structure_chunk(chunk);
     tracing::info!(
         confidence = ?draft.confidence,
         method_heading_count = draft.method_heading_count,
@@ -3044,36 +3045,53 @@ async fn parse_stage2_chunk(
             }
         }
     }
-    let raw_json = match parsed {
-        Some(r) => r,
+
+    let mut fallback_reason = String::new();
+    let llm_qs = match parsed {
+        Some(raw_json) => match post_process_batch(&raw_json, &state.pool, true).await {
+            Ok(qs) if !qs.is_empty() => qs,
+            other => {
+                let detail = match other {
+                    Ok(_) => "questions 为空".to_string(),
+                    Err((_, err)) => err["error"].as_str().unwrap_or("后处理失败").to_string(),
+                };
+                tracing::warn!(
+                    "任务 {task_id} 第 {} 块后处理失败（{detail}），尝试规则草稿",
+                    ci + 1
+                );
+                fallback_reason = detail;
+                Vec::new()
+            }
+        },
         None => {
             let e = last_err.expect("解析失败时必有错误");
             let msg = format!("第 {} 块解析失败: {}", ci + 1, map_ai_error_msg(&e));
             if is_fatal_ai_error(&e) {
                 return Err((true, msg));
             }
-            tracing::warn!("任务 {task_id} {msg}，降级为 OCR 草稿题干（保留配图）");
-            let mut qs = vec![draft_question_from_chunk(chunk, &map_ai_error_msg(&e))];
-            recover_chunk_questions(&mut qs, chunk);
-            assign_chunk_images(chunk, &mut qs);
-            return Ok(qs);
+            tracing::warn!("任务 {task_id} {msg}，尝试规则草稿");
+            fallback_reason = map_ai_error_msg(&e);
+            Vec::new()
         }
     };
 
-    let mut chunk_questions = match post_process_batch(&raw_json, &state.pool, true).await {
-        Ok(qs) if !qs.is_empty() => qs,
-        other => {
-            let detail = match other {
-                Ok(_) => "questions 为空".to_string(),
-                Err((_, err)) => err["error"].as_str().unwrap_or("后处理失败").to_string(),
-            };
-            tracing::warn!(
-                "任务 {task_id} 第 {} 块后处理失败（{detail}），降级为 OCR 草稿题干（保留配图）",
-                ci + 1
-            );
-            vec![draft_question_from_chunk(chunk, &detail)]
-        }
-    };
+    let mut chunk_questions = merge_script_and_llm(chunk, &draft, llm_qs);
+    if chunk_questions.is_empty() {
+        let reason = if fallback_reason.is_empty() {
+            "Stage2 未能结构化"
+        } else {
+            fallback_reason.as_str()
+        };
+        tracing::warn!(
+            "任务 {task_id} 第 {} 块无规则草稿可用，降级为 OCR 题干（保留配图）",
+            ci + 1
+        );
+        chunk_questions = vec![draft_question_from_chunk(chunk, reason)];
+    }
+    restore_script_analysis_if_needed(&mut chunk_questions, &draft);
+    for q in &mut chunk_questions {
+        append_validation_warnings(q, &draft);
+    }
     recover_chunk_questions(&mut chunk_questions, chunk);
     assign_chunk_images(chunk, &mut chunk_questions);
     Ok(chunk_questions)

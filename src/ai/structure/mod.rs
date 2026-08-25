@@ -9,7 +9,9 @@ mod analysis;
 mod choice;
 mod chunk;
 mod confidence;
+mod merge;
 mod options;
+mod validate;
 
 pub use analysis::{
     count_method_headings, finalize_parsed_question, looks_like_analysis_chunk,
@@ -18,6 +20,11 @@ pub use analysis::{
     stage2_llm_input,
 };
 pub use chunk::{extract_chunk_question_no, guess_chunk_question_type, structure_chunk};
+pub use merge::{merge_script_and_llm, restore_script_analysis_if_needed, script_usable};
+pub use validate::{
+    append_validation_warnings, llm_core_ok, strip_options_residue_from_stem, validate_structured,
+    StructuredValidation,
+};
 pub(crate) use choice::looks_like_choice_stem;
 
 use crate::ai::types::ParsedQuestion;
