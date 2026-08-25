@@ -140,6 +140,72 @@ pub(crate) async fn sync_paper_for_document(
     Ok(paper_id)
 }
 
+/// 用户丢弃未保存的录入结果时：删掉该资料下仍无题目的草稿试卷。
+///
+/// 全自动录入会在确认/解析阶段先建空卷，题目要等用户点保存才写入
+/// `paper_questions`。只清暂存会留下「0 题」空壳出现在试卷导航。
+pub(crate) async fn delete_empty_draft_paper_for_document(
+    pool: &sqlx::PgPool,
+    document_id: Uuid,
+    creator_id: Uuid,
+) -> Result<usize, sqlx::Error> {
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        r#"
+        DELETE FROM papers p
+        WHERE p.document_id = $1
+          AND p.creator_id = $2
+          AND p.status = 'draft'
+          AND NOT EXISTS (SELECT 1 FROM paper_questions pq WHERE pq.paper_id = p.id)
+        RETURNING p.id
+        "#,
+    )
+    .bind(document_id)
+    .bind(creator_id)
+    .fetch_all(pool)
+    .await?;
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let _ = sqlx::query(
+        r#"
+        UPDATE documents
+        SET metadata = COALESCE(metadata, '{}'::jsonb) - 'linked_paper_id',
+            updated_at = NOW()
+        WHERE id = $1
+        "#,
+    )
+    .bind(document_id)
+    .execute(pool)
+    .await;
+    tracing::info!(
+        "已删除资料 {document_id} 下 {} 份未录入题目的草稿试卷",
+        ids.len()
+    );
+    Ok(ids.len())
+}
+
+/// 兜底：关闭浏览器后未点「丢弃」的空草稿试卷，72h 后清理。
+pub async fn gc_abandoned_empty_parse_papers(pool: &sqlx::PgPool) {
+    match sqlx::query(
+        r#"
+        DELETE FROM papers p
+        WHERE p.document_id IS NOT NULL
+          AND p.status = 'draft'
+          AND NOT EXISTS (SELECT 1 FROM paper_questions pq WHERE pq.paper_id = p.id)
+          AND p.created_at < NOW() - INTERVAL '72 hours'
+        "#,
+    )
+    .execute(pool)
+    .await
+    {
+        Ok(r) if r.rows_affected() > 0 => {
+            tracing::info!("[gc] 空草稿试卷清理完成：删除 {} 份", r.rows_affected());
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!("[gc] 空草稿试卷清理失败: {e}"),
+    }
+}
+
 /// 解析可能先于确认：把后置建卷的 paper_id 写回尚未带卷的暂存题
 async fn backfill_staged_paper_id(
     pool: &sqlx::PgPool,

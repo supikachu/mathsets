@@ -21,10 +21,10 @@ use crate::auth::permissions::{
     is_admin_user, list_reviewers, PermissionError,
 };
 use crate::models::question::{
-    AiCreateMeta, CreateQuestionRequest, KnowledgeNodeSummary, Question, QuestionDetail,
-    QuestionPaperBrief, QuestionQuery, QuestionStatus, QuestionSummary, QuestionType, RejectRequest,
-    SubmitReviewRequest, TagSummary, TransferQuestionRequest, UpdateQuestionRequest,
-    is_answer_empty, refresh_system_flags_typed,
+    AiCreateMeta, CreateQuestionRequest, KnowledgeLinkSource, KnowledgeNodeSummary, Question,
+    QuestionDetail, QuestionPaperBrief, QuestionQuery, QuestionStatus, QuestionSummary,
+    QuestionType, RejectRequest, SubmitReviewRequest, TagCategory, TagSummary,
+    TransferQuestionRequest, UpdateQuestionRequest, is_answer_empty, refresh_system_flags_typed,
 };
 use crate::models::question_structure::{
     is_solution_analysis_missing, is_solution_answer_empty, parse_structure, structure_text_blobs,
@@ -617,6 +617,134 @@ pub async fn question_stats(
 // 题目 CRUD
 // ---------------------------------------------------------------------------
 
+/// 批量填充列表卡片关联：试卷、知识点、标签（各一条 ANY($1)，避免 N+1）
+async fn hydrate_question_list_cards(
+    pool: &sqlx::PgPool,
+    questions: &mut [QuestionSummary],
+) -> Result<(), sqlx::Error> {
+    if questions.is_empty() {
+        return Ok(());
+    }
+    let qids: Vec<Uuid> = questions.iter().map(|q| q.id).collect();
+
+    #[derive(sqlx::FromRow)]
+    struct PaperLinkRow {
+        question_id: Uuid,
+        paper_id: Uuid,
+        title: String,
+    }
+    let paper_links = sqlx::query_as::<_, PaperLinkRow>(
+        r#"
+        SELECT pq.question_id, p.id AS paper_id, p.title
+        FROM paper_questions pq
+        JOIN papers p ON p.id = pq.paper_id
+        WHERE pq.question_id = ANY($1)
+        ORDER BY pq.display_order, pq.sort_order, pq.created_at
+        "#,
+    )
+    .bind(&qids)
+    .fetch_all(pool)
+    .await?;
+
+    let mut papers_by_qid: HashMap<Uuid, Vec<QuestionPaperBrief>> = HashMap::new();
+    for row in paper_links {
+        papers_by_qid
+            .entry(row.question_id)
+            .or_default()
+            .push(QuestionPaperBrief {
+                id: row.paper_id,
+                title: row.title,
+            });
+    }
+
+    #[derive(sqlx::FromRow)]
+    struct KnLinkRow {
+        question_id: Uuid,
+        id: Uuid,
+        tree_id: Uuid,
+        name: String,
+        path: String,
+        depth: i16,
+        kind: String,
+        is_primary: bool,
+        ai_confidence: Option<rust_decimal::Decimal>,
+        source: KnowledgeLinkSource,
+    }
+    let kn_links = sqlx::query_as::<_, KnLinkRow>(
+        r#"
+        SELECT qkn.question_id, kn.id, kn.tree_id, kn.name,
+               kn.path::text AS path, kn.depth,
+               kt.kind::text AS kind,
+               qkn.is_primary, qkn.ai_confidence, qkn.source
+        FROM knowledge_nodes kn
+        JOIN knowledge_trees kt ON kt.id = kn.tree_id
+        JOIN question_knowledge_nodes qkn ON qkn.node_id = kn.id
+        WHERE qkn.question_id = ANY($1)
+        ORDER BY qkn.is_primary DESC, kn.sort_order, kn.name
+        "#,
+    )
+    .bind(&qids)
+    .fetch_all(pool)
+    .await?;
+
+    let mut kns_by_qid: HashMap<Uuid, Vec<KnowledgeNodeSummary>> = HashMap::new();
+    for row in kn_links {
+        kns_by_qid
+            .entry(row.question_id)
+            .or_default()
+            .push(KnowledgeNodeSummary {
+                id: row.id,
+                tree_id: row.tree_id,
+                name: row.name,
+                path: row.path,
+                depth: row.depth,
+                kind: row.kind,
+                is_primary: row.is_primary,
+                ai_confidence: row.ai_confidence,
+                source: row.source,
+            });
+    }
+
+    #[derive(sqlx::FromRow)]
+    struct TagLinkRow {
+        question_id: Uuid,
+        id: Uuid,
+        name: String,
+        category: TagCategory,
+    }
+    let tag_links = sqlx::query_as::<_, TagLinkRow>(
+        r#"
+        SELECT qtr.question_id, t.id, t.name, t.category
+        FROM tags t
+        JOIN question_tags_relation qtr ON qtr.tag_id = t.id
+        WHERE qtr.question_id = ANY($1)
+        ORDER BY t.category, t.name
+        "#,
+    )
+    .bind(&qids)
+    .fetch_all(pool)
+    .await?;
+
+    let mut tags_by_qid: HashMap<Uuid, Vec<TagSummary>> = HashMap::new();
+    for row in tag_links {
+        tags_by_qid
+            .entry(row.question_id)
+            .or_default()
+            .push(TagSummary {
+                id: row.id,
+                name: row.name,
+                category: row.category,
+            });
+    }
+
+    for q in questions.iter_mut() {
+        q.papers = papers_by_qid.remove(&q.id).unwrap_or_default();
+        q.knowledge_nodes = kns_by_qid.remove(&q.id).unwrap_or_default();
+        q.tags = tags_by_qid.remove(&q.id).unwrap_or_default();
+    }
+    Ok(())
+}
+
 /// GET /api/v1/questions
 pub async fn list_questions(
     State(state): State<AppState>,
@@ -652,7 +780,8 @@ pub async fn list_questions(
 
     let mut builder = sqlx::QueryBuilder::new(
         "SELECT q.id, q.stem, q.question_type, q.difficulty, q.status, \
-         q.creator_id, u.display_name AS creator_name, q.created_at, q.updated_at, q.version, q.space_id \
+         q.creator_id, u.display_name AS creator_name, q.created_at, q.updated_at, q.version, q.space_id, \
+         q.options, q.correct_answer, q.analysis, q.structure, q.metadata \
          FROM questions q LEFT JOIN users u ON u.id = q.creator_id WHERE 1=1",
     );
     apply_access_filters(&mut builder, &auth, &query);
@@ -678,40 +807,9 @@ pub async fn list_questions(
         .await
         .map_err(|e| db_err(format!("查询题目失败: {}", e)))?;
 
-    // 批量填充关联试卷（避免列表 N+1；有关联时卡片展示试卷名）
-    if !questions.is_empty() {
-        let qids: Vec<Uuid> = questions.iter().map(|q| q.id).collect();
-        #[derive(sqlx::FromRow)]
-        struct PaperLinkRow {
-            question_id: Uuid,
-            paper_id: Uuid,
-            title: String,
-        }
-        let links = sqlx::query_as::<_, PaperLinkRow>(
-            r#"
-            SELECT pq.question_id, p.id AS paper_id, p.title
-            FROM paper_questions pq
-            JOIN papers p ON p.id = pq.paper_id
-            WHERE pq.question_id = ANY($1)
-            ORDER BY pq.display_order, pq.sort_order, pq.created_at
-            "#,
-        )
-        .bind(&qids)
-        .fetch_all(&state.pool)
+    hydrate_question_list_cards(&state.pool, &mut questions)
         .await
-        .map_err(|e| db_err(format!("查询题目关联试卷失败: {}", e)))?;
-
-        let mut by_qid: HashMap<Uuid, Vec<QuestionPaperBrief>> = HashMap::new();
-        for row in links {
-            by_qid.entry(row.question_id).or_default().push(QuestionPaperBrief {
-                id: row.paper_id,
-                title: row.title,
-            });
-        }
-        for q in &mut questions {
-            q.papers = by_qid.remove(&q.id).unwrap_or_default();
-        }
-    }
+        .map_err(|e| db_err(format!("填充题目列表关联数据失败: {}", e)))?;
 
     Ok(Json(PageResult {
         items: questions,

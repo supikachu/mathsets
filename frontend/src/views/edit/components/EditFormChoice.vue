@@ -217,10 +217,10 @@ function handleOptionImageUpload(index: number) {
 
 .opt-card {
   background: var(--bg-input);
-  border-radius: 10px;
-  padding: 10px 12px;
+  border-radius: 12px;
+  padding: 12px 14px;
   border: 1.5px solid transparent;
-  transition: border-color 0.2s, box-shadow 0.2s;
+  transition: box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1), background 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 [data-theme='dark'] .opt-card {
@@ -229,11 +229,11 @@ function handleOptionImageUpload(index: number) {
 
 .opt-card:focus-within {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-light);
+  box-shadow: none;
 }
 
 [data-theme='dark'] .opt-card:focus-within {
-  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.15);
+  box-shadow: none;
 }
 
 .opt-card.correct {
@@ -315,24 +315,23 @@ function handleOptionImageUpload(index: number) {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 14px;
-  border: 1px dashed var(--border-strong);
-  background: transparent;
+  padding: 8px 14px;
+  border: none;
+  background: var(--bg-input);
   color: var(--text-secondary);
   font-size: 13px;
-  font-weight: 500;
-  border-radius: 8px;
+  font-weight: 400;
+  border-radius: 12px;
   cursor: pointer;
-  transition: var(--transition-fast);
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), background 0.2s, color 0.2s;
   font-family: inherit;
   align-self: flex-start;
 }
 
 .add-btn:hover {
-  border-color: var(--accent);
   color: var(--accent);
-  border-style: solid;
   background: var(--accent-light);
+  transform: translateY(-0.5px);
 }
 
 /* ============ 答案（结果）卡片 ============ */
@@ -340,7 +339,7 @@ function handleOptionImageUpload(index: number) {
   background: var(--bg-input);
   border-radius: 12px;
   padding: 12px 16px;
-  border: 1px solid var(--border-color);
+  border: 1px solid transparent;
 }
 
 [data-theme='dark'] .answer-card {
@@ -368,16 +367,16 @@ function handleOptionImageUpload(index: number) {
 }
 
 .quick-btn {
-  width: 30px;
-  height: 28px;
-  border-radius: 6px;
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
   background: var(--accent-light, #ecf5ff);
-  border: 1px solid var(--border-color);
+  border: 1px solid transparent;
   color: var(--accent, #007aff);
-  font-weight: 700;
+  font-weight: 600;
   font-size: 13px;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 [data-theme='dark'] .quick-btn {
@@ -401,14 +400,15 @@ function handleOptionImageUpload(index: number) {
 /* 答案文本输入框 */
 .answer-input {
   width: 100%;
-  border: 1px solid var(--border-color);
-  background: #ffffff;
-  border-radius: 8px;
-  padding: 8px 12px;
-  font-size: 14px;
+  border: 1px solid transparent;
+  background: var(--bg-card);
+  border-radius: 12px;
+  padding: 10px 12px;
+  font-size: 15px;
+  font-weight: 400;
   color: var(--text-primary);
   outline: none;
-  transition: border-color 0.2s, box-shadow 0.2s;
+  transition: box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   font-family: inherit;
 }
 
@@ -418,7 +418,7 @@ function handleOptionImageUpload(index: number) {
 
 .answer-input:focus {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-light);
+  box-shadow: none;
 }
 
 .answer-input::placeholder {

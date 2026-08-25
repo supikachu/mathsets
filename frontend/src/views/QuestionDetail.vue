@@ -299,6 +299,7 @@ import LatexRender from '@/components/LatexRender.vue'
 import QuestionStructureView from '@/components/QuestionStructureView.vue'
 import { AppButton, AppBadge, AppModal, AppConfirm, AppIcon } from '@/components/ui'
 import { useToast } from '@/composables/useToast'
+import { markQuestionDeleted, markQuestionDirty } from '@/composables/useQuestionListInvalidation'
 import { typeLabel, typeBadgeColor, statusLabel, statusIcon, formatTime } from '@/utils/questionDisplay'
 import { useOptionsLayout } from '@/composables/useOptionsLayout'
 import { partsFromStructureJson, walkLeaves } from '@/utils/questionParts'
@@ -518,6 +519,7 @@ async function submitReview() {
   try {
     await questionApi.submit(route.params.id as string)
     toast.success('已提交审核')
+    markQuestionDirty(route.params.id as string)
     fetchDetail()
   } catch (e: any) {
     toast.error(e.response?.data?.error || e.response?.data?.message || e.message || '提交审核失败')
@@ -531,6 +533,7 @@ async function confirmSubmitWithReviewer() {
   try {
     await questionApi.submit(route.params.id as string, { reviewer_id: selectedReviewerId.value })
     toast.success('已提交审核')
+    markQuestionDirty(route.params.id as string)
     reviewerDialog.value = false
     selectedReviewerId.value = ''
     fetchDetail()
@@ -596,6 +599,7 @@ async function doDelete() {
   try {
     await client.delete(`/questions/${route.params.id}`)
     toast.success('已删除')
+    markQuestionDeleted(route.params.id as string)
     backToList()
   } catch (e: any) {
     console.error('删除题目失败:', e)
@@ -629,6 +633,7 @@ async function confirmReview(action: string, comment?: string): Promise<boolean>
       await questionApi.reject(route.params.id as string, { reject_reason: comment })
     }
     toast.success(action === 'approved' ? '已通过' : '已驳回')
+    markQuestionDirty(route.params.id as string)
     await fetchDetail()
     return true
   } catch (e: any) {

@@ -90,10 +90,12 @@ pub const CORE_PARSE_RULES: &str = r#"
 【强制】三者在能判断时都必须输出，不允许因为"原文没写"就整体省略字段；确实无法判断才输出空数组。
 
 # 题型识别规则
-- 有 A/B/C/D 选项 → choice
+- 有 A/B/C/D 选项 → choice（即使挤在同一行，如 `A.3 B.4 C.6 D.8`）
 - 有「第X空」「___」→ fill
-- 有「(1)(2)」「求...的值」→ solution
-- 多选：题干明确写「多选」或答案不止一个 → sub_type="multi"
+- 有「(1)(2)」「求...的值」且没有 A–D 选项 → solution
+- 多选：卷头写「多选」「有多项符合题目要求」，或【答案】/[答案]/故选 不止一个字母 → question_type="multiple" 且 sub_type="multi"
+- 解析卷必须把【答案】BC、[答案] ACD、故选：B 写入 correct_answer.options，禁止留空
+- 「二、选择题：本题共 n 小题…」等大题说明属于下一题，禁止写入上一题解析
 
 # 选项与题干分离（极重要，违反则整体识别失败）
 【严禁数据冗余】`stem`（题干）字段中**绝对不能**包含选项内容。
@@ -110,6 +112,7 @@ pub const CORE_PARSE_RULES: &str = r#"
   大问 I："若 f(x) 为奇函数" → 子问 (i) 求 m；(ii) 求 a 的范围
   大问 II：独立叶子，直接求某值
 - 【强制】`stem` **只放总前提**（各问共用的条件），不要把 (1)(2) / I / (i) 的设问文本塞进 stem
+- 【强制】`stem` 不得包含【答案】【解析】【分析】【小问…详解】及之后的解法正文（法一 / 解法一等）；这些只能进入对应叶子的 `answer` / `analyses`
 - 【强制】解答题必须输出 `parts` 树：
   - `children` 非空 = 分支（只写本层局部条件/设问，禁止 answer / analyses）
   - `children` 为空 = 叶子（写 answer + analyses；局部 stem 可空）
@@ -136,6 +139,8 @@ pub const CORE_PARSE_RULES: &str = r#"
 
 # 多解法识别
 - 文本中出现「解法一」「解法二」「方法 1」「方法 2」「法一」「法二」「另解」「别解」→ 拆为多种解法
+- 【分析】是思路摘要：其中用「方法一；方法二」列举的只是提纲，禁止拆成多种解法
+- 【分析】+【详解】是同一种解法的思路和演算（选择题/填空放进同一项 analysis）；解答题的独立解法只按【详解】或【小问N详解】里的「法一」「法二」拆
 - 选择题/填空：拆到整题 `analysis` 数组，每种解法一项
 - 解答题：拆到**对应叶子**的 `analyses` 数组，整题 `analysis` 必须为 []
 - `title` 用原文标题；`content` 必须是该解法全文，禁止摘要或删步骤
@@ -288,7 +293,8 @@ pub const STAGE2_PARSE_SYSTEM_PROMPT: &str = r#"你是一个数学题结构化�
 # 切题
 - 输入里每一道独立题号（如 15. / 16.）必须各占 questions 数组一项，禁止把下一题并入上一题的 stem 或 parts
 - 本块只解析输入中出现的题目，不要补块外题号或臆造未出现的题
-- 解答题的解法写在叶子 `analyses`；选择题/填空的 analysis 只摘录该题解析；原文有几种解法就必须输出几项，禁止只留解法一；过长时保全部解法全文，JSON 必须闭合
+- 解答题的解法写在叶子 `analyses`；选择题/填空的 analysis 只摘录该题解析；原文有几种解法就必须输出几项，禁止只留解法一；【分析】+【详解】仍是一种解法；过长时保全部解法全文，JSON 必须闭合
+- 输入若已不含【解析】/【小问详解】，不要把解法写进 stem，`analysis` / `analyses` 留空即可
 "#;
 
 /// 解析卷 Stage2 附加约束：优先闭合 JSON，但不得删解法
@@ -296,6 +302,8 @@ pub const STAGE2_ANALYSIS_SLIM_RULES: &str = r#"
 # 解析卷输出约束
 - stem / options / correct_answer / parts 必须完整提取
 - 解答题：原文有几种解法，对应叶子 `analyses` 就必须有几项；选择题/填空走整题 analysis
+- 【分析】是思路摘要，【详解】是演算；【分析】里列举的方法一/方法二不是独立解法
+- 解答题：只按【详解】/【小问N详解】里的法一、法二拆 `analyses`
 - 禁止把多道题的解析写进同一题
 - 单题过长时宁可该题单独成段输出，也不要删解法或写「解析已缩短」
 "#;
@@ -434,6 +442,7 @@ mod tests {
         // 验证多小问结构认知
         assert!(CORE_PARSE_RULES.contains("多小问结构认知"));
         assert!(CORE_PARSE_RULES.contains("只放总前提"));
+        assert!(CORE_PARSE_RULES.contains("stem` 不得包含【答案】"));
         assert!(CORE_PARSE_RULES.contains("必须输出 `parts` 树"));
 
         // 验证答案留空规则（v1.2：禁止 null，要求空结构）

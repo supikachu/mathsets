@@ -460,7 +460,7 @@ export function renderMarkdownTables(html: string): string {
       table += `<tr>${row.map((c) => cell(c, 'td')).join('')}</tr>`
     }
     table += '</tbody></table>'
-    out.push(table)
+    out.push(`<div class="latex-table-wrap">${table}</div>`)
   }
 
   let i = 0
@@ -499,6 +499,7 @@ export function renderMarkdownTables(html: string): string {
         } else {
           emitTable(null, [first, ...body])
         }
+        while (j < lines.length && !lines[j].trim()) j++
         i = j
         continue
       }

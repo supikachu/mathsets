@@ -151,7 +151,7 @@
             </div>
 
             <!-- 题干 -->
-            <section class="edit-section" :class="{ 'ai-highlight': aiGeneratedFields.has('stem') }">
+            <section class="edit-section edit-section-stem" :class="{ 'ai-highlight': aiGeneratedFields.has('stem') }">
               <div class="section-label-row">
                 <div class="section-label">
                   <AppIcon name="book-open" :size="16" />
@@ -187,7 +187,7 @@
             </section>
 
             <!-- 答案 -->
-            <section class="edit-section" :class="{ 'ai-highlight': aiGeneratedFields.has('options') || aiGeneratedFields.has('blanks') || aiGeneratedFields.has('sub_answers') }">
+            <section class="edit-section edit-section-answer" :class="{ 'ai-highlight': aiGeneratedFields.has('options') || aiGeneratedFields.has('blanks') || aiGeneratedFields.has('sub_answers') }">
               <div class="section-label">
                 <AppIcon name="file-text" :size="16" /> <span>答案</span>
                 <div v-if="form.question_type === 'choice'" class="seg-toggle">
@@ -222,7 +222,7 @@
 
             <!-- 解析：选择题/填空整题多解法；解答题按叶子 -->
             <section
-              class="edit-section"
+              class="edit-section edit-section-analysis"
               :class="{ 'ai-highlight': aiGeneratedFields.has('solutions') || aiGeneratedFields.has('sub_answers') }"
             >
               <div class="section-label-row">
@@ -268,8 +268,11 @@
                   <AppIcon name="plus" :size="15" /> 添加新解法
                 </button>
                 <label class="no-analysis-check">
+                  <span class="no-analysis-copy">
+                    <span class="no-analysis-title">无需解析</span>
+                    <span class="no-analysis-caption">如纯计算题 / 默写题</span>
+                  </span>
                   <input type="checkbox" v-model="noAnalysisNeeded" />
-                  <span>无需解析（如纯计算题/默写题）</span>
                 </label>
               </template>
             </section>
@@ -312,10 +315,8 @@
           tabindex="0"
           @click="focusColumn"
           :form="form"
-          :expanded-part-id="expandedPartId"
           :image-editable="true"
           @image-click="handleImageClick"
-          @select-part="expandedPartId = $event"
         />
 
         <!-- 右栏：常驻属性面板（含 AI 智能打标） -->
@@ -467,6 +468,7 @@ import { useRoute, useRouter, onBeforeRouteLeave } from 'vue-router'
 import { questionApi, spaceApi, tagsApi, paperApi, aiTaskApi, type SpaceMemberInfo, type Tag, type ParsedQuestion, type TaggingUnmatched, type TaggingMatch, type DocumentMeta } from '@/api/client'
 import { AppButton, AppBadge, AppModal, AppConfirm, AppIcon } from '@/components/ui'
 import { useToast } from '@/composables/useToast'
+import { markQuestionDeleted, markQuestionDirty, markQuestionListStale } from '@/composables/useQuestionListInvalidation'
 import { getKnowledgeTreeList } from '@/composables/useKnowledgeTreeCache'
 import { useSpaceStore } from '@/stores/space'
 import { useAuthStore } from '@/stores/auth'
@@ -480,6 +482,7 @@ import {
   cloneParts,
   collectPartTexts,
   defaultStructure,
+  findPart,
   mapPartTexts,
   normalizeIncomingParts,
   partsFromFlatAnswers,
@@ -711,7 +714,7 @@ function resetToBlankQuestion() {
     aiGeneratedFields.value = new Set()
     primaryKnowledgeNodeId.value = null
     form.primaryKnowledgeNodeId = null
-    form.hasUnsaved = false
+    markFormClean()
   } finally {
     nextTick(() => { isSwitchingTab.value = false })
   }
@@ -775,6 +778,7 @@ const allSaved = computed(() => questionList.value.length > 1 && savedCount.valu
 function finishBatch() {
   toast.success(`🎉 批量录入 ${questionList.value.length} 题已全部处理完毕`)
   leaveConfirmed.value = true
+  markQuestionListStale()
   router.replace('/questions')
 }
 
@@ -955,7 +959,9 @@ function hasUnsavedChanges(): boolean {
   if (questionList.value.length > 1) {
     return hasUnsavedBatchChanges()
   }
-  return form.hasUnsaved
+  // 单题：与进入页时的内容指纹比较。属性面板把空数组换成新引用等程序化抖动
+  // 不会当成用户修改；题干/选项等 nested 就地编辑也能检出。
+  return isFormDirty()
 }
 
 // Selected Knowledge node IDs（与 AttributeSidePanel v-model 双向绑定）
@@ -1316,6 +1322,7 @@ async function onLeaveDiscardAll() {
     } else {
       toast.success(`已丢弃 ${ok} 道未确认题目`)
     }
+    markQuestionListStale()
     doLeave()
   } finally {
     discardingAll.value = false
@@ -1425,12 +1432,53 @@ const form = reactive({
   hasUnsaved: false,
 })
 
+let cleanFormFingerprint = ''
+
+function valuesEqual(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true
+  if (a == null || b == null) return a === b
+  if (typeof a !== 'object' || typeof b !== 'object') return false
+  try {
+    return JSON.stringify(a) === JSON.stringify(b)
+  } catch {
+    return false
+  }
+}
+
+function formContentFingerprint(): string {
+  try {
+    const data = JSON.parse(JSON.stringify(form)) as Record<string, unknown>
+    delete data.hasUnsaved
+    return JSON.stringify(data)
+  } catch {
+    return ''
+  }
+}
+
+function markFormClean() {
+  form.hasUnsaved = false
+  cleanFormFingerprint = formContentFingerprint()
+}
+
+function isFormDirty(): boolean {
+  return formContentFingerprint() !== cleanFormFingerprint
+}
+
+markFormClean()
+
 // 同步 knowledgeNodeIds 到 form（供 buildPayload 使用）
 watch(knowledgeNodeIds, (v) => {
+  if (valuesEqual(form.knowledgeNodeIds, v)) return
   form.knowledgeNodeIds = v
 }, { deep: true })
-watch(chapterNodeIds, v => { form.chapterNodeIds = v }, { deep: true })
-watch(methodNodeIds, v => { form.methodNodeIds = v }, { deep: true })
+watch(chapterNodeIds, (v) => {
+  if (valuesEqual(form.chapterNodeIds, v)) return
+  form.chapterNodeIds = v
+}, { deep: true })
+watch(methodNodeIds, (v) => {
+  if (valuesEqual(form.methodNodeIds, v)) return
+  form.methodNodeIds = v
+}, { deep: true })
 watch(primaryKnowledgeNodeId, v => { form.primaryKnowledgeNodeId = v })
 
 // 难度字符串枚举 ↔ 数字 1-5 转换
@@ -1930,6 +1978,7 @@ async function handleSave(submitAfter: boolean) {
       ? await questionApi.update(updateId, data)
       : await questionApi.create(data)
     const qid = res.data.id
+    markQuestionDirty(qid)
     // 【Upsert 关键】create/update 成功后立即把 qid 回写到 questionList[activeIndex].savedQid
     // 防止后续流程（如团队空间弹审稿人对话框后被取消）再次保存时重复 create
     if (questionList.value.length > 1
@@ -1937,7 +1986,7 @@ async function handleSave(submitAfter: boolean) {
         && activeIndex.value < questionList.value.length) {
       questionList.value[activeIndex.value].savedQid = qid
     }
-    form.hasUnsaved = false
+    markFormClean()
     clearDraft()
     // 保存成功：AI 高亮节点全部清除（手动修改阶段的视觉反馈到此为止）
     aiHighlightIds.value = []
@@ -2145,6 +2194,7 @@ async function doSaveAllRecognized() {
       const extra = emptyCount ? `，${emptyCount} 道空题干已跳过` : ''
       toast.success(`已保存 ${ok} 道题${extra}`)
       leaveConfirmed.value = true
+      markQuestionListStale()
       nextTick(() => router.replace('/questions'))
       return
     }
@@ -2163,6 +2213,7 @@ async function confirmSubmitWithReviewer() {
     toast.success('已提交审核')
     showReviewerDialog.value = false
     const qid = pendingQuestionId.value
+    markQuestionDirty(qid)
     pendingQuestionId.value = null
     selectedReviewerId.value = ''
     // 【批量模式分支】审题人确认提交后 → 标记已保存（与 handleSave 一致，不自动切下一题）
@@ -2198,7 +2249,7 @@ watch(() => ({ ...form }), (newVal, oldVal) => {
   const prev = oldVal as Record<string, unknown> | undefined
   const next = newVal as Record<string, unknown>
   const dataChanged = Object.keys(newVal).some(
-    (k) => k !== 'hasUnsaved' && next[k] !== prev?.[k],
+    (k) => k !== 'hasUnsaved' && !valuesEqual(next[k], prev?.[k]),
   )
   if (!dataChanged) return
   form.hasUnsaved = true
@@ -2687,7 +2738,7 @@ async function loadQuestion() {
       const rawStruct = (d as { structure?: { parts?: unknown } }).structure
       form.parts = normalizeIncomingParts(rawStruct?.parts)
     }
-    form.hasUnsaved = false
+    markFormClean()
   } catch { /* handled */ }
   finally {
     loading.value = false
@@ -2696,6 +2747,7 @@ async function loadQuestion() {
     if (!isNew) {
       await nextTick()
     }
+    markFormClean()
   }
 }
 
@@ -2917,6 +2969,7 @@ async function discardBatchQuestion(idx: number) {
   try {
     if (willDelete) {
       await questionApi.delete(item.savedQid as string)
+      markQuestionDeleted(item.savedQid as string)
     }
     questionList.value.splice(idx, 1)
 
@@ -2925,6 +2978,7 @@ async function discardBatchQuestion(idx: number) {
       await clearBatchSnapshot()
       toast.success('已丢弃全部题目')
       leaveConfirmed.value = true
+      markQuestionListStale()
       router.replace('/questions')
       return
     }
@@ -3440,18 +3494,22 @@ watch(() => form.question_type, () => {
 // ------------------------------------------------------------
 // 仅题干预览区开启 editable 模式：用户点击图片后，弹出浮窗调节
 // 宽度/对齐（等比例缩放，禁止 float），或触发裁剪弹窗。修改后的配置
-// 精准反写到 form.stem 的 Markdown 语法 ![alt](url){config}。
+// 精准反写到对应 Markdown：题干 / 选项 / 选择题解析 / 解答题问树。
 // ============================================================
 
 const imageAdjustPanelVisible = ref(false)
 const imageAdjustTarget = ref<HTMLElement | null>(null)
 const imageAdjustData = ref<{ url: string; mdId: string; config: ImageConfig } | null>(null)
-// 图片来源上下文：记录点击的图片属于哪个字段（stem/options[i]/solutions[i]）
-// 通过 DOM 反查 .paper-stem / .paper-opt / .paper-analysis 确定，用于回写 Markdown
+// 图片来源上下文：记录点击的图片属于哪个字段
+// 通过 DOM 反查 .paper-stem / .paper-opt / .paper-analysis / [data-img-slot] 确定，用于回写 Markdown
 // inImgRow / rowAlign：通过 DOM 反查 .latex-img-row 确定，用于 ImageAdjustmentPanel 显示「图组对齐」「移出并排」
+type ImageSlot = 'stem' | 'answer' | 'analysis'
 type ImageSource = {
-  field: 'stem' | 'options' | 'solutions'
+  field: 'stem' | 'options' | 'solutions' | 'parts'
   index?: number  // 仅 options 使用
+  partId?: string
+  slot?: ImageSlot
+  analysisId?: string
   inImgRow: boolean
   rowAlign?: 'left' | 'center' | 'right'
 }
@@ -3473,21 +3531,28 @@ function handleImageClick(payload: ImageClickPayload) {
   // 这里剥离 base 前缀，还原为 Markdown 中的相对路径形式，确保后续回写匹配成功。
   const normalizedUrl = normalizeImageUrl(payload.url)
 
-  // 1) DOM 反查图片来源字段：通过 closest() 找到图片所属的预览容器
-  //    LivePreviewCard：.paper-stem / .paper-opt / .paper-analysis
-  let field: 'stem' | 'options' | 'solutions' = 'stem'
+  // 1) DOM 反查图片来源字段：问树节点必须先于 .paper-analysis，
+  //    解答题解析/答案包在 .paper-analysis 里，但正文在 parts[].analyses，不在 form.solutions。
+  let field: ImageSource['field'] = 'stem'
   let index: number | undefined
-  if (el.closest('.paper-stem')) {
+  let partId: string | undefined
+  let slot: ImageSlot | undefined
+  let analysisId: string | undefined
+  const partHost = el.closest('[data-img-slot]') as HTMLElement | null
+  if (partHost?.dataset.imgSlot) {
+    field = 'parts'
+    partId = partHost.dataset.partId || undefined
+    slot = partHost.dataset.imgSlot as ImageSlot
+    analysisId = partHost.dataset.analysisId || undefined
+  } else if (el.closest('.paper-stem')) {
     field = 'stem'
   } else if (el.closest('.paper-opt')) {
-    // 找选项索引：在兄弟 .paper-opt 中的位置
     const optEl = el.closest('.paper-opt') as Element
     const siblings = Array.from(optEl.parentElement?.querySelectorAll(':scope > .paper-opt') || [])
     const idx = siblings.indexOf(optEl)
     field = 'options'
     index = idx >= 0 ? idx : 0
   } else if (el.closest('.paper-analysis') || el.closest('.paper-answer-block')) {
-    // 解析区：遍历所有 solutions 做 URL 匹配替换（URL 唯一不会误替换）
     field = 'solutions'
   }
 
@@ -3502,7 +3567,7 @@ function handleImageClick(payload: ImageClickPayload) {
 
   if (inImgRow) {
     // 围栏对齐：优先从 Markdown 源码 :::img-row {...} 头部解析（源真）
-    rowAlign = findImgRowAlignForUrl(field, index, normalizedUrl)
+    rowAlign = findImgRowAlignForUrl(field, index, normalizedUrl, { partId, slot, analysisId })
     // DOM justify-content 兜底（应对源码尚未持久化的临时态，如刚切换未保存）
     if (!rowAlign && rowEl) {
       rowAlign = justifyContentToAlign(rowEl.style.justifyContent)
@@ -3516,7 +3581,7 @@ function handleImageClick(payload: ImageClickPayload) {
     mdId: payload.mdId,
     config: effectiveConfig,
   }
-  imageAdjustSource.value = { field, index, inImgRow, rowAlign }
+  imageAdjustSource.value = { field, index, partId, slot, analysisId, inImgRow, rowAlign }
   imageAdjustPanelVisible.value = true
 }
 
@@ -3544,18 +3609,19 @@ function normalizeImageUrl(url: string): string {
  * 用于 handleImageClick 读取容器级对齐（源真），未找到返回 undefined（由调用方默认）。
  */
 function findImgRowAlignForUrl(
-  field: 'stem' | 'options' | 'solutions',
+  field: ImageSource['field'],
   index: number | undefined,
   url: string,
+  partRef?: { partId?: string; slot?: ImageSlot; analysisId?: string },
 ): 'left' | 'center' | 'right' | undefined {
-  const mds: string[] = []
-  if (field === 'stem') {
-    mds.push(form.stem)
-  } else if (field === 'options' && index != null && form.options[index]) {
-    mds.push(form.options[index].content)
-  } else if (field === 'solutions') {
-    mds.push(...form.solutions)
-  }
+  const mds = markdownSourcesForImage({
+    field,
+    index,
+    partId: partRef?.partId,
+    slot: partRef?.slot,
+    analysisId: partRef?.analysisId,
+    inImgRow: false,
+  })
   for (const md of mds) {
     const fence = findImgRowFenceByImgUrl(md, url)
     if (fence) {
@@ -3563,6 +3629,73 @@ function findImgRowAlignForUrl(
     }
   }
   return undefined
+}
+
+function markdownSourcesForImage(src: Pick<ImageSource, 'field' | 'index' | 'partId' | 'slot' | 'analysisId'>): string[] {
+  if (src.field === 'stem') return [form.stem]
+  if (src.field === 'options' && src.index != null && form.options[src.index]) {
+    return [form.options[src.index].content]
+  }
+  if (src.field === 'solutions') {
+    const mds = [...form.solutions]
+    if (form.question_type === 'solution') mds.push(...collectPartTexts(form.parts))
+    return mds
+  }
+  if (src.field === 'parts') {
+    return partMarkdownSources(src.partId, src.slot, src.analysisId)
+  }
+  return []
+}
+
+function partMarkdownSources(partId?: string, slot?: ImageSlot, analysisId?: string): string[] {
+  const part = partId ? findPart(form.parts, partId) : null
+  if (!part) return collectPartTexts(form.parts)
+  if (slot === 'stem') return [part.stem]
+  if (slot === 'answer') return [part.answer || '']
+  if (slot === 'analysis') {
+    if (analysisId) {
+      const a = part.analyses.find((x) => x.id === analysisId)
+      if (a) return [a.content]
+    }
+    return part.analyses.map((a) => a.content)
+  }
+  return [part.stem, part.answer || '', ...part.analyses.map((a) => a.content)]
+}
+
+function applyPartMarkdown(updater: (md: string) => string, src: ImageSource) {
+  const part = src.partId ? findPart(form.parts, src.partId) : null
+  if (!part) {
+    const rec = (nodes: QuestionPart[]) => {
+      for (const n of nodes) {
+        n.stem = updater(n.stem)
+        if (n.answer != null) n.answer = updater(n.answer)
+        for (const a of n.analyses) a.content = updater(a.content)
+        rec(n.children)
+      }
+    }
+    rec(form.parts)
+    return
+  }
+  if (src.slot === 'stem') {
+    part.stem = updater(part.stem)
+    return
+  }
+  if (src.slot === 'answer') {
+    part.answer = updater(part.answer || '')
+    return
+  }
+  if (src.slot === 'analysis') {
+    const hit = src.analysisId ? part.analyses.find((a) => a.id === src.analysisId) : undefined
+    if (hit) {
+      hit.content = updater(hit.content)
+      return
+    }
+    for (const a of part.analyses) a.content = updater(a.content)
+    return
+  }
+  part.stem = updater(part.stem)
+  if (part.answer != null) part.answer = updater(part.answer)
+  for (const a of part.analyses) a.content = updater(a.content)
 }
 
 /** 从 :::img-row {...} 配置字符串中提取 align（未配置返回 undefined） */
@@ -3614,9 +3747,16 @@ function applyMarkdownUpdate(updater: (md: string) => string): boolean {
     form.options[src.index].content = updater(form.options[src.index].content)
     return true
   }
+  if (src.field === 'parts') {
+    applyPartMarkdown(updater, src)
+    return true
+  }
   if (src.field === 'solutions') {
-    // 遍历所有解析，对每个做 URL 匹配替换（URL 唯一不会误替换）
     form.solutions = form.solutions.map(md => updater(md))
+    // 解答题解析实际在问树里；旧路径只写 solutions 时预览不会变
+    if (form.question_type === 'solution') {
+      applyPartMarkdown(updater, { ...src, field: 'parts' })
+    }
     return true
   }
   return false
@@ -3928,9 +4068,11 @@ async function handleCropped(blob: Blob) {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  padding: 12px 18px 16px;
-  gap: 10px;
-  background: var(--bg-muted, #f5f5f7);
+  padding: 16px 24px 20px;
+  gap: 12px;
+  background: var(--bg-primary, #f5f5f7);
+  color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
 }
 
 @media (max-width: 760px) {
@@ -3942,10 +4084,10 @@ async function handleCropped(blob: Blob) {
 
 .edit-title {
   font-size: 17px;
-  font-weight: 650;
+  font-weight: 600;
   margin: 0 0 0 2px;
   color: var(--text-primary);
-  letter-spacing: -0.01em;
+  letter-spacing: -0.02em;
 }
 
 .ai-module-slot.is-active {
@@ -3984,10 +4126,8 @@ async function handleCropped(blob: Blob) {
 .entry-mode-tabs button.active {
   background: var(--bg-card, #fff);
   color: var(--text-primary);
-  box-shadow:
-    0 1px 1px rgba(0, 0, 0, 0.04),
-    0 1px 3px rgba(0, 0, 0, 0.12);
-  font-weight: 650;
+  box-shadow: var(--shadow-xs);
+  font-weight: 600;
 }
 
 .entry-mode-tabs button:disabled {
@@ -4014,7 +4154,7 @@ async function handleCropped(blob: Blob) {
   flex-shrink: 0;
   gap: 12px;
   min-height: 44px;
-  padding: 2px 2px 4px;
+  padding: 6px 4px 8px;
 }
 
 .top-bar-left,
@@ -4118,6 +4258,7 @@ async function handleCropped(blob: Blob) {
 .workbench-seg button.active {
   background: var(--bg-card);
   color: var(--text-primary);
+  box-shadow: var(--shadow-xs);
 }
 
 @media (max-width: 1199px) {
@@ -4135,13 +4276,13 @@ async function handleCropped(blob: Blob) {
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
-  padding: 8px 12px;
-  margin-bottom: 10px;
-  border-radius: 8px;
-  font-size: 12.5px;
+  padding: 10px 16px;
+  margin-bottom: 8px;
+  border-radius: 12px;
+  font-size: 13px;
   color: #92400e;
-  background: #fffbeb;
-  border: 1px solid #fde68a;
+  background: var(--warning-light);
+  border: 1px solid transparent;
 }
 
 .classify-retry-banner .classify-retry-text {
@@ -4173,47 +4314,43 @@ async function handleCropped(blob: Blob) {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  background: var(--bg-card);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-sm);
-  border: 1px solid var(--border-color);
+  background: transparent;
   overflow: hidden;
 }
 
 .edit-col-inner {
   flex: 1;
   overflow-y: auto;
-  padding: 20px 24px;
+  padding: 24px;
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 24px;
 }
 
 /* ============ 沉浸式三栏交互容器 ============ */
 .interactive-column {
   height: 100%;
   min-height: 0;
-  /* overflow: hidden 确保中栏(LivePreviewCard)/右栏(AttributeSidePanel)的
-     内部内容不会撑破列容器高度。左栏(.edit-col)已自带 overflow:hidden。
-     内部滚动由 :deep(.preview-col-inner) / :deep(.asp-body) / .edit-col-inner 处理。
-     下拉/弹窗组件通常用 position:fixed 或 <Teleport>，不受此裁剪影响。 */
   overflow: hidden;
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-lg);
-  opacity: 0.7;
   outline: none;
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid hsl(0 0% 91%);
+  border-radius: 16px;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.05);
+  backdrop-filter: blur(20px) saturate(120%);
+  -webkit-backdrop-filter: blur(20px) saturate(120%);
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .interactive-column:hover {
-  opacity: 0.85;
+  transform: translateY(-0.5px);
+  box-shadow: 0 4px 12px rgb(0 0 0 / 0.08);
 }
 
-.interactive-column:focus-within {
-  opacity: 1;
-  border-color: var(--purple);
-  transform: translateY(-2px);
-  box-shadow: 0 0 0 3px var(--purple-light), var(--shadow-md);
+[data-theme='dark'] .interactive-column {
+  background: rgba(20, 20, 20, 0.8);
+  border-color: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.3);
 }
 
 /* 细滚动条：Firefox + 滚动链切断（关键修复）
@@ -4256,17 +4393,17 @@ async function handleCropped(blob: Blob) {
 }
 
 .attr-tag {
-  height: 24px;
-  padding: 0 6px 0 8px;
-  border-radius: 6px;
+  height: 26px;
+  padding: 0 8px 0 10px;
+  border-radius: 999px;
   font-size: 12px;
-  font-weight: 550;
+  font-weight: 400;
   display: inline-flex;
   align-items: center;
   gap: 5px;
   color: var(--text-secondary);
-  background: var(--bg-input);
-  border: 1px solid var(--border-color);
+  background: hsl(0 0% 96%);
+  border: 1px solid transparent;
 }
 
 .attr-tag-x {
@@ -4287,8 +4424,8 @@ async function handleCropped(blob: Blob) {
 }
 
 .attr-tag-kp {
-  background: rgba(0, 122, 255, 0.04);
-  border-color: rgba(0, 122, 255, 0.12);
+  background: var(--accent-light);
+  border-color: transparent;
   color: var(--accent);
 }
 
@@ -4307,16 +4444,11 @@ async function handleCropped(blob: Blob) {
   color: #ffffff;
 }
 
-.attr-tag-literacy {
-  background: rgba(88, 86, 214, 0.04);
-  border-color: rgba(88, 86, 214, 0.12);
-  color: #5856d6;
-}
-
+.attr-tag-literacy,
 .attr-tag-method {
-  background: rgba(52, 199, 89, 0.04);
-  border-color: rgba(52, 199, 89, 0.12);
-  color: #34c759;
+  background: hsl(0 0% 96%);
+  border-color: transparent;
+  color: var(--text-secondary);
 }
 
 .attr-tag-text {
@@ -4327,11 +4459,11 @@ async function handleCropped(blob: Blob) {
 }
 
 .attr-add-btn {
-  height: 24px;
-  padding: 0 10px;
-  border-radius: 6px;
-  font-size: 11.5px;
-  font-weight: 600;
+  height: 26px;
+  padding: 0 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 400;
   display: inline-flex;
   align-items: center;
   gap: 3px;
@@ -4339,7 +4471,7 @@ async function handleCropped(blob: Blob) {
   background: var(--accent-light);
   border: none;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), background 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .attr-add-btn:hover {
@@ -4350,18 +4482,66 @@ async function handleCropped(blob: Blob) {
 .edit-section {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
+}
+
+.edit-section-answer {
+  background: #f4f8fc;
+  border-radius: 16px;
+  padding: 20px;
+  border: none;
+}
+
+.edit-section-analysis {
+  background: #f5f5f7;
+  border-radius: 16px;
+  padding: 20px;
+  border: none;
+}
+
+[data-theme='dark'] .edit-section-answer {
+  background: rgba(100, 160, 220, 0.08);
+}
+
+[data-theme='dark'] .edit-section-analysis {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.edit-section-answer :deep(.part-field),
+.edit-section-answer :deep(.opt-card),
+.edit-section-answer :deep(.blank-item),
+.edit-section-answer :deep(.answer-card),
+.edit-section-analysis :deep(.part-field),
+.edit-section-analysis .solution-item,
+.edit-section-analysis :deep(.no-analysis-check),
+.edit-section-analysis :deep(.add-btn),
+.edit-section-answer :deep(.add-btn),
+.edit-section-analysis .add-solution-btn {
+  background: #fff;
+}
+
+[data-theme='dark'] .edit-section-answer :deep(.part-field),
+[data-theme='dark'] .edit-section-answer :deep(.opt-card),
+[data-theme='dark'] .edit-section-answer :deep(.blank-item),
+[data-theme='dark'] .edit-section-answer :deep(.answer-card),
+[data-theme='dark'] .edit-section-analysis :deep(.part-field),
+[data-theme='dark'] .edit-section-analysis .solution-item,
+[data-theme='dark'] .edit-section-analysis :deep(.no-analysis-check),
+[data-theme='dark'] .edit-section-analysis :deep(.add-btn),
+[data-theme='dark'] .edit-section-answer :deep(.add-btn),
+[data-theme='dark'] .edit-section-analysis .add-solution-btn {
+  background: var(--bg-card);
 }
 
 /* 答案待补全提示条 */
 .answer-pending-hint {
-  padding: 10px 14px;
-  border-radius: var(--radius-md);
-  background: #fffbeb; /* amber-50 */
-  border: 1px solid #fde68a; /* amber-200 */
-  color: #b45309; /* amber-700 */
+  padding: 12px 16px;
+  border-radius: 12px;
+  background: var(--warning-light);
+  border: 1px solid transparent;
+  color: #b45309;
   font-size: 13px;
-  font-weight: 500;
+  font-weight: 400;
   line-height: 1.5;
 }
 
@@ -4375,10 +4555,15 @@ async function handleCropped(blob: Blob) {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 13.5px;
-  font-weight: 650;
-  color: var(--text-primary);
-  margin-bottom: 2px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #1d1d1f;
+  letter-spacing: -0.01em;
+  margin-bottom: 0;
+}
+
+[data-theme='dark'] .section-label {
+  color: #f5f5f7;
 }
 
 .section-label-row {
@@ -4386,7 +4571,7 @@ async function handleCropped(blob: Blob) {
   align-items: center;
   justify-content: space-between;
   width: 100%;
-  margin-bottom: 6px;
+  margin-bottom: 0;
 }
 
 .quick-toolbar {
@@ -4399,26 +4584,26 @@ async function handleCropped(blob: Blob) {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 2px 8px;
-  height: 24px;
+  padding: 0 10px;
+  height: 28px;
   border: none;
-  background: transparent;
-  color: var(--primary-color, #007aff);
+  background: var(--bg-input);
+  color: var(--accent);
   font-size: 12px;
-  font-weight: 500;
-  border-radius: 5px;
+  font-weight: 400;
+  border-radius: 8px;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), background 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   user-select: none;
 }
 
 .quick-tool-btn:hover {
-  background: rgba(0, 122, 255, 0.08);
-  color: #0066d6;
+  background: var(--accent-light);
+  transform: translateY(-0.5px);
 }
 
 .quick-tool-btn:active {
-  transform: scale(0.96);
+  transform: scale(0.98);
 }
 
 .solution-head-right {
@@ -4441,27 +4626,28 @@ async function handleCropped(blob: Blob) {
   display: inline-flex;
   gap: 2px;
   padding: 2px;
-  border-radius: 6px;
-  background: var(--bg-input);
+  border-radius: 9px;
+  background: rgba(118, 118, 128, 0.12);
   margin-left: 8px;
 }
 
 .seg-btn {
-  padding: 2px 10px;
+  padding: 4px 12px;
+  min-height: 26px;
   border: none;
-  border-radius: 4px;
+  border-radius: 7px;
   background: transparent;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--text-muted);
   cursor: pointer;
-  transition: all 0.2s;
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .seg-btn.active {
   background: var(--bg-card);
   color: var(--text-primary);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+  box-shadow: var(--shadow-xs);
 }
 
 /* 文本输入框与配图上传容器 */
@@ -4469,15 +4655,27 @@ async function handleCropped(blob: Blob) {
 .solution-textarea-wrap {
   position: relative;
   background: var(--bg-input);
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  border: 1px solid transparent;
   overflow: hidden;
-  transition: border-color 0.2s;
+  transition: box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1), background 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.stem-wrap:hover,
+.solution-textarea-wrap:hover {
+  background: #f0f0f2;
 }
 
 .stem-wrap:focus-within,
 .solution-textarea-wrap:focus-within {
+  background: var(--bg-card);
   border-color: var(--accent);
+  box-shadow: none;
+}
+
+[data-theme='dark'] .stem-wrap:hover,
+[data-theme='dark'] .solution-textarea-wrap:hover {
+  background: var(--bg-hover);
 }
 
 .sol-stems {
@@ -4486,49 +4684,54 @@ async function handleCropped(blob: Blob) {
 
 .edit-textarea {
   width: 100%;
-  padding: 12px 14px 40px;
+  padding: 14px 16px 40px;
   border: none;
   background: transparent;
   color: var(--text-primary);
-  font-size: 14px;
-  line-height: 1.7;
+  font-size: 15px;
+  line-height: 1.5;
+  font-weight: 400;
   font-family: inherit;
   resize: none;
   outline: none;
   box-sizing: border-box;
-  /* CSS 原生按内容撑开 —— 替代旧 JS scrollHeight 动态计算
-     Chrome 123+ 支持；Firefox/Safari 暂不支持时会 fallback 到默认高度
-     不设 max-height / overflow:hidden —— textarea 随内容无限增高，
-     由外层 .edit-col-inner 的 overflow-y:auto 统一滚动，避免双重滚动条 */
   field-sizing: content;
   min-height: 120px;
   overflow: hidden;
+}
+
+.edit-textarea:focus {
+  box-shadow: none;
+  border: none;
+  outline: none;
+  background: transparent;
 }
 
 .img-upload-btn {
   position: absolute;
   left: 12px;
   bottom: 10px;
-  height: 24px;
-  padding: 0 8px;
-  border-radius: 6px;
-  background: var(--bg-card);
-  border: 1px solid var(--border-color);
-  color: var(--text-secondary);
-  font-size: 11px;
-  font-weight: 550;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 8px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 400;
   display: flex;
   align-items: center;
   gap: 4px;
   cursor: pointer;
-  box-shadow: 0 1px 2px rgba(0,0,0,0.02);
-  transition: all 0.2s;
+  box-shadow: none;
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), background 0.2s, color 0.2s;
 }
 
 .img-upload-btn:hover {
-  background: var(--bg-hover);
+  background: var(--accent-light);
   color: var(--accent);
-  border-color: var(--accent-light);
+  border-color: transparent;
+  transform: translateY(-0.5px);
 }
 
 /* ============ 解析多解法列表 ============ */
@@ -4539,10 +4742,10 @@ async function handleCropped(blob: Blob) {
 }
 
 .solution-item {
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-md);
-  padding: 14px;
-  background: var(--bg-card);
+  border: 1px solid transparent;
+  border-radius: 12px;
+  padding: 16px;
+  background: var(--bg-input);
 }
 
 .solution-head {
@@ -4554,7 +4757,7 @@ async function handleCropped(blob: Blob) {
 
 .solution-name {
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--text-primary);
 }
 
@@ -4564,10 +4767,10 @@ async function handleCropped(blob: Blob) {
   color: var(--text-muted);
   cursor: pointer;
   padding: 4px;
-  border-radius: 4px;
+  border-radius: 8px;
   display: inline-flex;
   align-items: center;
-  transition: all 0.2s;
+  transition: background 0.2s cubic-bezier(0.4, 0, 0.2, 1), color 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .solution-del:hover {
@@ -4576,48 +4779,125 @@ async function handleCropped(blob: Blob) {
 }
 
 .add-solution-btn {
-  height: 32px;
+  height: 36px;
   width: 100%;
-  border: 1px dashed var(--border-color);
-  border-radius: var(--radius-md);
-  background: transparent;
+  border: none;
+  border-radius: 12px;
+  background: var(--bg-input);
   color: var(--text-secondary);
-  font-size: 12.5px;
-  font-weight: 550;
+  font-size: 13px;
+  font-weight: 400;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), background 0.2s, color 0.2s;
   margin-top: 4px;
 }
 
 .add-solution-btn:hover {
-  border-color: var(--accent);
   color: var(--accent);
   background: var(--accent-light);
+  transform: translateY(-0.5px);
 }
 
-/* 无需解析 Checkbox */
+/* 无需解析：iOS Settings 行 + UISwitch */
 .no-analysis-check {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 12.5px;
-  font-weight: 500;
-  color: var(--text-secondary);
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 8px;
+  padding: 12px 16px;
+  min-height: 44px;
+  border-radius: 12px;
+  background: var(--bg-input);
   cursor: pointer;
   user-select: none;
-  margin-top: 4px;
+}
+
+.no-analysis-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.no-analysis-title {
+  font-size: 15px;
+  font-weight: 400;
+  line-height: 1.3;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+}
+
+.no-analysis-caption {
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+  color: var(--text-muted);
 }
 
 .no-analysis-check input[type='checkbox'] {
-  width: 15px;
-  height: 15px;
+  appearance: none;
+  -webkit-appearance: none;
+  flex-shrink: 0;
+  width: 51px;
+  height: 31px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: #e9e9ea;
   cursor: pointer;
-  accent-color: var(--accent, #007aff);
-  border-radius: 4px;
+  position: relative;
+  box-shadow: none;
+  transition: background 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.no-analysis-check input[type='checkbox']::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 27px;
+  height: 27px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.16), 0 1px 1px rgba(0, 0, 0, 0.06);
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.no-analysis-check input[type='checkbox']:checked {
+  background: var(--success, #34c759);
+}
+
+.no-analysis-check input[type='checkbox']:checked::after {
+  transform: translateX(20px);
+}
+
+.no-analysis-check input[type='checkbox']:focus,
+.no-analysis-check input[type='checkbox']:focus-visible {
+  outline: none;
+  border: none;
+  box-shadow: none;
+  background: #e9e9ea;
+}
+
+.no-analysis-check input[type='checkbox']:checked:focus,
+.no-analysis-check input[type='checkbox']:checked:focus-visible {
+  background: var(--success, #34c759);
+}
+
+[data-theme='dark'] .no-analysis-check input[type='checkbox'],
+[data-theme='dark'] .no-analysis-check input[type='checkbox']:focus {
+  background: #39393d;
+}
+
+[data-theme='dark'] .no-analysis-check input[type='checkbox']:checked,
+[data-theme='dark'] .no-analysis-check input[type='checkbox']:checked:focus {
+  background: var(--success, #30d158);
 }
 
 /* ============ 高级折叠面板 ============ */
@@ -4675,19 +4955,21 @@ async function handleCropped(blob: Blob) {
 
 .text-input {
   width: 100%;
-  padding: 8px 10px;
-  border-radius: 6px;
-  border: 1px solid var(--border-color);
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid transparent;
   background: var(--bg-input);
   color: var(--text-primary);
-  font-size: 13.5px;
+  font-size: 14px;
   outline: none;
   box-sizing: border-box;
+  min-height: 40px;
 }
 
 .text-input:focus {
-  border-color: var(--accent);
   background: var(--bg-card);
+  box-shadow: none;
+  border-color: var(--accent);
 }
 
 .reviewer-checkboxes {
@@ -4696,9 +4978,9 @@ async function handleCropped(blob: Blob) {
   gap: 6px;
   max-height: 120px;
   overflow-y: auto;
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  padding: 10px 12px;
   background: var(--bg-input);
 }
 
@@ -4722,21 +5004,16 @@ async function handleCropped(blob: Blob) {
 /* ============ AI 痕迹高亮 ============ */
 @keyframes ai-breathe {
   0%, 100% {
-    box-shadow: 0 0 0 2px var(--purple);
+    background-color: transparent;
   }
   50% {
-    box-shadow: 0 0 8px 2px var(--purple-light);
+    background-color: var(--accent-light);
   }
 }
 
 .ai-highlight {
-  animation: ai-breathe 2s ease-in-out 3;
-  border-radius: var(--radius-md);
-  transition: box-shadow 0.5s ease;
-}
-
-[data-theme='dark'] .interactive-column {
-  box-shadow: none;
+  animation: ai-breathe 2s cubic-bezier(0.4, 0, 0.2, 1) 3;
+  border-radius: 12px;
 }
 
 /* ============ 批量录题 Tab 切换栏 ============ */
@@ -4745,9 +5022,10 @@ async function handleCropped(blob: Blob) {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  padding: 12px 16px;
-  background: var(--bg-card);
-  border-bottom: 1px solid var(--border-color);
+  padding: 10px 16px;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid hsl(0 0% 91%);
+  border-radius: 12px;
 }
 
 /* 1. 默认状态：浅灰小方块 */
@@ -4794,15 +5072,15 @@ async function handleCropped(blob: Blob) {
   justify-content: center;
   width: 32px;
   height: 32px;
-  font-size: 14px;
-  font-weight: 500;
+  font-size: 13px;
+  font-weight: 600;
   border: none;
-  border-radius: 6px;
-  background: #f3f4f6;
-  color: #4b5563;
+  border-radius: 10px;
+  background: var(--bg-input);
+  color: var(--text-secondary);
   cursor: pointer;
   user-select: none;
-  transition: all 0.2s ease;
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), background 0.2s, color 0.2s;
 }
 
 .nav-block:hover:not(:disabled) {
@@ -4827,7 +5105,7 @@ async function handleCropped(blob: Blob) {
 .nav-block.is-active {
   background: var(--accent);
   color: #ffffff;
-  box-shadow: 0 2px 6px rgba(37, 99, 235, 0.3);
+  box-shadow: 0 2px 8px rgba(0, 113, 227, 0.28);
 }
 
 /* 离开确认弹窗（三选项：丢弃未确认题目 / 保留草稿 / 继续编辑） */
@@ -4884,5 +5162,24 @@ async function handleCropped(blob: Blob) {
 [data-theme='dark'] .nav-block.is-saved:hover:not(:disabled) {
   background: #065f46;
   color: #d1fae5;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .interactive-column,
+  .quick-tool-btn,
+  .add-solution-btn,
+  .nav-block,
+  .img-upload-btn {
+    transition: none;
+  }
+  .interactive-column:hover,
+  .quick-tool-btn:hover,
+  .add-solution-btn:hover {
+    transform: none;
+  }
+  .no-analysis-check input[type='checkbox'],
+  .no-analysis-check input[type='checkbox']::after {
+    transition: none;
+  }
 }
 </style>

@@ -91,7 +91,12 @@ pub async fn list_papers_brief(
     let papers = sqlx::query_as::<_, PaperBrief>(
         r#"
         SELECT id, title
-        FROM papers
+        FROM papers p
+        WHERE NOT (
+            p.document_id IS NOT NULL
+            AND p.status = 'draft'
+            AND NOT EXISTS (SELECT 1 FROM paper_questions pq WHERE pq.paper_id = p.id)
+        )
         ORDER BY updated_at DESC
         "#,
     )
@@ -816,6 +821,14 @@ fn apply_paper_filters<'a>(
     builder: &mut sqlx::QueryBuilder<'a, sqlx::Postgres>,
     query: &'a PaperListQuery,
 ) {
+    // 全自动录入会先建空草稿卷；未保存任何题之前不进试卷导航，避免「0 题」空壳。
+    builder.push(
+        " AND NOT (\
+            p.document_id IS NOT NULL \
+            AND p.status = 'draft' \
+            AND NOT EXISTS (SELECT 1 FROM paper_questions pq WHERE pq.paper_id = p.id)\
+        )",
+    );
     if let Some(ref status) = query.status {
         builder.push(" AND p.status = ").push_bind(status.clone());
     }

@@ -20,8 +20,15 @@ use uuid::Uuid;
 use base64::Engine as _;
 
 use crate::ai::cleaner::clean_and_parse;
+use crate::ai::continuation::merge_split_questions;
+use crate::ai::structure::{
+    finalize_parsed_question, recover_chunk_questions, recover_parsed_questions,
+    recover_question_sections, stage2_llm_input,
+};
 use crate::ai::layout::{
-    layout_sidecar_path, load_layout_sidecar, split_question_chunks, LayoutDocument, LayoutSource,
+    exam_section_heading, is_implausible_major_no_drop, layout_sidecar_path, load_layout_sidecar,
+    question_major_no, question_start_regex, rehome_trailing_exam_sections, split_question_chunks,
+    LayoutDocument, LayoutSource,
 };
 use crate::ai::ocr::{
     create_ocr_provider, parse_percent_value, should_fallback, OcrError, OcrProvider,
@@ -703,7 +710,7 @@ async fn execute_task(state: &AppState, task: &AiParseTask) -> Result<TaskOutcom
             }
         };
 
-        let page_questions = match post_process_batch(&raw_json, &state.pool, true).await {
+        let mut page_questions = match post_process_batch(&raw_json, &state.pool, true).await {
             Ok(qs) => qs,
             Err((_, err)) => {
                 let msg = format!("第 {page_no} 页解析失败: {}", err["error"]);
@@ -715,6 +722,11 @@ async fn execute_task(state: &AppState, task: &AiParseTask) -> Result<TaskOutcom
                 continue;
             }
         };
+
+        for q in &mut page_questions {
+            let own = q.stem.clone();
+            recover_question_sections(q, &own);
+        }
 
         for (idx, q) in page_questions.into_iter().enumerate() {
             if idx % 5 == 0 {
@@ -1329,6 +1341,7 @@ async fn stage_question(
     localize_external_images(&mut parsed, &state.upload_dir).await;
     let image_urls = resolve_question_images(&mut parsed, page_image_url);
 
+    finalize_parsed_question(&mut parsed);
     parsed.ensure_solution_parts();
     let options_json = parsed
         .options
@@ -1697,6 +1710,23 @@ pub(crate) async fn clear_unsaved_staged_questions(
     .execute(pool)
     .await
     .map_err(|e| format!("清空暂存失败: {e}"))?;
+
+    if kept_count == 0 {
+        let row: Option<(Option<Uuid>, Uuid)> = sqlx::query_as(
+            "SELECT document_id, creator_id FROM ai_parse_tasks WHERE id = $1",
+        )
+        .bind(parse_task_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| format!("查询解析任务失败: {e}"))?;
+        if let Some((Some(doc_id), creator_id)) = row {
+            crate::handlers::documents::delete_empty_draft_paper_for_document(
+                pool, doc_id, creator_id,
+            )
+            .await
+            .map_err(|e| format!("删除空草稿试卷失败: {e}"))?;
+        }
+    }
 
     let _ = sqlx::query(
         r#"
@@ -2075,6 +2105,8 @@ pub(crate) fn map_pdf_poll_progress(
 
 /// Stage 2 切块上限（字符数）：约 2~4 页一块，控制 LLM 上下文与输出截断风险
 const STAGE2_CHUNK_MAX_CHARS: usize = 6000;
+/// 只识别出一道大题时不再按字数横切（避免把长解析切成无题干残片）
+const STAGE2_SINGLE_QUESTION_MAX_CHARS: usize = 24000;
 /// Stage2 同时解析的切块数（暂存仍串行，避免 jsonb 追加丢题）
 const STAGE2_CONCURRENCY: usize = 4;
 
@@ -2332,34 +2364,40 @@ async fn run_pdf_fast_path(
         }
     }
 
-    for (ci, chunk_questions) in parsed_by_chunk {
-        for (idx, q) in chunk_questions.into_iter().enumerate() {
-            if idx % 5 == 0 {
-                refresh_heartbeat(state, task_id).await;
-                if is_cancel_requested(state, task_id).await {
-                    outcome.cancelled = true;
-                    return Ok(outcome);
-                }
+    let mut flat: Vec<ParsedQuestion> = Vec::new();
+    for (_ci, chunk_questions) in parsed_by_chunk {
+        flat.extend(chunk_questions);
+    }
+    let mut merged = merge_split_questions(flat);
+    recover_parsed_questions(&mut merged, &markdown);
+
+    for (idx, q) in merged.into_iter().enumerate() {
+        if idx % 5 == 0 {
+            refresh_heartbeat(state, task_id).await;
+            if is_cancel_requested(state, task_id).await {
+                outcome.cancelled = true;
+                return Ok(outcome);
             }
+        }
 
-            let question_index = format!("c{ci}_i{idx}");
-            let qno = q.question_no.clone();
-            outcome.processed_count += 1;
-            all_questions.push((question_index.clone(), q.clone()));
+        let question_index = format!("m_i{idx}");
+        let qno = q.question_no.clone();
+        outcome.processed_count += 1;
+        all_questions.push((question_index.clone(), q.clone()));
 
-            match stage_question(
-                state,
-                task,
-                &question_index,
-                q,
-                None,
-                paper_id,
-                collection_id,
-                is_mixed,
-                space_id,
-            )
-            .await
-            {
+        match stage_question(
+            state,
+            task,
+            &question_index,
+            q,
+            None,
+            paper_id,
+            collection_id,
+            is_mixed,
+            space_id,
+        )
+        .await
+        {
                 Ok(()) => {
                     outcome.success_count += 1;
                     if let Some(no) = qno {
@@ -2390,7 +2428,6 @@ async fn run_pdf_fast_path(
                 }
             }
         }
-    }
 
     Ok(outcome)
 }
@@ -2923,7 +2960,10 @@ fn split_stage2_with_layout(
             return (chunks, layout.source.as_str());
         }
     }
-    (split_stage2_markdown(md, paper_meta), "markdown_fallback")
+    (
+        rehome_trailing_exam_sections(split_stage2_markdown(md, paper_meta)),
+        "markdown_fallback",
+    )
 }
 
 /// Ok(questions) / Err((fatal, message))
@@ -2961,11 +3001,20 @@ async fn parse_stage2_chunk(
     ci: usize,
     chunk: &str,
 ) -> Result<Vec<ParsedQuestion>, (bool, String)> {
+    let llm_input = stage2_llm_input(chunk);
+    if llm_input.chars().count() != chunk.chars().count() {
+        tracing::info!(
+            "任务 {task_id} 第 {} 块 Stage2 只送题干 {} 字（原文 {} 字，解析由规则回填）",
+            ci + 1,
+            llm_input.chars().count(),
+            chunk.chars().count()
+        );
+    }
     let mut last_err: Option<AiError> = None;
     let mut parsed: Option<String> = None;
     for attempt in 0..2u8 {
         match text_provider
-            .parse_text_with_prompt(chunk, prompt, text_model)
+            .parse_text_with_prompt(&llm_input, prompt, text_model)
             .await
         {
             Ok(r) => {
@@ -2997,6 +3046,7 @@ async fn parse_stage2_chunk(
             }
             tracing::warn!("任务 {task_id} {msg}，降级为 OCR 草稿题干（保留配图）");
             let mut qs = vec![draft_question_from_chunk(chunk, &map_ai_error_msg(&e))];
+            recover_chunk_questions(&mut qs, chunk);
             assign_chunk_images(chunk, &mut qs);
             return Ok(qs);
         }
@@ -3016,13 +3066,14 @@ async fn parse_stage2_chunk(
             vec![draft_question_from_chunk(chunk, &detail)]
         }
     };
+    recover_chunk_questions(&mut chunk_questions, chunk);
     assign_chunk_images(chunk, &mut chunk_questions);
     Ok(chunk_questions)
 }
 
 fn draft_question_from_chunk(chunk: &str, reason: &str) -> ParsedQuestion {
     let question_type = guess_chunk_question_type(chunk);
-    ParsedQuestion {
+    let mut q = ParsedQuestion {
         question_type: question_type.clone(),
         sub_type: None,
         difficulty: None,
@@ -3044,7 +3095,9 @@ fn draft_question_from_chunk(chunk: &str, reason: &str) -> ParsedQuestion {
         score: None,
         chapter_path: vec![],
         solution_methods: vec![],
-    }
+    };
+    recover_question_sections(&mut q, chunk);
+    q
 }
 
 fn extract_chunk_question_no(chunk: &str) -> Option<String> {
@@ -3060,7 +3113,8 @@ fn guess_chunk_question_type(chunk: &str) -> String {
     static CHOICE_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(r"(?m)^\s*A\s*[\.．、\)]").expect("choice option")
     });
-    if CHOICE_RE.is_match(chunk) {
+    let (body, _) = crate::ai::structure::split_body_and_tail(chunk);
+    if crate::ai::structure::looks_like_choice_stem(body) || CHOICE_RE.is_match(chunk) {
         "choice".into()
     } else if chunk.contains("____") || chunk.contains("填空") {
         "fill".into()
@@ -3092,29 +3146,16 @@ fn split_stage2_markdown(md: &str, paper_meta: &serde_json::Value) -> Vec<String
     };
     let by_q = split_markdown_by_question_no(md, max_q);
     if by_q.len() >= 2 {
-        return by_q;
+        return rehome_trailing_exam_sections(by_q);
     }
-    split_markdown_chunks(md, STAGE2_CHUNK_MAX_CHARS)
-}
-
-fn question_start_regex() -> &'static regex::Regex {
-    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(
-            r"^\s*(?:\*\*|__|#+\s*)?(?:第\s*)?([1-9]\d{0,2})\s*(?:题|[.．、]\s|[.．、][\u{4e00}-\u{9fff}]|[.．、]$)",
-        )
-        .expect("question start regex")
-    });
-    &RE
-}
-
-fn exam_section_heading_regex() -> &'static regex::Regex {
-    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(
-            r"(?:第\s*[IⅠⅡⅢIV一二三四五1-9]+\s*卷)|(^[一二三四五六七八九十]+[、．，.､]?\s*(?:选|多选|填空|解答|计算|证明|综合))",
-        )
-        .expect("exam section heading regex")
-    });
-    &RE
+    if md.chars().count() <= STAGE2_SINGLE_QUESTION_MAX_CHARS {
+        let t = md.trim();
+        if t.is_empty() {
+            return Vec::new();
+        }
+        return rehome_trailing_exam_sections(vec![t.to_string()]);
+    }
+    rehome_trailing_exam_sections(split_markdown_chunks(md, STAGE2_CHUNK_MAX_CHARS))
 }
 
 fn is_notice_heading(line: &str) -> bool {
@@ -3168,16 +3209,16 @@ fn looks_like_math_question_start(line: &str) -> bool {
 /// 卷头「注意事项」序号与考场说明不计入题号。
 fn split_markdown_by_question_no(md: &str, max_questions_per_chunk: usize) -> Vec<String> {
     let re = question_start_regex();
-    let section_re = exam_section_heading_regex();
     let mut starts: Vec<usize> = Vec::new();
     let mut offset = 0usize;
     let mut in_notice = false;
+    let mut last_major: Option<u32> = None;
     for line in md.split_inclusive('\n') {
         let trimmed = line.trim();
         if is_notice_heading(trimmed) {
             in_notice = true;
         }
-        if section_re.is_match(trimmed) {
+        if exam_section_heading(trimmed) {
             in_notice = false;
         }
         if re.is_match(trimmed) {
@@ -3185,8 +3226,19 @@ fn split_markdown_by_question_no(md: &str, max_questions_per_chunk: usize) -> Ve
             let math_like = looks_like_math_question_start(trimmed);
             if instruction || (in_notice && !math_like) {
                 // 卷头说明序号，跳过
+            } else if let (Some(prev), Some(curr)) = (last_major, question_major_no(trimmed)) {
+                if is_implausible_major_no_drop(prev, curr) {
+                    // OCR 把小问收成「2. 若过…」，不要当成新大题
+                } else {
+                    in_notice = false;
+                    last_major = Some(curr);
+                    starts.push(offset);
+                }
             } else {
                 in_notice = false;
+                if let Some(n) = question_major_no(trimmed) {
+                    last_major = Some(n);
+                }
                 starts.push(offset);
             }
         }
@@ -3712,6 +3764,33 @@ mod tests {
         assert_eq!(q.question_type, "choice");
         assert!(q.stem.contains("/uploads/q5a.png"));
         assert!(q.warnings.iter().any(|w| w.contains("OCR")));
+    }
+
+    #[test]
+    fn test_draft_from_chunk_peels_analysis_and_keeps_six_methods() {
+        let chunk = "\
+16. 已知椭圆\n\
+（1）求离心率\n\
+【解析】\n\
+法一：平移\n\
+法二：点差\n\
+法三：韦达\n\
+法四：参数\n\
+法五：斜率不存在\n\
+法六：水平宽乘铅垂高\n";
+        let q = draft_question_from_chunk(chunk, "JSON 截断");
+        assert!(!q.stem.contains("【解析】"), "题干不应再含解析: {}", q.stem);
+        assert!(q.stem.contains("已知椭圆"));
+        let n = q
+            .parts
+            .iter()
+            .flat_map(|p| p.analyses.iter())
+            .chain(q.analysis.iter())
+            .filter(|a| a.content.contains("水平宽") || a.title.contains("六"))
+            .count();
+        assert!(n >= 1, "应回填法六: parts={:?} analysis={:?}", q.parts, q.analysis);
+        let total = q.parts.iter().map(|p| p.analyses.len()).sum::<usize>().max(q.analysis.len());
+        assert!(total >= 6, "应保留 6 种解法, total={total}, parts={:?}", q.parts);
     }
 
     #[test]
@@ -4384,6 +4463,29 @@ mod tests {
     }
 
     #[test]
+    fn test_split_stage2_rehomes_section_heading_on_analysis_paper() {
+        let md = "\
+8. 已知函数 $f(x)$。\n\
+故选：B\n\
+\n\
+## 二、选择题：本题共3小题，每小题6分，共18分。有多项符合题目要求。\n\
+9. 已知随机变量服从正态分布。\n\
+故选：BC\n";
+        let chunks = split_stage2_markdown(md, &json!({"title": "2024年高考数学试卷（解析卷）"}));
+        assert!(chunks.len() >= 2, "{chunks:?}");
+        let q8 = chunks.iter().find(|c| c.contains("8. 已知函数")).expect("第8题");
+        let q9 = chunks.iter().find(|c| c.contains("9. 已知随机变量")).expect("第9题");
+        assert!(
+            !q8.contains("二、选择题") && !q8.contains("多项符合"),
+            "卷头不得留在上一题: {q8}"
+        );
+        assert!(
+            q9.contains("二、选择题") && q9.contains("9. 已知随机变量"),
+            "卷头应交给下一题: {q9}"
+        );
+    }
+
+    #[test]
     fn test_split_by_question_no_ignores_sub_items_and_decimals() {
         let md = "1. 大题\n（1）小问一\n（2）小问二\n3.14 不是题号\n2. 第二大题";
         let chunks = split_markdown_by_question_no(md, 1);
@@ -4391,6 +4493,25 @@ mod tests {
         assert!(chunks[0].contains("（1）小问一"));
         assert!(chunks[0].contains("3.14"));
         assert!(chunks[1].starts_with("2. 第二大题") || chunks[1].contains("2. 第二大题"));
+    }
+
+    #[test]
+    fn test_split_by_question_no_keeps_item_16_with_ocr_subquestion_two() {
+        let md = "\
+16. 已知 $A(0,3)$ 为椭圆上两点.\n\
+（1）求离心率\n\
+2. 若过 $P$ 的直线 $l$ 交 $C$ 于另一点 $B$\n\
+【解析】\n\
+法五：斜率不存在\n\
+法六：水平宽\n";
+        let chunks = split_markdown_by_question_no(md, 1);
+        assert!(
+            chunks.is_empty(),
+            "16 后的行首「2. 若过」不应切成第二道大题，chunks={chunks:?}"
+        );
+        let stage2 = split_stage2_markdown(md, &serde_json::json!({}));
+        assert_eq!(stage2.len(), 1, "单题长解析应整题送 Stage2: {stage2:?}");
+        assert!(stage2[0].contains("法六"));
     }
 
     #[test]

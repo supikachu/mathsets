@@ -334,9 +334,18 @@ function pruneInvalidSelectedNodes() {
       if (!t) return true
       return t.code.endsWith(`_${currentStageSuffix()}`)
     })
-  chapterNodeIds.value = keep(chapterNodeIds.value)
-  knowledgeNodeIds.value = keep(knowledgeNodeIds.value)
-  methodNodeIds.value = keep(methodNodeIds.value)
+  const nextChapter = keep(chapterNodeIds.value)
+  const nextKnowledge = keep(knowledgeNodeIds.value)
+  const nextMethod = keep(methodNodeIds.value)
+  if (nextChapter.length !== chapterNodeIds.value.length || nextChapter.some((id, i) => id !== chapterNodeIds.value[i])) {
+    chapterNodeIds.value = nextChapter
+  }
+  if (nextKnowledge.length !== knowledgeNodeIds.value.length || nextKnowledge.some((id, i) => id !== knowledgeNodeIds.value[i])) {
+    knowledgeNodeIds.value = nextKnowledge
+  }
+  if (nextMethod.length !== methodNodeIds.value.length || nextMethod.some((id, i) => id !== methodNodeIds.value[i])) {
+    methodNodeIds.value = nextMethod
+  }
   if (primaryKnowledgeNodeId.value && !nodeBelongsToCurrentStage(primaryKnowledgeNodeId.value)) {
     primaryKnowledgeNodeId.value = null
   }
@@ -2101,8 +2110,7 @@ onBeforeUnmount(() => {
   flex-shrink: 0;
   height: 100%;
   width: clamp(260px, 25vw, 320px);
-  /* !important 覆盖父组件 .interactive-column 的 overflow:hidden 和 opacity:0.7。
-     opacity<1 会创建独立 stacking context，导致 z-index 跨列失效，把手被预览列遮挡。
+  /* !important 覆盖父组件 .interactive-column 的 overflow:hidden。
      折叠后必须 overflow:visible 让 left:-24px 的把手不被裁切。 */
   overflow: visible !important;
   opacity: 1 !important;
@@ -2119,22 +2127,17 @@ onBeforeUnmount(() => {
   height: 100%;
   display: flex;
   flex-direction: column;
-  background: var(--bg-card);
-  border-radius: var(--radius-lg);
-  border: 1px solid var(--border-color);
-  box-shadow: var(--shadow-sm);
+  background: transparent;
+  border-radius: 16px;
+  border: none;
+  box-shadow: none;
   overflow: hidden;
-  transition: opacity 0.25s ease;
+  transition: opacity 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .asp-wrapper.is-collapsed .attr-side-panel {
   opacity: 0;
   pointer-events: none;
-}
-
-[data-theme='dark'] .attr-side-panel {
-  border-color: #3a3a3c;
-  box-shadow: none;
 }
 
 /* ===== 左侧边缘把手（Handle）Toggle：与 KnowledgeTreeNav 保持相同的精细化胶囊把手风格 ===== */
@@ -2222,18 +2225,22 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 16px;
-  border-bottom: 1px solid var(--border-color);
+  padding: 16px;
+  border-bottom: 1px solid hsl(0 0% 91%);
   flex-shrink: 0;
   gap: 8px;
+}
+
+[data-theme='dark'] .asp-header {
+  border-bottom-color: rgba(255, 255, 255, 0.08);
 }
 
 .asp-title {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 13.5px;
-  font-weight: 650;
+  font-size: 13px;
+  font-weight: 600;
   color: var(--text-primary);
   letter-spacing: -0.01em;
 }
@@ -2273,13 +2280,13 @@ onBeforeUnmount(() => {
 /* ===== 基础属性区块：5 行双列极简扁平化栅格 ===== */
 .asp-section-meta {
   padding: 4px 4px 16px;
-  border-bottom: 1px solid var(--border-color);
+  border-bottom: 1px solid hsl(0 0% 91%);
 }
 
 .asp-meta-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 6px 6px;
+  gap: 8px;
 }
 
 /* cell 纯容器：无 padding/边框，让 AppSelect 自身承担"标签按钮"视觉 */
@@ -2304,13 +2311,14 @@ onBeforeUnmount(() => {
 .asp-meta-cell :deep(.app-select-trigger) {
   width: 100%;
   min-width: 0;
-  padding: 5px 10px;
-  min-height: 32px;
-  font-size: 12.5px;
+  padding: 8px 12px;
+  min-height: 36px;
+  font-size: 13px;
+  font-weight: 400;
   border: none;
-  border-radius: 6px;
+  border-radius: 12px;
   background: var(--bg-input);
-  transition: background 0.15s ease, box-shadow 0.15s ease;
+  transition: background 0.2s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .asp-meta-cell :deep(.app-select-trigger:hover:not(.open)) {
@@ -2319,7 +2327,7 @@ onBeforeUnmount(() => {
 
 .asp-meta-cell :deep(.app-select-trigger.open) {
   background: var(--bg-card);
-  box-shadow: 0 0 0 2px var(--accent-light);
+  box-shadow: 0 0 0 1px var(--accent);
 }
 
 /* disabled 占位态：更淡的背景 + 不可点击 */
@@ -2335,9 +2343,9 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   gap: 2px;
-  padding: 5px 8px;
-  min-height: 32px;
-  border-radius: 6px;
+  padding: 8px 8px;
+  min-height: 36px;
+  border-radius: 12px;
   background: var(--bg-input);
 }
 
@@ -2376,10 +2384,10 @@ onBeforeUnmount(() => {
 }
 
 .asp-label {
-  font-size: 12.5px;
-  font-weight: 650;
+  font-size: 12px;
+  font-weight: 600;
   color: var(--text-secondary);
-  letter-spacing: 0.01em;
+  letter-spacing: -0.01em;
 }
 
 .asp-counter {
@@ -2544,21 +2552,28 @@ onBeforeUnmount(() => {
 /* ===== 输入框 ===== */
 .asp-input {
   width: 100%;
-  height: 32px;
-  padding: 0 10px;
-  border-radius: 8px;
-  border: 1px solid var(--border-color);
+  height: 36px;
+  padding: 0 12px;
+  border-radius: 12px;
+  border: 1px solid transparent;
   background: var(--bg-input);
   color: var(--text-primary);
-  font-size: 12.5px;
+  font-size: 13px;
+  font-weight: 400;
   outline: none;
   box-sizing: border-box;
-  transition: border-color 0.2s;
+  transition: box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1), background 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .asp-input:focus {
-  border-color: var(--accent);
   background: var(--bg-card);
+  box-shadow: none;
+  border-color: var(--accent);
+}
+
+.attr-side-panel :deep(.app-select-trigger.open),
+.attr-side-panel :deep(.cascader-trigger.open) {
+  box-shadow: 0 0 0 1px var(--accent);
 }
 
 .asp-input::placeholder {
@@ -2578,10 +2593,12 @@ onBeforeUnmount(() => {
   top: calc(100% + 4px);
   left: 0;
   right: 0;
-  background: var(--bg-card);
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid hsl(0 0% 91%);
+  border-radius: 12px;
   box-shadow: var(--shadow-md);
+  backdrop-filter: blur(20px) saturate(120%);
+  -webkit-backdrop-filter: blur(20px) saturate(120%);
   z-index: 50;
   max-height: 200px;
   overflow-y: auto;
@@ -2617,21 +2634,22 @@ onBeforeUnmount(() => {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 5px 10px;
-  border: 1px dashed var(--accent);
-  border-radius: 6px;
+  padding: 6px 12px;
+  border: none;
+  border-radius: 999px;
   background: var(--accent-light);
   color: var(--accent);
-  font-size: 11.5px;
-  font-weight: 600;
+  font-size: 12px;
+  font-weight: 400;
   cursor: pointer;
   align-self: flex-start;
-  transition: all 0.2s;
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), background 0.2s, color 0.2s;
 }
 
 .asp-create-btn:hover {
   background: var(--accent);
   color: #fff;
+  transform: translateY(-0.5px);
 }
 
 /* ===== 标签 Chip 网格 ===== */
@@ -2645,22 +2663,22 @@ onBeforeUnmount(() => {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 4px 10px;
+  padding: 6px 12px;
   border-radius: 9999px;
-  border: 1px solid var(--border-color);
+  border: 1px solid transparent;
   background: var(--bg-input);
   color: var(--text-secondary);
   font-size: 12px;
-  font-weight: 500;
+  font-weight: 400;
   cursor: pointer;
-  transition: all 0.18s ease;
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), background 0.2s, color 0.2s;
   white-space: nowrap;
 }
 
 .asp-chip:hover {
-  border-color: var(--accent);
   color: var(--accent);
   background: var(--accent-light);
+  transform: translateY(-0.5px);
 }
 
 .asp-chip.active {
@@ -2701,7 +2719,7 @@ onBeforeUnmount(() => {
 }
 
 .asp-node-chip:hover {
-  box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 22%, transparent);
+  box-shadow: none;
 }
 
 /* 按 type 区分色调（章节/知识点/方法） */
@@ -2718,9 +2736,9 @@ onBeforeUnmount(() => {
 }
 
 .asp-node-chip.is-method {
-  background: var(--purple-light, #f3e8ff);
-  border-color: var(--purple-light, #f3e8ff);
-  color: var(--purple, #8b5cf6);
+  background: var(--bg-input);
+  border-color: transparent;
+  color: var(--text-secondary);
 }
 
 .asp-node-chip-type {
@@ -2840,10 +2858,10 @@ onBeforeUnmount(() => {
 /* ===== AI 高亮动画（与 QuestionEdit.vue 的 .ai-highlight 一致） ===== */
 @keyframes asp-ai-breathe {
   0%, 100% {
-    box-shadow: 0 0 0 2px var(--purple);
+    background-color: transparent;
   }
   50% {
-    box-shadow: 0 0 8px 2px var(--purple-light);
+    background-color: var(--accent-light);
   }
 }
 
@@ -3159,10 +3177,10 @@ onBeforeUnmount(() => {
 
 /* 展开态为拟物化教研纸张卡片（样式挂内层，随内容自然增高） */
 .asp-tree-collapse.is-expanded .asp-tree-collapse-inner {
-  padding: 10px;
-  background: linear-gradient(180deg, #fafbfc 0%, #f5f7fa 100%);
-  border: 1px solid var(--border-color);
-  border-radius: 10px;
+  padding: 12px;
+  background: hsl(0 0% 96%);
+  border: 1px solid transparent;
+  border-radius: 12px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06), inset 0 1px 2px rgba(0, 0, 0, 0.03);
 }
 
@@ -3177,23 +3195,23 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   gap: 4px;
-  padding: 7px 14px;
-  border: 1px dashed var(--accent);
-  border-radius: 8px;
+  padding: 8px 14px;
+  border: none;
+  border-radius: 12px;
   background: var(--accent-light);
   color: var(--accent);
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 400;
   cursor: pointer;
   align-self: flex-start;
-  transition: all 0.2s ease;
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), background 0.2s, color 0.2s;
 }
 
 .asp-tree-toggle:hover {
   background: var(--accent);
   color: #fff;
-  border-color: var(--accent);
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+  transform: translateY(-0.5px);
+  box-shadow: 0 4px 12px hsl(211 100% 50% / 0.3);
 }
 
 /* 收起按钮：撑满宽度，置于展开区域底部 */

@@ -1152,3 +1152,103 @@ async fn test_clear_parse_staged_questions() {
     assert_eq!(body["kept"], json!(1));
 }
 
+/// 丢弃全部未保存暂存后，应删掉该资料下 0 题的草稿试卷；已有题目的卷保留。
+#[tokio::test]
+async fn test_clear_staged_deletes_empty_draft_paper() {
+    let Some((mut app, pool)) = create_test_app().await else {
+        eprintln!("跳过：未配置 DATABASE_URL_TEST");
+        return;
+    };
+    let (token, user_id) = register_and_login(&mut app).await;
+    let uid = Uuid::parse_str(&user_id).unwrap();
+
+    let doc_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO documents (creator_id, file_name, status) VALUES ($1, 'gaokao.pdf', 'confirmed') RETURNING id",
+    )
+    .bind(uid)
+    .fetch_one(&pool)
+    .await
+    .expect("insert document");
+
+    let empty_paper: Uuid = sqlx::query_scalar(
+        r#"
+        INSERT INTO papers (id, title, subject, status, creator_id, document_id, created_at, updated_at, version)
+        VALUES ($1, '2024年高考数学试卷（新课标Ⅰ卷）（解析卷）', '数学', 'draft', $2, $3, NOW(), NOW(), 1)
+        RETURNING id
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(uid)
+    .bind(doc_id)
+    .fetch_one(&pool)
+    .await
+    .expect("insert empty paper");
+
+    let filled_paper: Uuid = sqlx::query_scalar(
+        r#"
+        INSERT INTO papers (id, title, subject, status, creator_id, created_at, updated_at, version)
+        VALUES ($1, '手动空卷应保留', '数学', 'draft', $2, NOW(), NOW(), 1)
+        RETURNING id
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(uid)
+    .fetch_one(&pool)
+    .await
+    .expect("insert manual paper");
+
+    sqlx::query("UPDATE documents SET metadata = jsonb_build_object('linked_paper_id', $2::text) WHERE id = $1")
+        .bind(doc_id)
+        .bind(empty_paper.to_string())
+        .execute(&pool)
+        .await
+        .expect("link paper metadata");
+
+    let parse_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO ai_parse_tasks (creator_id, document_id, progress) VALUES ($1, $2, $3) RETURNING id",
+    )
+    .bind(uid)
+    .bind(doc_id)
+    .bind(json!({
+        "staged_questions": [
+            {"index": "p1_i0", "saved": false, "parsed": {"stem": "未保存"}}
+        ]
+    }))
+    .fetch_one(&pool)
+    .await
+    .expect("insert parse task");
+
+    let (status, body) = request_auth(
+        &mut app,
+        Method::POST,
+        &format!("/api/v1/ai/parse-task/{parse_id}/clear-staged"),
+        Some(json!({})),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["removed"], json!(1), "{body}");
+    assert_eq!(body["kept"], json!(0), "{body}");
+
+    let empty_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM papers WHERE id = $1)")
+        .bind(empty_paper)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(!empty_exists, "丢弃后应删除 0 题草稿试卷");
+
+    let filled_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM papers WHERE id = $1)")
+        .bind(filled_paper)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(filled_exists, "无 document_id 的手动试卷不应被删");
+
+    let linked: Option<String> = sqlx::query_scalar("SELECT metadata->>'linked_paper_id' FROM documents WHERE id = $1")
+        .bind(doc_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(linked.is_none() || linked.as_deref() == Some(""), "应清掉 linked_paper_id");
+}
+

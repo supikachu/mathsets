@@ -415,7 +415,13 @@
     </div>
 
     <!-- ===== 可滚动列表区域 ===== -->
-    <div class="ql-scroll-area">
+    <div
+      ref="scrollAreaRef"
+      class="ql-scroll-area"
+      :class="{ 'is-virtual-host': isVirtualList, 'is-scrolling': listScrolling }"
+      @scroll.passive="onListScrollIdle"
+      @wheel.passive="onListScrollIdle"
+    >
       <div v-if="fromPaper && navView !== 'papers'" class="ql-from-paper">
         <span>来自试卷：{{ fromPaper.title || '已选试卷' }}</span>
         <button type="button" class="ql-from-paper-x" title="清除试卷筛选" @click="clearFromPaper">
@@ -423,7 +429,7 @@
         </button>
       </div>
 
-      <div v-if="loading" class="loading-hint">加载中…</div>
+      <div v-if="showInitialLoading" class="loading-hint">加载中…</div>
 
       <template v-else-if="navView === 'papers'">
         <div v-if="paperList.length === 0" class="ql-empty-state">
@@ -482,24 +488,23 @@
           </button>
         </div>
 
-        <!-- ===== 题目卡片列表（虚拟滚动） =====
-             使用 DynamicScroller 支持题卡动态高度（题干长短/有无配图/有无解析均不同）。
-             page-mode 复用 window 滚动，最小侵入既有布局；
-             DynamicScrollerItem 内置 ResizeObserver，图片加载完成或解析展开时自动重测高度。 -->
+        <!-- 虚拟列表：Scroller 自身滚动（不用 page-mode），屏外预渲染 buffer=1200 -->
         <DynamicScroller
           v-else
+          ref="cardScrollerRef"
           :items="cardList"
-          :min-item-size="200"
+          :min-item-size="260"
+          :buffer="1200"
           key-field="id"
-          page-mode
-          :buffer="200"
           class="q-card-list"
+          @scroll.passive="onListScrollIdle"
         >
-          <template #default="{ item: card, active }">
+          <template #default="{ item: card, index, active }">
             <DynamicScrollerItem
               :item="card"
+              :index="index"
               :active="active"
-              :data-index="card.id"
+              :size-dependencies="[expandedIds.has(card.id)]"
               class="q-card-slot"
             >
               <div
@@ -581,15 +586,13 @@
               />
             </div>
 
-            <!-- 展开解析区域：CSS Grid 0fr→1fr 高度过渡
-                 方案：外层 grid 切换 grid-template-rows，内层 overflow:hidden 裁剪
-                 优势：DOM 常驻（LaTeX 仅渲染一次），完美过渡到内容实际高度 -->
+            <!-- 展开解析：首次展开再挂载 LaTeX，之后保留 DOM 以便高度过渡 -->
             <div
               class="q-analysis-grid"
               :class="{ 'is-expanded': expandedIds.has(card.id) }"
             >
               <div class="q-analysis-clip">
-                <div class="q-analysis-section">
+                <div v-if="analysisHydratedIds.has(card.id)" class="q-analysis-section">
                   <div class="q-analysis-title">
                     <AppIcon name="lightbulb" :size="14" :stroke="2" />
                     <span>答案解析</span>
@@ -820,7 +823,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onBeforeUnmount, onActivated, watch, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { questionApi, paperApi, type QuestionSummary, type QuestionDetail, type QuestionQuery, type GradeLevel, type SemesterType, type ExamType, type KnowledgeNodeSummary, type PaperSummary, type PaperListQuery } from '@/api/client'
+import { questionApi, paperApi, type QuestionSummary, type QuestionDetail, type QuestionQuery, type GradeLevel, type SemesterType, type ExamType, type KnowledgeNodeSummary, type PaperSummary, type PaperListQuery, type TagSummary } from '@/api/client'
 import LatexRender from '@/components/LatexRender.vue'
 import QuestionOptions from '@/components/QuestionOptions.vue'
 import QuestionStructureView from '@/components/QuestionStructureView.vue'
@@ -832,6 +835,7 @@ import { AppButton, AppSelect, AppPagination, AppIcon, AppBadge, AppModal } from
 import { useQuestionBasket } from '@/composables/useQuestionBasket'
 import { useToast } from '@/composables/useToast'
 import { useSpaceStore } from '@/stores/space'
+import { consumeQuestionListInvalidation, hasQuestionListWork } from '@/composables/useQuestionListInvalidation'
 import {
   SOURCE_CATEGORY_LABELS,
   PAPER_KIND_OPTIONS,
@@ -974,6 +978,11 @@ async function fetchIncompleteCount() {
   } catch {
     incompleteCount.value = 0
   }
+}
+
+async function refreshBadgeCounts() {
+  await Promise.all([fetchPendingCount(), fetchIncompleteCount()])
+  lastCountsKey = countsKey()
 }
 
 // 左侧树节点点击 → 同步到 query 并触发表格刷新（默认包含子孙节点）
@@ -1164,10 +1173,12 @@ function spaceKindLabel(kind: string) {
 // 全局 SpaceSwitcher 切换空间时自动刷新列表
 watch(
   () => space.currentSpaceId,
-  (newId) => {
+  (newId, oldId) => {
+    if (newId === oldId) return
     query.space_id = newId || undefined
     page.value = 1
     fetchList()
+    refreshBadgeCounts()
   },
 )
 
@@ -1206,7 +1217,40 @@ const page = ref(1)
 const pageSize = 20
 const hasMore = ref(false)
 
+const scrollAreaRef = ref<HTMLElement | null>(null)
+const cardScrollerRef = ref<{ scrollToPosition?: (n: number) => void } | null>(null)
+const listScrolling = ref(false)
+let listScrollIdleTimer = 0
+
+function onListScrollIdle() {
+  if (!listScrolling.value) listScrolling.value = true
+  window.clearTimeout(listScrollIdleTimer)
+  listScrollIdleTimer = window.setTimeout(() => {
+    listScrolling.value = false
+  }, 140)
+}
+
+function resetListScroll() {
+  cardScrollerRef.value?.scrollToPosition?.(0)
+  const area = scrollAreaRef.value
+  if (!area) return
+  area.scrollTop = 0
+  const scrollerEl = area.querySelector('.vue-recycle-scroller, .q-card-list') as HTMLElement | null
+  if (scrollerEl) scrollerEl.scrollTop = 0
+}
+
+/** 已有卡片时后台刷新，不拆掉列表 DOM */
+const showInitialLoading = computed(() => {
+  if (!loading.value) return false
+  return navView.value === 'papers' ? paperList.value.length === 0 : cardList.value.length === 0
+})
+
+const isVirtualList = computed(() =>
+  navView.value !== 'papers' && !showInitialLoading.value && cardList.value.length > 0,
+)
+
 const expandedIds = ref<Set<string>>(new Set())
+const analysisHydratedIds = ref<Set<string>>(new Set())
 
 // —— 知识点 Hover 面板：真实溢出检测（替代 length>2 启发式）——
 // mouseenter 时用 scrollHeight > clientHeight 判断标签是否真正被隐藏，
@@ -1545,6 +1589,7 @@ function onFilterChange() {
 function onPageChange(p: number) {
   page.value = p
   fetchList()
+  void nextTick(resetListScroll)
 }
 
 // ---- 工具函数：解析选项 ----
@@ -1629,9 +1674,102 @@ function isCorrectOption(card: QuestionCard, label: string): boolean {
 }
 
 // ---- 获取列表 + 批量获取详情 ----
-// 模块级详情缓存：按 questionId 缓存 QuestionDetail，避免换页/切筛选时重复请求已见过的题目。
-// 根治 N+1 需后端扩展 list 接口返回完整字段，此缓存作为前端缓解：命中缓存的题目零请求。
+// 列表接口已带卡片字段时零 N+1；旧后端或缺字段时仍按 miss 逐题 get。
 const detailCache = new Map<string, QuestionDetail>()
+
+let fetchGen = 0
+let lastListFetchKey = ''
+let lastCountsKey = ''
+let skipActivateOnce = false
+
+function listFetchKey(): string {
+  return JSON.stringify({
+    view: navView.value,
+    page: page.value,
+    space: query.space_id ?? '',
+    status: query.status ?? '',
+    keyword: query.keyword ?? '',
+    type: query.question_type ?? '',
+    difficulty: query.difficulty ?? '',
+    kn: query.knowledge_node_ids ?? [],
+    include_descendants: !!query.include_descendants,
+    paper: query.paper_id ?? '',
+    stage: query.stage ?? '',
+    subject: query.subject ?? '',
+    year: query.year ?? null,
+    semester: query.semester ?? '',
+    region: query.region ?? '',
+    source_type: query.source_type ?? '',
+    source_kind: query.source_kind ?? '',
+    source_category: query.source_category ?? '',
+    document_type: query.document_type ?? '',
+    paperStatus: paperStatus.value,
+    paperFilters: {
+      year: paperFilters.year,
+      grade: paperFilters.grade,
+      semester: paperFilters.semester,
+      sourceKind: paperFilters.sourceKind,
+      region: paperFilters.region,
+      city: paperFilters.city,
+    },
+  })
+}
+
+function countsKey(): string {
+  return JSON.stringify({
+    space: query.space_id ?? '',
+    stage: query.stage ?? '',
+    subject: query.subject ?? '',
+    kn: query.knowledge_node_ids ?? [],
+    paper: query.paper_id ?? '',
+  })
+}
+
+function summaryHasCardPayload(s: QuestionSummary): boolean {
+  return s.metadata != null
+}
+
+function buildCard(s: QuestionSummary, detail: QuestionDetail | null): QuestionCard {
+  const meta = (detail?.metadata ?? s.metadata ?? {}) as Record<string, unknown>
+  const rawFlags = (meta.system_flags ?? {}) as Record<string, unknown>
+  const options = detail?.options ?? s.options
+  const answer = detail?.correct_answer ?? s.correct_answer
+  const analysis = detail?.analysis ?? s.analysis ?? null
+  const structure = detail?.structure ?? s.structure
+  const tags = (detail?.tags ?? s.tags ?? []) as TagSummary[]
+  const knowledgeNodes = detail?.knowledge_nodes ?? s.knowledge_nodes ?? []
+  const structureParts = partsFromStructureJson(structure)
+  return {
+    id: s.id,
+    stem: s.stem,
+    question_type: s.question_type,
+    difficulty: difficultyNumToString(s.difficulty),
+    status: s.status,
+    grade_level: s.grade_level,
+    semester: null,
+    source: detail?.source ?? null,
+    school_source: detail?.source ?? null,
+    exam_type: null,
+    region: [String(meta.region_province ?? '').trim(), String(meta.region_city ?? '').trim()].filter(Boolean).join('') || null,
+    year: meta.year ? String(meta.year) : null,
+    metadata: meta,
+    tags,
+    updated_at: s.updated_at,
+    version: s.version,
+    parsedOptions: parseOptions(options),
+    correctAnswer: parseAnswer(answer),
+    analysis,
+    structureParts,
+    partCount: leafCount(structureParts),
+    knowledgeNodes,
+    systemFlags: {
+      pending_answer: !!rawFlags.pending_answer,
+      missing_analysis: !!rawFlags.missing_analysis,
+      no_analysis_needed: !!rawFlags.no_analysis_needed,
+    },
+    papers: Array.isArray(s.papers) ? s.papers.filter(p => p?.id && p?.title) : [],
+  }
+}
 
 async function fetchPaperList() {
   const params: PaperListQuery = {
@@ -1658,10 +1796,13 @@ async function fetchPaperList() {
 }
 
 async function fetchList() {
-  loading.value = true
+  const gen = ++fetchGen
+  const blocking = navView.value === 'papers' ? paperList.value.length === 0 : cardList.value.length === 0
+  if (blocking) loading.value = true
   try {
     if (navView.value === 'papers') {
       await fetchPaperList()
+      if (gen === fetchGen) lastListFetchKey = listFetchKey()
       return
     }
     // 拦截 incomplete 虚拟状态：深拷贝 query，在 apiParams 上替换，绝不污染响应式 state
@@ -1677,64 +1818,39 @@ async function fetchList() {
     apiParams.page = page.value
     apiParams.page_size = pageSize
     const res = await questionApi.list(apiParams)
+    if (gen !== fetchGen) return
     const summaries: QuestionSummary[] = res.data
-    // 捕获总数：优先取后端 PageResult.total，否则回退到当前已加载条数
     totalCount.value = (res as any).total ?? summaries.length
     hasMore.value = summaries.length >= pageSize
 
-    // 仅对缓存未命中的题目发请求（命中缓存的零请求），减少 N+1 实际请求数
-    const missIds = summaries.map((s) => s.id).filter((id) => !detailCache.has(id))
-    const fetchedDetails = await Promise.all(
-      missIds.map((id) => questionApi.get(id).catch(() => null))
-    )
-    for (let i = 0; i < missIds.length; i++) {
+    const fallbackIds = summaries
+      .filter((s) => !summaryHasCardPayload(s) && !detailCache.has(s.id))
+      .map((s) => s.id)
+    const fetchedDetails = fallbackIds.length
+      ? await Promise.all(fallbackIds.map((id) => questionApi.get(id).catch(() => null)))
+      : []
+    if (gen !== fetchGen) return
+    for (let i = 0; i < fallbackIds.length; i++) {
       const d = fetchedDetails[i]?.data
-      if (d) detailCache.set(missIds[i], d)
+      if (d) detailCache.set(fallbackIds[i], d)
     }
 
     cardList.value = summaries.map((s) => {
-      const detail: QuestionDetail | null = detailCache.get(s.id) ?? null
-      const meta = (detail?.metadata ?? {}) as Record<string, unknown>
-      const province = String(meta.region_province ?? '').trim()
-      const city = String(meta.region_city ?? '').trim()
-      const rawFlags = (meta.system_flags ?? {}) as Record<string, unknown>
-      return {
-        id: s.id,
-        stem: s.stem,
-        question_type: s.question_type,
-        difficulty: difficultyNumToString(s.difficulty),
-        status: s.status,
-        grade_level: s.grade_level,
-        semester: null,
-        source: detail?.source ?? null,
-        school_source: detail?.source ?? null,
-        exam_type: null,
-        // B2 后 metadata 长尾字段：year / region_province+region_city（旧 academic_year/exam_region 已废弃）
-        region: [province, city].filter(Boolean).join('') || null,
-        year: meta.year ? String(meta.year) : null,
-        metadata: meta,
-        tags: detail?.tags ?? [],
-        updated_at: s.updated_at,
-        version: s.version,
-        parsedOptions: parseOptions(detail?.options),
-        correctAnswer: parseAnswer(detail?.correct_answer),
-        analysis: detail?.analysis ?? null,
-        structureParts: partsFromStructureJson(detail?.structure),
-        partCount: leafCount(partsFromStructureJson(detail?.structure)),
-        knowledgeNodes: detail?.knowledge_nodes ?? [],
-        systemFlags: {
-          pending_answer: !!rawFlags.pending_answer,
-          missing_analysis: !!rawFlags.missing_analysis,
-          no_analysis_needed: !!rawFlags.no_analysis_needed,
-        },
-        papers: Array.isArray(s.papers) ? s.papers.filter(p => p?.id && p?.title) : [],
+      if (summaryHasCardPayload(s)) {
+        const cached = detailCache.get(s.id)
+        if (cached && (cached.updated_at !== s.updated_at || cached.version !== s.version)) {
+          detailCache.delete(s.id)
+        }
+        return buildCard(s, null)
       }
+      return buildCard(s, detailCache.get(s.id) ?? null)
     })
+    lastListFetchKey = listFetchKey()
   } catch (e: any) {
     console.error('列表加载失败:', e)
     toast.error(e.response?.data?.error || e.response?.data?.message || e.message || '列表加载失败')
   } finally {
-    loading.value = false
+    if (gen === fetchGen) loading.value = false
   }
 }
 
@@ -1748,6 +1864,9 @@ function toggleAnalysis(id: string) {
     next.delete(id)
   } else {
     next.add(id)
+    const ready = new Set(analysisHydratedIds.value)
+    ready.add(id)
+    analysisHydratedIds.value = ready
   }
   expandedIds.value = next
 }
@@ -1824,8 +1943,7 @@ function closeBatchResult() {
   batchResult.value = null
   clearSelection()
   fetchList()
-  fetchIncompleteCount()
-  fetchPendingCount()
+  refreshBadgeCounts()
 }
 
 // 左侧导航节点变化已由 handleKnowledgeNodeSelect 处理，无需 watch
@@ -1844,26 +1962,50 @@ function applyRouteQuery() {
   }
 }
 
+function refreshListOnActivate() {
+  applyRouteQuery()
+  const inv = consumeQuestionListInvalidation()
+  for (const id of inv.dirtyIds) detailCache.delete(id)
+  for (const id of inv.deletedIds) detailCache.delete(id)
+
+  const key = listFetchKey()
+  const queryChanged = key !== lastListFetchKey
+  const hasContent = navView.value === 'papers' ? paperList.value.length > 0 : cardList.value.length > 0
+
+  if (inv.deletedIds.length && navView.value === 'questions') {
+    const gone = new Set(inv.deletedIds)
+    cardList.value = cardList.value.filter((c) => !gone.has(c.id))
+  }
+
+  if (queryChanged || hasQuestionListWork(inv) || !hasContent) {
+    fetchList()
+  }
+
+  const nextCountsKey = countsKey()
+  if (inv.refreshCounts || nextCountsKey !== lastCountsKey) {
+    refreshBadgeCounts()
+  }
+}
+
 onMounted(() => {
   applyRouteQuery()
+  skipActivateOnce = true
   fetchList()
-  fetchPendingCount()
-  fetchIncompleteCount()
+  refreshBadgeCounts()
 })
 
-// keep-alive 缓存组件从详情页返回时触发 —— onMounted 不会再次执行
-// 确保删除/编辑后列表数据为最新
+// keep-alive 从详情/编辑返回：查询未变且无写操作则零请求，保留列表 DOM
 onActivated(() => {
-  applyRouteQuery()
-  // 清除模块级详情缓存，避免 fetchList 命中旧数据跳过 API 请求
-  detailCache.clear()
-  fetchList()
-  fetchPendingCount()
-  fetchIncompleteCount()
+  if (skipActivateOnce) {
+    skipActivateOnce = false
+    return
+  }
+  refreshListOnActivate()
 })
 
 onBeforeUnmount(() => {
   if (searchTimer) clearTimeout(searchTimer)
+  window.clearTimeout(listScrollIdleTimer)
 })
 </script>
 
@@ -2474,8 +2616,35 @@ onBeforeUnmount(() => {
   min-height: 0; /* Flex 子项允许收缩，使 flex:1 + overflow-y:auto 生效 */
   overflow-y: auto;
   overscroll-behavior: contain; /* 切断滚动链：防止列表触底触发外层滚动/橡皮筋 */
+  overflow-anchor: none; /* 题卡高度变化时禁止浏览器锚点跳变 */
+  scroll-behavior: auto; /* 覆盖 html 的 smooth，滚轮/触控板保持跟手 */
+  -webkit-overflow-scrolling: touch;
   padding: 16px 20px;
   background: var(--bg-primary); /* 画布涂灰：与白色卡片拉开对比，卡片瞬间“跳”出 */
+}
+
+/* 题目虚拟列表：滚动交给 DynamicScroller，避免套一层 overflow + page-mode */
+.ql-scroll-area.is-virtual-host {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-bottom: 8px;
+}
+
+.ql-scroll-area.is-virtual-host :deep(.pagination) {
+  flex-shrink: 0;
+}
+
+/* 滚动中关掉题卡 hover 抬升，避免指针扫过时整列卡同时做 transform */
+.ql-scroll-area.is-scrolling .q-card,
+.ql-scroll-area.is-scrolling .q-card:hover {
+  transform: none;
+  transition: none;
+  pointer-events: none;
+}
+
+.ql-scroll-area.is-virtual-host .ql-from-paper {
+  flex-shrink: 0;
 }
 
 /* ===== Header Actions ===== */
@@ -2651,9 +2820,25 @@ onBeforeUnmount(() => {
 
 /* ===== Card List ===== */
 .q-card-list {
-  /* DynamicScroller 使用绝对定位摆放 DynamicScrollerItem，flex/gap 已不适用。
-     保留 class 用于 descendant selector 上下文与暗色主题覆盖。 */
+  /* DynamicScroller 根节点即滚动盒：必须有明确高度，虚拟化才能按视口裁剪 */
   position: relative;
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  overscroll-behavior: contain;
+  overflow-anchor: none;
+  scroll-behavior: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.ql-scroll-area.is-virtual-host :deep(.vue-recycle-scroller) {
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  overflow-anchor: none;
+  scroll-behavior: auto;
 }
 
 /* 单个题卡 slot：DynamicScrollerItem 的根元素。
@@ -2668,6 +2853,7 @@ onBeforeUnmount(() => {
   padding-top: 8px;
   padding-bottom: 8px;
   box-sizing: border-box;
+  contain: layout;
 }
 
 /* ===== Question Card ===== */

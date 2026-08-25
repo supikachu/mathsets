@@ -199,6 +199,14 @@ export interface QuestionSummary {
   space_id: string
   /// 关联试卷（有则列表卡片展示试卷名）
   papers?: QuestionPaperBrief[]
+  /// 列表接口一次返回，供卡片渲染；缺省时前端回退逐题 get
+  options?: unknown
+  correct_answer?: unknown
+  analysis?: string | null
+  structure?: { version?: number; parts?: unknown[] } | null
+  metadata?: Record<string, unknown>
+  knowledge_nodes?: KnowledgeNodeSummary[]
+  tags?: TagSummary[]
 }
 
 /// 题目详情（B2：新增 stem_text/images/metadata/exam_type/cognitive_level 等，

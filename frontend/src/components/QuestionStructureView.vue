@@ -16,17 +16,14 @@ const props = withDefaults(defineProps<{
   showAnswers?: boolean
   showAnalyses?: boolean
   imageEditable?: boolean
-  selectedId?: string
 }>(), {
   section: 'all',
   showAnswers: true,
   showAnalyses: true,
   imageEditable: false,
-  selectedId: '',
 })
 
 const emit = defineEmits<{
-  select: [id: string]
   'image-click': [payload: ImageClickPayload]
 }>()
 
@@ -56,10 +53,6 @@ function setSol(id: string, i: number) {
   activeMap[id] = i
 }
 
-function onSelect(id: string) {
-  emit('select', id)
-}
-
 const stemNodes = computed(() =>
   nodes.value.filter((n) => !simple.value || n.part.stem.trim()),
 )
@@ -80,16 +73,17 @@ const analysisLeaves = computed(() =>
         v-for="node in stemNodes"
         :key="'s-' + node.part.id"
         class="part-node"
-        :class="{
-          selected: selectedId === node.part.id,
-          leaf: isLeaf(node.part),
-        }"
+        :class="{ leaf: isLeaf(node.part) }"
         :style="{ marginLeft: simple ? '0' : `${(node.depth - 1) * 16}px` }"
-        @click="onSelect(node.part.id)"
       >
         <div class="part-head">
           <span v-if="!simple" class="part-label">{{ node.part.label }}</span>
-          <div v-if="node.part.stem.trim()" class="part-stem">
+          <div
+            v-if="node.part.stem.trim()"
+            class="part-stem"
+            :data-part-id="node.part.id"
+            data-img-slot="stem"
+          >
             <LatexRender
               :text="node.part.stem"
               :mode="imageEditable ? 'editable' : 'readonly'"
@@ -107,12 +101,18 @@ const analysisLeaves = computed(() =>
         v-for="leaf in answerLeaves"
         :key="'a-' + leaf.part.id"
         class="part-node leaf-row"
-        :class="{ selected: selectedId === leaf.part.id }"
-        @click="onSelect(leaf.part.id)"
       >
-        <span v-if="leaf.pathLabel" class="part-label">{{ leaf.pathLabel }}</span>
-        <div class="leaf-body">
-          <LatexRender :text="leaf.part.answer || ''" />
+        <span class="part-label">{{ leaf.pathLabel }}</span>
+        <div
+          class="leaf-body"
+          :data-part-id="leaf.part.id"
+          data-img-slot="answer"
+        >
+          <LatexRender
+            :text="leaf.part.answer || ''"
+            :mode="imageEditable ? 'editable' : 'readonly'"
+            @image-click="emit('image-click', $event)"
+          />
         </div>
       </div>
     </div>
@@ -124,13 +124,16 @@ const analysisLeaves = computed(() =>
         v-for="leaf in analysisLeaves"
         :key="'x-' + leaf.part.id"
         class="part-node leaf-row"
-        :class="{ selected: selectedId === leaf.part.id }"
-        @click="onSelect(leaf.part.id)"
       >
-        <span v-if="leaf.pathLabel" class="part-label">{{ leaf.pathLabel }}</span>
-        <div class="leaf-body">
-          <div class="analysis-head">
-            <div v-if="visibleAnalyses(leaf.part).length > 1" class="sol-seg">
+        <span class="part-label">{{ leaf.pathLabel }}</span>
+        <div
+          class="leaf-body"
+          :data-part-id="leaf.part.id"
+          data-img-slot="analysis"
+          :data-analysis-id="visibleAnalyses(leaf.part)[solIndex(leaf.part.id)]?.id || ''"
+        >
+          <div v-if="visibleAnalyses(leaf.part).length > 1" class="analysis-head">
+            <div class="sol-seg">
               <button
                 v-for="(s, i) in visibleAnalyses(leaf.part)"
                 :key="s.id || i"
@@ -155,7 +158,19 @@ const analysisLeaves = computed(() =>
 <style scoped>
 .part-tree { display: flex; flex-direction: column; gap: 8px; }
 .part-tree.grouped { gap: 14px; }
-.stem-block, .leaf-block { display: flex; flex-direction: column; gap: 6px; }
+.stem-block { display: flex; flex-direction: column; gap: 6px; }
+/* 编号列宽取最宽标签（如 (2)(ii)），正文从同一条竖线起排，换行不再钻到编号下 */
+.leaf-block {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  column-gap: 12px;
+  row-gap: 10px;
+  align-items: start;
+}
+.leaf-block > .block-title,
+.leaf-block > .muted {
+  grid-column: 1 / -1;
+}
 .block-title {
   font-size: 12px;
   font-weight: 600;
@@ -166,20 +181,34 @@ const analysisLeaves = computed(() =>
 .part-node {
   border-radius: 8px;
   padding: 4px 0;
-  cursor: pointer;
 }
-.part-node.selected { outline: 1px solid var(--accent, #0071e3); outline-offset: 4px; }
-.part-head { display: flex; gap: 8px; align-items: flex-start; }
-.leaf-row { display: flex; gap: 8px; align-items: flex-start; }
+.part-head { display: flex; gap: 12px; align-items: flex-start; }
+.leaf-row {
+  display: contents;
+}
 .part-label {
   flex-shrink: 0;
   font-weight: 600;
   font-size: 13px;
   color: var(--accent, #0071e3);
-  min-width: 28px;
+  white-space: nowrap;
   line-height: 1.8;
 }
-.part-stem, .leaf-body { flex: 1; min-width: 0; font-size: 14px; line-height: 1.8; }
+.part-label:empty { visibility: hidden; }
+.part-stem, .leaf-body {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  line-height: 1.8;
+  overflow-wrap: break-word;
+}
+.part-tree.simple .leaf-block {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.part-tree.simple .leaf-row { display: block; }
+.part-tree.simple .part-label { display: none; }
 .muted { color: var(--text-muted, #86868b); font-size: 13px; }
 .analysis-head {
   display: flex;

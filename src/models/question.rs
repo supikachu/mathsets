@@ -373,7 +373,7 @@ pub struct QuestionPaperBrief {
     pub title: String,
 }
 
-/// 题目列表响应项
+/// 题目列表响应项（卡片所需字段一次返回，避免前端对每题再打详情）
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct QuestionSummary {
     pub id: Uuid,
@@ -387,10 +387,23 @@ pub struct QuestionSummary {
     pub updated_at: DateTime<Utc>,
     pub version: i32,
     pub space_id: Uuid,
+    pub options: Option<serde_json::Value>,
+    pub correct_answer: Option<serde_json::Value>,
+    pub analysis: Option<String>,
+    pub structure: Option<serde_json::Value>,
+    pub metadata: serde_json::Value,
     /// 关联试卷（列表接口二次填充；FromRow 跳过）
     #[sqlx(skip)]
     #[serde(default)]
     pub papers: Vec<QuestionPaperBrief>,
+    /// 知识点（列表接口二次填充；FromRow 跳过）
+    #[sqlx(skip)]
+    #[serde(default)]
+    pub knowledge_nodes: Vec<KnowledgeNodeSummary>,
+    /// 标签（列表接口二次填充；FromRow 跳过）
+    #[sqlx(skip)]
+    #[serde(default)]
+    pub tags: Vec<TagSummary>,
 }
 
 impl From<Question> for QuestionSummary {
@@ -407,7 +420,14 @@ impl From<Question> for QuestionSummary {
             updated_at: q.updated_at,
             version: q.version,
             space_id: q.space_id,
+            options: q.options,
+            correct_answer: q.correct_answer,
+            analysis: q.analysis,
+            structure: q.structure,
+            metadata: q.metadata,
             papers: vec![],
+            knowledge_nodes: vec![],
+            tags: vec![],
         }
     }
 }

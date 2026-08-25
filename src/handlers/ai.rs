@@ -104,7 +104,7 @@ pub(crate) fn map_ai_error(e: AiError) -> (StatusCode, Json<serde_json::Value>) 
 /// - `(?is)`：i 忽略大小写，s 让 `.` 跨换行（选项常跨多行）
 static OPTIONS_RESIDUE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?is)(?:^|\n|[。；;！？$）])\s*\$?\s*A[\.、．\)]\s*.*?B[\.、．\)]\s*.*?C[\.、．\)]\s*.*?D[\.、．\)]\s*.*$",
+        r"(?is)(?:^|\n|[。；;！？$）)])\s*\$?\s*A[\.、．\)]\s*.*?B[\.、．\)]\s*.*?C[\.、．\)]\s*.*?D[\.、．\)]\s*.*$",
     )
     .expect("选项残留正则编译失败")
 });
@@ -130,8 +130,11 @@ fn strip_options_residue_from_stem(q: &mut ParsedQuestion) {
         let mut cut = m.start();
         // `$` / `）` 是题干合法结尾（作答空位、中文括号），保留；换行/句末标点仍随选项一起去掉
         if let Some(ch) = q.stem[cut..].chars().next() {
-            if ch == '$' || ch == '）' {
+            if matches!(ch, '$' | '）' | ')') {
                 cut += ch.len_utf8();
+                if ch == ')' && q.stem[cut..].starts_with('$') {
+                    cut += 1;
+                }
             }
         }
         let mut new_stem = q.stem[..cut].trim_end().to_string();
@@ -1695,6 +1698,21 @@ mod tests {
         strip_options_residue_from_stem(&mut q);
         assert_eq!(q.stem, "下列结论正确的是");
         assert!(q.warnings.iter().any(|w| w.contains("剥离")));
+    }
+
+    #[test]
+    fn strips_compact_options_after_ascii_parens() {
+        let mut q = make_choice(
+            "当 $x \\in [0, 2\\pi]$ 时交点个数为 ( ) A.3 B.4 C.6 D.8",
+            true,
+        );
+        strip_options_residue_from_stem(&mut q);
+        assert_eq!(
+            q.stem,
+            "当 $x \\in [0, 2\\pi]$ 时交点个数为 ( )",
+            "{}",
+            q.stem
+        );
     }
 
     #[test]

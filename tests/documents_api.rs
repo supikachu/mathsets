@@ -509,8 +509,8 @@ async fn test_confirm_create_paper_then_update_metadata() {
     assert_eq!(status, StatusCode::OK, "{listed}");
     let items = listed["items"].as_array().expect("试卷列表");
     assert!(
-        items.iter().any(|p| p["id"] == paper_id),
-        "学段筛选应能命中已回写的试卷: {listed}"
+        items.iter().all(|p| p["id"] != paper_id),
+        "尚未录入题目的空草稿卷不应出现在试卷导航: {listed}"
     );
 }
 

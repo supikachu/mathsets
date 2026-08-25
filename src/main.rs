@@ -122,6 +122,8 @@ async fn main() {
                     &gc_state.upload_dir,
                 )
                 .await;
+                mathset::handlers::documents::gc_abandoned_empty_parse_papers(&gc_state.pool)
+                    .await;
             }
         });
         tracing::info!("🧹 AI 孤儿草稿 GC 已启动 (6 小时间隔 / 72h TTL)");

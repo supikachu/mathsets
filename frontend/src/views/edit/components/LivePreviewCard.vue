@@ -20,12 +20,10 @@ const props = defineProps<{
     difficulty_coefficient: number
   }
   imageEditable?: boolean
-  expandedPartId?: string
 }>()
 
 const emit = defineEmits<{
   (e: 'image-click', payload: ImageClickPayload): void
-  (e: 'select-part', id: string): void
 }>()
 
 const previewOptions = computed(() => {
@@ -191,8 +189,6 @@ function splitSolution(text: string): { body: string; conclusion: string } {
           section="stems"
           :parts="solutionParts"
           :image-editable="imageEditable"
-          :selected-id="expandedPartId"
-          @select="emit('select-part', $event)"
           @image-click="emit('image-click', $event)"
         />
 
@@ -205,8 +201,6 @@ function splitSolution(text: string): { body: string; conclusion: string } {
                 section="answers"
                 :parts="solutionParts"
                 :image-editable="imageEditable"
-                :selected-id="expandedPartId"
-                @select="emit('select-part', $event)"
                 @image-click="emit('image-click', $event)"
               />
             </div>
@@ -218,8 +212,6 @@ function splitSolution(text: string): { body: string; conclusion: string } {
                 section="analyses"
                 :parts="solutionParts"
                 :image-editable="imageEditable"
-                :selected-id="expandedPartId"
-                @select="emit('select-part', $event)"
                 @image-click="emit('image-click', $event)"
               />
             </div>
@@ -293,20 +285,20 @@ function splitSolution(text: string): { body: string; conclusion: string } {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 16px;
+  padding: 24px;
 }
 
 /* 试卷卡片 - 悬浮纸张效果 */
 .paper-card {
   background: var(--bg-card);
   border-radius: 16px;
-  padding: 24px 28px 48px 28px;
-  box-shadow: var(--shadow-md);
-  border: none;
+  padding: 24px;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.05);
+  border: 1px solid hsl(0 0% 91%);
 }
 
 [data-theme='dark'] .paper-card {
-  border: 1px solid #3a3a3c;
+  border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .paper-card-header {
@@ -315,7 +307,7 @@ function splitSolution(text: string): { body: string; conclusion: string } {
   justify-content: space-between;
   margin-bottom: 16px;
   padding-bottom: 12px;
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: 1px solid hsl(0 0% 91%);
 }
 
 [data-theme='dark'] .paper-card-header {
@@ -355,25 +347,55 @@ function splitSolution(text: string): { body: string; conclusion: string } {
   color: #f5f5f7;
 }
 
-/* 答案/解析区块 */
+/* 答案卡片 — 与详情页参考答案一致：莫兰迪极淡蓝底 */
 .paper-answer-block {
-  background: #f5f5f7;
-  border-radius: 8px;
-  padding: 12px 16px;
-  margin-top: 10px;
+  background: #f4f8fc;
+  border-radius: 16px;
+  padding: 20px 24px;
+  margin-top: 24px;
+  border: none;
+}
+
+.paper-answer-block:hover {
+  background: #edf3f9;
 }
 
 [data-theme='dark'] .paper-answer-block {
-  background: rgba(255, 255, 255, 0.04);
+  background: rgba(100, 160, 220, 0.08);
+}
+
+[data-theme='dark'] .paper-answer-block:hover {
+  background: rgba(100, 160, 220, 0.12);
+}
+
+/* 解析卡片 — 与详情页解析一致：系统柔和灰底 */
+.paper-answer-block.paper-analysis {
+  background: #f5f5f7;
+}
+
+.paper-answer-block.paper-analysis:hover {
+  background: #ebebef;
+}
+
+[data-theme='dark'] .paper-answer-block.paper-analysis {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+[data-theme='dark'] .paper-answer-block.paper-analysis:hover {
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .paper-answer-label {
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 600;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  margin-bottom: 4px;
+  color: #1d1d1f;
+  letter-spacing: -0.01em;
+  margin-bottom: 16px;
+  text-transform: none;
+}
+
+[data-theme='dark'] .paper-answer-label {
+  color: #f5f5f7;
 }
 
 .paper-answer-content {
@@ -384,7 +406,7 @@ function splitSolution(text: string): { body: string; conclusion: string } {
 }
 
 .paper-correct-answer {
-  font-weight: 700;
+  font-weight: 600;
   font-size: 16px;
   color: var(--accent);
 }
@@ -403,15 +425,15 @@ function splitSolution(text: string): { body: string; conclusion: string } {
 }
 
 .sol-seg-btn {
-  padding: 3px 10px;
+  padding: 4px 12px;
   border: none;
   border-radius: var(--radius-full);
   background: transparent;
-  font-size: 11px;
-  font-weight: 500;
+  font-size: 12px;
+  font-weight: 400;
   color: var(--text-muted);
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .sol-seg-btn.active {
@@ -455,7 +477,7 @@ function splitSolution(text: string): { body: string; conclusion: string } {
 }
 
 .paper-sub-num {
-  font-weight: 700;
+  font-weight: 600;
   flex-shrink: 0;
 }
 
