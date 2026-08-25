@@ -66,6 +66,51 @@ fn has_bracket_section(text: &str) -> bool {
     SECTION_HEAD.is_match(text)
 }
 
+/// 法一 / 解法二 / 另解 等标题个数（行首或带冒号的行内标题）。
+pub fn count_method_headings(text: &str) -> usize {
+    find_method_heads(text).len()
+}
+
+pub fn looks_like_analysis_chunk(text: &str) -> bool {
+    text.contains("【解析】")
+        || text.contains("【分析】")
+        || text.contains("【详解】")
+        || BARE_SECTION_HEAD.is_match(text)
+}
+
+/// 从 OCR 块切出解法数组，写入 `ParsedQuestion.analysis`（不拆 parts）。
+pub fn split_chunk_analysis(chunk: &str) -> Vec<AnalysisMethod> {
+    let (_, tail) = split_body_and_tail(chunk);
+    let tail = tail.trim();
+    if tail.is_empty() {
+        return Vec::new();
+    }
+    if find_method_heads(tail).is_empty() {
+        if looks_like_analysis_chunk(tail) {
+            let content = strip_leading_section_head(tail);
+            if content.is_empty() {
+                return Vec::new();
+            }
+            return vec![AnalysisMethod {
+                title: "解析".into(),
+                content,
+            }];
+        }
+        return Vec::new();
+    }
+    split_methods(tail)
+}
+
+fn strip_leading_section_head(tail: &str) -> String {
+    if let Some(m) = SECTION_HEAD.find(tail) {
+        let rest = tail[m.end()..].trim();
+        if !rest.is_empty() {
+            return rest.to_string();
+        }
+    }
+    tail.trim().to_string()
+}
+
 pub fn recover_chunk_questions(qs: &mut [ParsedQuestion], source_md: &str) {
     match qs.len() {
         0 => {}

@@ -3001,6 +3001,14 @@ async fn parse_stage2_chunk(
     ci: usize,
     chunk: &str,
 ) -> Result<Vec<ParsedQuestion>, (bool, String)> {
+    let draft = crate::ai::structure::structure_chunk(chunk);
+    tracing::info!(
+        confidence = ?draft.confidence,
+        method_heading_count = draft.method_heading_count,
+        question_no = draft.question.question_no.as_deref().unwrap_or("-"),
+        "任务 {task_id} 第 {} 块规则结构化（仍走 Stage2）",
+        ci + 1
+    );
     let llm_input = stage2_llm_input(chunk);
     if llm_input.chars().count() != chunk.chars().count() {
         tracing::info!(
@@ -3101,26 +3109,11 @@ fn draft_question_from_chunk(chunk: &str, reason: &str) -> ParsedQuestion {
 }
 
 fn extract_chunk_question_no(chunk: &str) -> Option<String> {
-    for line in chunk.lines() {
-        if let Some(caps) = crate::ai::layout::question_start_regex().captures(line) {
-            return caps.get(1).map(|m| m.as_str().to_string());
-        }
-    }
-    None
+    crate::ai::structure::extract_chunk_question_no(chunk)
 }
 
 fn guess_chunk_question_type(chunk: &str) -> String {
-    static CHOICE_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r"(?m)^\s*A\s*[\.．、\)]").expect("choice option")
-    });
-    let (body, _) = crate::ai::structure::split_body_and_tail(chunk);
-    if crate::ai::structure::looks_like_choice_stem(body) || CHOICE_RE.is_match(chunk) {
-        "choice".into()
-    } else if chunk.contains("____") || chunk.contains("填空") {
-        "fill".into()
-    } else {
-        "solution".into()
-    }
+    crate::ai::structure::guess_chunk_question_type(chunk)
 }
 
 fn looks_like_analysis_paper(md: &str, paper_meta: &serde_json::Value) -> bool {

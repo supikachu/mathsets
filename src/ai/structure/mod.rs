@@ -2,12 +2,37 @@
 //!
 //! 长解析卷一次丢给 Stage2 时，模型常把【解析】写进 stem，再被 max_tokens 截断。
 //! 这里先切开题干再送模型，最后用原文解法回填。
+//!
+//! 全自动路径另提供纯脚本 `structure_chunk` → `ScriptDraft`（阶段 1 仍每块打 LLM）。
 
 mod analysis;
 mod choice;
+mod chunk;
+mod confidence;
+mod options;
 
 pub use analysis::{
-    finalize_parsed_question, peel_marked_fields, recover_chunk_questions, recover_parsed_questions,
-    recover_question_sections, resplit_nested_methods, split_body_and_tail, stage2_llm_input,
+    count_method_headings, finalize_parsed_question, looks_like_analysis_chunk,
+    peel_marked_fields, recover_chunk_questions, recover_parsed_questions,
+    recover_question_sections, resplit_nested_methods, split_body_and_tail, split_chunk_analysis,
+    stage2_llm_input,
 };
+pub use chunk::{extract_chunk_question_no, guess_chunk_question_type, structure_chunk};
 pub(crate) use choice::looks_like_choice_stem;
+
+use crate::ai::types::ParsedQuestion;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Confidence {
+    High,
+    Low,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScriptDraft {
+    pub question: ParsedQuestion,
+    pub confidence: Confidence,
+    pub reasons: Vec<String>,
+    pub method_heading_count: usize,
+    pub image_urls_in_chunk: Vec<String>,
+}
