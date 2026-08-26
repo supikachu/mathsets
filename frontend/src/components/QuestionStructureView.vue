@@ -201,6 +201,7 @@ const analysisLeaves = computed(() =>
   font-size: 14px;
   line-height: 1.8;
   overflow-wrap: break-word;
+  overflow-x: auto;
 }
 .part-tree.simple .leaf-block {
   display: flex;
@@ -216,8 +217,18 @@ const analysisLeaves = computed(() =>
   justify-content: flex-end;
   gap: 8px;
   margin-bottom: 4px;
+  min-width: 0;
 }
-.sol-seg { display: inline-flex; gap: 2px; padding: 2px; border-radius: 999px; background: var(--bg-input, #f5f5f7); }
+.sol-seg {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 999px;
+  background: var(--bg-input, #f5f5f7);
+  max-width: 100%;
+  overflow-x: auto;
+  flex-shrink: 1;
+}
 .sol-seg-btn {
   padding: 2px 8px; border: none; border-radius: 999px; background: transparent;
   font-size: 11px; color: var(--text-muted, #86868b); cursor: pointer;

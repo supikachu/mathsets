@@ -5,6 +5,7 @@ import LatexRender, { type ImageClickPayload } from '@/components/LatexRender.vu
 import QuestionOptions from '@/components/QuestionOptions.vue'
 import QuestionStructureView from '@/components/QuestionStructureView.vue'
 import { isSimpleTree, partsHaveContent, type QuestionPart } from '@/utils/questionParts'
+import { choiceAnswerLatex, extractChoiceLetters } from '@/utils/choiceAnswer'
 
 const props = defineProps<{
   form: {
@@ -31,11 +32,7 @@ const previewOptions = computed(() => {
   return props.form.options.filter(o => o.content)
 })
 
-const highlightLabels = computed(() => {
-  const ans = props.form.correctAnswer
-  if (Array.isArray(ans)) return ans.filter(Boolean)
-  return ans ? [ans] : []
-})
+const highlightLabels = computed(() => extractChoiceLetters(props.form.correctAnswer))
 
 const previewRootRef = ref<HTMLElement | null>(null)
 const optionsRef = ref<InstanceType<typeof QuestionOptions> | null>(null)
@@ -97,20 +94,10 @@ watch(() => previewSolutions.value.length, (newLen) => {
   }
 })
 
-const hasCorrectAnswer = computed(() => {
-  if (Array.isArray(props.form.correctAnswer)) return props.form.correctAnswer.length > 0
-  return !!props.form.correctAnswer
-})
+const hasCorrectAnswer = computed(() => extractChoiceLetters(props.form.correctAnswer).length > 0)
 
-// 答案预览：统一包裹在单个 $\mathrm{...}$ 中渲染
-// 单选 B → $\mathrm{B}$，多选 A+C → $\mathrm{AC}$
-const displayCorrectAnswer = computed(() => {
-  if (Array.isArray(props.form.correctAnswer)) {
-    if (props.form.correctAnswer.length === 0) return ''
-    return `$\\mathrm{${props.form.correctAnswer.join('')}}$`
-  }
-  return props.form.correctAnswer ? `$\\mathrm{${props.form.correctAnswer}}$` : ''
-})
+// 答案预览：统一包裹在单个 $\mathrm{...}$ 中渲染；已是 $\mathrm{B}$ 时不再套一层
+const displayCorrectAnswer = computed(() => choiceAnswerLatex(props.form.correctAnswer))
 
 const cnNums = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十']
 function cnNum(n: number): string {
@@ -341,6 +328,9 @@ function splitSolution(text: string): { body: string; conclusion: string } {
   margin-bottom: 14px;
   word-break: break-word;
   font-family: var(--font-cn-isolated);
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
 }
 
 [data-theme='dark'] .paper-stem {
@@ -392,6 +382,11 @@ function splitSolution(text: string): { body: string; conclusion: string } {
   letter-spacing: -0.01em;
   margin-bottom: 16px;
   text-transform: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
 }
 
 [data-theme='dark'] .paper-answer-label {
@@ -403,6 +398,9 @@ function splitSolution(text: string): { body: string; conclusion: string } {
   line-height: 1.7;
   color: var(--text-primary);
   font-family: var(--font-cn-isolated);
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
 }
 
 .paper-correct-answer {
@@ -422,6 +420,11 @@ function splitSolution(text: string): { body: string; conclusion: string } {
   padding: 2px;
   border-radius: var(--radius-full);
   background: var(--bg-input);
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  flex-shrink: 1;
+  flex-wrap: nowrap;
 }
 
 .sol-seg-btn {

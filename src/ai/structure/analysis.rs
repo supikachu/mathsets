@@ -178,6 +178,8 @@ pub fn finalize_parsed_question(q: &mut ParsedQuestion) {
     resplit_nested_methods(q);
     prune_strategy_catalog_in_question(q);
     merge_strategy_detail_in_question(q);
+    crate::ai::slice::polish_question(q);
+    super::choice::fill_choice_answers(q);
 }
 
 fn peel_stem(q: &mut ParsedQuestion) -> Option<String> {
@@ -1188,7 +1190,9 @@ A. $1-i$\nB. $-1+i$\nC. $1+i$\nD. $-1-i$\n\
         }));
         recover_question_sections(&mut q, md);
         assert_eq!(q.analysis.len(), 1, "分析+详解应是一种解法: {:?}", q.analysis.iter().map(|a| &a.title).collect::<Vec<_>>());
-        assert!(q.analysis[0].content.contains("四则运算"), "{}", q.analysis[0].content);
+        assert!(!q.analysis[0].content.contains("【分析】"), "{}", q.analysis[0].content);
+        assert!(!q.analysis[0].content.contains("【详解】"), "{}", q.analysis[0].content);
+        assert!(!q.analysis[0].content.contains("四则运算"), "【分析】摘要不应留在解析: {}", q.analysis[0].content);
         assert!(q.analysis[0].content.contains("因为"), "{}", q.analysis[0].content);
         assert!(q.analysis[0].content.contains("故选"), "{}", q.analysis[0].content);
     }
@@ -1206,7 +1210,7 @@ A. $1-i$\nB. $-1+i$\nC. $1+i$\nD. $-1-i$\n\
         }));
         finalize_parsed_question(&mut q);
         assert_eq!(q.analysis.len(), 1, "{:?}", q.analysis.iter().map(|a| a.content.chars().count()).collect::<Vec<_>>());
-        assert!(q.analysis[0].content.contains("根据向量垂直"));
+        assert!(!q.analysis[0].content.contains("根据向量垂直"), "思路摘要不应留在解析: {}", q.analysis[0].content);
         assert!(q.analysis[0].content.contains("因为"));
         assert!(!q.analysis[0].title.contains("解法二"), "合并后不应还叫解法二: {}", q.analysis[0].title);
     }
@@ -1230,7 +1234,8 @@ A. $1-i$\nB. $-1+i$\nC. $1+i$\nD. $-1-i$\n\
         }));
         recover_question_sections(&mut q, md);
         assert_eq!(q.analysis.len(), 1, "{:?}", q.analysis.iter().map(|a| &a.title).collect::<Vec<_>>());
-        assert!(q.analysis[0].content.contains("画出两函数"));
+        assert!(!q.analysis[0].content.contains("【分析】"), "{}", q.analysis[0].content);
+        assert!(!q.analysis[0].content.contains("画出两函数"), "【分析】摘要不应留在解析: {}", q.analysis[0].content);
         assert!(q.analysis[0].content.contains("故选"));
     }
 

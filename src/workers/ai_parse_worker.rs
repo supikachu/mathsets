@@ -14,7 +14,7 @@
 //!   可重试（上游/超时/JSON）→ retrying（retry_count+1，≤2 次）
 
 use std::collections::HashSet;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use base64::Engine as _;
@@ -1414,9 +1414,15 @@ async fn stage_question(
 
     // 站外结构化：导入后暂不入队，等用户在「智能打标」里点开始。
     // 无文本模型时仍走同步 Parsed 适配（测试环境 / 未配置打标模型）。
-    let defer_async_tagging = is_ocr_export(task);
+    let defer_async_tagging = is_ocr_export(task) || crate::ai::slice::tagging_paused();
     let (matched, unmatched, suggestion_id, engine_version, suggestion_value, tagging_status) =
         if has_text_model && defer_async_tagging {
+            if crate::ai::slice::tagging_paused() && !is_ocr_export(task) {
+                tracing::info!(
+                    "任务 {} 题目 {question_index} 切片测试阶段跳过打标（MATHSET_ENABLE_TAGGING=1 可恢复）",
+                    task.id
+                );
+            }
             (
                 Vec::new(),
                 serde_json::json!({}),
@@ -2076,6 +2082,21 @@ pub(crate) fn progress_phase_patch(phase: &str) -> serde_json::Value {
     serde_json::json!({ "phase": phase })
 }
 
+async fn persist_slice_timing(state: &AppState, task_id: Uuid, timing: serde_json::Value) {
+    let patch = serde_json::json!({ "slice_timing": timing });
+    let _ = sqlx::query(
+        r#"
+        UPDATE ai_parse_tasks
+        SET progress = COALESCE(progress, '{}'::jsonb) || $2::jsonb, updated_at = NOW()
+        WHERE id = $1
+        "#,
+    )
+    .bind(task_id)
+    .bind(&patch)
+    .execute(&state.pool)
+    .await;
+}
+
 // ---------------------------------------------------------------------------
 // PDF 直传路径：轮询进度映射（纯函数，供 ocr_pdf_async 接入后使用）
 // ---------------------------------------------------------------------------
@@ -2307,8 +2328,10 @@ async fn run_pdf_fast_path(
     }
 
     // ── Phase 2：版面切大题（失败则回退 Markdown 题号切块）→ Stage2 ──
+    let md_to_json_start = Instant::now();
     let analysis_paper = looks_like_analysis_paper(&markdown, &task.paper_meta);
     let (chunks, split_via) = split_stage2_with_layout(&layout, &markdown, &task.paper_meta);
+    let split_ms = md_to_json_start.elapsed().as_millis();
     if chunks.is_empty() {
         return Err("PDF 直传 OCR 结果为空".into());
     }
@@ -2406,12 +2429,34 @@ async fn run_pdf_fast_path(
         "任务 {task_id} 块处理完成（切题={split_via}，高置信跳过={high_skip_n}，LLM={llm_n}）"
     );
 
+    let after_chunks = Instant::now();
     let mut flat: Vec<ParsedQuestion> = Vec::new();
     for (_ci, chunk_questions) in parsed_by_chunk {
         flat.extend(chunk_questions);
     }
     let mut merged = merge_split_questions(flat);
     recover_parsed_questions(&mut merged, &markdown);
+    let markdown_to_json_ms = md_to_json_start.elapsed().as_millis();
+    let merge_recover_ms = after_chunks.elapsed().as_millis();
+    let slice_timing = serde_json::json!({
+        "markdown_to_json_ms": markdown_to_json_ms,
+        "split_ms": split_ms,
+        "merge_recover_ms": merge_recover_ms,
+        "chunk_count": merged.len(),
+        "high_skip_n": high_skip_n,
+        "llm_n": llm_n,
+        "split_via": split_via,
+        "tagging_paused": crate::ai::slice::tagging_paused(),
+    });
+    tracing::info!(
+        markdown_to_json_ms,
+        split_ms,
+        merge_recover_ms,
+        high_skip_n,
+        llm_n,
+        "任务 {task_id} MinerU Markdown→规范 JSON {markdown_to_json_ms}ms（切块={split_ms}ms，合并回填={merge_recover_ms}ms，高置信跳过={high_skip_n}，LLM={llm_n}）"
+    );
+    persist_slice_timing(state, task_id, slice_timing).await;
 
     for (idx, q) in merged.into_iter().enumerate() {
         if idx % 5 == 0 {
@@ -3063,6 +3108,7 @@ async fn parse_stage2_chunk(
                 draft.confidence,
             );
             if report.schema_ok && !report.method_count_mismatch {
+                recover_chunk_questions(&mut qs, chunk);
                 assign_chunk_images(chunk, &mut qs);
                 tracing::info!("任务 {task_id} 第 {} 块高置信，跳过 Stage2", ci + 1);
                 return Ok((qs, true));
@@ -4238,9 +4284,21 @@ mod tests {
                 assert!(
                     unmatched_knowledge
                         .iter()
-                        .any(|n| n.as_str() == Some(planted.as_str())),
-                    "未匹配知识点应随暂存项保存：{staged}"
+                        .any(|v| v.as_str() == Some(planted.as_str())
+                            || v.to_string().contains(&planted)),
+                    "未匹配知识点应随暂存保存：{staged}"
                 );
+            }
+            Some("idle") => {
+                let queued: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM ai_tagging_tasks WHERE parse_task_id = $1 AND source_index = $2",
+                )
+                .bind(task.id)
+                .bind("p1_i0")
+                .fetch_one(&pool)
+                .await
+                .expect("查询打标队列失败");
+                assert_eq!(queued, 0, "切片测试阶段不应自动入队打标：{staged}");
             }
             other => panic!("暂存项 tagging_status 异常：{other:?}，staged={staged}"),
         }

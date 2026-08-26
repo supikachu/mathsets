@@ -1488,6 +1488,17 @@ export interface AiParseTaskDetail {
   pipeline?: string | null
   /** 如 ocr_ready */
   phase?: string | null
+  /** MinerU markdown → 规范 JSON 耗时（毫秒） */
+  slice_timing?: {
+    markdown_to_json_ms?: number
+    split_ms?: number
+    merge_recover_ms?: number
+    chunk_count?: number
+    high_skip_n?: number
+    llm_n?: number
+    split_via?: string
+    tagging_paused?: boolean
+  } | null
 }
 
 /// AI 智能录入暂存项（对应后端 progress.staged_questions 数组元素）

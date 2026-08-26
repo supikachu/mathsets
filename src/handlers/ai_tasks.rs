@@ -149,6 +149,10 @@ fn task_phase(task: &AiParseTask) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+fn task_slice_timing(task: &AiParseTask) -> Option<serde_json::Value> {
+    task.progress.get("slice_timing").cloned()
+}
+
 /// 站外 JSON：允许 `{questions:[...]}`、纯数组，或带 ```json 围栏 / 前后说明文字的文本。
 fn wrap_import_payload(raw: &str) -> Result<String, String> {
     let v = parse_import_json(raw)?;
@@ -472,6 +476,7 @@ pub async fn get_task_status(
         ocr_markdown: task_ocr_markdown(&task),
         pipeline: task_pipeline(&task),
         phase: task_phase(&task),
+        slice_timing: task_slice_timing(&task),
     }))
 }
 

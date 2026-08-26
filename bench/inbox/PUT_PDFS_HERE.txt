@@ -1,0 +1,11 @@
+把待测的 PDF 放到这个文件夹（bench/inbox）。
+
+然后在仓库根目录执行：
+
+  python scripts/bench_full_auto_parse.py --label baseline
+
+优化代码后再测同一批资料（不再上传、跳过 OCR）：
+
+  python scripts/bench_full_auto_parse.py --label after --reuse bench/out/baseline_latest.json
+
+结果在 bench/out/ 。

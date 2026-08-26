@@ -1,5 +1,6 @@
 pub mod continuation;
 pub mod cleaner;
+pub mod slice;
 pub mod structure;
 pub mod deepseek;
 pub mod embedding;

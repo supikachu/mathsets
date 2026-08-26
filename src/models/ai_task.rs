@@ -179,6 +179,9 @@ pub struct TaskStatusResponse {
     /// 流水线阶段，如 `ocr_ready`（OCR 已完成、等待导入）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
+    /// MinerU Markdown → 规范 JSON 耗时（毫秒）及切块统计
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slice_timing: Option<serde_json::Value>,
 }
 
 #[cfg(test)]

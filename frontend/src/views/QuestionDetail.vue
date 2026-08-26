@@ -303,6 +303,7 @@ import { markQuestionDeleted, markQuestionDirty } from '@/composables/useQuestio
 import { typeLabel, typeBadgeColor, statusLabel, statusIcon, formatTime } from '@/utils/questionDisplay'
 import { useOptionsLayout } from '@/composables/useOptionsLayout'
 import { partsFromStructureJson, walkLeaves } from '@/utils/questionParts'
+import { extractChoiceLetters } from '@/utils/choiceAnswer'
 
 const route = useRoute()
 const router = useRouter()
@@ -391,12 +392,7 @@ const optionList = computed(() => {
 })
 
 // 正确答案标签列表
-const correctLabels = computed(() => {
-  const ans = q.value?.correct_answer
-  if (!ans) return []
-  if (Array.isArray(ans)) return ans.map(String).sort()
-  return [String(ans)]
-})
+const correctLabels = computed(() => extractChoiceLetters(q.value?.correct_answer))
 
 // ===== 多解法 =====
 const cnNums = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十']
@@ -980,6 +976,9 @@ watch(() => route.params.id, (newId, oldId) => {
   color: #1d1d1f;
   margin-bottom: 16px;
   word-break: break-word;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
 }
 
 [data-theme='dark'] .paper-stem {
@@ -1224,6 +1223,9 @@ watch(() => route.params.id, (newId, oldId) => {
   font-size: 14px;
   line-height: 1.8;
   color: var(--text-primary);
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
 }
 
 .card-answer-content.as-fill-list {
@@ -1302,6 +1304,9 @@ watch(() => route.params.id, (newId, oldId) => {
   font-size: 14px;
   line-height: 1.8;
   color: var(--text-primary);
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
 }
 
 .paper-analysis-content :deep(p) {
@@ -1315,6 +1320,9 @@ watch(() => route.params.id, (newId, oldId) => {
   padding: 2px;
   border-radius: var(--radius-full);
   background: var(--bg-input);
+  max-width: 100%;
+  overflow-x: auto;
+  flex-shrink: 1;
 }
 
 .sol-seg-btn {

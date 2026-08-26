@@ -28,6 +28,18 @@ static ANS_SQUARE: LazyLock<Regex> = LazyLock::new(|| {
 static ANS_COLON: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"答案[:：]\s*\$?\s*([A-Da-d,，、\s]{1,12})").expect("答案："));
 
+/// MinerU 常写成 `【答案】$\mathrm{B}$` / `故选：$\mathrm{B}$`，字母不在 $ 后直接出现。
+static ANS_MATHRM: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?:【\s*答案\s*】|\[\s*答案\s*\]|故选|答案)[:：]?\s*\$?\\mathrm\s*\{([A-Da-d]+)\}",
+    )
+    .expect("答案 mathrm")
+});
+
+static MATHRM_BARE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\\mathrm\s*\{([A-Da-d]+)\}").expect("mathrm letters")
+});
+
 pub(crate) fn looks_like_choice_stem(stem: &str) -> bool {
     extract_options_from_stem(stem).is_some()
 }
@@ -250,7 +262,13 @@ fn choice_answer_is_empty(q: &ParsedQuestion) -> bool {
 }
 
 fn parse_choice_letters_ex(text: &str, allow_bare: bool) -> Vec<String> {
-    for re in [&*ANS_BRACKET, &*ANS_SQUARE, &*GU_XUAN, &*ANS_COLON] {
+    for re in [
+        &*ANS_MATHRM,
+        &*ANS_BRACKET,
+        &*ANS_SQUARE,
+        &*GU_XUAN,
+        &*ANS_COLON,
+    ] {
         if let Some(c) = re.captures(text) {
             let letters = letters_from(c.get(1).map(|m| m.as_str()).unwrap_or(""));
             if !letters.is_empty() {
@@ -260,7 +278,13 @@ fn parse_choice_letters_ex(text: &str, allow_bare: bool) -> Vec<String> {
     }
     if allow_bare {
         let t = text.trim();
-        if t.chars().count() <= 12 {
+        if t.chars().count() <= 24 {
+            if let Some(c) = MATHRM_BARE.captures(t) {
+                let letters = letters_from(c.get(1).map(|m| m.as_str()).unwrap_or(""));
+                if !letters.is_empty() {
+                    return letters;
+                }
+            }
             if let Some(v) = compact_letters(t) {
                 return v;
             }
@@ -518,5 +542,24 @@ mod tests {
             vec!["A".to_string(), "C".to_string(), "D".to_string()]
         );
         assert_eq!(q.question_type, "multiple");
+    }
+
+    #[test]
+    fn mathrm_answer_from_bracket_and_bare_latex() {
+        let mut q = parse_q(json!({
+            "question_type": "choice",
+            "stem": "8. 已知向量。",
+            "options": [
+                {"label": "A", "content": "-2"},
+                {"label": "B", "content": "-1"},
+                {"label": "C", "content": "1"},
+                {"label": "D", "content": "2"}
+            ],
+            "correct_answer": {"kind": "choice", "value": {"options": []}},
+            "analysis": [{"title": "解法一", "content": "【答案】$\\mathrm{B}$\n因为垂直，所以 $x=2$."}],
+            "parts": []
+        }));
+        finalize_parsed_question(&mut q);
+        assert_eq!(choice_letters(&q), vec!["B".to_string()]);
     }
 }

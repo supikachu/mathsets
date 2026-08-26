@@ -2,6 +2,7 @@
 import { computed, nextTick } from 'vue'
 import { AppIcon } from '@/components/ui'
 import { useToast } from '@/composables/useToast'
+import { extractChoiceLetters } from '@/utils/choiceAnswer'
 
 const options = defineModel<{ label: string; content: string }[]>('options', { required: true })
 const correctAnswer = defineModel<any>('correctAnswer', { required: true })
@@ -14,8 +15,7 @@ const isMultiChoice = computed(() => subType.value === 'multi')
 // 当前选中的 label 集合（统一为数组处理）
 const selectedLabels = computed<string[]>({
   get() {
-    if (Array.isArray(correctAnswer.value)) return [...correctAnswer.value]
-    return correctAnswer.value ? [correctAnswer.value] : []
+    return extractChoiceLetters(correctAnswer.value)
   },
   set(val: string[]) {
     const sorted = [...val].sort()

@@ -511,6 +511,27 @@ function render() {
 
   const tables = container.value.querySelectorAll('.latex-table-wrap')
   tables.forEach((table) => clearAdjacentBR(table))
+
+  wrapOverflowingMath(container.value)
+}
+
+/** 行间公式与超宽行内公式限制在容器内，溢出时出现横向滚动条而不是画出预览。 */
+function wrapOverflowingMath(root: HTMLElement) {
+  const limit = root.clientWidth
+  if (limit <= 0) return
+
+  root.querySelectorAll<HTMLElement>('.katex-display').forEach((el) => {
+    el.classList.add('katex-scroll')
+  })
+
+  root.querySelectorAll<HTMLElement>('.katex').forEach((el) => {
+    if (el.closest('.katex-display') || el.closest('.katex-scroll-inline')) return
+    if (el.scrollWidth <= limit + 4) return
+    const wrap = document.createElement('span')
+    wrap.className = 'katex-scroll-inline'
+    el.parentNode?.insertBefore(wrap, el)
+    wrap.appendChild(el)
+  })
 }
 
 /**
@@ -540,17 +561,35 @@ const handleImageClick = (e: MouseEvent) => {
   // readonly 模式：不拦截，让事件自然冒泡
 }
 
+let overflowObserver: ResizeObserver | null = null
+
+function attachOverflowObserver() {
+  overflowObserver?.disconnect()
+  overflowObserver = null
+  if (!container.value || typeof ResizeObserver === 'undefined') return
+  overflowObserver = new ResizeObserver(() => {
+    if (container.value) wrapOverflowingMath(container.value)
+  })
+  overflowObserver.observe(container.value)
+}
+
 onMounted(() => {
   render()
   if (container.value) {
     container.value.addEventListener('click', handleImageClick)
+    attachOverflowObserver()
   }
 })
 
 // 文本/模式动态变化时重新渲染
-watch(() => [props.text, props.inline, props.subQuestionBadge], render)
+watch(() => [props.text, props.inline, props.subQuestionBadge], () => {
+  render()
+  attachOverflowObserver()
+})
 
 onBeforeUnmount(() => {
+  overflowObserver?.disconnect()
+  overflowObserver = null
   if (container.value) {
     container.value.removeEventListener('click', handleImageClick)
   }
@@ -561,9 +600,12 @@ onBeforeUnmount(() => {
 .latex-render {
   line-height: 1.8;
   font-family: var(--font-cn-isolated);
+  max-width: 100%;
+  min-width: 0;
 }
 .latex-render.latex-inline {
   display: inline;
+  max-width: 100%;
 }
 .latex-render .katex-error {
   color: #e74c3c;
@@ -602,13 +644,41 @@ onBeforeUnmount(() => {
   font-weight: 600;
 }
 
-/* 行间公式（$$...$$）：左对齐+缩进，提升长篇推导的阅读连贯性 */
-.latex-render .katex-display {
+/* 行间公式（$$...$$）：左对齐+缩进；超宽时横向滚动，不画出预览卡片 */
+.latex-render .katex-display,
+.latex-render .katex-scroll {
   margin: 12px 0 !important;
   line-height: 1;
+  max-width: 100%;
   overflow-x: auto;
-  padding: 4px 0 4px 32px;
+  overflow-y: hidden;
+  padding: 4px 0 8px 32px;
   text-align: left !important;
+  -webkit-overflow-scrolling: touch;
+}
+.latex-render .katex-display > .katex,
+.latex-render .katex-scroll > .katex {
+  width: max-content;
+  max-width: none;
+}
+.latex-render .katex-scroll-inline {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 6px;
+  -webkit-overflow-scrolling: touch;
+}
+.latex-render .katex-display::-webkit-scrollbar,
+.latex-render .katex-scroll::-webkit-scrollbar,
+.latex-render .katex-scroll-inline::-webkit-scrollbar {
+  height: 8px;
+}
+.latex-render .katex-display::-webkit-scrollbar-thumb,
+.latex-render .katex-scroll::-webkit-scrollbar-thumb,
+.latex-render .katex-scroll-inline::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--text-muted, #86868b) 50%, transparent);
+  border-radius: 4px;
 }
 .latex-render .katex-display + br,
 .latex-render br:has(+ .katex-display) {
