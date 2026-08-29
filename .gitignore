@@ -36,6 +36,16 @@ logs/
 questions/
 .pg_reload.sql
 
+# 全自动解析压测：账号、试卷 PDF、运行结果不入库
+bench/credentials.txt
+bench/inbox/*
+!bench/inbox/.gitkeep
+!bench/inbox/PUT_PDFS_HERE.txt
+bench/out/
+bench/eval/*
+!bench/eval/.gitkeep
+!bench/eval/README.txt
+
 # ==========================================
 # 5. Rust 后端编译输出 (Cargo / Rust)
 # ==========================================
@@ -57,3 +67,4 @@ frontend/*.tsbuildinfo
 # 前端本地环境变量
 frontend/.env.local
 frontend/.env.*.local   
+/target-itest/

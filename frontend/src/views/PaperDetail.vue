@@ -5,10 +5,13 @@ import { paperApi, type PaperDetail, type PaperQuestionItemDetail } from '@/api/
 import { AppIcon } from '@/components/ui'
 import LatexRender from '@/components/LatexRender.vue'
 import QuestionOptions from '@/components/QuestionOptions.vue'
+import QuestionStructureView from '@/components/QuestionStructureView.vue'
 import { useToast } from '@/composables/useToast'
 import { useQuestionBasket } from '@/composables/useQuestionBasket'
 import { displayPaperSource } from '@/utils/questionSource'
 import { typeLabel, diffLabel } from '@/utils/questionDisplay'
+import { partsFromStructureJson } from '@/utils/questionParts'
+import { extractChoiceLetters, extractFillBlanks } from '@/utils/choiceAnswer'
 
 const route = useRoute()
 const router = useRouter()
@@ -122,39 +125,22 @@ function getParsedQuestion(q: PaperQuestionItemDetail) {
 
 // 获取正确答案标号数组（用于选择题高亮与展示）
 function getCorrectLabels(q: PaperQuestionItemDetail): string[] {
-  const ans = q.correct_answer
-  if (!ans) return []
-  if (Array.isArray(ans)) {
-    return ans.map((item) => (typeof item === 'string' ? item.trim().toUpperCase() : String(item).trim().toUpperCase())).filter(Boolean)
-  }
-  if (typeof ans === 'string') {
-    const trimmed = ans.trim()
-    if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
-      try {
-        const parsed = JSON.parse(trimmed)
-        if (Array.isArray(parsed)) {
-          return parsed.map((x) => String(x).trim().toUpperCase()).filter(Boolean)
-        }
-      } catch {}
-    }
-    return trimmed.replace(/[^A-Za-z]/g, '').split('').map((c) => c.toUpperCase()).filter(Boolean)
-  }
-  return []
+  return extractChoiceLetters(q.correct_answer)
 }
 
 // 格式化非选择题答案展示
 function formatAnswerText(q: PaperQuestionItemDetail): string {
-  const ans = q.correct_answer
-  if (!ans) return '暂无参考答案'
-  if (typeof ans === 'string') return ans
-  if (Array.isArray(ans)) {
-    return ans.join('； ')
-  }
-  try {
-    return JSON.stringify(ans)
-  } catch {
-    return String(ans)
-  }
+  const letters = extractChoiceLetters(q.correct_answer)
+  if (letters.length) return letters.join('')
+  const blanks = extractFillBlanks(q.correct_answer)
+  if (blanks.length) return blanks.map((b) => b.answer).join('； ')
+  if (!q.correct_answer) return '暂无参考答案'
+  if (typeof q.correct_answer === 'string') return q.correct_answer
+  return '暂无参考答案'
+}
+
+function paperSolutionParts(q: PaperQuestionItemDetail) {
+  return partsFromStructureJson(q.structure)
 }
 
 // 题目是否展开答案
@@ -453,6 +439,11 @@ onMounted(async () => {
                       <div class="apple-q-index">{{ q.question_no || (idx + 1) }}.</div>
                       <div class="apple-q-stem">
                         <LatexRender :text="getParsedQuestion(q).stem" />
+                        <QuestionStructureView
+                          v-if="q.question_type === 'solution' && paperSolutionParts(q).length"
+                          section="stems"
+                          :parts="paperSolutionParts(q)"
+                        />
                       </div>
                     </div>
 
@@ -479,7 +470,10 @@ onMounted(async () => {
                       <div class="ans-section-item">
                         <div class="ans-tag-label">【参考答案】</div>
                         <div class="ans-value-box">
-                          <template v-if="getCorrectLabels(q).length">
+                          <template v-if="q.question_type === 'solution' && paperSolutionParts(q).length">
+                            <QuestionStructureView section="answers" :parts="paperSolutionParts(q)" />
+                          </template>
+                          <template v-else-if="getCorrectLabels(q).length">
                             <span class="ans-hero-pill">
                               <LatexRender :text="`$\\mathrm{${getCorrectLabels(q).join('')}}$`" :inline="true" />
                             </span>
@@ -493,7 +487,13 @@ onMounted(async () => {
                       </div>
 
                       <!-- 试题解析 -->
-                      <div class="ans-section-item">
+                      <div v-if="q.question_type === 'solution' && paperSolutionParts(q).length" class="ans-section-item">
+                        <div class="ans-tag-label">【试题解析】</div>
+                        <div class="ans-analysis-content">
+                          <QuestionStructureView section="analyses" :parts="paperSolutionParts(q)" />
+                        </div>
+                      </div>
+                      <div v-else-if="q.question_type !== 'solution'" class="ans-section-item">
                         <div class="ans-tag-label">【试题解析】</div>
                         <div class="ans-analysis-content">
                           <LatexRender :text="q.analysis || '暂无详细试题解析'" />

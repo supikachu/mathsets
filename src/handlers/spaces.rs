@@ -1159,17 +1159,17 @@ async fn clone_question_internal(
         r#"
         INSERT INTO questions (
             id, stem, stem_text, images, question_type, difficulty, status,
-            options, correct_answer, analysis, metadata,
+            options, correct_answer, analysis, structure, metadata,
             parent_id, sub_order,
             paper_count, attempt_count, accuracy_rate, favorite_count,
             creator_id, created_at, updated_at, version, space_id, origin_question_id
         )
         VALUES (
             $1, $2, $3, $4, $5, $6, 'draft'::question_status,
-            $7, $8, $9, COALESCE($10, '{}'::jsonb),
-            $11, $12,
+            $7, $8, $9, $10, COALESCE($11, '{}'::jsonb),
+            $12, $13,
             0, 0, NULL, 0,
-            $13, $14, $15, 1, $16, $17
+            $14, $15, $16, 1, $17, $18
         )
         "#,
     )
@@ -1182,6 +1182,7 @@ async fn clone_question_internal(
     .bind(&src.options)
     .bind(&src.correct_answer)
     .bind(&src.analysis)
+    .bind(&src.structure)
     .bind(&src.metadata)
     .bind(src.parent_id)
     .bind(src.sub_order)

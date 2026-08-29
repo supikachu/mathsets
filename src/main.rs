@@ -1,8 +1,78 @@
+use tracing::field::{Field, Visit};
+use tracing_subscriber::field::RecordFields;
+use tracing_subscriber::fmt::format::Writer;
+use tracing_subscriber::fmt::FormatFields;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use mathset::build_app;
 use mathset::config::AppConfig;
 use mathset::db;
+
+/// 自定义无 ANSI 控制符的字段格式化器（解决多 Layer 共享 Span 字段缓存导致文件日志残留 ESC 颜色码的问题）
+#[derive(Default)]
+struct PlainFieldFormatter;
+
+impl<'writer> FormatFields<'writer> for PlainFieldFormatter {
+    fn format_fields<R: RecordFields>(
+        &self,
+        mut writer: Writer<'writer>,
+        fields: R,
+    ) -> std::fmt::Result {
+        let mut visitor = PlainFieldVisitor {
+            writer: &mut writer,
+            result: Ok(()),
+            is_first: true,
+        };
+        fields.record(&mut visitor);
+        visitor.result
+    }
+}
+
+struct PlainFieldVisitor<'a, 'w> {
+    writer: &'a mut Writer<'w>,
+    result: std::fmt::Result,
+    is_first: bool,
+}
+
+impl<'a, 'w> PlainFieldVisitor<'a, 'w> {
+    fn write_field(&mut self, name: &str, value: impl std::fmt::Display) {
+        if self.result.is_err() {
+            return;
+        }
+        let prefix = if self.is_first {
+            self.is_first = false;
+            ""
+        } else {
+            " "
+        };
+        if name == "message" {
+            self.result = write!(self.writer, "{prefix}{value}");
+        } else {
+            self.result = write!(self.writer, "{prefix}{name}={value}");
+        }
+    }
+}
+
+impl<'a, 'w> Visit for PlainFieldVisitor<'a, 'w> {
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        self.write_field(field.name(), format_args!("{value:?}"));
+    }
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.write_field(field.name(), value);
+    }
+    fn record_i64(&mut self, field: &Field, value: i64) {
+        self.write_field(field.name(), value);
+    }
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        self.write_field(field.name(), value);
+    }
+    fn record_bool(&mut self, field: &Field, value: bool) {
+        self.write_field(field.name(), value);
+    }
+    fn record_error(&mut self, field: &Field, value: &(dyn std::error::Error + 'static)) {
+        self.write_field(field.name(), value);
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -25,8 +95,9 @@ async fn main() {
     let stdout_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stdout);
 
-    // 文件输出层（禁用 ANSI 控制符，避免乱码）
+    // 文件输出层（使用纯文本字段格式化器 + 禁用 ANSI 控制符，彻底杜绝 ESC 乱码）
     let file_layer = tracing_subscriber::fmt::layer()
+        .fmt_fields(PlainFieldFormatter)
         .with_ansi(false)
         .with_writer(non_blocking_file);
 
@@ -122,6 +193,8 @@ async fn main() {
                     &gc_state.upload_dir,
                 )
                 .await;
+                mathset::handlers::documents::gc_abandoned_empty_parse_papers(&gc_state.pool)
+                    .await;
             }
         });
         tracing::info!("🧹 AI 孤儿草稿 GC 已启动 (6 小时间隔 / 72h TTL)");

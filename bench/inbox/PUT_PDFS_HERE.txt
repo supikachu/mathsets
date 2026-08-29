@@ -1,0 +1,17 @@
+把待测的 PDF 放到这个文件夹（bench/inbox）。
+
+然后在仓库根目录执行：
+
+  python scripts/bench_full_auto_parse.py --label baseline
+
+优化代码后再测同一批资料（复用 document_id，Worker 跳过 MinerU）：
+
+  python scripts/bench_full_auto_parse.py --label after --reuse bench/out/baseline_latest.json
+
+--reuse 会先确认上一轮任务已有 ocr_markdown；没有缓存则失败退出，不会默默重跑 OCR。
+若只要落盘、不新建解析：
+
+  python scripts/bench_full_auto_parse.py --dump-from bench/out/after_latest.json
+
+速度摘要在 bench/out/ 。
+MinerU 原文与全自动 JSON 在 bench/eval/<试卷名>/paper.md 和 full.json 。

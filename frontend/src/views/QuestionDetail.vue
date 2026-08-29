@@ -82,6 +82,12 @@
             <!-- 题干 -->
             <div class="paper-stem">
               <LatexRender :text="q?.stem || ''" />
+              <QuestionStructureView
+                v-if="q?.question_type === 'solution' && solutionParts.length"
+                class="detail-part-stems"
+                section="stems"
+                :parts="solutionParts"
+              />
             </div>
 
             <!-- 选择题选项 -->
@@ -107,9 +113,9 @@
             </div>
 
             <!-- 答案与解析区 — 材质化卡片 -->
-            <div v-if="hasAnswer || q?.analysis || hasGrading" class="answer-solution-block">
+            <div v-if="hasAnswer || q?.analysis || hasGrading || solutionParts.length" class="answer-solution-block">
               <!-- 参考答案卡片（莫兰迪极淡蓝底） -->
-              <div v-if="hasAnswer" class="answer-card">
+              <div v-if="hasAnswer || (q?.question_type === 'solution' && solutionParts.length)" class="answer-card">
                 <div class="card-section-title">参考答案</div>
                 <!-- 选择题答案：统一 $\mathrm{...}$ 格式 KaTeX 渲染 -->
                 <div v-if="(q?.question_type === 'choice' || q?.question_type === 'multiple') && correctLabels.length" class="card-answer-content">
@@ -117,21 +123,25 @@
                 </div>
                 <!-- 填空题答案 -->
                 <div v-else-if="q?.question_type === 'fill'" class="card-answer-content as-fill-list">
-                  <span v-for="(item, i) in (q!.correct_answer as any[])" :key="i" class="as-fill-item">
+                  <span v-for="(item, i) in fillBlanks" :key="i" class="as-fill-item">
                     {{ i + 1 }}. <LatexRender :text="item.answer || String(item)" :inline="true" :sub-question-badge="true" />
                   </span>
                 </div>
-                <!-- 解答题答案 — 逐小问 Flex 隔离布局 -->
+                <!-- 解答题：按树缩进渲染各问答案与解法 -->
                 <div v-else-if="q?.question_type === 'solution'" class="card-answer-content">
-                  <div v-for="(ans, i) in (q!.correct_answer as string[])" :key="i" class="answer-item-row">
-                    <span class="sub-question-badge">{{ i + 1 }}</span>
-                    <div class="answer-item-body"><LatexRender :text="ans" /></div>
-                  </div>
+                  <QuestionStructureView v-if="solutionParts.length" section="answers" :parts="solutionParts" />
+                  <span v-else class="paper-muted">—</span>
                 </div>
               </div>
 
-              <!-- 解析卡片（苹果系统柔和灰底） -->
-              <div v-if="q?.analysis" class="analysis-card">
+              <!-- 解析卡片 -->
+              <div v-if="q?.question_type === 'solution' && solutionParts.length" class="analysis-card">
+                <div class="card-section-title">解析</div>
+                <div class="paper-analysis-content">
+                  <QuestionStructureView section="analyses" :parts="solutionParts" />
+                </div>
+              </div>
+              <div v-else-if="q?.question_type !== 'solution' && q?.analysis" class="analysis-card">
                 <div class="card-section-title-row">
                   <span class="card-section-title">解析</span>
                   <div v-if="detailSolutions.length > 1" class="sol-seg">
@@ -286,10 +296,14 @@ import client from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
 import { useSpaceStore } from '@/stores/space'
 import LatexRender from '@/components/LatexRender.vue'
+import QuestionStructureView from '@/components/QuestionStructureView.vue'
 import { AppButton, AppBadge, AppModal, AppConfirm, AppIcon } from '@/components/ui'
 import { useToast } from '@/composables/useToast'
+import { markQuestionDeleted, markQuestionDirty } from '@/composables/useQuestionListInvalidation'
 import { typeLabel, typeBadgeColor, statusLabel, statusIcon, formatTime } from '@/utils/questionDisplay'
 import { useOptionsLayout } from '@/composables/useOptionsLayout'
+import { partsFromStructureJson, walkLeaves } from '@/utils/questionParts'
+import { extractChoiceLetters, extractFillBlanks } from '@/utils/choiceAnswer'
 
 const route = useRoute()
 const router = useRouter()
@@ -378,18 +392,16 @@ const optionList = computed(() => {
 })
 
 // 正确答案标签列表
-const correctLabels = computed(() => {
-  const ans = q.value?.correct_answer
-  if (!ans) return []
-  if (Array.isArray(ans)) return ans.map(String).sort()
-  return [String(ans)]
-})
+const correctLabels = computed(() => extractChoiceLetters(q.value?.correct_answer))
+const fillBlanks = computed(() => extractFillBlanks(q.value?.correct_answer))
 
 // ===== 多解法 =====
 const cnNums = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十']
 function cnNum(n: number): string {
   return cnNums[n - 1] || String(n)
 }
+
+const solutionParts = computed(() => partsFromStructureJson(q.value?.structure))
 
 const activeSolution = ref(0)
 
@@ -421,10 +433,13 @@ function splitSolution(text: string): { body: string; conclusion: string } {
 
 // 是否有参考答案
 const hasAnswer = computed(() => {
-  const ans = q.value?.correct_answer
-  if (!ans) return false
-  if (Array.isArray(ans)) return ans.length > 0
-  return !!ans
+  if (q.value?.question_type === 'solution') {
+    return walkLeaves(solutionParts.value).some((l) => (l.answer || '').trim())
+  }
+  if (q.value?.question_type === 'fill') {
+    return fillBlanks.value.some((b) => (b.answer || '').trim())
+  }
+  return correctLabels.value.length > 0
 })
 
 // 是否有评分标准
@@ -501,6 +516,7 @@ async function submitReview() {
   try {
     await questionApi.submit(route.params.id as string)
     toast.success('已提交审核')
+    markQuestionDirty(route.params.id as string)
     fetchDetail()
   } catch (e: any) {
     toast.error(e.response?.data?.error || e.response?.data?.message || e.message || '提交审核失败')
@@ -514,6 +530,7 @@ async function confirmSubmitWithReviewer() {
   try {
     await questionApi.submit(route.params.id as string, { reviewer_id: selectedReviewerId.value })
     toast.success('已提交审核')
+    markQuestionDirty(route.params.id as string)
     reviewerDialog.value = false
     selectedReviewerId.value = ''
     fetchDetail()
@@ -579,6 +596,7 @@ async function doDelete() {
   try {
     await client.delete(`/questions/${route.params.id}`)
     toast.success('已删除')
+    markQuestionDeleted(route.params.id as string)
     backToList()
   } catch (e: any) {
     console.error('删除题目失败:', e)
@@ -612,6 +630,7 @@ async function confirmReview(action: string, comment?: string): Promise<boolean>
       await questionApi.reject(route.params.id as string, { reject_reason: comment })
     }
     toast.success(action === 'approved' ? '已通过' : '已驳回')
+    markQuestionDirty(route.params.id as string)
     await fetchDetail()
     return true
   } catch (e: any) {
@@ -622,19 +641,15 @@ async function confirmReview(action: string, comment?: string): Promise<boolean>
 }
 
 function isCorrect(label: string): boolean {
-  const ans = q.value?.correct_answer
-  if (!ans) return false
-  if (Array.isArray(ans)) return ans.map(String).includes(label)
-  return String(ans) === label
+  return extractChoiceLetters(q.value?.correct_answer).includes(label)
 }
 
 const isMultiChoice = computed(() => {
   if (!q.value) return false
   if (q.value.question_type === 'multiple') return true
   if (q.value.question_type !== 'choice') return false
-  if ((q.value as any)?.sub_type === 'multi') return true
-  const ans = q.value.correct_answer
-  return Array.isArray(ans) && ans.length > 1
+  if ((q.value as { sub_type?: string })?.sub_type === 'multi') return true
+  return extractChoiceLetters(q.value.correct_answer).length > 1
 })
 
 // ── 空间切换监听：防止幽灵页面 ──
@@ -958,6 +973,9 @@ watch(() => route.params.id, (newId, oldId) => {
   color: #1d1d1f;
   margin-bottom: 16px;
   word-break: break-word;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
 }
 
 [data-theme='dark'] .paper-stem {
@@ -966,6 +984,10 @@ watch(() => route.params.id, (newId, oldId) => {
 
 .paper-stem :deep(p) {
   margin: 0 0 8px;
+}
+
+.detail-part-stems {
+  margin-top: 8px;
 }
 
 /* 选项 — 自适应网格 */
@@ -1198,6 +1220,9 @@ watch(() => route.params.id, (newId, oldId) => {
   font-size: 14px;
   line-height: 1.8;
   color: var(--text-primary);
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
 }
 
 .card-answer-content.as-fill-list {
@@ -1276,6 +1301,9 @@ watch(() => route.params.id, (newId, oldId) => {
   font-size: 14px;
   line-height: 1.8;
   color: var(--text-primary);
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
 }
 
 .paper-analysis-content :deep(p) {
@@ -1289,6 +1317,9 @@ watch(() => route.params.id, (newId, oldId) => {
   padding: 2px;
   border-radius: var(--radius-full);
   background: var(--bg-input);
+  max-width: 100%;
+  overflow-x: auto;
+  flex-shrink: 1;
 }
 
 .sol-seg-btn {

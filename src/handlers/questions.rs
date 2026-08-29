@@ -21,10 +21,14 @@ use crate::auth::permissions::{
     is_admin_user, list_reviewers, PermissionError,
 };
 use crate::models::question::{
-    AiCreateMeta, CreateQuestionRequest, KnowledgeNodeSummary, Question, QuestionDetail,
-    QuestionPaperBrief, QuestionQuery, QuestionStatus, QuestionSummary, QuestionType, RejectRequest,
-    SubmitReviewRequest, TagSummary, TransferQuestionRequest, UpdateQuestionRequest,
-    is_answer_empty, refresh_system_flags,
+    AiCreateMeta, CreateQuestionRequest, KnowledgeLinkSource, KnowledgeNodeSummary, Question,
+    QuestionDetail, QuestionPaperBrief, QuestionQuery, QuestionStatus, QuestionSummary,
+    QuestionType, RejectRequest, SubmitReviewRequest, TagCategory, TagSummary,
+    TransferQuestionRequest, UpdateQuestionRequest, attach_parse_pointer,
+    canonicalize_correct_answer, is_answer_empty, refresh_system_flags_typed,
+};
+use crate::models::question_structure::{
+    is_solution_analysis_missing, is_solution_answer_empty, parse_structure, structure_text_blobs,
 };
 use crate::models::space::SpaceKind;
 use crate::models::user::{GlobalRole, User};
@@ -456,6 +460,22 @@ pub(crate) fn db_err(msg: impl Into<String>) -> (StatusCode, Json<serde_json::Va
     )
 }
 
+fn reject_solution_parent_id(
+    question_type: &QuestionType,
+    parent_id: Option<Uuid>,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    if *question_type == QuestionType::Solution && parent_id.is_some() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "解答题小问只写入 structure，不能用 parent_id 拆成子题",
+                "code": "ERR_SOLUTION_PARENT_ID"
+            })),
+        ));
+    }
+    Ok(())
+}
+
 /// 提交审核前的完整性校验（T2-1 ~ T2-4）
 ///
 /// 三道校验门，任一失败返回 422 + 结构化错误：
@@ -467,6 +487,31 @@ pub(crate) fn db_err(msg: impl Into<String>) -> (StatusCode, Json<serde_json::Va
 fn validate_question_completeness(
     question: &Question,
 ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    if question.question_type == QuestionType::Solution {
+        let parsed = parse_structure(question.structure.as_ref());
+        if is_solution_answer_empty(parsed.as_ref()) {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "error": "题目尚未补全答案，无法提交审核",
+                    "code": "ERR_ANSWER_INCOMPLETE",
+                    "missing": ["correct_answer"]
+                })),
+            ));
+        }
+        if is_solution_analysis_missing(parsed.as_ref()) {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "error": "题目尚未补全解析，无法提交审核",
+                    "code": "ERR_ANALYSIS_INCOMPLETE",
+                    "missing": ["analysis"]
+                })),
+            ));
+        }
+        return Ok(());
+    }
+
     // 1. 答案校验
     if is_answer_empty(&question.correct_answer) {
         return Err((
@@ -589,6 +634,134 @@ pub async fn question_stats(
 // 题目 CRUD
 // ---------------------------------------------------------------------------
 
+/// 批量填充列表卡片关联：试卷、知识点、标签（各一条 ANY($1)，避免 N+1）
+async fn hydrate_question_list_cards(
+    pool: &sqlx::PgPool,
+    questions: &mut [QuestionSummary],
+) -> Result<(), sqlx::Error> {
+    if questions.is_empty() {
+        return Ok(());
+    }
+    let qids: Vec<Uuid> = questions.iter().map(|q| q.id).collect();
+
+    #[derive(sqlx::FromRow)]
+    struct PaperLinkRow {
+        question_id: Uuid,
+        paper_id: Uuid,
+        title: String,
+    }
+    let paper_links = sqlx::query_as::<_, PaperLinkRow>(
+        r#"
+        SELECT pq.question_id, p.id AS paper_id, p.title
+        FROM paper_questions pq
+        JOIN papers p ON p.id = pq.paper_id
+        WHERE pq.question_id = ANY($1)
+        ORDER BY pq.display_order, pq.sort_order, pq.created_at
+        "#,
+    )
+    .bind(&qids)
+    .fetch_all(pool)
+    .await?;
+
+    let mut papers_by_qid: HashMap<Uuid, Vec<QuestionPaperBrief>> = HashMap::new();
+    for row in paper_links {
+        papers_by_qid
+            .entry(row.question_id)
+            .or_default()
+            .push(QuestionPaperBrief {
+                id: row.paper_id,
+                title: row.title,
+            });
+    }
+
+    #[derive(sqlx::FromRow)]
+    struct KnLinkRow {
+        question_id: Uuid,
+        id: Uuid,
+        tree_id: Uuid,
+        name: String,
+        path: String,
+        depth: i16,
+        kind: String,
+        is_primary: bool,
+        ai_confidence: Option<rust_decimal::Decimal>,
+        source: KnowledgeLinkSource,
+    }
+    let kn_links = sqlx::query_as::<_, KnLinkRow>(
+        r#"
+        SELECT qkn.question_id, kn.id, kn.tree_id, kn.name,
+               kn.path::text AS path, kn.depth,
+               kt.kind::text AS kind,
+               qkn.is_primary, qkn.ai_confidence, qkn.source
+        FROM knowledge_nodes kn
+        JOIN knowledge_trees kt ON kt.id = kn.tree_id
+        JOIN question_knowledge_nodes qkn ON qkn.node_id = kn.id
+        WHERE qkn.question_id = ANY($1)
+        ORDER BY qkn.is_primary DESC, kn.sort_order, kn.name
+        "#,
+    )
+    .bind(&qids)
+    .fetch_all(pool)
+    .await?;
+
+    let mut kns_by_qid: HashMap<Uuid, Vec<KnowledgeNodeSummary>> = HashMap::new();
+    for row in kn_links {
+        kns_by_qid
+            .entry(row.question_id)
+            .or_default()
+            .push(KnowledgeNodeSummary {
+                id: row.id,
+                tree_id: row.tree_id,
+                name: row.name,
+                path: row.path,
+                depth: row.depth,
+                kind: row.kind,
+                is_primary: row.is_primary,
+                ai_confidence: row.ai_confidence,
+                source: row.source,
+            });
+    }
+
+    #[derive(sqlx::FromRow)]
+    struct TagLinkRow {
+        question_id: Uuid,
+        id: Uuid,
+        name: String,
+        category: TagCategory,
+    }
+    let tag_links = sqlx::query_as::<_, TagLinkRow>(
+        r#"
+        SELECT qtr.question_id, t.id, t.name, t.category
+        FROM tags t
+        JOIN question_tags_relation qtr ON qtr.tag_id = t.id
+        WHERE qtr.question_id = ANY($1)
+        ORDER BY t.category, t.name
+        "#,
+    )
+    .bind(&qids)
+    .fetch_all(pool)
+    .await?;
+
+    let mut tags_by_qid: HashMap<Uuid, Vec<TagSummary>> = HashMap::new();
+    for row in tag_links {
+        tags_by_qid
+            .entry(row.question_id)
+            .or_default()
+            .push(TagSummary {
+                id: row.id,
+                name: row.name,
+                category: row.category,
+            });
+    }
+
+    for q in questions.iter_mut() {
+        q.papers = papers_by_qid.remove(&q.id).unwrap_or_default();
+        q.knowledge_nodes = kns_by_qid.remove(&q.id).unwrap_or_default();
+        q.tags = tags_by_qid.remove(&q.id).unwrap_or_default();
+    }
+    Ok(())
+}
+
 /// GET /api/v1/questions
 pub async fn list_questions(
     State(state): State<AppState>,
@@ -624,7 +797,8 @@ pub async fn list_questions(
 
     let mut builder = sqlx::QueryBuilder::new(
         "SELECT q.id, q.stem, q.question_type, q.difficulty, q.status, \
-         q.creator_id, u.display_name AS creator_name, q.created_at, q.updated_at, q.version, q.space_id \
+         q.creator_id, u.display_name AS creator_name, q.created_at, q.updated_at, q.version, q.space_id, \
+         q.options, q.correct_answer, q.analysis, q.structure, q.metadata \
          FROM questions q LEFT JOIN users u ON u.id = q.creator_id WHERE 1=1",
     );
     apply_access_filters(&mut builder, &auth, &query);
@@ -650,40 +824,9 @@ pub async fn list_questions(
         .await
         .map_err(|e| db_err(format!("查询题目失败: {}", e)))?;
 
-    // 批量填充关联试卷（避免列表 N+1；有关联时卡片展示试卷名）
-    if !questions.is_empty() {
-        let qids: Vec<Uuid> = questions.iter().map(|q| q.id).collect();
-        #[derive(sqlx::FromRow)]
-        struct PaperLinkRow {
-            question_id: Uuid,
-            paper_id: Uuid,
-            title: String,
-        }
-        let links = sqlx::query_as::<_, PaperLinkRow>(
-            r#"
-            SELECT pq.question_id, p.id AS paper_id, p.title
-            FROM paper_questions pq
-            JOIN papers p ON p.id = pq.paper_id
-            WHERE pq.question_id = ANY($1)
-            ORDER BY pq.display_order, pq.sort_order, pq.created_at
-            "#,
-        )
-        .bind(&qids)
-        .fetch_all(&state.pool)
+    hydrate_question_list_cards(&state.pool, &mut questions)
         .await
-        .map_err(|e| db_err(format!("查询题目关联试卷失败: {}", e)))?;
-
-        let mut by_qid: HashMap<Uuid, Vec<QuestionPaperBrief>> = HashMap::new();
-        for row in links {
-            by_qid.entry(row.question_id).or_default().push(QuestionPaperBrief {
-                id: row.paper_id,
-                title: row.title,
-            });
-        }
-        for q in &mut questions {
-            q.papers = by_qid.remove(&q.id).unwrap_or_default();
-        }
-    }
+        .map_err(|e| db_err(format!("填充题目列表关联数据失败: {}", e)))?;
 
     Ok(Json(PageResult {
         items: questions,
@@ -1185,6 +1328,8 @@ pub async fn create_question(
         return Err((StatusCode::FORBIDDEN, Json(json!({"error": "无权在该空间创建题目"}))));
     }
 
+    reject_solution_parent_id(&req.question_type, req.parent_id)?;
+
     // ── AI 智能录入：加载暂存项（校验归属）；已保存则幂等返回已有题目 ──
     let ai_staged: Option<serde_json::Value> = match &req.ai_meta {
         Some(meta) => {
@@ -1233,33 +1378,52 @@ pub async fn create_question(
 
     // ── V2.1.1 去重 hash（创建接口即时计算，计划书 §八） ──
     // 空答案统一按 JSON null 参与 hash（与下方 INSERT 写入值一致）
-    let answer_for_hash = req.correct_answer.as_ref().unwrap_or(&serde_json::Value::Null);
-    let content_hash = crate::util::normalize::compute_content_hash(
+    let is_solution = req.question_type == QuestionType::Solution;
+    let persist_structure = if is_solution {
+        req.structure.clone()
+    } else {
+        None
+    };
+    let persist_answer = canonicalize_correct_answer(&req.question_type, req.correct_answer.as_ref());
+    let persist_analysis = if is_solution { None } else { req.analysis.clone() };
+    let answer_for_hash = persist_answer.as_ref().unwrap_or(&serde_json::Value::Null);
+    let content_hash = crate::util::normalize::compute_content_hash_ex(
         &req.stem,
         req.options.as_ref(),
         answer_for_hash,
-        req.analysis.as_deref(),
+        persist_analysis.as_deref(),
+        persist_structure.as_ref(),
     );
-    let normalized_content_hash = crate::util::normalize::compute_normalized_content_hash(
+    let normalized_content_hash = crate::util::normalize::compute_normalized_content_hash_ex(
         &req.stem,
         req.options.as_ref(),
         answer_for_hash,
+        persist_structure.as_ref(),
     );
 
     // ── 异步补全：刷新 metadata.system_flags（pending_answer / missing_analysis） ──
     let mut metadata = req.metadata.clone().unwrap_or_else(|| serde_json::json!({}));
-    refresh_system_flags(&mut metadata, &req.correct_answer, &req.analysis);
+    refresh_system_flags_typed(
+        &mut metadata,
+        &persist_answer,
+        &persist_analysis,
+        Some(&req.question_type),
+        persist_structure.as_ref(),
+    );
+    if let Some(meta) = &req.ai_meta {
+        attach_parse_pointer(&mut metadata, meta.task_id, &meta.staged_index, now);
+    }
 
     sqlx::query(
         r#"
         INSERT INTO questions (id, stem, question_type, difficulty, status,
-            options, correct_answer, analysis, metadata,
+            options, correct_answer, analysis, structure, metadata,
             images, parent_id, sub_order,
             creator_id, created_at, updated_at, version, space_id,
             content_hash, normalized_content_hash)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, '{}'::jsonb),
-            $10, $11, $12,
-            $13, $14, $15, $16, $17, $18, $19)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10, '{}'::jsonb),
+            $11, $12, $13,
+            $14, $15, $16, $17, $18, $19, $20)
         "#,
     )
     .bind(id)
@@ -1268,9 +1432,10 @@ pub async fn create_question(
     .bind(&req.difficulty)
     .bind(QuestionStatus::Draft)
     .bind(&req.options)
-    // 空答案统一写入 JSON null（非 SQL NULL，不违反 NOT NULL 约束）
-    .bind(req.correct_answer.as_ref().unwrap_or(&serde_json::Value::Null))
-    .bind(&req.analysis)
+    // 规范 {kind,value}；缺省/null 写 JSON null。空 [] 写成空结构以便 pending_answer。
+    .bind(persist_answer.as_ref().unwrap_or(&serde_json::Value::Null))
+    .bind(&persist_analysis)
+    .bind(&persist_structure)
     .bind(&metadata)
     .bind(&req.images)
     .bind(&req.parent_id)
@@ -1515,6 +1680,9 @@ pub async fn update_question(
             if let Some(f) = cap.get(1) { old_images.insert(f.as_str().to_string()); }
         }
     }
+    for cap in re.captures_iter(&structure_text_blobs(existing.structure.as_ref())) {
+        if let Some(f) = cap.get(1) { old_images.insert(f.as_str().to_string()); }
+    }
 
     // 提取新文本中的图片集合（COALESCE 语义：未提供的字段保留旧值）
     let new_stem = req.stem.as_deref().unwrap_or(&existing.stem);
@@ -1533,6 +1701,19 @@ pub async fn update_question(
         for cap in re.captures_iter(&options.to_string()) {
             if let Some(f) = cap.get(1) { new_images.insert(f.as_str().to_string()); }
         }
+    }
+    let effective_type = req.question_type.as_ref().unwrap_or(&existing.question_type);
+    if req.parent_id.is_some() {
+        reject_solution_parent_id(effective_type, req.parent_id)?;
+    }
+
+    let persist_structure = if *effective_type == QuestionType::Solution {
+        req.structure.clone().or_else(|| existing.structure.clone())
+    } else {
+        None
+    };
+    for cap in re.captures_iter(&structure_text_blobs(persist_structure.as_ref())) {
+        if let Some(f) = cap.get(1) { new_images.insert(f.as_str().to_string()); }
     }
 
     // 差集：存在于旧文本中但已不存在于新文本中的图片 = 被遗弃的旧图片
@@ -1553,15 +1734,21 @@ pub async fn update_question(
         .metadata
         .clone()
         .unwrap_or_else(|| existing.metadata.clone());
-    let effective_answer = req
-        .correct_answer
-        .clone()
-        .or_else(|| existing.correct_answer.clone());
-    let effective_analysis = req.analysis.clone().or(existing.analysis.clone());
-    refresh_system_flags(
+    let persist_answer = canonicalize_correct_answer(
+        effective_type,
+        req.correct_answer.as_ref().or(existing.correct_answer.as_ref()),
+    );
+    let persist_analysis = if *effective_type == QuestionType::Solution {
+        None
+    } else {
+        req.analysis.clone().or(existing.analysis.clone())
+    };
+    refresh_system_flags_typed(
         &mut effective_metadata,
-        &effective_answer,
-        &effective_analysis,
+        &persist_answer,
+        &persist_analysis,
+        Some(effective_type),
+        persist_structure.as_ref(),
     );
 
     let query_result = sqlx::query(
@@ -1571,8 +1758,9 @@ pub async fn update_question(
             question_type = COALESCE($2, question_type),
             difficulty = COALESCE($3, difficulty),
             options = COALESCE($4, options),
-            correct_answer = COALESCE($5, correct_answer),
-            analysis = COALESCE($6, analysis),
+            correct_answer = CASE WHEN $18 THEN 'null'::jsonb ELSE COALESCE($5, correct_answer) END,
+            analysis = CASE WHEN $18 THEN NULL ELSE COALESCE($6, analysis) END,
+            structure = $17,
             metadata = COALESCE($7, metadata),
             images = COALESCE($8, images),
             parent_id = COALESCE($9, parent_id),
@@ -1588,7 +1776,7 @@ pub async fn update_question(
     .bind(&req.question_type)
     .bind(&req.difficulty)
     .bind(&req.options)
-    .bind(&req.correct_answer)
+    .bind(&persist_answer)
     .bind(&req.analysis)
     .bind(&effective_metadata)
     .bind(&req.images)
@@ -1600,6 +1788,8 @@ pub async fn update_question(
     .bind(id)
     .bind(old_version)
     .bind(new_status)
+    .bind(&persist_structure)
+    .bind(*effective_type == QuestionType::Solution)
     .execute(&mut *tx)
     .await
     .map_err(|e| db_err(format!("更新题目失败: {}", e)))?;
@@ -1841,6 +2031,11 @@ fn extract_image_filenames(
                     if let Some(f) = cap.get(1) {
                         filenames.push(f.as_str().to_string());
                     }
+                }
+            }
+            for cap in re.captures_iter(&structure_text_blobs(q.structure.as_ref())) {
+                if let Some(f) = cap.get(1) {
+                    filenames.push(f.as_str().to_string());
                 }
             }
         }
@@ -2626,7 +2821,31 @@ pub async fn reject_question(
         );
     }
 
-    // ── 状态流转：pending → draft ──
+    // ── 状态流转：pending → draft（事务内 FOR UPDATE 锁定，防止并发审核竞态：
+    //    锁后复核状态，避免把已被其他审核人通过的题目改回草稿） ──
+    let mut tx = state.pool.begin().await.map_err(|e| db_err(format!("开启事务失败: {}", e)))?;
+
+    let locked = sqlx::query_as::<_, Question>(
+        "SELECT * FROM questions WHERE id = $1 FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| db_err(format!("锁定题目失败: {}", e)))?
+    .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "题目不存在"}))))?;
+
+    if locked.status != QuestionStatus::Pending {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": format!("状态流转违规：当前状态 {:?} 不可驳回，仅 pending 可驳回", locked.status),
+                "code": "ERR_INVALID_STATE_TRANSITION",
+                "current_status": format!("{:?}", locked.status),
+                "expected_status": "pending"
+            })),
+        ));
+    }
+
     sqlx::query(
         r#"
         UPDATE questions
@@ -2639,9 +2858,11 @@ pub async fn reject_question(
     .bind(chrono::Utc::now())
     .bind(auth_user.id)
     .bind(id)
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await
     .map_err(|e| db_err(format!("驳回题目失败: {}", e)))?;
+
+    tx.commit().await.map_err(|e| db_err(format!("提交事务失败: {}", e)))?;
 
     // ── 通知题目创建者：题目被驳回 ──
     // 个人空间允许自审退回，此时不通知自己
@@ -2841,17 +3062,17 @@ async fn copy_question(
         r#"
         INSERT INTO questions (
             id, stem, stem_text, images, question_type, difficulty, status,
-            options, correct_answer, analysis, metadata,
+            options, correct_answer, analysis, structure, metadata,
             parent_id, sub_order,
             creator_id, created_at, updated_at, version, space_id, origin_question_id,
             content_hash, normalized_content_hash
         )
         VALUES (
             $1, $2, $3, $4, $5, $6, 'published'::question_status,
-            $7, $8, $9, COALESCE($10, '{}'::jsonb),
-            $11, $12,
-            $13, $14, $15, 1, $16, $17,
-            $18, $19
+            $7, $8, $9, $10, COALESCE($11, '{}'::jsonb),
+            $12, $13,
+            $14, $15, $16, 1, $17, $18,
+            $19, $20
         )
         "#,
     )
@@ -2864,6 +3085,7 @@ async fn copy_question(
     .bind(&src.options)
     .bind(&src.correct_answer)
     .bind(&src.analysis)
+    .bind(&src.structure)
     .bind(&src.metadata)
     .bind(&src.parent_id)
     .bind(src.sub_order)

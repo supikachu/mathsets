@@ -193,6 +193,7 @@ pub struct PaperQuestionItem {
     pub options: Option<serde_json::Value>,
     pub correct_answer: Option<serde_json::Value>,
     pub analysis: Option<String>,
+    pub structure: Option<serde_json::Value>,
 }
 
 /// 创建试卷请求（V2.1.1：支持元数据 + document_id 幂等复用键）

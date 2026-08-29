@@ -245,14 +245,14 @@ pub async fn review_submission(
             r#"
             INSERT INTO questions (
                 id, stem, stem_text, images, question_type, difficulty, status,
-                options, correct_answer, analysis, metadata,
+                options, correct_answer, analysis, structure, metadata,
                 parent_id, sub_order,
                 creator_id, created_at, updated_at, version, space_id, origin_question_id
             )
             SELECT
                 gen_random_uuid(), stem, stem_text, images, question_type, difficulty,
                 'published'::question_status,
-                options, correct_answer, analysis, metadata,
+                options, correct_answer, analysis, structure, metadata,
                 parent_id, sub_order,
                 creator_id, $2, $2, 1, $1, $3
             FROM questions WHERE id = $3

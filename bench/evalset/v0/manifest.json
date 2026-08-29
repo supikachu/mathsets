@@ -1,0 +1,14 @@
+{
+  "schema_version": "evalset.v0",
+  "unit": "question",
+  "frozen_at": null,
+  "note": "第一期约 10 卷 / 206 题。未拷入试卷正文前 papers 为空；用 --dump-from 脱敏后再填。",
+  "prompt": {
+    "rules_prompts": "docs/rules-prompts.md",
+    "stage2_patch": "src/ai/prompt.rs STAGE2_PATCH_PROMPT"
+  },
+  "question_count": 0,
+  "paper_count": 0,
+  "strata": ["解析卷"],
+  "papers": []
+}

@@ -194,13 +194,87 @@ fn first_markdown_image(text: &str) -> Option<String> {
 }
 
 pub(crate) fn exam_section_heading(line: &str) -> bool {
+    section_heading_line_regex().is_match(normalize_section_line(line))
+}
+
+fn normalize_section_line(line: &str) -> &str {
+    line.trim().trim_start_matches('#').trim()
+}
+
+fn section_heading_line_regex() -> &'static regex::Regex {
     static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(
-            r"(?:第\s*[IⅠⅡⅢIV一二三四五1-9]+\s*卷)|(^[一二三四五六七八九十]+[、．，.､]?\s*(?:选|多选|填空|解答|计算|证明|综合))",
+            r"^(?:第\s*[IⅠⅡⅢIV一二三四五1-9]+\s*卷)|^[一二三四五六七八九十]+[、．，.､]?\s*(?:选择|多选|填空|解答|计算|证明|综合)",
         )
-        .expect("section heading")
+        .expect("section heading line")
     });
-    RE.is_match(line.trim())
+    &RE
+}
+
+fn section_heading_search_regex() -> &'static regex::Regex {
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r"(?m)(?:^|\n)\s*#*\s*(?:第\s*[IⅠⅡⅢIV一二三四五1-9]+\s*卷|[一二三四五六七八九十]+[、．，.､]?\s*(?:选择|多选|填空|解答|计算|证明|综合))",
+        )
+        .expect("section heading search")
+    });
+    &RE
+}
+
+/// 正文之后的「二、选择题 / 三、填空题」卷头，应交给下一题而不是留在本题解析末尾。
+pub(crate) fn split_trailing_exam_section(text: &str) -> (&str, &str) {
+    let mut last: Option<usize> = None;
+    for m in section_heading_search_regex().find_iter(text) {
+        let mut start = m.start();
+        if text.as_bytes().get(start) == Some(&b'\n') {
+            start += 1;
+        }
+        if text[..start].trim().is_empty() {
+            continue;
+        }
+        last = Some(m.start());
+    }
+    match last {
+        Some(i) => (text[..i].trim_end(), text[i..].trim()),
+        None => (text, ""),
+    }
+}
+
+/// 把误粘在上一题末尾的大题说明挪到下一题开头。
+pub(crate) fn rehome_trailing_exam_sections(chunks: Vec<String>) -> Vec<String> {
+    let mut carry = String::new();
+    let mut out: Vec<String> = Vec::new();
+    for chunk in chunks {
+        let mut md = if carry.is_empty() {
+            chunk
+        } else {
+            format!("{carry}\n\n{chunk}")
+        };
+        carry.clear();
+        let (body, trail) = split_trailing_exam_section(&md);
+        if !trail.is_empty() {
+            carry = trail.to_string();
+            md = body.to_string();
+        }
+        if !md.trim().is_empty() {
+            out.push(md);
+        }
+    }
+    out
+}
+
+/// 去掉题干/解析里误入的大题说明（含 Markdown `## 二、选择题`）。
+pub(crate) fn strip_exam_sections(text: &str) -> String {
+    let (body, _) = split_trailing_exam_section(text);
+    let t = body.trim();
+    if exam_section_heading(t.lines().next().unwrap_or("")) {
+        let rest = t
+            .find('\n')
+            .map(|i| t[i + 1..].trim_start())
+            .unwrap_or("");
+        return rest.to_string();
+    }
+    t.to_string()
 }
 
 pub(crate) fn question_start_regex() -> &'static regex::Regex {
@@ -211,6 +285,57 @@ pub(crate) fn question_start_regex() -> &'static regex::Regex {
         .expect("question start")
     });
     &RE
+}
+
+pub(crate) fn question_major_no(line: &str) -> Option<u32> {
+    question_start_regex()
+        .captures(line.trim())
+        .and_then(|c| c.get(1))
+        .and_then(|m| m.as_str().parse().ok())
+}
+
+/// OCR 常把「（2）若过…」收成行首「2. 若过…」，题号从 16 掉到 2，应视为小问而非新大题。
+pub(crate) fn is_implausible_major_no_drop(prev: u32, curr: u32) -> bool {
+    curr < prev && curr <= 9 && prev >= 10
+}
+
+/// 按行首大题号切开 Markdown。版面块把「18. …\n19.已知」粘在同一段时，切块后仍能拆出第 19 题。
+pub fn split_markdown_on_question_starts(md: &str) -> Vec<String> {
+    let mut starts: Vec<usize> = Vec::new();
+    let mut offset = 0usize;
+    let mut last_major: Option<u32> = None;
+    for line in md.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if !is_instruction_numbered_line(trimmed) {
+            if let Some(curr) = question_major_no(trimmed) {
+                let drop = last_major
+                    .is_some_and(|prev| is_implausible_major_no_drop(prev, curr));
+                if !drop {
+                    starts.push(offset);
+                    last_major = Some(curr);
+                }
+            }
+        }
+        offset += line.len();
+    }
+    if starts.len() < 2 {
+        let t = md.trim();
+        return if t.is_empty() {
+            Vec::new()
+        } else {
+            vec![md.to_string()]
+        };
+    }
+    let mut pieces = Vec::new();
+    for (i, &s) in starts.iter().enumerate() {
+        let end = starts.get(i + 1).copied().unwrap_or(md.len());
+        if i == 0 && s > 0 {
+            pieces.push(md[..end].to_string());
+        } else {
+            pieces.push(md[s..end].to_string());
+        }
+    }
+    pieces
 }
 
 pub(crate) fn is_instruction_numbered_line(line: &str) -> bool {
@@ -254,5 +379,26 @@ mod tests {
         assert_eq!(doc.blocks.len(), 2);
         assert_eq!(doc.blocks[0].page, 0);
         assert_eq!(doc.blocks[1].page, 1);
+    }
+
+    #[test]
+    fn exam_section_heading_strips_markdown_hashes() {
+        assert!(exam_section_heading("## 二、选择题：本题共3小题，每小题6分"));
+        assert!(exam_section_heading("三、填空题：本题共3小题，每小题5分，共15分。"));
+        assert!(!exam_section_heading("本题考查解析几何中的椭圆"));
+        assert!(strip_exam_sections("故选：B\n\n## 三、填空题：本题共3小题，每小题5分，共15分。").contains("故选：B"));
+        assert!(!strip_exam_sections("故选：B\n\n## 三、填空题：本题共3小题，每小题5分，共15分。").contains("填空题"));
+    }
+
+    #[test]
+    fn rehome_moves_trailing_section_to_next_chunk() {
+        let chunks = rehome_trailing_exam_sections(vec![
+            "8. 函数。\n故选：B\n\n## 二、选择题：本题共3小题，每小题6分，共18分。有多项符合题目要求。".into(),
+            "9. 正态。".into(),
+        ]);
+        assert_eq!(chunks.len(), 2);
+        assert!(!chunks[0].contains("二、选择题"), "{}", chunks[0]);
+        assert!(chunks[1].contains("二、选择题"));
+        assert!(chunks[1].contains("9. 正态"));
     }
 }

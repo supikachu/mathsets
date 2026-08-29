@@ -22,7 +22,7 @@ use serde_json::Value;
 use mathset::config::AppConfig;
 use mathset::db;
 use mathset::util::normalize::{
-    compute_content_hash, compute_normalized_content_hash, normalize_text,
+    compute_content_hash_ex, compute_normalized_content_hash_ex, normalize_text,
 };
 
 /// 每批处理行数
@@ -35,6 +35,7 @@ struct QuestionRow {
     options: Option<Value>,
     correct_answer: Value,
     analysis: Option<String>,
+    structure: Option<Value>,
 }
 
 #[tokio::main]
@@ -60,7 +61,7 @@ async fn main() {
     loop {
         let rows: Vec<QuestionRow> = sqlx::query_as(
             r#"
-            SELECT id, stem, options, correct_answer, analysis,
+            SELECT id, stem, options, correct_answer, analysis, structure,
                    content_hash, normalized_content_hash
             FROM questions
             WHERE content_hash IS NULL OR normalized_content_hash IS NULL
@@ -78,16 +79,18 @@ async fn main() {
         }
 
         for row in rows {
-            let content = compute_content_hash(
+            let content = compute_content_hash_ex(
                 &row.stem,
                 row.options.as_ref(),
                 &row.correct_answer,
                 row.analysis.as_deref(),
+                row.structure.as_ref(),
             );
-            let normalized = compute_normalized_content_hash(
+            let normalized = compute_normalized_content_hash_ex(
                 &row.stem,
                 row.options.as_ref(),
                 &row.correct_answer,
+                row.structure.as_ref(),
             );
 
             let result = sqlx::query(

@@ -571,6 +571,10 @@ async fn test_question_full_lifecycle() {
     // 注：grade 字段已 deprecated 且 #[serde(skip_serializing)]，不再出现在响应中
     assert_eq!(body["knowledge_nodes"].as_array().unwrap().len(), 1);
     assert_eq!(body["version"], 1);
+    assert_eq!(
+        body["correct_answer"],
+        json!({"kind":"choice","value":{"options":["B"]}})
+    );
 
     let question_id = body["id"].as_str().unwrap().to_string();
 
@@ -731,8 +735,9 @@ async fn test_question_delete_draft_only() {
             "stem": "临时题目",
             "question_type": "solution",
             "difficulty": 1,
-            "correct_answer": ["证明略"],
-            "analysis": "略证过程"
+            "correct_answer": null,
+            "analysis": null,
+            "structure": mathset::testing::solution_structure_json("证明略", "略证过程")
         }),
         &token,
     )
@@ -984,8 +989,9 @@ async fn test_non_creator_cannot_submit() {
             "stem": "提交权限测试",
             "question_type": "solution",
             "difficulty": 1,
-            "correct_answer": ["证明略"],
-            "analysis": "略证过程"
+            "correct_answer": null,
+            "analysis": null,
+            "structure": mathset::testing::solution_structure_json("证明略", "略证过程")
         }),
         &token_a,
     )
@@ -1033,6 +1039,123 @@ async fn test_ai_settings_default() {
     assert!(body["tagging_provider"].is_null());
     assert_eq!(body["stage2_concurrency"], 4);
     assert_eq!(body["tagging_concurrency"], 4);
+    assert!(
+        body.get("embedding_model").is_none(),
+        "教师响应不应包含 embedding_model: {:?}",
+        body
+    );
+    assert!(body.get("embedding_dim").is_none());
+    assert!(body.get("embedding_models").is_none());
+}
+
+#[tokio::test]
+async fn test_ai_settings_embedding_admin_only() {
+    let mut app = match create_test_app().await {
+        Some(app) => app,
+        None => return,
+    };
+    let teacher = register_and_login(&mut app).await;
+    let admin = register_leader_and_login(&mut app).await;
+    let (status, before) = get_auth(&mut app, "/api/v1/ai/settings", &admin).await;
+    assert_eq!(status, StatusCode::OK, "管理员获取失败: {:?}", before);
+    let before_model = before["embedding_model"].as_str().unwrap_or("");
+    assert!(
+        before_model == "text-embedding-v3" || before_model == "qwen3.7-text-embedding",
+        "管理员应看到白名单模型: {:?}",
+        before
+    );
+    assert_eq!(before["embedding_dim"], 1024);
+    assert_eq!(
+        before["embedding_models"],
+        json!(["text-embedding-v3", "qwen3.7-text-embedding"])
+    );
+
+    let (status, body) = put_auth(
+        &mut app,
+        "/api/v1/ai/settings",
+        json!({
+            "provider": "deepseek",
+            "api_key": "sk-teacher",
+            "model_text": "deepseek-chat",
+            "embedding_model": "qwen3.7-text-embedding"
+        }),
+        &teacher,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "教师保存失败: {:?}", body);
+    assert!(
+        body.get("embedding_model").is_none(),
+        "教师 PUT 响应不应带 embedding 字段: {:?}",
+        body
+    );
+
+    let (status, after_teacher) = get_auth(&mut app, "/api/v1/ai/settings", &admin).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        after_teacher["embedding_model"].as_str().unwrap_or(""),
+        before_model,
+        "教师不应改掉全站 embedding 模型"
+    );
+
+    let (status, body) = put_auth(
+        &mut app,
+        "/api/v1/ai/settings",
+        json!({
+            "provider": "deepseek",
+            "api_key": "sk-admin",
+            "model_text": "deepseek-chat",
+            "embedding_model": "not-a-real-model"
+        }),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "非法模型应 400: {:?}", body);
+
+    let other = if before_model == "qwen3.7-text-embedding" {
+        "text-embedding-v3"
+    } else {
+        "qwen3.7-text-embedding"
+    };
+    let (status, body) = put_auth(
+        &mut app,
+        "/api/v1/ai/settings",
+        json!({
+            "provider": "deepseek",
+            "api_key": "sk-admin",
+            "model_text": "deepseek-chat",
+            "embedding_model": other
+        }),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "管理员切换模型失败: {:?}", body);
+    assert_eq!(body["embedding_model"], other);
+    assert_eq!(body["embedding_dim"], 1024);
+
+    let (status, body) = get_auth(&mut app, "/api/v1/ai/settings", &admin).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["embedding_model"], other);
+
+    let (status, body) = get_auth(&mut app, "/api/v1/ai/settings", &teacher).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.get("embedding_model").is_none(),
+        "教师 GET 仍不应看到全站 embedding 配置: {:?}",
+        body
+    );
+
+    let _ = put_auth(
+        &mut app,
+        "/api/v1/ai/settings",
+        json!({
+            "provider": "deepseek",
+            "api_key": "sk-admin",
+            "model_text": "deepseek-chat",
+            "embedding_model": "text-embedding-v3"
+        }),
+        &admin,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -1210,4 +1333,235 @@ async fn test_ai_parse_task_empty_body() {
     // 缺少 document_id → 422（serde 校验）
     let (status, _) = post_auth(&mut app, "/api/v1/ai/parse-task", json!({}), &token).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn test_solution_structure_round_trip_and_completeness() {
+    let mut app = match create_test_app().await {
+        Some(app) => app,
+        None => return,
+    };
+    let token = register_and_login(&mut app).await;
+
+    // 空结构无法提交
+    let (status, body) = post_auth(
+        &mut app,
+        "/api/v1/questions",
+        json!({
+            "stem": "已知函数 $f(x)$",
+            "question_type": "solution",
+            "difficulty": 3,
+            "correct_answer": null,
+            "analysis": null,
+            "structure": { "version": 1, "parts": [] }
+        }),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let empty_id = body["id"].as_str().unwrap().to_string();
+    let (status, body) = post_auth(
+        &mut app,
+        &format!("/api/v1/questions/{empty_id}/submit"),
+        json!({}),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["code"], "ERR_ANSWER_INCOMPLETE");
+
+    // 图 2 结构 round-trip
+    let fig2 = mathset::testing::fig2_structure_json();
+    let (status, body) = post_auth(
+        &mut app,
+        "/api/v1/questions",
+        json!({
+            "stem": "已知函数 $f(x)=ax^3+bx^2+cx+d$",
+            "question_type": "solution",
+            "difficulty": 4,
+            "correct_answer": null,
+            "analysis": null,
+            "structure": fig2
+        }),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let qid = body["id"].as_str().unwrap().to_string();
+    assert!(body["correct_answer"].is_null());
+    assert!(body["analysis"].is_null());
+    assert_eq!(body["structure"]["parts"].as_array().unwrap().len(), 2);
+    assert_eq!(body["structure"]["parts"][0]["children"].as_array().unwrap().len(), 2);
+    assert_eq!(body["structure"]["parts"][1]["analyses"].as_array().unwrap().len(), 2);
+
+    let (status, detail) = get_auth(&mut app, &format!("/api/v1/questions/{qid}"), &token).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["structure"]["parts"][0]["label"], "I");
+    assert_eq!(detail["structure"]["parts"][0]["children"][0]["answer"], "$m=-1$");
+    assert_eq!(detail["structure"]["parts"][1]["analyses"][1]["title"], "解法二");
+
+    let (status, _) = post_auth(
+        &mut app,
+        &format!("/api/v1/questions/{qid}/submit"),
+        json!({}),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let fig3 = mathset::testing::fig3_structure_json();
+    let (status, body) = post_auth(
+        &mut app,
+        "/api/v1/questions",
+        json!({
+            "stem": "已知偶函数 $f(x)$",
+            "question_type": "solution",
+            "difficulty": 3,
+            "correct_answer": null,
+            "analysis": null,
+            "structure": fig3
+        }),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["structure"]["parts"][0]["children"].as_array().unwrap().len(), 0);
+    assert_eq!(body["structure"]["parts"][1]["children"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn test_solution_normalized_hash_ignores_leaf_analysis() {
+    let mut app = match create_test_app().await {
+        Some(app) => app,
+        None => return,
+    };
+    let token = register_and_login(&mut app).await;
+    let stem = format!("嵌套 hash 题 {}", Uuid::new_v4());
+
+    let (status, b1) = post_auth(
+        &mut app,
+        "/api/v1/questions",
+        json!({
+            "stem": stem,
+            "question_type": "solution",
+            "difficulty": 2,
+            "correct_answer": null,
+            "structure": mathset::testing::solution_structure_json("$2$", "解法甲")
+        }),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{b1}");
+    let (status, b2) = post_auth(
+        &mut app,
+        "/api/v1/questions",
+        json!({
+            "stem": stem,
+            "question_type": "solution",
+            "difficulty": 2,
+            "correct_answer": null,
+            "structure": mathset::testing::solution_structure_json("$2$", "解法乙完全不同")
+        }),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{b2}");
+
+    // 通过详情 metadata 无法拿到 hash，走列表不够；用 GET 后由创建响应不带 hash。
+    // 两次创建的 normalized 去重：第二题不应因解析不同而变成另一道内容。
+    // 这里用库内 hash 函数对照。
+    let s1 = mathset::testing::solution_structure_json("$2$", "解法甲");
+    let s2 = mathset::testing::solution_structure_json("$2$", "解法乙完全不同");
+    let n1 = mathset::util::normalize::compute_normalized_content_hash_ex(&stem, None, &Value::Null, Some(&s1));
+    let n2 = mathset::util::normalize::compute_normalized_content_hash_ex(&stem, None, &Value::Null, Some(&s2));
+    let c1 = mathset::util::normalize::compute_content_hash_ex(&stem, None, &Value::Null, None, Some(&s1));
+    let c2 = mathset::util::normalize::compute_content_hash_ex(&stem, None, &Value::Null, None, Some(&s2));
+    assert_eq!(n1, n2, "normalized hash 应去掉叶子 analyses");
+    assert_ne!(c1, c2, "content hash 应包含叶子解法");
+}
+
+#[tokio::test]
+async fn test_correct_answer_canonical_and_solution_parent_id() {
+    let mut app = match create_test_app().await {
+        Some(app) => app,
+        None => return,
+    };
+    let token = register_and_login(&mut app).await;
+
+    let (status, body) = post_auth(
+        &mut app,
+        "/api/v1/questions",
+        json!({
+            "stem": "多选规范化",
+            "question_type": "multiple",
+            "difficulty": 2,
+            "options": [
+                {"label": "A", "content": "1"},
+                {"label": "B", "content": "2"},
+                {"label": "C", "content": "3"}
+            ],
+            "correct_answer": ["A", "C"]
+        }),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        body["correct_answer"],
+        json!({"kind":"choice","value":{"options":["A","C"]}})
+    );
+
+    let (status, body) = post_auth(
+        &mut app,
+        "/api/v1/questions",
+        json!({
+            "stem": "填空规范化",
+            "question_type": "fill",
+            "difficulty": 2,
+            "correct_answer": [{"position": 1, "answer": "2"}]
+        }),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        body["correct_answer"],
+        json!({"kind":"fill","value":{"blanks":[{"position":1,"answer":"2"}]}})
+    );
+
+    let (status, body) = post_auth(
+        &mut app,
+        "/api/v1/questions",
+        json!({
+            "stem": "空答案待补全",
+            "question_type": "choice",
+            "difficulty": 1,
+            "options": [{"label":"A","content":"1"}],
+            "correct_answer": []
+        }),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        body["correct_answer"],
+        json!({"kind":"choice","value":{"options":[]}})
+    );
+    assert_eq!(body["metadata"]["system_flags"]["pending_answer"], true);
+
+    let (status, body) = post_auth(
+        &mut app,
+        "/api/v1/questions",
+        json!({
+            "stem": "解答题禁止 parent_id",
+            "question_type": "solution",
+            "difficulty": 3,
+            "parent_id": Uuid::new_v4(),
+            "structure": mathset::testing::solution_structure_json("解。", "过程")
+        }),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "ERR_SOLUTION_PARENT_ID");
 }

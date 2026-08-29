@@ -3,6 +3,9 @@ import { computed, ref, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { AppIcon } from '@/components/ui'
 import LatexRender, { type ImageClickPayload } from '@/components/LatexRender.vue'
 import QuestionOptions from '@/components/QuestionOptions.vue'
+import QuestionStructureView from '@/components/QuestionStructureView.vue'
+import { isSimpleTree, partsHaveContent, type QuestionPart } from '@/utils/questionParts'
+import { choiceAnswerLatex, extractChoiceLetters } from '@/utils/choiceAnswer'
 
 const props = defineProps<{
   form: {
@@ -13,6 +16,7 @@ const props = defineProps<{
     blanks: { position: number; answer: string }[]
     sub_answers: string[]
     solutions: string[]
+    parts?: QuestionPart[]
     difficulty: string
     difficulty_coefficient: number
   }
@@ -28,11 +32,7 @@ const previewOptions = computed(() => {
   return props.form.options.filter(o => o.content)
 })
 
-const highlightLabels = computed(() => {
-  const ans = props.form.correctAnswer
-  if (Array.isArray(ans)) return ans.filter(Boolean)
-  return ans ? [ans] : []
-})
+const highlightLabels = computed(() => extractChoiceLetters(props.form.correctAnswer))
 
 const previewRootRef = ref<HTMLElement | null>(null)
 const optionsRef = ref<InstanceType<typeof QuestionOptions> | null>(null)
@@ -80,6 +80,13 @@ const difficultyStars = computed(() => {
 
 const activeSolution = ref(0)
 const previewSolutions = computed(() => props.form.solutions.filter(s => s.trim()))
+const solutionParts = computed(() => props.form.parts || [])
+const isPreviewEmpty = computed(() =>
+  !props.form.stem
+  && !previewSolutions.value.length
+  && props.form.options.every(o => !o.content)
+  && !partsHaveContent(solutionParts.value),
+)
 
 watch(() => previewSolutions.value.length, (newLen) => {
   if (activeSolution.value >= newLen) {
@@ -87,20 +94,10 @@ watch(() => previewSolutions.value.length, (newLen) => {
   }
 })
 
-const hasCorrectAnswer = computed(() => {
-  if (Array.isArray(props.form.correctAnswer)) return props.form.correctAnswer.length > 0
-  return !!props.form.correctAnswer
-})
+const hasCorrectAnswer = computed(() => extractChoiceLetters(props.form.correctAnswer).length > 0)
 
-// 答案预览：统一包裹在单个 $\mathrm{...}$ 中渲染
-// 单选 B → $\mathrm{B}$，多选 A+C → $\mathrm{AC}$
-const displayCorrectAnswer = computed(() => {
-  if (Array.isArray(props.form.correctAnswer)) {
-    if (props.form.correctAnswer.length === 0) return ''
-    return `$\\mathrm{${props.form.correctAnswer.join('')}}$`
-  }
-  return props.form.correctAnswer ? `$\\mathrm{${props.form.correctAnswer}}$` : ''
-})
+// 答案预览：统一包裹在单个 $\mathrm{...}$ 中渲染；已是 $\mathrm{B}$ 时不再套一层
+const displayCorrectAnswer = computed(() => choiceAnswerLatex(props.form.correctAnswer))
 
 const cnNums = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十']
 function cnNum(n: number): string {
@@ -130,7 +127,7 @@ function splitSolution(text: string): { body: string; conclusion: string } {
   <div ref="previewRootRef" class="preview-col border-none bg-transparent">
     <div class="preview-col-inner p-0">
       <!-- 骨架屏（无输入时） -->
-      <div v-if="!form.stem && !form.solutions.some(s => s.trim()) && form.options.every(o => !o.content)" class="preview-skeleton">
+      <div v-if="isPreviewEmpty" class="preview-skeleton">
         <div class="skeleton-line skeleton-title"></div>
         <div class="skeleton-line skeleton-text"></div>
         <div class="skeleton-line skeleton-text skeleton-short"></div>
@@ -173,60 +170,90 @@ function splitSolution(text: string): { body: string; conclusion: string } {
           @image-click="emit('image-click', $event)"
         />
 
-        <!-- 答案 & 解析 -->
-        <div class="paper-answer-block">
-          <div class="paper-answer-label">答案</div>
-          <div class="paper-answer-content">
-            <template v-if="form.question_type === 'choice' && hasCorrectAnswer">
-              <!-- 答案统一用 $\mathrm{...}$ 格式，通过 LatexRender 渲染 -->
-              <LatexRender :text="displayCorrectAnswer" :inline="true" />
-            </template>
-            <template v-else-if="form.question_type === 'fill' && form.blanks.some(b => b.answer)">
-              <span v-for="(blank, i) in form.blanks.filter(b => b.answer)" :key="i">
-                {{ form.blanks.indexOf(blank) + 1 }}. <LatexRender :text="blank.answer" :inline="true" />&nbsp;
-              </span>
-            </template>
-            <template v-else-if="form.question_type === 'solution' && form.sub_answers.some(a => a.trim())">
-              <div v-for="(ans, i) in form.sub_answers" :key="i" class="paper-sub-answer">
-                <span class="paper-sub-num">({{ i + 1 }})</span>
-                <LatexRender :text="ans" :inline="false" />
-              </div>
-            </template>
-            <span class="paper-muted" v-else>—</span>
-          </div>
-        </div>
+        <!-- 解答题：小问题干紧跟总前提 -->
+        <QuestionStructureView
+          v-if="form.question_type === 'solution' && solutionParts.length"
+          section="stems"
+          :parts="solutionParts"
+          :image-editable="imageEditable"
+          @image-click="emit('image-click', $event)"
+        />
 
-        <div v-if="previewSolutions.length" class="paper-answer-block paper-analysis">
-          <div class="paper-answer-label flex justify-between items-center">
-            <span>解析</span>
-            <div v-if="previewSolutions.length > 1" class="sol-seg">
-              <button
-                v-for="(s, i) in previewSolutions"
-                :key="i"
-                class="sol-seg-btn"
-                :class="{ active: activeSolution === i }"
-                @click="activeSolution = i"
-              >解法{{ cnNum(i + 1) }}</button>
+        <!-- 解答题：答案、解析分块 -->
+        <template v-if="form.question_type === 'solution' && solutionParts.length && (!isSimpleTree(solutionParts) || partsHaveContent(solutionParts) || form.stem)">
+          <div class="paper-answer-block">
+            <div class="paper-answer-label">答案</div>
+            <div class="paper-answer-content">
+              <QuestionStructureView
+                section="answers"
+                :parts="solutionParts"
+                :image-editable="imageEditable"
+                @image-click="emit('image-click', $event)"
+              />
             </div>
           </div>
-          <div class="paper-answer-content">
-            <Transition name="sol-fade" mode="out-in">
+          <div class="paper-answer-block paper-analysis">
+            <div class="paper-answer-label">解析</div>
+            <div class="paper-answer-content">
+              <QuestionStructureView
+                section="analyses"
+                :parts="solutionParts"
+                :image-editable="imageEditable"
+                @image-click="emit('image-click', $event)"
+              />
+            </div>
+          </div>
+        </template>
+
+        <!-- 选择题/填空题：答案 & 解析 -->
+        <template v-else-if="form.question_type !== 'solution'">
+          <div class="paper-answer-block">
+            <div class="paper-answer-label">答案</div>
+            <div class="paper-answer-content">
+              <template v-if="form.question_type === 'choice' && hasCorrectAnswer">
+                <LatexRender :text="displayCorrectAnswer" :inline="true" />
+              </template>
+              <template v-else-if="form.question_type === 'fill' && form.blanks.some(b => b.answer)">
+                <span v-for="(blank, i) in form.blanks.filter(b => b.answer)" :key="i">
+                  {{ form.blanks.indexOf(blank) + 1 }}. <LatexRender :text="blank.answer" :inline="true" />&nbsp;
+                </span>
+              </template>
+              <span class="paper-muted" v-else>—</span>
+            </div>
+          </div>
+
+          <div v-if="previewSolutions.length" class="paper-answer-block paper-analysis">
+            <div class="paper-answer-label flex justify-between items-center">
+              <span>解析</span>
+              <div v-if="previewSolutions.length > 1" class="sol-seg">
+                <button
+                  v-for="(s, i) in previewSolutions"
+                  :key="i"
+                  class="sol-seg-btn"
+                  :class="{ active: activeSolution === i }"
+                  @click="activeSolution = i"
+                >解法{{ cnNum(i + 1) }}</button>
+              </div>
+            </div>
+            <div class="paper-answer-content">
+              <Transition name="sol-fade" mode="out-in">
+                <LatexRender
+                  :key="activeSolution"
+                  :text="splitSolution(previewSolutions[activeSolution]).body"
+                  :mode="imageEditable ? 'editable' : 'readonly'"
+                  @image-click="emit('image-click', $event)"
+                />
+              </Transition>
+            </div>
+            <div v-if="splitSolution(previewSolutions[activeSolution]).conclusion" class="paper-conclusion">
               <LatexRender
-                :key="activeSolution"
-                :text="splitSolution(previewSolutions[activeSolution]).body"
+                :text="splitSolution(previewSolutions[activeSolution]).conclusion"
                 :mode="imageEditable ? 'editable' : 'readonly'"
                 @image-click="emit('image-click', $event)"
               />
-            </Transition>
+            </div>
           </div>
-          <div v-if="splitSolution(previewSolutions[activeSolution]).conclusion" class="paper-conclusion">
-            <LatexRender
-              :text="splitSolution(previewSolutions[activeSolution]).conclusion"
-              :mode="imageEditable ? 'editable' : 'readonly'"
-              @image-click="emit('image-click', $event)"
-            />
-          </div>
-        </div>
+        </template>
       </div>
     </div>
   </div>
@@ -245,20 +272,20 @@ function splitSolution(text: string): { body: string; conclusion: string } {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 16px;
+  padding: 24px;
 }
 
 /* 试卷卡片 - 悬浮纸张效果 */
 .paper-card {
   background: var(--bg-card);
   border-radius: 16px;
-  padding: 24px 28px 48px 28px;
-  box-shadow: var(--shadow-md);
-  border: none;
+  padding: 24px;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.05);
+  border: 1px solid hsl(0 0% 91%);
 }
 
 [data-theme='dark'] .paper-card {
-  border: 1px solid #3a3a3c;
+  border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .paper-card-header {
@@ -267,7 +294,7 @@ function splitSolution(text: string): { body: string; conclusion: string } {
   justify-content: space-between;
   margin-bottom: 16px;
   padding-bottom: 12px;
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: 1px solid hsl(0 0% 91%);
 }
 
 [data-theme='dark'] .paper-card-header {
@@ -301,31 +328,69 @@ function splitSolution(text: string): { body: string; conclusion: string } {
   margin-bottom: 14px;
   word-break: break-word;
   font-family: var(--font-cn-isolated);
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
 }
 
 [data-theme='dark'] .paper-stem {
   color: #f5f5f7;
 }
 
-/* 答案/解析区块 */
+/* 答案卡片 — 与详情页参考答案一致：莫兰迪极淡蓝底 */
 .paper-answer-block {
-  background: #f5f5f7;
-  border-radius: 8px;
-  padding: 12px 16px;
-  margin-top: 10px;
+  background: #f4f8fc;
+  border-radius: 16px;
+  padding: 20px 24px;
+  margin-top: 24px;
+  border: none;
+}
+
+.paper-answer-block:hover {
+  background: #edf3f9;
 }
 
 [data-theme='dark'] .paper-answer-block {
-  background: rgba(255, 255, 255, 0.04);
+  background: rgba(100, 160, 220, 0.08);
+}
+
+[data-theme='dark'] .paper-answer-block:hover {
+  background: rgba(100, 160, 220, 0.12);
+}
+
+/* 解析卡片 — 与详情页解析一致：系统柔和灰底 */
+.paper-answer-block.paper-analysis {
+  background: #f5f5f7;
+}
+
+.paper-answer-block.paper-analysis:hover {
+  background: #ebebef;
+}
+
+[data-theme='dark'] .paper-answer-block.paper-analysis {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+[data-theme='dark'] .paper-answer-block.paper-analysis:hover {
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .paper-answer-label {
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 600;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  margin-bottom: 4px;
+  color: #1d1d1f;
+  letter-spacing: -0.01em;
+  margin-bottom: 16px;
+  text-transform: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+[data-theme='dark'] .paper-answer-label {
+  color: #f5f5f7;
 }
 
 .paper-answer-content {
@@ -333,10 +398,13 @@ function splitSolution(text: string): { body: string; conclusion: string } {
   line-height: 1.7;
   color: var(--text-primary);
   font-family: var(--font-cn-isolated);
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
 }
 
 .paper-correct-answer {
-  font-weight: 700;
+  font-weight: 600;
   font-size: 16px;
   color: var(--accent);
 }
@@ -352,18 +420,23 @@ function splitSolution(text: string): { body: string; conclusion: string } {
   padding: 2px;
   border-radius: var(--radius-full);
   background: var(--bg-input);
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  flex-shrink: 1;
+  flex-wrap: nowrap;
 }
 
 .sol-seg-btn {
-  padding: 3px 10px;
+  padding: 4px 12px;
   border: none;
   border-radius: var(--radius-full);
   background: transparent;
-  font-size: 11px;
-  font-weight: 500;
+  font-size: 12px;
+  font-weight: 400;
   color: var(--text-muted);
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .sol-seg-btn.active {
@@ -407,7 +480,7 @@ function splitSolution(text: string): { body: string; conclusion: string } {
 }
 
 .paper-sub-num {
-  font-weight: 700;
+  font-weight: 600;
   flex-shrink: 0;
 }
 

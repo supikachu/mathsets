@@ -20,10 +20,12 @@ import {
 import { AppButton, AppModal, AppConfirm, AppIcon, AppBadge } from '@/components/ui'
 import LatexRender from '@/components/LatexRender.vue'
 import QuestionOptions from '@/components/QuestionOptions.vue'
+import QuestionStructureView from '@/components/QuestionStructureView.vue'
 import { typeLabel, typeBadgeColor, diffLabel, diffBadgeColor } from '@/utils/questionDisplay'
 import { useToast } from '@/composables/useToast'
 import { useAiParsePolling } from '@/composables/useAiParsePolling'
 import { normalizeChoiceAnswerBlank } from '@/utils/parseMarkdown'
+import { defaultStructure, partsFromParsed, type QuestionPart } from '@/utils/questionParts'
 import {
   comparePaperQuestionOrder,
   resolvedQuestionNo,
@@ -72,6 +74,7 @@ const props = defineProps<{
     blanks: { position: number; answer: string }[]
     sub_answers: string[]
     solutions: string[]
+    parts?: QuestionPart[]
     tagIds: string[]
     knowledgeNodeIds: string[]
     hasUnsaved: boolean
@@ -317,6 +320,12 @@ function previewIdentityKey(q: ParsedQuestion, fallback: number): string {
   if (no) return `no:${no}`
   const stem = (q.stem || '').replace(/\s+/g, '').slice(0, 96)
   if (stem) return `stem:${stem}`
+  const partStem = (q.parts || [])
+    .map((p) => `${p.label || ''}${p.stem || ''}`)
+    .join('')
+    .replace(/\s+/g, '')
+    .slice(0, 96)
+  if (partStem) return `parts:${partStem}`
   return `idx:${q.ai_meta?.staged_index ?? fallback}`
 }
 
@@ -646,6 +655,7 @@ function parsedStubFromSnapshot(s: any): ParsedQuestion {
     warnings: [],
     image_placeholders: [],
     image_urls: [],
+    parts: Array.isArray(s?.parts) ? s.parts : [],
     kp_matches: [],
     tagging_matches: Array.isArray(s?.taggingMatches) ? s.taggingMatches : [],
     tagging_suggestion_id: s?.taggingSuggestionId || null,
@@ -670,6 +680,8 @@ function overlayParsedFromSnapshot(q: ParsedQuestion, s: any): ParsedQuestion {
     correct_answer = { kind: 'choice', value: { options: opts } }
   } else if (qType === 'fill' && Array.isArray(s.blanks)) {
     correct_answer = { kind: 'fill', value: { blanks: s.blanks } }
+  } else if (qType === 'solution' && Array.isArray(s.parts) && s.parts.length) {
+    correct_answer = { kind: 'solution', value: { subs: [] } }
   } else if (qType === 'solution' && Array.isArray(s.sub_answers)) {
     correct_answer = {
       kind: 'solution',
@@ -691,6 +703,9 @@ function overlayParsedFromSnapshot(q: ParsedQuestion, s: any): ParsedQuestion {
     options,
     correct_answer,
     analysis,
+    parts: qType === 'solution'
+      ? (Array.isArray(s.parts) && s.parts.length ? s.parts : q.parts)
+      : q.parts,
     tagging_matches: Array.isArray(s.taggingMatches) && s.taggingMatches.length
       ? s.taggingMatches
       : q.tagging_matches,
@@ -1016,6 +1031,7 @@ function doApplyAiResult(q: ParsedQuestion) {
   props.form.sub_answers = ['']
   props.form.correctAnswer = ''
   props.form.solutions = ['']
+  if ('parts' in props.form) props.form.parts = defaultStructure().parts
   aiGeneratedFields.value = new Set()
 
   // Set fields — multiple 在编辑态映射为 choice + sub_type=multi
@@ -1058,14 +1074,14 @@ function doApplyAiResult(q: ParsedQuestion) {
     }
     aiGeneratedFields.value.add('blanks')
   } else if (q.question_type === 'solution') {
-    if (q.correct_answer.kind === 'solution' && q.correct_answer.value.subs) {
-      props.form.sub_answers = q.correct_answer.value.subs.map(s => s.content)
-    }
+    props.form.parts = partsFromParsed(q)
     aiGeneratedFields.value.add('sub_answers')
   }
 
-  props.form.solutions = q.analysis.map(a => a.content)
-  aiGeneratedFields.value.add('solutions')
+  if (q.question_type !== 'solution') {
+    props.form.solutions = q.analysis.map(a => a.content)
+    aiGeneratedFields.value.add('solutions')
+  }
 
   if (q.kp_matches?.length) {
     const kIds: string[] = []
@@ -1490,6 +1506,7 @@ function stagedToParsed(s: AiStagedQuestion, taskId: string): ParsedQuestion {
     options: p.options,
     correct_answer: (p.correct_answer ?? { kind: 'solution', value: { subs: [] } }) as any,
     analysis: Array.isArray(p.analysis) ? p.analysis : [],
+    parts: Array.isArray(p.parts) ? p.parts : [],
     knowledge_points: Array.isArray(p.knowledge_points) ? p.knowledge_points : [],
     confidence: typeof p.confidence === 'number' ? p.confidence : 0,
     image_placeholders: Array.isArray(p.image_placeholders) ? p.image_placeholders : [],
@@ -2127,12 +2144,18 @@ onBeforeUnmount(() => {
                       </div>
                     </div>
                     <div class="ai-q-card-body">
-                      <div class="ai-q-stem">
+                      <div v-if="card.stem" class="ai-q-stem">
                         <LatexRender :text="card.stem" />
                       </div>
                       <QuestionOptions
                         v-if="(card.question_type === 'choice' || card.question_type === 'multiple') && card.options?.length"
                         :options="card.options"
+                      />
+                      <QuestionStructureView
+                        v-if="card.question_type === 'solution' && card.parts?.length"
+                        class="ai-q-parts"
+                        section="stems"
+                        :parts="partsFromParsed(card)"
                       />
                     </div>
                     <div
@@ -3115,6 +3138,14 @@ pre.ai-ocr-pre,
 
 .ai-q-stem :deep(.katex) {
   font-size: 1.02em;
+}
+
+.ai-q-parts {
+  margin-top: 8px;
+}
+
+.ai-q-parts :deep(.part-node) {
+  padding: 2px 0;
 }
 
 .ai-q-card :deep(.q-option-content) {

@@ -46,10 +46,11 @@ function removeBlank(index: number) {
   align-items: center;
   gap: 8px;
   background: var(--bg-input);
-  border-radius: 8px;
-  padding: 4px 8px;
+  border-radius: 12px;
+  padding: 6px 12px;
   border: 1.5px solid transparent;
-  transition: border-color 0.2s ease, background-color 0.2s ease;
+  min-height: 40px;
+  transition: box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1), background 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .blank-item:focus-within {
@@ -62,7 +63,7 @@ function removeBlank(index: number) {
   color: var(--text-muted);
   width: 44px;
   flex-shrink: 0;
-  font-weight: 550;
+  font-weight: 600;
   padding-left: 4px;
 }
 
@@ -99,23 +100,22 @@ function removeBlank(index: number) {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 7px 14px;
-  border: 1px dashed var(--border-strong);
-  background: transparent;
+  padding: 8px 14px;
+  border: none;
+  background: var(--bg-input);
   color: var(--text-secondary);
   font-size: 13px;
-  font-weight: 500;
-  border-radius: 8px;
+  font-weight: 400;
+  border-radius: 12px;
   cursor: pointer;
-  transition: var(--transition-fast);
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), background 0.2s, color 0.2s;
   font-family: inherit;
 }
 
 .add-btn:hover {
-  border-color: var(--accent);
   color: var(--accent);
-  border-style: solid;
   background: var(--accent-light);
+  transform: translateY(-0.5px);
 }
 
 .add-btn-sm {

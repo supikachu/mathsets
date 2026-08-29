@@ -12,8 +12,10 @@ use crate::ai::cleaner::{clean_and_parse, repair_truncated_batch};
 use crate::ai::ocr::OcrConfig;
 use crate::ai::provider::{AiError, is_rate_limit_message, is_transient_openrouter_error, RATE_LIMIT_USER_MESSAGE, OPENROUTER_PROVIDER_ERROR_USER_MESSAGE};
 use crate::ai::gemini_limit::{GEMINI_RPD_USER_MESSAGE, GEMINI_UNAVAILABLE_USER_MESSAGE};
+pub(crate) use crate::ai::structure::strip_options_residue_from_stem;
 use crate::ai::types::{AnalysisMethod, ParsedAnswer, ParsedQuestion};
 use crate::auth::middleware::AuthUser;
+use crate::auth::permissions::is_admin_user;
 use crate::handlers::ai_tagging::match_knowledge_nodes;
 use crate::models::ai_setting::{
     decrypt_api_key, encrypt_api_key, parse_master_key, AiSettingsResponse, UpdateAiSettingsRequest,
@@ -91,65 +93,9 @@ pub(crate) fn map_ai_error(e: AiError) -> (StatusCode, Json<serde_json::Value>) 
 }
 
 // ---------------------------------------------------------------------------
-// 第二道防线：题干选项残留正则剥离
+// 第二道防线：题干选项残留正则剥离（实现见 `ai::structure::validate`）
 // ---------------------------------------------------------------------------
 
-/// 匹配题干末尾的选项残留块（A→B→C→D 顺序完整且延伸到字符串结尾）
-///
-/// 设计要点（保守优先，避免误删真实题干）：
-/// - 必须匹配到完整的 A、B、C、D 四个选项前缀（缺一不匹配，避免误伤零散 A/B）
-/// - 选项前缀形如 `A.` `A、` `A)`，前缀前需为行首 / 句末标点（。；;！？），
-///   避免误伤正文里的 "点 A."、"线段 AB."、"已知 A(1,2)" 等
-/// - lazy `.*?` + `$` 锚定到字符串结尾，只剥离尾部完整选项块
-/// - `(?is)`：i 忽略大小写，s 让 `.` 跨换行（选项常跨多行）
-static OPTIONS_RESIDUE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"(?is)(?:^|\n|[。；;！？$）])\s*\$?\s*A[\.、．\)]\s*.*?B[\.、．\)]\s*.*?C[\.、．\)]\s*.*?D[\.、．\)]\s*.*$",
-    )
-    .expect("选项残留正则编译失败")
-});
-
-/// 第二道防线：正则剥离选择题题干末尾的选项残留
-///
-/// 大模型偶尔不听 Prompt 指令，会把 "A. xxx B. xxx C. xxx D. xxx" 残留在 stem 里，
-/// 导致前端题干区与选项区重复渲染。本函数在结构化解析后做兜底清洗。
-///
-/// - 仅对 choice / multiple 题型生效
-/// - 仅当 `options` 数组已填充时才剥离（否则剥离会丢失唯一选项副本，宁可不剥）
-/// - 命中时剥离残留并追加 warning 供审计
-fn strip_options_residue_from_stem(q: &mut ParsedQuestion) {
-    if !matches!(q.question_type.as_str(), "choice" | "multiple") {
-        return;
-    }
-    // 仅当 options 已填充时剥离——否则剥离会丢失唯一选项副本，宁可不剥
-    let has_options = q.options.as_ref().is_some_and(|o| !o.is_empty());
-    if !has_options {
-        return;
-    }
-    if let Some(m) = OPTIONS_RESIDUE_RE.find(&q.stem) {
-        let mut cut = m.start();
-        // `$` / `）` 是题干合法结尾（作答空位、中文括号），保留；换行/句末标点仍随选项一起去掉
-        if let Some(ch) = q.stem[cut..].chars().next() {
-            if ch == '$' || ch == '）' {
-                cut += ch.len_utf8();
-            }
-        }
-        let mut new_stem = q.stem[..cut].trim_end().to_string();
-        if new_stem.ends_with('$') && new_stem.matches('$').count() % 2 == 1 {
-            new_stem.pop();
-            new_stem = new_stem.trim_end().to_string();
-        }
-        if new_stem != q.stem {
-            tracing::info!(
-                "剥离题干选项残留：{} 字符 → {} 字符",
-                q.stem.chars().count(),
-                new_stem.chars().count()
-            );
-            q.warnings.push("已自动剥离题干中残留的选项文本".into());
-            q.stem = new_stem;
-        }
-    }
-}
 
 /// 选择题题干末尾用于填涂答案的空括号 → `$(\hspace{2em})$`
 ///
@@ -246,6 +192,59 @@ fn normalize_solution_methods(mut q_val: serde_json::Value) -> serde_json::Value
     q_val
 }
 
+/// 站外模型常漏 `kind`/`value`，只写 `{"options":[]}` / `{"blanks":[]}` / `{"subs":[]}`。
+/// 不补全则整题反序列化失败被跳过。
+fn normalize_correct_answer(mut q_val: serde_json::Value) -> serde_json::Value {
+    let qtype = q_val
+        .get("question_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let Some(ans) = q_val.get("correct_answer").cloned() else {
+        return q_val;
+    };
+    if ans.is_null() {
+        return q_val;
+    }
+    if ans.get("kind").and_then(|k| k.as_str()).is_some() && ans.get("value").is_some() {
+        return q_val;
+    }
+    let inferred = if ans.get("options").is_some()
+        || ans.get("value").and_then(|v| v.get("options")).is_some()
+    {
+        "choice"
+    } else if ans.get("blanks").is_some()
+        || ans.get("value").and_then(|v| v.get("blanks")).is_some()
+    {
+        "fill"
+    } else if ans.get("subs").is_some() || ans.get("value").and_then(|v| v.get("subs")).is_some() {
+        "solution"
+    } else {
+        match qtype.as_str() {
+            "choice" | "multiple" => "choice",
+            "fill" => "fill",
+            _ => "solution",
+        }
+    };
+    let value = if let Some(v) = ans.get("value") {
+        v.clone()
+    } else {
+        match inferred {
+            "choice" => json!({
+                "options": ans.get("options").cloned().unwrap_or_else(|| json!([]))
+            }),
+            "fill" => json!({
+                "blanks": ans.get("blanks").cloned().unwrap_or_else(|| json!([]))
+            }),
+            _ => json!({
+                "subs": ans.get("subs").cloned().unwrap_or_else(|| json!([]))
+            }),
+        }
+    };
+    q_val["correct_answer"] = json!({ "kind": inferred, "value": value });
+    q_val
+}
+
 /// 批量后处理：清洗 → 截断检测(补丁七) → 逐题隔离解析(补丁十防连坐) → 知识点匹配
 ///
 /// v1.1（T1.12）：当 Stage 2 输出被 `max_tokens` 截断导致 JSON 残缺时，
@@ -309,93 +308,14 @@ pub(crate) async fn post_process_batch(
         None
     };
 
-    let mut results = Vec::new();
+    let mut parsed = Vec::new();
 
     for (i, q_val) in questions_val.iter().enumerate() {
         // solution_methods 容错归一化：LLM 常输出 ["数形结合"] 字符串数组而非
         // [{"name":"..."}] 对象数组 → 先转对象再反序列化，避免整题因类型不匹配被丢弃
-        let q_val = normalize_solution_methods(q_val.clone());
+        let q_val = normalize_correct_answer(normalize_solution_methods(q_val.clone()));
         match serde_json::from_value::<ParsedQuestion>(q_val.clone()) {
-            Ok(mut q) => {
-                // 校验 question_type
-                if !["choice", "fill", "solution", "multiple"].contains(&q.question_type.as_str()) {
-                    tracing::warn!("第 {} 题题型无效: {}，跳过", i + 1, q.question_type);
-                    continue;
-                }
-                if q.stem.trim().is_empty() {
-                    tracing::warn!("第 {} 题题干为空，跳过", i + 1);
-                    continue;
-                }
-                // 字面量 \n、HTML 表格 → 真换行 / Markdown 表
-                q.sanitize_text_markup();
-                // 第二道防线：剥离选择题题干末尾的选项残留
-                strip_options_residue_from_stem(&mut q);
-                // 选择题作答空括号 () / （） → $(\hspace{2em})$
-                normalize_choice_answer_blank(&mut q);
-                // :::img-row 围栏闭合清洗：防 token 截断导致缺 ::: 闭合标记
-                q.sanitize_img_row_fences();
-                // 校验 analysis
-                if q.analysis.is_empty() {
-                    q.analysis = vec![AnalysisMethod {
-                        title: "解法一".into(),
-                        content: "".into(),
-                    }];
-                    q.warnings.push("AI 返回解析为空，请手动补充".into());
-                } else {
-                    for (ai, a) in q.analysis.iter_mut().enumerate() {
-                        if a.title.trim().is_empty() {
-                            a.title = format!("解法{}", ai + 1);
-                        }
-                    }
-                }
-                // v1.2：correct_answer 为 None（LLM 输出了 null）→ 按题型补空默认值
-                if q.correct_answer.is_none() {
-                    q.correct_answer = Some(ParsedAnswer::empty_for_type(&q.question_type));
-                    q.warnings.push("AI 未返回答案，已自动填充空答案".into());
-                }
-                // 知识点匹配（限定 knowledge 树，杜绝跨树错配；失败不影响整体解析）
-                // 站外导入跳过：会走 embedding HTTP，空闲后再导入容易超过前端 10s 超时。
-                if match_knowledge && !q.knowledge_points.is_empty() {
-                    match match_knowledge_nodes(pool, &q.knowledge_points, None, "knowledge").await {
-                        Ok((matched, _)) => {
-                            for m in &matched {
-                                if m.score < 0.95 {
-                                    q.warnings.push(format!(
-                                        "知识点「{}」模糊匹配到「{}」(相似度 {:.0}%)",
-                                        m.ai_name, m.node_name, m.score * 100.0
-                                    ));
-                                }
-                            }
-                            q.kp_matches = matched
-                                .iter()
-                                .map(|m| crate::ai::kp_matcher::KpMatch {
-                                    ai_name: m.ai_name.clone(),
-                                    matched_id: Some(m.node_id),
-                                    matched_name: Some(m.node_name.clone()),
-                                    score: m.score,
-                                })
-                                .collect();
-                            crate::ai::tagging::shadow::maybe_log_knowledge_shadow(
-                                pool,
-                                &q.knowledge_points,
-                            )
-                            .await;
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "第 {} 题知识点匹配失败（不影响解析）: {:?}",
-                                i + 1,
-                                e.1
-                            );
-                        }
-                    }
-                }
-                // v1.1（T1.12）：截断修复成功时，每题标注提示
-                if let Some(w) = truncate_warning {
-                    q.warnings.push(w.to_string());
-                }
-                results.push(q);
-            }
+            Ok(q) => parsed.push(q),
             Err(e) => {
                 // ⚠️ 补丁十核心：单题解析失败只记录 warning，不影响同批次其他题目
                 tracing::warn!(
@@ -408,6 +328,14 @@ pub(crate) async fn post_process_batch(
         }
     }
 
+    let results = match truncate_warning {
+        Some(w) => {
+            finalize_parsed_questions_with_note(parsed, pool, match_knowledge, Some(w), true)
+                .await
+        }
+        None => finalize_parsed_questions(parsed, pool, match_knowledge).await,
+    };
+
     if results.is_empty() {
         return Err((
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -416,6 +344,113 @@ pub(crate) async fn post_process_batch(
     }
 
     Ok(results)
+}
+
+/// 逐题清洗 / 剥选项残留 / 空解析占位 / 知识点匹配。
+///
+/// `post_process_batch` 仍是 LLM JSON 与导入入口；脚本 High 路径走
+/// [`finalize_script_questions`]（不填空「解法一」占位，避免误伤纯选择题）。
+pub(crate) async fn finalize_parsed_questions(
+    qs: Vec<ParsedQuestion>,
+    pool: &sqlx::PgPool,
+    match_knowledge: bool,
+) -> Vec<ParsedQuestion> {
+    finalize_parsed_questions_with_note(qs, pool, match_knowledge, None, true).await
+}
+
+pub(crate) async fn finalize_script_questions(
+    qs: Vec<ParsedQuestion>,
+    pool: &sqlx::PgPool,
+    match_knowledge: bool,
+) -> Vec<ParsedQuestion> {
+    finalize_parsed_questions_with_note(qs, pool, match_knowledge, None, false).await
+}
+
+async fn finalize_parsed_questions_with_note(
+    qs: Vec<ParsedQuestion>,
+    pool: &sqlx::PgPool,
+    match_knowledge: bool,
+    extra_warning: Option<&str>,
+    fill_empty_analysis: bool,
+) -> Vec<ParsedQuestion> {
+    let mut results = Vec::new();
+    for (i, mut q) in qs.into_iter().enumerate() {
+        if !["choice", "fill", "solution", "multiple"].contains(&q.question_type.as_str()) {
+            tracing::warn!("第 {} 题题型无效: {}，跳过", i + 1, q.question_type);
+            continue;
+        }
+        if !q.has_visible_body() {
+            tracing::warn!("第 {} 题题干与问树均为空，跳过", i + 1);
+            continue;
+        }
+        apply_parsed_question_cleanup(&mut q, fill_empty_analysis);
+        if match_knowledge && !q.knowledge_points.is_empty() {
+            match match_knowledge_nodes(pool, &q.knowledge_points, None, "knowledge").await {
+                Ok((matched, _)) => {
+                    for m in &matched {
+                        if m.score < 0.95 {
+                            q.warnings.push(format!(
+                                "知识点「{}」模糊匹配到「{}」(相似度 {:.0}%)",
+                                m.ai_name, m.node_name, m.score * 100.0
+                            ));
+                        }
+                    }
+                    q.kp_matches = matched
+                        .iter()
+                        .map(|m| crate::ai::kp_matcher::KpMatch {
+                            ai_name: m.ai_name.clone(),
+                            matched_id: Some(m.node_id),
+                            matched_name: Some(m.node_name.clone()),
+                            score: m.score,
+                        })
+                        .collect();
+                    crate::ai::tagging::shadow::maybe_log_knowledge_shadow(
+                        pool,
+                        &q.knowledge_points,
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "第 {} 题知识点匹配失败（不影响解析）: {:?}",
+                        i + 1,
+                        e.1
+                    );
+                }
+            }
+        }
+        if let Some(w) = extra_warning {
+            q.warnings.push(w.to_string());
+        }
+        results.push(q);
+    }
+    results
+}
+
+fn apply_parsed_question_cleanup(q: &mut ParsedQuestion, fill_empty_analysis: bool) {
+    q.sanitize_text_markup();
+    strip_options_residue_from_stem(q);
+    normalize_choice_answer_blank(q);
+    q.sanitize_img_row_fences();
+    if q.analysis.is_empty() {
+        if fill_empty_analysis {
+            q.analysis = vec![AnalysisMethod {
+                title: "解法一".into(),
+                content: "".into(),
+            }];
+            q.warnings.push("AI 返回解析为空，请手动补充".into());
+        }
+    } else {
+        for (ai, a) in q.analysis.iter_mut().enumerate() {
+            if a.title.trim().is_empty() {
+                a.title = format!("解法{}", ai + 1);
+            }
+        }
+    }
+    if q.correct_answer.is_none() {
+        q.correct_answer = Some(ParsedAnswer::empty_for_type(&q.question_type));
+        q.warnings.push("AI 未返回答案，已自动填充空答案".into());
+    }
 }
 
 /// 截断检测 + 错误归类（post_process_batch 兜底）
@@ -474,7 +509,7 @@ pub async fn get_settings(
         None => empty_ai_settings_response(),
     };
 
-    Ok(Json(resp))
+    Ok(Json(attach_embedding_admin_fields(resp, &state.pool, &auth).await))
 }
 
 /// 更新 AI 配置
@@ -483,6 +518,18 @@ pub async fn update_settings(
     State(state): State<AppState>,
     Json(req): Json<UpdateAiSettingsRequest>,
 ) -> Result<Json<AiSettingsResponse>, (StatusCode, Json<serde_json::Value>)> {
+    if is_admin_user(&auth) {
+        if let Some(ref model) = req.embedding_model {
+            let t = model.trim();
+            if !t.is_empty() && crate::ai::embedding::parse_embedding_model(t).is_none() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "不支持的 embedding 模型，仅允许 text-embedding-v3 或 qwen3.7-text-embedding"})),
+                ));
+            }
+        }
+    }
+
     let master_key = match &state.ai_config.key_encryption_key {
         Some(k) => match parse_master_key(k) {
             Ok(mk) => mk,
@@ -671,7 +718,31 @@ pub async fn update_settings(
         )
     })?;
 
-    let resp = ai_settings_response(setting);
+    if is_admin_user(&auth) {
+        if let Some(ref model) = req.embedding_model {
+            let t = model.trim();
+            if !t.is_empty() {
+                let changed = crate::ai::embedding::save_embedding_model(&state.pool, t, auth.id)
+                    .await
+                    .map_err(|e| {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": format!("保存 embedding 模型失败: {e}")})),
+                        )
+                    })?;
+                if changed {
+                    tracing::info!(
+                        user_id = %auth.id,
+                        model = t,
+                        "管理员切换全站 embedding 模型，后台重嵌全部知识树节点与标签"
+                    );
+                    tokio::spawn(crate::ai::embedding::start_backfill(state.pool.clone()));
+                }
+            }
+        }
+    }
+
+    let resp = attach_embedding_admin_fields(ai_settings_response(setting), &state.pool, &auth).await;
 
     Ok(Json(resp))
 }
@@ -697,6 +768,9 @@ fn empty_ai_settings_response() -> AiSettingsResponse {
         tagging_llm_base_url: None,
         stage2_concurrency: DEFAULT_STAGE2_CONCURRENCY,
         tagging_concurrency: DEFAULT_TAGGING_CONCURRENCY,
+        embedding_model: None,
+        embedding_dim: None,
+        embedding_models: None,
     }
 }
 
@@ -723,7 +797,24 @@ fn ai_settings_response(s: UserAiSetting) -> AiSettingsResponse {
             .tagging_concurrency
             .map(clamp_llm_concurrency)
             .unwrap_or(DEFAULT_TAGGING_CONCURRENCY),
+        embedding_model: None,
+        embedding_dim: None,
+        embedding_models: None,
     }
+}
+
+async fn attach_embedding_admin_fields(
+    mut resp: AiSettingsResponse,
+    pool: &sqlx::PgPool,
+    auth: &AuthUser,
+) -> AiSettingsResponse {
+    if !is_admin_user(auth) {
+        return resp;
+    }
+    resp.embedding_model = Some(crate::ai::embedding::load_embedding_model(pool).await);
+    resp.embedding_dim = Some(crate::ai::embedding::EMBEDDING_DIM as i32);
+    resp.embedding_models = Some(crate::ai::embedding::embedding_model_ids());
+    resp
 }
 
 fn decrypt_stored_key(
@@ -1627,6 +1718,7 @@ mod tests {
             image_placeholders: vec![],
             image_urls: vec![],
             kp_matches: vec![],
+            parts: vec![],
             question_no: None,
             display_order: None,
             score: None,
@@ -1641,6 +1733,21 @@ mod tests {
         strip_options_residue_from_stem(&mut q);
         assert_eq!(q.stem, "下列结论正确的是");
         assert!(q.warnings.iter().any(|w| w.contains("剥离")));
+    }
+
+    #[test]
+    fn strips_compact_options_after_ascii_parens() {
+        let mut q = make_choice(
+            "当 $x \\in [0, 2\\pi]$ 时交点个数为 ( ) A.3 B.4 C.6 D.8",
+            true,
+        );
+        strip_options_residue_from_stem(&mut q);
+        assert_eq!(
+            q.stem,
+            "当 $x \\in [0, 2\\pi]$ 时交点个数为 ( )",
+            "{}",
+            q.stem
+        );
     }
 
     #[test]
@@ -1669,6 +1776,35 @@ mod tests {
         let q: ParsedQuestion =
             serde_json::from_value(normalize_solution_methods(full)).unwrap();
         assert_eq!(q.solution_methods[0].name, "配方法");
+    }
+
+    #[test]
+    fn normalizes_untagged_correct_answer() {
+        let choice = serde_json::json!({
+            "question_type": "choice",
+            "stem": "选错的是",
+            "correct_answer": { "options": [] },
+            "analysis": [],
+            "knowledge_points": [],
+            "confidence": 0.0,
+            "warnings": [],
+            "image_placeholders": []
+        });
+        let q: ParsedQuestion =
+            serde_json::from_value(normalize_correct_answer(choice)).unwrap();
+        assert!(matches!(
+            q.correct_answer,
+            Some(ParsedAnswer::Choice { ref options }) if options.is_empty()
+        ));
+
+        let fill = serde_json::json!({
+            "question_type": "fill",
+            "stem": "填空",
+            "correct_answer": { "blanks": [] },
+            "analysis": []
+        });
+        let q: ParsedQuestion = serde_json::from_value(normalize_correct_answer(fill)).unwrap();
+        assert!(matches!(q.correct_answer, Some(ParsedAnswer::Fill { .. })));
     }
 
     #[test]

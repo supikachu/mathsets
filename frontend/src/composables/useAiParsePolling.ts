@@ -14,6 +14,14 @@ const TERMINAL: ReadonlySet<string> = new Set([
   'cancelled',
 ])
 
+/** 全自动 processing 阶段文案（`ocr_export` 仍走 OCR / ocr_ready，不会出现 structuring） */
+export function processingStatusText(phase?: string | null): string {
+  if (phase === 'structuring') return '正在规则切题…'
+  if (phase === 'stage2') return 'AI 正在解析…'
+  if (phase === 'ocr') return '正在识别试卷…'
+  return 'AI 正在解析（可随时取消）…'
+}
+
 /**
  * V2.1.1 AI 解析任务轮询 Hook
  *
@@ -62,7 +70,7 @@ export function useAiParsePolling() {
         statusText.value = cancelRequested ? '正在停止…' : '正在排队…'
         break
       case 'processing':
-        statusText.value = cancelRequested ? '正在停止解析…' : 'AI 正在解析（可随时取消）…'
+        statusText.value = cancelRequested ? '正在停止解析…' : processingStatusText(data.phase)
         break
       case 'retrying':
         statusText.value = cancelRequested ? '正在停止…' : '解析遇到波动，正在重试…'

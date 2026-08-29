@@ -1,4 +1,4 @@
-//! DashScope text-embedding-v3 client（打标向量召回，不是 AiProvider）
+//! DashScope 文本 embedding client（打标向量召回，不是 AiProvider）
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -8,9 +8,66 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-pub const EMBEDDING_MODEL: &str = "text-embedding-v3";
+pub const DEFAULT_EMBEDDING_MODEL: &str = "text-embedding-v3";
+/// 兼容旧调用；实际请求模型以 `EmbeddingClient.model` / 库表配置为准
+pub const EMBEDDING_MODEL: &str = DEFAULT_EMBEDDING_MODEL;
 pub const EMBEDDING_DIM: usize = 1024;
+/// 仅 1024 维、DashScope OpenAI 兼容文本 embedding，禁止与库表 `vector(1024)` 混用其它维数
+pub const ALLOWED_EMBEDDING_MODELS: &[&str] = &[
+    "text-embedding-v3",
+    "qwen3.7-text-embedding",
+];
 const BATCH_SIZE: usize = 10;
+
+pub fn parse_embedding_model(s: &str) -> Option<&'static str> {
+    let t = s.trim();
+    ALLOWED_EMBEDDING_MODELS.iter().copied().find(|&m| m == t)
+}
+
+pub fn embedding_model_ids() -> Vec<String> {
+    ALLOWED_EMBEDDING_MODELS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
+}
+
+pub async fn load_embedding_model(pool: &PgPool) -> String {
+    let row = sqlx::query_scalar::<_, String>(
+        "SELECT model FROM app_embedding_settings WHERE id = 1",
+    )
+    .fetch_optional(pool)
+    .await;
+    match row {
+        Ok(Some(m)) if parse_embedding_model(&m).is_some() => m,
+        _ => DEFAULT_EMBEDDING_MODEL.to_string(),
+    }
+}
+
+/// 写入全站模型。`Ok(true)` 表示相对原值有变化，调用方应触发全量重嵌。
+pub async fn save_embedding_model(
+    pool: &PgPool,
+    model: &str,
+    updated_by: Uuid,
+) -> Result<bool, String> {
+    let model = parse_embedding_model(model).ok_or_else(|| "不支持的 embedding 模型".to_string())?;
+    let prev = load_embedding_model(pool).await;
+    sqlx::query(
+        r#"
+        INSERT INTO app_embedding_settings (id, model, updated_at, updated_by)
+        VALUES (1, $1, NOW(), $2)
+        ON CONFLICT (id) DO UPDATE SET
+          model = EXCLUDED.model,
+          updated_at = NOW(),
+          updated_by = EXCLUDED.updated_by
+        "#,
+    )
+    .bind(model)
+    .bind(updated_by)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(prev != model)
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum EmbeddingError {
@@ -27,10 +84,18 @@ pub struct EmbeddingClient {
     http: reqwest::Client,
     api_key: String,
     url: String,
+    pub model: String,
 }
 
 impl EmbeddingClient {
     pub fn from_env() -> Option<Self> {
+        Self::from_env_with_model(DEFAULT_EMBEDDING_MODEL)
+    }
+
+    pub fn from_env_with_model(model: &str) -> Option<Self> {
+        let model = parse_embedding_model(model)
+            .unwrap_or(DEFAULT_EMBEDDING_MODEL)
+            .to_string();
         let api_key = std::env::var("QWEN_API_KEY").ok().filter(|s| !s.is_empty())?;
         let base = std::env::var("QWEN_BASE_URL").unwrap_or_else(|_| {
             "https://dashscope.aliyuncs.com/compatible-mode".into()
@@ -40,7 +105,21 @@ impl EmbeddingClient {
             .timeout(Duration::from_secs(30))
             .build()
             .ok()?;
-        Some(Self { http, api_key, url })
+        Some(Self {
+            http,
+            api_key,
+            url,
+            model,
+        })
+    }
+
+    pub async fn from_pool(pool: &PgPool) -> Option<Self> {
+        let model = load_embedding_model(pool).await;
+        Self::from_env_with_model(&model)
+    }
+
+    fn cache_key(&self, text: &str) -> String {
+        format!("{}\n{text}", self.model)
     }
 
     pub async fn embed_texts(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
@@ -51,7 +130,8 @@ impl EmbeddingClient {
         let mut out: Vec<Option<Vec<f32>>> = vec![None; texts.len()];
         let mut missing: Vec<(usize, String)> = Vec::new();
         for (i, t) in texts.iter().enumerate() {
-            if let Some(v) = cache.get(t) {
+            let key = self.cache_key(t);
+            if let Some(v) = cache.get(&key) {
                 out[i] = Some(v.clone());
             } else {
                 missing.push((i, t.clone()));
@@ -64,7 +144,7 @@ impl EmbeddingClient {
                 return Err(EmbeddingError::CountMismatch);
             }
             for ((idx, text), vec) in chunk.iter().zip(fetched.into_iter()) {
-                cache.insert(text.clone(), vec.clone());
+                cache.insert(self.cache_key(text), vec.clone());
                 out[*idx] = Some(vec);
             }
         }
@@ -99,7 +179,7 @@ impl EmbeddingClient {
             .post(&self.url)
             .bearer_auth(&self.api_key)
             .json(&Req {
-                model: EMBEDDING_MODEL,
+                model: &self.model,
                 input: inputs,
                 dimensions: EMBEDDING_DIM,
             })
@@ -231,14 +311,18 @@ pub fn format_vector(v: &[f32]) -> String {
     format!("[{inner}]")
 }
 
-pub fn content_hash(text: &str) -> String {
+pub fn content_hash(model: &str, text: &str) -> String {
     let mut h = Sha256::new();
-    h.update(EMBEDDING_MODEL.as_bytes());
+    h.update(model.as_bytes());
     h.update(b":");
     h.update(EMBEDDING_DIM.to_string().as_bytes());
     h.update(b"\n");
     h.update(text.as_bytes());
     format!("{:x}", h.finalize())
+}
+
+fn hash_for(client: &EmbeddingClient, text: &str) -> String {
+    content_hash(&client.model, text)
 }
 
 pub fn aliases_from_json(v: &serde_json::Value) -> Vec<String> {
@@ -281,6 +365,9 @@ pub fn spawn_refresh_tag_embedding(pool: PgPool, tag_id: Uuid) {
 }
 
 pub async fn start_backfill(pool: PgPool) {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    let lock = LOCK.get_or_init(|| tokio::sync::Mutex::new(()));
+    let _guard = lock.lock().await;
     if !vector_recall_wanted() {
         return;
     }
@@ -297,10 +384,11 @@ pub async fn start_backfill(pool: PgPool) {
             return;
         }
     }
-    let Some(client) = EmbeddingClient::from_env() else {
+    let Some(client) = EmbeddingClient::from_pool(&pool).await else {
         tracing::info!("向量召回未启用：未配置 QWEN_API_KEY");
         return;
     };
+    tracing::info!(model = %client.model, "开始知识树/标签 embedding 回填");
     match backfill_all(&pool, &client).await {
         Ok((n, t)) => tracing::info!(nodes = n, tags = t, "知识树/标签 embedding 回填完成"),
         Err(e) => tracing::warn!("embedding 回填失败: {e}"),
@@ -311,7 +399,7 @@ pub async fn refresh_node_embedding(pool: &PgPool, node_id: Uuid) -> Result<(), 
     if !vector_recall_wanted() || !embeddings_table_ready(pool).await {
         return Ok(());
     }
-    let Some(client) = EmbeddingClient::from_env() else {
+    let Some(client) = EmbeddingClient::from_pool(pool).await else {
         return Ok(());
     };
     let row: Option<(String, String, serde_json::Value)> = sqlx::query_as(
@@ -342,7 +430,7 @@ pub async fn refresh_tag_embedding(pool: &PgPool, tag_id: Uuid) -> Result<(), St
     if !vector_recall_wanted() || !embeddings_table_ready(pool).await {
         return Ok(());
     }
-    let Some(client) = EmbeddingClient::from_env() else {
+    let Some(client) = EmbeddingClient::from_pool(pool).await else {
         return Ok(());
     };
     let row: Option<(String, String, serde_json::Value)> = sqlx::query_as(
@@ -365,7 +453,7 @@ async fn upsert_node(
     node_id: Uuid,
     text: &str,
 ) -> Result<(), String> {
-    let hash = content_hash(text);
+    let hash = hash_for(client, text);
     let same: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM knowledge_node_embeddings WHERE node_id = $1 AND content_hash = $2)",
     )
@@ -384,7 +472,7 @@ async fn upsert_node(
     let Some(v) = vecs.first() else {
         return Err("empty embedding".into());
     };
-    store_node_embedding(pool, node_id, text, v).await
+    store_node_embedding(pool, client, node_id, text, v).await
 }
 
 async fn upsert_tag(
@@ -393,7 +481,7 @@ async fn upsert_tag(
     tag_id: Uuid,
     text: &str,
 ) -> Result<(), String> {
-    let hash = content_hash(text);
+    let hash = hash_for(client, text);
     let same: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM tag_embeddings WHERE tag_id = $1 AND content_hash = $2)",
     )
@@ -412,7 +500,7 @@ async fn upsert_tag(
     let Some(v) = vecs.first() else {
         return Err("empty embedding".into());
     };
-    store_tag_embedding(pool, tag_id, text, v).await
+    store_tag_embedding(pool, client, tag_id, text, v).await
 }
 
 async fn backfill_all(pool: &PgPool, client: &EmbeddingClient) -> Result<(usize, usize), String> {
@@ -437,7 +525,7 @@ async fn backfill_all(pool: &PgPool, client: &EmbeddingClient) -> Result<(usize,
     let mut pending_nodes: Vec<(Uuid, String)> = Vec::new();
     for (id, name, name_path, aliases_json) in nodes {
         let text = node_embed_text(&name_path, &name, &aliases_from_json(&aliases_json));
-        let hash = content_hash(&text);
+        let hash = hash_for(client, &text);
         let same: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM knowledge_node_embeddings WHERE node_id = $1 AND content_hash = $2)",
         )
@@ -456,7 +544,7 @@ async fn backfill_all(pool: &PgPool, client: &EmbeddingClient) -> Result<(usize,
         match client.embed_texts(&texts).await {
             Ok(vecs) => {
                 for ((id, text), v) in chunk.iter().zip(vecs.into_iter()) {
-                    if let Err(e) = store_node_embedding(pool, *id, text, &v).await {
+                    if let Err(e) = store_node_embedding(pool, client, *id, text, &v).await {
                         tracing::debug!(node_id = %id, "节点 embedding 回填失败: {e}");
                     } else {
                         n_ok += 1;
@@ -481,7 +569,7 @@ async fn backfill_all(pool: &PgPool, client: &EmbeddingClient) -> Result<(usize,
     let mut pending_tags: Vec<(Uuid, String)> = Vec::new();
     for (id, name, category, aliases_json) in tags {
         let text = tag_embed_text(&category, &name, &aliases_from_json(&aliases_json));
-        let hash = content_hash(&text);
+        let hash = hash_for(client, &text);
         let same: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM tag_embeddings WHERE tag_id = $1 AND content_hash = $2)",
         )
@@ -500,7 +588,7 @@ async fn backfill_all(pool: &PgPool, client: &EmbeddingClient) -> Result<(usize,
         match client.embed_texts(&texts).await {
             Ok(vecs) => {
                 for ((id, text), v) in chunk.iter().zip(vecs.into_iter()) {
-                    if let Err(e) = store_tag_embedding(pool, *id, text, &v).await {
+                    if let Err(e) = store_tag_embedding(pool, client, *id, text, &v).await {
                         tracing::debug!(tag_id = %id, "标签 embedding 回填失败: {e}");
                     } else {
                         t_ok += 1;
@@ -515,11 +603,12 @@ async fn backfill_all(pool: &PgPool, client: &EmbeddingClient) -> Result<(usize,
 
 async fn store_node_embedding(
     pool: &PgPool,
+    client: &EmbeddingClient,
     node_id: Uuid,
     text: &str,
     v: &[f32],
 ) -> Result<(), String> {
-    let hash = content_hash(text);
+    let hash = hash_for(client, text);
     let lit = format_vector(v);
     sqlx::query(
         r#"
@@ -542,11 +631,12 @@ async fn store_node_embedding(
 
 async fn store_tag_embedding(
     pool: &PgPool,
+    client: &EmbeddingClient,
     tag_id: Uuid,
     text: &str,
     v: &[f32],
 ) -> Result<(), String> {
-    let hash = content_hash(text);
+    let hash = hash_for(client, text);
     let lit = format_vector(v);
     sqlx::query(
         r#"
@@ -573,10 +663,33 @@ mod tests {
 
     #[test]
     fn content_hash_changes_with_text() {
-        let a = content_hash("集合\n交集\n");
-        let b = content_hash("集合\n并集\n");
+        let a = content_hash(DEFAULT_EMBEDDING_MODEL, "集合\n交集\n");
+        let b = content_hash(DEFAULT_EMBEDDING_MODEL, "集合\n并集\n");
         assert_ne!(a, b);
-        assert_eq!(a, content_hash("集合\n交集\n"));
+        assert_eq!(a, content_hash(DEFAULT_EMBEDDING_MODEL, "集合\n交集\n"));
+    }
+
+    #[test]
+    fn content_hash_changes_with_model() {
+        let text = "集合\n交集\n";
+        assert_ne!(
+            content_hash("text-embedding-v3", text),
+            content_hash("qwen3.7-text-embedding", text)
+        );
+    }
+
+    #[test]
+    fn parse_embedding_model_whitelist() {
+        assert_eq!(
+            parse_embedding_model("text-embedding-v3"),
+            Some("text-embedding-v3")
+        );
+        assert_eq!(
+            parse_embedding_model(" qwen3.7-text-embedding "),
+            Some("qwen3.7-text-embedding")
+        );
+        assert!(parse_embedding_model("text-embedding-v1").is_none());
+        assert!(parse_embedding_model("qwen3.7-text-embedding-flash").is_none());
     }
 
     #[test]

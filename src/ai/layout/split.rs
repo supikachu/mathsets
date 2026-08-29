@@ -1,8 +1,9 @@
 //! 版面块 → 大题 Span：去页眉、双栏阅读序、题号切开、跨页并入当前题。
 
 use super::{
-    exam_section_heading, is_instruction_numbered_line, looks_like_math_question_start,
-    question_start_regex, BlockKind, LayoutBlock, LayoutDocument,
+    exam_section_heading, is_implausible_major_no_drop, is_instruction_numbered_line,
+    looks_like_math_question_start, question_major_no, question_start_regex,
+    rehome_trailing_exam_sections, BlockKind, LayoutBlock, LayoutDocument,
 };
 
 /// 切出每道大题的 Markdown。切不出至少两道题时返回 None，调用方回退字符串切块。
@@ -12,13 +13,17 @@ pub fn split_question_chunks(doc: &LayoutDocument) -> Option<Vec<String>> {
     if spans.len() < 2 {
         return None;
     }
-    Some(
+    if spans.len() < 2 {
+        return None;
+    }
+    Some(rehome_trailing_exam_sections(
         spans
             .into_iter()
+            .flat_map(|s| super::split_markdown_on_question_starts(&s))
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect(),
-    )
+    ))
 }
 
 fn reorder_reading_order(blocks: &[LayoutBlock]) -> Vec<LayoutBlock> {
@@ -160,6 +165,7 @@ fn is_two_column(page: &[&LayoutBlock]) -> bool {
 fn cut_spans(blocks: &[LayoutBlock]) -> Vec<String> {
     let mut starts: Vec<usize> = Vec::new();
     let mut in_notice = false;
+    let mut last_major: Option<u32> = None;
     for (i, b) in blocks.iter().enumerate() {
         if b.kind.is_noise() {
             continue;
@@ -172,7 +178,15 @@ fn cut_spans(blocks: &[LayoutBlock]) -> Vec<String> {
             in_notice = false;
         }
         if is_question_start(b, in_notice) {
+            if let (Some(prev), Some(curr)) = (last_major, question_major_no(&line)) {
+                if is_implausible_major_no_drop(prev, curr) {
+                    continue;
+                }
+            }
             in_notice = false;
+            if let Some(n) = question_major_no(&line) {
+                last_major = Some(n);
+            }
             starts.push(i);
         }
     }
@@ -377,5 +391,117 @@ mod tests {
             blocks: vec![blk(0, 0, "没有题号的一段说明", 80.0, 80.0, 900.0, 140.0)],
         };
         assert!(split_question_chunks(&doc).is_none());
+    }
+
+    #[test]
+    fn does_not_split_ocr_subquestion_two_after_item_sixteen() {
+        let doc = LayoutDocument {
+            source: LayoutSource::Mineru,
+            blocks: vec![
+                blk(
+                    0,
+                    0,
+                    "16. 已知 A(0,3) 为椭圆上两点.\n（1）求 C 的离心率",
+                    80.0,
+                    80.0,
+                    900.0,
+                    160.0,
+                ),
+                blk(
+                    0,
+                    1,
+                    "2. 若过 P 的直线 l 交 C 于另一点 B，且三角形面积为 9",
+                    80.0,
+                    180.0,
+                    900.0,
+                    240.0,
+                ),
+                blk(0, 2, "法五：当 l 的斜率不存在时", 80.0, 260.0, 900.0, 320.0),
+                blk(1, 3, "法六：设线法与法五一致", 80.0, 80.0, 900.0, 140.0),
+            ],
+        };
+        assert!(
+            split_question_chunks(&doc).is_none(),
+            "16 后出现行首 2. 若过…应视为小问，整份仍是一道大题"
+        );
+    }
+
+    #[test]
+    fn rehomes_exam_section_heading_to_next_question() {
+        let doc = LayoutDocument {
+            source: LayoutSource::Mineru,
+            blocks: vec![
+                blk(
+                    0,
+                    0,
+                    "8. 已知函数 $f(x)$。\n故选：B\n\n## 二、选择题：本题共3小题，每小题6分，共18分。在每小题给出的选项中，有多项符合题目要求。",
+                    80.0,
+                    80.0,
+                    900.0,
+                    200.0,
+                ),
+                blk(
+                    0,
+                    1,
+                    "9. 已知随机变量服从正态分布。",
+                    80.0,
+                    240.0,
+                    900.0,
+                    300.0,
+                ),
+            ],
+        };
+        let chunks = split_question_chunks(&doc).expect("两道大题");
+        assert_eq!(chunks.len(), 2, "{chunks:?}");
+        assert!(
+            !chunks[0].contains("二、选择题") && !chunks[0].contains("多项符合"),
+            "卷头不得留在上一题: {}",
+            chunks[0]
+        );
+        assert!(chunks[0].contains("8. 已知函数"));
+        assert!(
+            chunks[1].contains("二、选择题") && chunks[1].contains("9. 已知随机变量"),
+            "卷头应交给下一题: {}",
+            chunks[1]
+        );
+    }
+
+    #[test]
+    fn splits_next_major_glued_with_single_newline() {
+        let doc = LayoutDocument {
+            source: LayoutSource::Markdown,
+            blocks: vec![
+                blk(
+                    0,
+                    0,
+                    "1. 已知集合 $M=\\{1\\}$ 。故选：A",
+                    80.0,
+                    80.0,
+                    900.0,
+                    140.0,
+                ),
+                blk(
+                    0,
+                    1,
+                    "18. 已知函数 $f(x)=x^{2}+mx+n$ 。\n【答案】略\n【详解】略\n19.已知 $a\\in [0,8]$ ，函数 $f(x)=\\frac{4x-a}{x^2+1}$（1）求 $a$（2）求证不等式。",
+                    80.0,
+                    160.0,
+                    900.0,
+                    400.0,
+                ),
+            ],
+        };
+        let chunks = split_question_chunks(&doc).expect("应拆出第19题");
+        assert!(
+            chunks.iter().any(|c| c.contains("19.已知") || c.contains("19. 已知")),
+            "漏切第19题: {chunks:?}"
+        );
+        let i18 = chunks.iter().position(|c| c.contains("18. 已知函数")).expect("18");
+        let i19 = chunks
+            .iter()
+            .position(|c| c.contains("19.已知") || c.contains("19. 已知"))
+            .expect("19");
+        assert!(i18 < i19);
+        assert!(!chunks[i18].contains("19.已知"), "第19题不得留在第18题块里: {}", chunks[i18]);
     }
 }

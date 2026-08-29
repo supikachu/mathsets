@@ -778,7 +778,8 @@ mod tests {
             }
         });
         let md = extract_pages_md_from_value(Some(&v)).unwrap();
-        assert_eq!(md, "第一页\n\n第二页");
+        let br = crate::ai::layout::LayoutDocument::PAGE_BREAK;
+        assert_eq!(md, format!("第一页\n\n{br}\n\n第二页"));
     }
 
     #[test]
@@ -816,7 +817,8 @@ mod tests {
             }
         });
         let md = extract_pages_md_from_value(Some(&v)).unwrap();
-        assert_eq!(md, "有内容\n\n后段");
+        let br = crate::ai::layout::LayoutDocument::PAGE_BREAK;
+        assert_eq!(md, format!("有内容\n\n{br}\n\n后段"));
     }
 
     #[test]
@@ -836,7 +838,8 @@ mod tests {
             ],
         };
         let md = extract_pages_md_from_struct(&result).unwrap();
-        assert_eq!(md, "第一页\n\n后段");
+        let br = crate::ai::layout::LayoutDocument::PAGE_BREAK;
+        assert_eq!(md, format!("第一页\n\n{br}\n\n后段"));
     }
 
     #[test]

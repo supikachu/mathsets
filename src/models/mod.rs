@@ -6,6 +6,7 @@ pub mod document;
 pub mod notification;
 pub mod paper;
 pub mod question;
+pub mod question_structure;
 pub mod space;
 pub mod tag_governance;
 pub mod user;

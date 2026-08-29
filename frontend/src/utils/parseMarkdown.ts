@@ -1,4 +1,5 @@
 import type { ParsedQuestion, ParsedOption, BlankAnswer } from '@/api/client'
+import { cnNum, defaultLeaf, newId, relabelTree, type QuestionPart } from '@/utils/questionParts'
 
 /** 系统推荐提示词（用户复制后发给 AI） */
 export const RECOMMENDED_PROMPT = `请将图片/文件中的题目转换为 Markdown 格式，严格遵守以下格式规则：
@@ -167,10 +168,27 @@ function extractSolutionAnswer(answerSection: string): string[] {
   return result.length > 0 ? result : [answerSection.trim()]
 }
 
+function splitStemByNumberedParts(stem: string): { preamble: string; items: { label: string; stem: string }[] } {
+  const chunks = stem.split(/(?=\n\s*[（(]\s*\d+\s*[）)])/)
+  if (chunks.length <= 1) return { preamble: stem.trim(), items: [] }
+  const preamble = chunks[0].trim()
+  const items = chunks.slice(1).map((c) => {
+    const t = c.trim()
+    const m = t.match(/^[（(]\s*(\d+)\s*[）)]\s*([\s\S]*)/)
+    if (!m) return { label: '', stem: t }
+    return { label: `(${m[1]})`, stem: (m[2] || '').trim() }
+  })
+  return { preamble, items }
+}
+
+function methodsFromChunk(chunk: string): { title: string; content: string }[] {
+  const segs = chunk.split(/\n---\n/).map((s) => s.trim()).filter(Boolean)
+  if (!segs.length) return [{ title: '解法一', content: '' }]
+  return segs.map((content, i) => ({ title: `解法${cnNum(i + 1)}`, content }))
+}
+
 /**
- * 解析段处理：把 ### (N) 小问标题转为行首 (N) 标记，合并为单个 analysis 元素。
- * form.solutions 的数据模型是"多解法"而非"分小问"，同一题目的多个小问
- * 应合并为"解法一"，内部用 (1) (2) 行首标记分隔。
+ * 解析段：按小问切开后挂到对应叶；叶内再用 --- 拆多种解法。
  */
 function splitAnalysisBySub(analysisSection: string): { title: string; content: string }[] {
   const headingRegex = /^###\s*[（(]\s*(\d+)\s*[）)]\s*$/
@@ -246,6 +264,8 @@ export function parseMarkdownToQuestion(md: string): ParsedQuestion {
   // 答案提取（按题型）
   let correctAnswer: ParsedQuestion['correct_answer']
   let subType: string | undefined
+  let solutionParts: QuestionPart[] | undefined
+  let solutionStem = stem
 
   if (questionType === 'choice') {
     const { options: ansOpts, isMulti } = extractChoiceAnswer(answerSection)
@@ -255,24 +275,45 @@ export function parseMarkdownToQuestion(md: string): ParsedQuestion {
     const blanks = extractFillAnswer(answerSection)
     correctAnswer = { kind: 'fill', value: { blanks } }
   } else {
-    const subs = extractSolutionAnswer(answerSection)
-    correctAnswer = {
-      kind: 'solution',
-      value: { subs: subs.map((content, i) => ({ sub_id: i + 1, content })) },
+    const { preamble, items } = splitStemByNumberedParts(stem)
+    const answers = extractSolutionAnswer(answerSection)
+    const analysisChunks = analysisSection ? extractSolutionAnswer(analysisSection) : []
+    const leafCount = Math.max(items.length, answers.length, 1)
+    const parts: QuestionPart[] = []
+    for (let i = 0; i < leafCount; i++) {
+      const leaf = defaultLeaf(items[i]?.label || `(${i + 1})`)
+      if (items[i]?.label) leaf.labelDirty = true
+      leaf.stem = items[i]?.stem || ''
+      leaf.answer = answers[i] ?? ''
+      const chunk = analysisChunks.length === leafCount
+        ? (analysisChunks[i] || '')
+        : (i === 0 ? (analysisSection || '') : '')
+      leaf.analyses = methodsFromChunk(chunk).map((m) => ({
+        id: newId(),
+        title: m.title,
+        content: m.content,
+      }))
+      parts.push(leaf)
     }
+    relabelTree(parts)
+    solutionParts = parts
+    solutionStem = preamble || stem
+    correctAnswer = { kind: 'solution', value: { subs: [] } }
   }
 
-  // 解析提取：按 ### (N) 标题拆分为多个小问，去掉标题字面文本
+  // 解析提取：解答题解法已挂到叶子；选择题/填空仍用整题 analysis
   let analysis: { title: string; content: string }[]
   const warnings: string[] = []
-  if (analysisSection) {
+  if (questionType === 'solution') {
+    analysis = []
+    if (!analysisSection) warnings.push('AI 未输出 ## 解析 段，请手动补充解题过程')
+  } else if (analysisSection) {
     analysis = splitAnalysisBySub(analysisSection)
     if (analysis.length === 0) {
       analysis = [{ title: '解法一', content: '' }]
       warnings.push('## 解析 段为空，请手动补充解题过程')
     }
   } else {
-    // 无解析段：不再用答案段兜底（会导致答案与解析混淆），给空占位 + 警告
     analysis = [{ title: '解法一', content: '' }]
     warnings.push('AI 未输出 ## 解析 段，请手动补充解题过程')
   }
@@ -290,10 +331,15 @@ export function parseMarkdownToQuestion(md: string): ParsedQuestion {
     question_type: questionType as 'choice' | 'fill' | 'solution',
     sub_type: subType,
     difficulty,
-    stem: normalizeChoiceAnswerBlank(stem, questionType, Boolean(options?.length)),
+    stem: normalizeChoiceAnswerBlank(
+      questionType === 'solution' ? solutionStem : stem,
+      questionType,
+      Boolean(options?.length),
+    ),
     options: options ?? undefined,
     correct_answer: correctAnswer,
     analysis,
+    parts: solutionParts,
     knowledge_points: knowledgePoints,
     confidence: 0.85,
     warnings,
@@ -414,7 +460,7 @@ export function renderMarkdownTables(html: string): string {
       table += `<tr>${row.map((c) => cell(c, 'td')).join('')}</tr>`
     }
     table += '</tbody></table>'
-    out.push(table)
+    out.push(`<div class="latex-table-wrap">${table}</div>`)
   }
 
   let i = 0
@@ -453,6 +499,7 @@ export function renderMarkdownTables(html: string): string {
         } else {
           emitTable(null, [first, ...body])
         }
+        while (j < lines.length && !lines[j].trim()) j++
         i = j
         continue
       }

@@ -9,7 +9,9 @@
 //!
 //! hash 组合：
 //! - content_hash              = SHA-256(规范化 stem‖options‖answer‖analysis)
+//!   解答题：stem‖options‖canonical(structure)（含各叶解法）
 //! - normalized_content_hash   = SHA-256(规范化 stem‖options‖answer)（不含解析）
+//!   解答题：stem‖options‖canonical(structure 去掉 analyses)
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -96,13 +98,73 @@ fn answer_text(answer: &Value) -> String {
     serde_json::to_string(answer).unwrap_or_default()
 }
 
+fn sort_value(v: &Value) -> Value {
+    match v {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let mut out = serde_json::Map::new();
+            for k in keys {
+                out.insert(k.clone(), sort_value(&map[k]));
+            }
+            Value::Object(out)
+        }
+        Value::Array(arr) => Value::Array(arr.iter().map(sort_value).collect()),
+        other => other.clone(),
+    }
+}
+
+fn strip_analyses(v: &Value) -> Value {
+    match v {
+        Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (k, val) in map {
+                if k == "analyses" {
+                    continue;
+                }
+                out.insert(k.clone(), strip_analyses(val));
+            }
+            Value::Object(out)
+        }
+        Value::Array(arr) => Value::Array(arr.iter().map(strip_analyses).collect()),
+        other => other.clone(),
+    }
+}
+
+fn structure_canonical(structure: &Value) -> String {
+    serde_json::to_string(&sort_value(structure)).unwrap_or_default()
+}
+
+fn structure_is_present(structure: Option<&Value>) -> bool {
+    matches!(structure, Some(v) if !v.is_null())
+}
+
 /// content_hash：stem‖options‖answer‖analysis（全部规范化后拼接）
+/// 若传入解答题 `structure`，则以 canonical JSON 替代 answer+analysis。
 pub fn compute_content_hash(
     stem: &str,
     options: Option<&Value>,
     answer: &Value,
     analysis: Option<&str>,
 ) -> String {
+    compute_content_hash_ex(stem, options, answer, analysis, None)
+}
+
+pub fn compute_content_hash_ex(
+    stem: &str,
+    options: Option<&Value>,
+    answer: &Value,
+    analysis: Option<&str>,
+    structure: Option<&Value>,
+) -> String {
+    if structure_is_present(structure) {
+        let parts = [
+            normalize_text(stem),
+            normalize_text(&options_text(options)),
+            normalize_text(&structure_canonical(structure.unwrap())),
+        ];
+        return sha256_hex(&parts.join("\u{1f}"));
+    }
     let parts = [
         normalize_text(stem),
         normalize_text(&options_text(options)),
@@ -114,6 +176,24 @@ pub fn compute_content_hash(
 
 /// normalized_content_hash：stem‖options‖answer（不含解析，用于跨资料去重）
 pub fn compute_normalized_content_hash(stem: &str, options: Option<&Value>, answer: &Value) -> String {
+    compute_normalized_content_hash_ex(stem, options, answer, None)
+}
+
+pub fn compute_normalized_content_hash_ex(
+    stem: &str,
+    options: Option<&Value>,
+    answer: &Value,
+    structure: Option<&Value>,
+) -> String {
+    if structure_is_present(structure) {
+        let stripped = strip_analyses(structure.unwrap());
+        let parts = [
+            normalize_text(stem),
+            normalize_text(&options_text(options)),
+            normalize_text(&structure_canonical(&stripped)),
+        ];
+        return sha256_hex(&parts.join("\u{1f}"));
+    }
     let parts = [
         normalize_text(stem),
         normalize_text(&options_text(options)),
@@ -182,5 +262,29 @@ mod tests {
         let n1 = compute_normalized_content_hash("题目", None, &answer);
         let n2 = compute_normalized_content_hash("题目", None, &answer);
         assert_eq!(n1, n2);
+    }
+
+    #[test]
+    fn test_structure_hash_ignores_analysis_in_normalized() {
+        let s1 = json!({
+            "version": 1,
+            "parts": [{
+                "id": "a",
+                "label": "(1)",
+                "stem": "",
+                "children": [],
+                "answer": "m=-1",
+                "analyses": [{"id":"x","title":"解法一","content":"证奇"}],
+                "no_analysis_needed": false
+            }]
+        });
+        let mut s2 = s1.clone();
+        s2["parts"][0]["analyses"][0]["content"] = json!("另一种证法");
+        let n1 = compute_normalized_content_hash_ex("题干", None, &Value::Null, Some(&s1));
+        let n2 = compute_normalized_content_hash_ex("题干", None, &Value::Null, Some(&s2));
+        assert_eq!(n1, n2);
+        let c1 = compute_content_hash_ex("题干", None, &Value::Null, None, Some(&s1));
+        let c2 = compute_content_hash_ex("题干", None, &Value::Null, None, Some(&s2));
+        assert_ne!(c1, c2);
     }
 }

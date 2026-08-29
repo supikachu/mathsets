@@ -199,6 +199,14 @@ export interface QuestionSummary {
   space_id: string
   /// 关联试卷（有则列表卡片展示试卷名）
   papers?: QuestionPaperBrief[]
+  /// 列表接口一次返回，供卡片渲染；缺省时前端回退逐题 get
+  options?: unknown
+  correct_answer?: unknown
+  analysis?: string | null
+  structure?: { version?: number; parts?: unknown[] } | null
+  metadata?: Record<string, unknown>
+  knowledge_nodes?: KnowledgeNodeSummary[]
+  tags?: TagSummary[]
 }
 
 /// 题目详情（B2：新增 stem_text/images/metadata/exam_type/cognitive_level 等，
@@ -216,6 +224,8 @@ export interface QuestionDetail {
   options: { label: string; content: string }[] | null
   correct_answer: unknown
   analysis: string | null
+  /// 解答题题内嵌套结构；其它题型为 null
+  structure?: { version?: number; parts?: unknown[] } | null
   grading_criteria: unknown | null
 
   // ── 难度与评估 ──
@@ -329,7 +339,8 @@ export interface CreateQuestionRequest {
   default_score?: number
   options?: unknown
   correct_answer: unknown
-  analysis?: string
+  analysis?: string | null
+  structure?: { version?: number; parts?: unknown[] } | null
   grading_criteria?: unknown
   source?: string
   exam_type?: ExamType
@@ -366,7 +377,8 @@ export interface UpdateQuestionRequest {
   default_score?: number
   options?: unknown
   correct_answer?: unknown
-  analysis?: string
+  analysis?: string | null
+  structure?: { version?: number; parts?: unknown[] } | null
   grading_criteria?: unknown
   source?: string
   exam_type?: ExamType
@@ -572,6 +584,7 @@ export interface PaperQuestionItemDetail {
   options?: { label: string; content: string }[] | null
   correct_answer?: unknown
   analysis?: string | null
+  structure?: { version?: number; parts?: unknown[] } | null
 }
 
 export interface PaperDetail {
@@ -1150,6 +1163,18 @@ export interface KpMatch {
   kind?: string
 }
 
+export interface ParsedPart {
+  id?: string
+  label?: string
+  stem?: string
+  children?: ParsedPart[]
+  answer?: string | null
+  analyses?: AnalysisMethod[]
+  no_analysis_needed?: boolean
+  label_dirty?: boolean
+  labelDirty?: boolean
+}
+
 export interface ParsedQuestion {
   /// B3：新增 'multiple' 题型
   question_type: 'choice' | 'multiple' | 'fill' | 'solution'
@@ -1163,6 +1188,8 @@ export interface ParsedQuestion {
   options?: ParsedOption[]
   correct_answer: ParsedAnswer
   analysis: AnalysisMethod[]
+  /// 解答题问树；选择题/填空为空
+  parts?: ParsedPart[]
   knowledge_points: string[]
   confidence: number
   warnings: string[]
@@ -1211,6 +1238,12 @@ export interface AiSettings {
   tagging_llm_base_url: string | null
   stage2_concurrency: number
   tagging_concurrency: number
+  /** 全站 embedding 模型；仅管理员响应带此字段 */
+  embedding_model?: string | null
+  /** 固定 1024，与库表 vector(1024) 一致；仅管理员 */
+  embedding_dim?: number | null
+  /** 白名单模型列表；仅管理员 */
+  embedding_models?: string[] | null
 }
 
 export const aiApi = {
@@ -1233,6 +1266,7 @@ export const aiApi = {
     tagging_llm_base_url?: string
     stage2_concurrency?: number
     tagging_concurrency?: number
+    embedding_model?: string
   }) {
     return client.put<AiSettings>('/ai/settings', data)
   },
@@ -1457,10 +1491,26 @@ export interface AiParseTaskDetail {
   staged_questions: AiStagedQuestion[]
   /** OCR 全文 Markdown（站外结构化导入前展示） */
   ocr_markdown?: string | null
+  /** OCR 引擎 id（progress.ocr_engine） */
+  ocr_engine?: string | null
+  /** 是否复用同文档已有 OCR */
+  ocr_reused?: boolean | null
   /** full | ocr_export */
   pipeline?: string | null
   /** 如 ocr_ready */
   phase?: string | null
+  /** MinerU markdown → 规范 JSON 耗时（毫秒） */
+  slice_timing?: {
+    markdown_to_json_ms?: number
+    split_ms?: number
+    merge_recover_ms?: number
+    chunk_count?: number
+    high_skip_n?: number
+    llm_n?: number
+    llm_calls?: number
+    split_via?: string
+    tagging_paused?: boolean
+  } | null
 }
 
 /// AI 智能录入暂存项（对应后端 progress.staged_questions 数组元素）

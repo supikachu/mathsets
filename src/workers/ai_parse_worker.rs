@@ -14,20 +14,31 @@
 //!   可重试（上游/超时/JSON）→ retrying（retry_count+1，≤2 次）
 
 use std::collections::HashSet;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use base64::Engine as _;
 
 use crate::ai::cleaner::clean_and_parse;
+use crate::ai::continuation::merge_split_questions;
+use crate::ai::structure::{
+    append_validation_warnings, finalize_parsed_question, merge_script_and_llm,
+    recover_chunk_questions, recover_parsed_questions, recover_question_sections,
+    restore_script_analysis_if_needed, script_skip_accepted, stage2_batch_user_input,
+    strip_llm_analysis_for_recover, structure_chunk, validate_structured, ScriptDraft,
+};
 use crate::ai::layout::{
-    layout_sidecar_path, load_layout_sidecar, split_question_chunks, LayoutDocument, LayoutSource,
+    exam_section_heading, is_implausible_major_no_drop, layout_sidecar_path, load_layout_sidecar,
+    question_major_no, question_start_regex, rehome_trailing_exam_sections, split_markdown_on_question_starts,
+    split_question_chunks, LayoutDocument, LayoutSource,
 };
 use crate::ai::ocr::{
     create_ocr_provider, parse_percent_value, should_fallback, OcrError, OcrProvider,
     PdfProgressCallback,
 };
-use crate::ai::prompt::{BATCH_IMAGE_OCR_FULL_PROMPT, STAGE2_PARSE_FULL_PROMPT, STAGE2_PARSE_SLIM_PROMPT};
+use crate::ai::prompt::{
+    BATCH_IMAGE_OCR_FULL_PROMPT, STAGE2_PARSE_FULL_PROMPT, STAGE2_PATCH_PROMPT,
+};
 use crate::ai::provider::{
     create_provider, is_transient_openrouter_error, AiError, AiProvider,
     OPENROUTER_PROVIDER_ERROR_USER_MESSAGE, RATE_LIMIT_USER_MESSAGE,
@@ -42,11 +53,13 @@ use crate::ai::paper_order::{
 use crate::ai::types::{ParsedAnswer, ParsedQuestion};
 use crate::auth::middleware::AuthUser;
 use crate::auth::permissions::ensure_personal_space;
-use crate::handlers::ai::{post_process_batch, resolve_ai_config, resolve_ocr_config, ModelKind};
+use crate::handlers::ai::{
+    finalize_script_questions, post_process_batch, resolve_ai_config, resolve_ocr_config, ModelKind,
+};
 use crate::handlers::collections::{get_or_create_collection, link_question_to_collection};
 use crate::models::ai_task::{AiParseTask, AiTaskSourceType, AiTaskStatus};
 use crate::models::document::is_paper_type;
-use crate::util::normalize::compute_normalized_content_hash;
+use crate::util::normalize::compute_normalized_content_hash_ex;
 use crate::AppState;
 
 // ---------------------------------------------------------------------------
@@ -703,7 +716,7 @@ async fn execute_task(state: &AppState, task: &AiParseTask) -> Result<TaskOutcom
             }
         };
 
-        let page_questions = match post_process_batch(&raw_json, &state.pool, true).await {
+        let mut page_questions = match post_process_batch(&raw_json, &state.pool, true).await {
             Ok(qs) => qs,
             Err((_, err)) => {
                 let msg = format!("第 {page_no} 页解析失败: {}", err["error"]);
@@ -715,6 +728,11 @@ async fn execute_task(state: &AppState, task: &AiParseTask) -> Result<TaskOutcom
                 continue;
             }
         };
+
+        for q in &mut page_questions {
+            let own = q.stem.clone();
+            recover_question_sections(q, &own);
+        }
 
         for (idx, q) in page_questions.into_iter().enumerate() {
             if idx % 5 == 0 {
@@ -889,25 +907,14 @@ async fn localize_external_images(parsed: &mut ParsedQuestion, upload_dir: &str)
     let re =
         regex::Regex::new(r"!\[[^\]]*\]\((https?://[^)\s]+)\)").expect("外链图片正则必然合法");
     let mut externals: Vec<String> = Vec::new();
-    {
-        let mut push = |text: &str| {
-            for cap in re.captures_iter(text) {
-                let url = cap[1].to_string();
-                if !externals.contains(&url) {
-                    externals.push(url);
-                }
-            }
-        };
-        push(&parsed.stem);
-        if let Some(opts) = parsed.options.as_ref() {
-            for o in opts {
-                push(&o.content);
+    parsed.visit_strings(|t| {
+        for cap in re.captures_iter(t) {
+            let url = cap[1].to_string();
+            if !externals.contains(&url) {
+                externals.push(url);
             }
         }
-        for a in &parsed.analysis {
-            push(&a.content);
-        }
-    }
+    });
     if externals.is_empty() {
         return;
     }
@@ -985,7 +992,7 @@ async fn localize_external_images(parsed: &mut ParsedQuestion, upload_dir: &str)
     }
 
     // 3. 替换所有字段中的外链 URL（含 image_urls 汇总数组）
-    let rewrite = |s: &mut String| {
+    parsed.visit_strings_mut(|s| {
         if !re.is_match(s) {
             return;
         }
@@ -997,16 +1004,7 @@ async fn localize_external_images(parsed: &mut ParsedQuestion, upload_dir: &str)
                 }
             })
             .into_owned();
-    };
-    rewrite(&mut parsed.stem);
-    if let Some(opts) = parsed.options.as_mut() {
-        for o in opts {
-            rewrite(&mut o.content);
-        }
-    }
-    for a in parsed.analysis.iter_mut() {
-        rewrite(&mut a.content);
-    }
+    });
     for u in parsed.image_urls.iter_mut() {
         if let Some(new_url) = url_map.get(u) {
             *u = new_url.clone();
@@ -1045,17 +1043,13 @@ fn harvest_markdown_image_urls(md: &str) -> Vec<(usize, String)> {
 }
 
 fn question_body_text(parsed: &ParsedQuestion) -> String {
-    let mut s = parsed.stem.clone();
-    if let Some(opts) = &parsed.options {
-        for o in opts {
+    let mut s = String::new();
+    parsed.visit_strings(|t| {
+        if !t.is_empty() {
+            s.push_str(t);
             s.push('\n');
-            s.push_str(&o.content);
         }
-    }
-    for a in &parsed.analysis {
-        s.push('\n');
-        s.push_str(&a.content);
-    }
+    });
     s
 }
 
@@ -1180,15 +1174,7 @@ fn replace_placeholders_with_url(parsed: &mut ParsedQuestion, url: &str) {
         *s = t.into_owned();
     };
 
-    sub(&mut parsed.stem);
-    if let Some(opts) = parsed.options.as_mut() {
-        for o in opts {
-            sub(&mut o.content);
-        }
-    }
-    for a in parsed.analysis.iter_mut() {
-        sub(&mut a.content);
-    }
+    parsed.visit_strings_mut(sub);
 }
 
 fn inject_block_image(text: &str, url: &str) -> String {
@@ -1205,14 +1191,13 @@ fn inject_block_image(text: &str, url: &str) -> String {
 }
 
 fn has_placeholder(parsed: &ParsedQuestion) -> bool {
-    parsed.stem.contains("IMAGE_PLACEHOLDER")
-        || parsed.options.as_ref().is_some_and(|opts| {
-            opts.iter().any(|o| o.content.contains("IMAGE_PLACEHOLDER"))
-        })
-        || parsed
-            .analysis
-            .iter()
-            .any(|a| a.content.contains("IMAGE_PLACEHOLDER"))
+    let mut hit = false;
+    parsed.visit_strings(|t| {
+        if t.contains("IMAGE_PLACEHOLDER") {
+            hit = true;
+        }
+    });
+    hit
 }
 
 /// 图片占位符解析：`![配图](IMAGE_PLACEHOLDER_N)` → 真实可访问 URL
@@ -1362,19 +1347,23 @@ async fn stage_question(
     localize_external_images(&mut parsed, &state.upload_dir).await;
     let image_urls = resolve_question_images(&mut parsed, page_image_url);
 
+    finalize_parsed_question(&mut parsed);
+    parsed.ensure_solution_parts();
     let options_json = parsed
         .options
         .as_ref()
         .map(|opts| serde_json::to_value(opts).unwrap_or(serde_json::Value::Null));
     let correct_answer_json = serde_json::to_value(&parsed.correct_answer)
         .map_err(|e| format!("序列化 correct_answer 失败: {e}"))?;
+    let structure_json = parsed.structure_json();
 
     // hash 去重（只读查询）：命中已有题目 → 暂存 existing_question_id，
     // 保存时前端提示"复用已有题目"而非重复创建
-    let normalized_hash = compute_normalized_content_hash(
+    let normalized_hash = compute_normalized_content_hash_ex(
         &parsed.stem,
         options_json.as_ref(),
         &correct_answer_json,
+        structure_json.as_ref(),
     );
     let existing_question_id: Option<Uuid> = sqlx::query_scalar(
         "SELECT id FROM questions WHERE normalized_content_hash = $1 LIMIT 1",
@@ -1424,9 +1413,15 @@ async fn stage_question(
 
     // 站外结构化：导入后暂不入队，等用户在「智能打标」里点开始。
     // 无文本模型时仍走同步 Parsed 适配（测试环境 / 未配置打标模型）。
-    let defer_async_tagging = is_ocr_export(task);
+    let defer_async_tagging = is_ocr_export(task) || crate::ai::slice::tagging_paused();
     let (matched, unmatched, suggestion_id, engine_version, suggestion_value, tagging_status) =
         if has_text_model && defer_async_tagging {
+            if crate::ai::slice::tagging_paused() && !is_ocr_export(task) {
+                tracing::info!(
+                    "任务 {} 题目 {question_index} 切片测试阶段跳过打标（MATHSET_ENABLE_TAGGING=1 可恢复）",
+                    task.id
+                );
+            }
             (
                 Vec::new(),
                 serde_json::json!({}),
@@ -1727,6 +1722,23 @@ pub(crate) async fn clear_unsaved_staged_questions(
     .execute(pool)
     .await
     .map_err(|e| format!("清空暂存失败: {e}"))?;
+
+    if kept_count == 0 {
+        let row: Option<(Option<Uuid>, Uuid)> = sqlx::query_as(
+            "SELECT document_id, creator_id FROM ai_parse_tasks WHERE id = $1",
+        )
+        .bind(parse_task_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| format!("查询解析任务失败: {e}"))?;
+        if let Some((Some(doc_id), creator_id)) = row {
+            crate::handlers::documents::delete_empty_draft_paper_for_document(
+                pool, doc_id, creator_id,
+            )
+            .await
+            .map_err(|e| format!("删除空草稿试卷失败: {e}"))?;
+        }
+    }
 
     let _ = sqlx::query(
         r#"
@@ -2050,6 +2062,40 @@ async fn update_progress(
     .await;
 }
 
+async fn set_progress_phase(state: &AppState, task_id: Uuid, phase: &str) {
+    let patch = progress_phase_patch(phase);
+    let _ = sqlx::query(
+        r#"
+        UPDATE ai_parse_tasks
+        SET progress = COALESCE(progress, '{}'::jsonb) || $2::jsonb, updated_at = NOW()
+        WHERE id = $1
+        "#,
+    )
+    .bind(task_id)
+    .bind(&patch)
+    .execute(&state.pool)
+    .await;
+}
+
+pub(crate) fn progress_phase_patch(phase: &str) -> serde_json::Value {
+    serde_json::json!({ "phase": phase })
+}
+
+async fn persist_slice_timing(state: &AppState, task_id: Uuid, timing: serde_json::Value) {
+    let patch = serde_json::json!({ "slice_timing": timing });
+    let _ = sqlx::query(
+        r#"
+        UPDATE ai_parse_tasks
+        SET progress = COALESCE(progress, '{}'::jsonb) || $2::jsonb, updated_at = NOW()
+        WHERE id = $1
+        "#,
+    )
+    .bind(task_id)
+    .bind(&patch)
+    .execute(&state.pool)
+    .await;
+}
+
 // ---------------------------------------------------------------------------
 // PDF 直传路径：轮询进度映射（纯函数，供 ocr_pdf_async 接入后使用）
 // ---------------------------------------------------------------------------
@@ -2105,8 +2151,12 @@ pub(crate) fn map_pdf_poll_progress(
 
 /// Stage 2 切块上限（字符数）：约 2~4 页一块，控制 LLM 上下文与输出截断风险
 const STAGE2_CHUNK_MAX_CHARS: usize = 6000;
+/// 只识别出一道大题时不再按字数横切（避免把长解析切成无题干残片）
+const STAGE2_SINGLE_QUESTION_MAX_CHARS: usize = 24000;
 /// Stage2 同时解析的切块数（暂存仍串行，避免 jsonb 追加丢题）
 const STAGE2_CONCURRENCY: usize = 4;
+/// 残块批量：一次 LLM 处理 3～8 题，默认 6。
+const STAGE2_LLM_BATCH: usize = 6;
 
 /// 明确已知限流很紧的档位：智谱、Gemini 免费档、OpenRouter `:free` 免费模型。
 ///
@@ -2196,14 +2246,16 @@ async fn run_pdf_fast_path(
         engine.id()
     );
 
-    let markdown = if let Some(cached) = cached_ocr_markdown(task) {
+    let markdown = if let Some((cached, cached_engine)) = resolve_reusable_ocr(state, task).await {
         tracing::info!(
-            "任务 {task_id} 复用已落库 OCR Markdown（{} 字符，跳过 OCR）",
-            cached.chars().count()
+            "任务 {task_id} 复用已落库 OCR Markdown（{} 字符，引擎 {}，跳过 OCR）",
+            cached.chars().count(),
+            if cached_engine.is_empty() { "-" } else { cached_engine.as_str() }
         );
         cached
     } else {
         // ── Phase 1：整档 OCR（pin 引擎 future，select 并行处理进度/心跳/取消） ──
+        set_progress_phase(state, task_id, "ocr").await;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<u8>();
         let on_progress: PdfProgressCallback = std::sync::Arc::new(move |p| {
             let _ = tx.send(p);
@@ -2278,16 +2330,13 @@ async fn run_pdf_fast_path(
     }
 
     // ── Phase 2：版面切大题（失败则回退 Markdown 题号切块）→ Stage2 ──
+    let md_to_json_start = Instant::now();
     let analysis_paper = looks_like_analysis_paper(&markdown, &task.paper_meta);
     let (chunks, split_via) = split_stage2_with_layout(&layout, &markdown, &task.paper_meta);
+    let split_ms = md_to_json_start.elapsed().as_millis();
     if chunks.is_empty() {
         return Err("PDF 直传 OCR 结果为空".into());
     }
-    let prompt = if analysis_paper {
-        STAGE2_PARSE_SLIM_PROMPT.as_str()
-    } else {
-        STAGE2_PARSE_FULL_PROMPT.as_str()
-    };
     tracing::info!(
         "任务 {task_id} 全文 Markdown {} 字符 → {} 块解析（切题={split_via}，版面来源={}，{} 块，解析卷={}，并发={}）",
         markdown.chars().count(),
@@ -2297,6 +2346,7 @@ async fn run_pdf_fast_path(
         analysis_paper,
         stage2_n
     );
+    set_progress_phase(state, task_id, "structuring").await;
 
     let mut outcome = FastPathOutcome {
         cancelled: false,
@@ -2309,34 +2359,77 @@ async fn run_pdf_fast_path(
     let mut pending: Vec<(usize, String)> = chunks.into_iter().enumerate().collect();
     let mut parsed_by_chunk: std::collections::BTreeMap<usize, Vec<ParsedQuestion>> =
         std::collections::BTreeMap::new();
+    let mut high_skip_n = 0u32;
+    let mut llm_n = 0u32;
+    let mut llm_calls = 0u32;
 
-    while !pending.is_empty() {
+    let mut llm_pending: Vec<(usize, String, ScriptDraft)> = Vec::new();
+    for (ci, chunk) in pending.drain(..) {
+        refresh_heartbeat(state, task_id).await;
+        if is_cancel_requested(state, task_id).await {
+            outcome.cancelled = true;
+            return Ok(outcome);
+        }
+        let draft = structure_chunk(&chunk);
+        tracing::info!(
+            confidence = ?draft.confidence,
+            method_heading_count = draft.method_heading_count,
+            question_no = draft.question.question_no.as_deref().unwrap_or("-"),
+            skip_llm = script_skip_accepted(&draft),
+            "任务 {task_id} 第 {} 块规则结构化",
+            ci + 1
+        );
+        if let Some(qs) = try_accept_script_skip(state, &draft, &chunk).await {
+            high_skip_n += 1;
+            parsed_by_chunk.insert(ci, qs);
+        } else {
+            llm_pending.push((ci, chunk, draft));
+        }
+    }
+
+    tracing::info!(
+        "任务 {task_id} 规则跳过 {high_skip_n} 块，其余 {} 块按每批最多 {STAGE2_LLM_BATCH} 题打 Stage2（并发={stage2_n}）",
+        llm_pending.len()
+    );
+
+    while !llm_pending.is_empty() {
         refresh_heartbeat(state, task_id).await;
         if is_cancel_requested(state, task_id).await {
             outcome.cancelled = true;
             return Ok(outcome);
         }
 
-        let take_n = stage2_n.min(pending.len());
-        let batch: Vec<(usize, String)> = pending.drain(..take_n).collect();
+        let mut groups: Vec<Vec<(usize, String, ScriptDraft)>> = Vec::new();
+        for _ in 0..stage2_n {
+            if llm_pending.is_empty() {
+                break;
+            }
+            let take = STAGE2_LLM_BATCH.min(llm_pending.len());
+            groups.push(llm_pending.drain(..take).collect());
+        }
 
-        // 通用 N 路：必须覆盖整个 batch。batch 已从 pending 里 drain 出来，漏处理任何一块
-        // 都会让该块的题目凭空消失且不报错。
-        let results: Vec<(usize, Result<Vec<ParsedQuestion>, (bool, String)>)> =
-            futures::future::join_all(batch.iter().map(|(ci, chunk)| async move {
-                let r = parse_stage2_chunk_cancellable(
-                    state, task_id, text_provider, text_model, prompt, *ci, chunk,
+        let results: Vec<Result<Vec<(usize, Vec<ParsedQuestion>)>, (bool, String)>> =
+            futures::future::join_all(groups.iter().map(|group| async move {
+                parse_stage2_batch_cancellable(
+                    state,
+                    task_id,
+                    text_provider,
+                    text_model,
+                    group,
                 )
-                .await;
-                (*ci, r)
+                .await
             }))
             .await;
 
         let mut fatal = false;
-        for (ci, res) in results {
+        for (group, res) in groups.into_iter().zip(results) {
             match res {
-                Ok(qs) => {
-                    parsed_by_chunk.insert(ci, qs);
+                Ok(pairs) => {
+                    llm_calls += 1;
+                    llm_n += pairs.len() as u32;
+                    for (ci, qs) in pairs {
+                        parsed_by_chunk.insert(ci, qs);
+                    }
                 }
                 Err((is_fatal, msg)) => {
                     if msg.contains("任务已取消") || is_cancel_requested(state, task_id).await {
@@ -2344,13 +2437,13 @@ async fn run_pdf_fast_path(
                         return Ok(outcome);
                     }
                     tracing::warn!("任务 {task_id} {msg}");
-                    outcome.failed_count += 1;
-                    outcome.processed_count += 1;
+                    outcome.failed_count += group.len() as i32;
+                    outcome.processed_count += group.len() as i32;
                     set_last_error(state, task_id, &msg).await;
                     if is_fatal {
                         tracing::warn!(
                             "任务 {task_id} 遇到不可恢复的 AI 错误，停止后续 {} 块",
-                            pending.len()
+                            llm_pending.len()
                         );
                         fatal = true;
                     }
@@ -2362,34 +2455,71 @@ async fn run_pdf_fast_path(
         }
     }
 
-    for (ci, chunk_questions) in parsed_by_chunk {
-        for (idx, q) in chunk_questions.into_iter().enumerate() {
-            if idx % 5 == 0 {
-                refresh_heartbeat(state, task_id).await;
-                if is_cancel_requested(state, task_id).await {
-                    outcome.cancelled = true;
-                    return Ok(outcome);
-                }
+    tracing::info!(
+        split_via,
+        high_skip_n,
+        llm_n,
+        llm_calls,
+        "任务 {task_id} 块处理完成（切题={split_via}，高置信跳过={high_skip_n}，LLM题={llm_n}，LLM调用={llm_calls}）"
+    );
+
+    let after_chunks = Instant::now();
+    let mut flat: Vec<ParsedQuestion> = Vec::new();
+    for (_ci, chunk_questions) in parsed_by_chunk {
+        flat.extend(chunk_questions);
+    }
+    let mut merged = merge_split_questions(flat);
+    recover_parsed_questions(&mut merged, &markdown);
+    let markdown_to_json_ms = md_to_json_start.elapsed().as_millis();
+    let merge_recover_ms = after_chunks.elapsed().as_millis();
+    let slice_timing = serde_json::json!({
+        "markdown_to_json_ms": markdown_to_json_ms,
+        "split_ms": split_ms,
+        "merge_recover_ms": merge_recover_ms,
+        "chunk_count": merged.len(),
+        "high_skip_n": high_skip_n,
+        "llm_n": llm_n,
+        "llm_calls": llm_calls,
+        "split_via": split_via,
+        "tagging_paused": crate::ai::slice::tagging_paused(),
+    });
+    tracing::info!(
+        markdown_to_json_ms,
+        split_ms,
+        merge_recover_ms,
+        high_skip_n,
+        llm_n,
+        "任务 {task_id} MinerU Markdown→规范 JSON {markdown_to_json_ms}ms（切块={split_ms}ms，合并回填={merge_recover_ms}ms，高置信跳过={high_skip_n}，LLM={llm_n}）"
+    );
+    persist_slice_timing(state, task_id, slice_timing).await;
+
+    for (idx, q) in merged.into_iter().enumerate() {
+        if idx % 5 == 0 {
+            refresh_heartbeat(state, task_id).await;
+            if is_cancel_requested(state, task_id).await {
+                outcome.cancelled = true;
+                return Ok(outcome);
             }
+        }
 
-            let question_index = format!("c{ci}_i{idx}");
-            let qno = q.question_no.clone();
-            outcome.processed_count += 1;
-            all_questions.push((question_index.clone(), q.clone()));
+        let question_index = format!("m_i{idx}");
+        let qno = q.question_no.clone();
+        outcome.processed_count += 1;
+        all_questions.push((question_index.clone(), q.clone()));
 
-            match stage_question(
-                state,
-                task,
-                &question_index,
-                q,
-                None,
-                paper_id,
-                collection_id,
-                is_mixed,
-                space_id,
-            )
-            .await
-            {
+        match stage_question(
+            state,
+            task,
+            &question_index,
+            q,
+            None,
+            paper_id,
+            collection_id,
+            is_mixed,
+            space_id,
+        )
+        .await
+        {
                 Ok(()) => {
                     outcome.success_count += 1;
                     if let Some(no) = qno {
@@ -2420,18 +2550,124 @@ async fn run_pdf_fast_path(
                 }
             }
         }
-    }
 
     Ok(outcome)
 }
 
 fn cached_ocr_markdown(task: &AiParseTask) -> Option<String> {
-    task.progress
+    ocr_markdown_from_progress(&task.progress)
+}
+
+fn ocr_markdown_from_progress(progress: &serde_json::Value) -> Option<String> {
+    progress
         .get("ocr_markdown")
         .and_then(|v| v.as_str())
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
+}
+
+fn ocr_engine_from_progress(progress: &serde_json::Value) -> Option<String> {
+    progress
+        .get("ocr_engine")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+fn force_ocr_requested(task: &AiParseTask) -> bool {
+    task.paper_meta
+        .get("force_ocr")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// 本任务或同 `document_id` 已完成任务上的 OCR Markdown。
+/// `force_ocr` 为 true 时返回 None，调用方必须重跑 OCR。
+async fn resolve_reusable_ocr(state: &AppState, task: &AiParseTask) -> Option<(String, String)> {
+    if force_ocr_requested(task) {
+        tracing::info!("任务 {} 指定 force_ocr，不复用 OCR 缓存", task.id);
+        return None;
+    }
+    if let Some(md) = cached_ocr_markdown(task) {
+        return Some((
+            md,
+            ocr_engine_from_progress(&task.progress).unwrap_or_default(),
+        ));
+    }
+    let doc_id = task.document_id?;
+    let (md, engine, src_id) = sibling_ocr_cache(state, doc_id, task.id).await?;
+    let engine = engine.unwrap_or_default();
+    tracing::info!(
+        "任务 {} 复用同文档任务 {} 的 OCR Markdown（{} 字符，跳过 MinerU）",
+        task.id,
+        src_id,
+        md.chars().count()
+    );
+    let engine_id = if engine.is_empty() { "unknown" } else { engine.as_str() };
+    persist_ocr_markdown(state, task.id, &md, engine_id).await;
+    let patch = serde_json::json!({
+        "ocr_reused": true,
+        "ocr_reused_from": src_id.to_string(),
+    });
+    if let Err(e) = sqlx::query(
+        r#"
+        UPDATE ai_parse_tasks
+        SET progress = COALESCE(progress, '{}'::jsonb) || $2::jsonb, updated_at = NOW()
+        WHERE id = $1
+        "#,
+    )
+    .bind(task.id)
+    .bind(&patch)
+    .execute(&state.pool)
+    .await
+    {
+        tracing::warn!("任务 {} 写入 OCR 复用标记失败: {e}", task.id);
+    }
+    Some((md, engine))
+}
+
+async fn sibling_ocr_cache(
+    state: &AppState,
+    document_id: Uuid,
+    current_task_id: Uuid,
+) -> Option<(String, Option<String>, Uuid)> {
+    let row: Option<(Option<String>, Option<String>, Uuid)> = sqlx::query_as(
+        r#"
+        SELECT progress->>'ocr_markdown', progress->>'ocr_engine', id
+        FROM ai_parse_tasks
+        WHERE document_id = $1
+          AND id <> $2
+          AND COALESCE(length(trim(progress->>'ocr_markdown')), 0) > 0
+        ORDER BY COALESCE(completed_at, updated_at) DESC NULLS LAST
+        LIMIT 1
+        "#,
+    )
+    .bind(document_id)
+    .bind(current_task_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| {
+        tracing::warn!("查询同文档 OCR 缓存失败: {e}");
+        e
+    })
+    .ok()
+    .flatten();
+    let (md, engine, src_id) = row?;
+    let md = md?.trim().to_string();
+    if md.is_empty() {
+        return None;
+    }
+    let engine = engine.and_then(|s| {
+        let t = s.trim();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t.to_string())
+        }
+    });
+    Some((md, engine, src_id))
 }
 
 async fn persist_ocr_markdown(state: &AppState, task_id: Uuid, markdown: &str, engine_id: &str) {
@@ -2515,6 +2751,31 @@ async fn run_page_ocr_export(
     is_mixed: bool,
 ) -> Result<FastPathOutcome, String> {
     let task_id = task.id;
+    if let Some((cached, cached_engine)) = resolve_reusable_ocr(state, task).await {
+        tracing::info!(
+            "任务 {task_id} 复用 OCR Markdown 导出（{} 字符，引擎 {}，跳过逐页 OCR）",
+            cached.chars().count(),
+            if cached_engine.is_empty() { "-" } else { cached_engine.as_str() }
+        );
+        let layout = resolve_ocr_layout(state, task, &cached);
+        persist_ocr_layout(state, task_id, &layout).await;
+        persist_ocr_export_ready(
+            state,
+            task_id,
+            space_id,
+            paper_id,
+            collection_id,
+            is_mixed,
+        )
+        .await;
+        return Ok(FastPathOutcome {
+            cancelled: false,
+            success_count: 0,
+            failed_count: 0,
+            processed_count: page_files.len() as i32,
+            ocr_export: true,
+        });
+    }
     let mut parts: Vec<String> = Vec::new();
     for (page_idx, page_file) in page_files.iter().enumerate() {
         refresh_heartbeat(state, task_id).await;
@@ -2611,7 +2872,7 @@ fn dedupe_parsed_questions(questions: Vec<ParsedQuestion>) -> Vec<ParsedQuestion
     let mut seen_stem = HashSet::new();
     let mut out = Vec::with_capacity(questions.len());
     for q in questions {
-        if q.stem.trim().is_empty() {
+        if !q.has_visible_body() {
             continue;
         }
         if let Some(key) = question_no_identity(q.question_no.as_deref()) {
@@ -2809,7 +3070,7 @@ pub(crate) async fn import_external_questions(
     });
     questions = dedupe_parsed_questions(questions);
     for q in questions {
-        if q.stem.trim().is_empty() {
+        if !q.has_visible_body() {
             continue;
         }
         let no_key = question_no_identity(q.question_no.as_deref());
@@ -2953,21 +3214,52 @@ fn split_stage2_with_layout(
             return (chunks, layout.source.as_str());
         }
     }
-    (split_stage2_markdown(md, paper_meta), "markdown_fallback")
+    (
+        rehome_trailing_exam_sections(split_stage2_markdown(md, paper_meta)),
+        "markdown_fallback",
+    )
 }
 
-/// Ok(questions) / Err((fatal, message))
-async fn parse_stage2_chunk_cancellable(
+async fn try_accept_script_skip(
+    state: &AppState,
+    draft: &ScriptDraft,
+    chunk: &str,
+) -> Option<Vec<ParsedQuestion>> {
+    if !script_skip_accepted(draft) {
+        return None;
+    }
+    let mut qs =
+        finalize_script_questions(vec![draft.question.clone()], &state.pool, true).await;
+    if qs.is_empty() {
+        return None;
+    }
+    recover_chunk_questions(&mut qs, chunk);
+    assign_chunk_images(chunk, &mut qs);
+    let report = validate_structured(
+        &qs[0],
+        draft.method_heading_count,
+        draft.confidence,
+    );
+    if report.schema_ok && !report.method_count_mismatch {
+        tracing::info!(
+            question_no = draft.question.question_no.as_deref().unwrap_or("-"),
+            "规则结构化跳过 Stage2"
+        );
+        return Some(qs);
+    }
+    None
+}
+
+/// Ok(pairs) / Err((fatal, message))
+async fn parse_stage2_batch_cancellable(
     state: &AppState,
     task_id: Uuid,
     text_provider: &dyn AiProvider,
     text_model: Option<&str>,
-    prompt: &str,
-    ci: usize,
-    chunk: &str,
-) -> Result<Vec<ParsedQuestion>, (bool, String)> {
+    group: &[(usize, String, ScriptDraft)],
+) -> Result<Vec<(usize, Vec<ParsedQuestion>)>, (bool, String)> {
     tokio::select! {
-        r = parse_stage2_chunk(state, task_id, text_provider, text_model, prompt, ci, chunk) => r,
+        r = parse_stage2_llm_group(state, task_id, text_provider, text_model, group) => r,
         _ = wait_until_cancel(state, task_id) => Err((false, "任务已取消".into())),
     }
 }
@@ -2981,21 +3273,38 @@ async fn wait_until_cancel(state: &AppState, task_id: Uuid) {
     }
 }
 
-/// Ok(questions) / Err((fatal, message))
-async fn parse_stage2_chunk(
+async fn parse_stage2_llm_group(
     state: &AppState,
     task_id: Uuid,
     text_provider: &dyn AiProvider,
     text_model: Option<&str>,
-    prompt: &str,
-    ci: usize,
-    chunk: &str,
-) -> Result<Vec<ParsedQuestion>, (bool, String)> {
+    group: &[(usize, String, ScriptDraft)],
+) -> Result<Vec<(usize, Vec<ParsedQuestion>)>, (bool, String)> {
+    if group.is_empty() {
+        return Ok(Vec::new());
+    }
+    let refs: Vec<(&str, &ScriptDraft)> = group
+        .iter()
+        .map(|(_, chunk, draft)| (chunk.as_str(), draft))
+        .collect();
+    let llm_input = stage2_batch_user_input(&refs);
+    let nos: Vec<String> = group
+        .iter()
+        .map(|(_, _, d)| d.question.question_no.clone().unwrap_or_else(|| "-".into()))
+        .collect();
+    tracing::info!(
+        "任务 {task_id} Stage2 批量 {} 题（{}），输入 {} 字",
+        group.len(),
+        nos.join(","),
+        llm_input.chars().count()
+    );
+
+    set_progress_phase(state, task_id, "stage2").await;
     let mut last_err: Option<AiError> = None;
     let mut parsed: Option<String> = None;
     for attempt in 0..2u8 {
         match text_provider
-            .parse_text_with_prompt(chunk, prompt, text_model)
+            .parse_text_with_prompt(&llm_input, STAGE2_PATCH_PROMPT, text_model)
             .await
         {
             Ok(r) => {
@@ -3004,8 +3313,7 @@ async fn parse_stage2_chunk(
             }
             Err(e) if (matches!(e, AiError::Timeout) || e.is_rate_limited()) && attempt == 0 => {
                 tracing::warn!(
-                    "任务 {task_id} 第 {} 块{}，3s 后重试 1 次",
-                    ci + 1,
+                    "任务 {task_id} 批量 Stage2{}，3s 后重试 1 次",
                     if e.is_rate_limited() { "限流" } else { "超时" }
                 );
                 tokio::time::sleep(Duration::from_secs(3)).await;
@@ -3017,42 +3325,64 @@ async fn parse_stage2_chunk(
             }
         }
     }
-    let raw_json = match parsed {
-        Some(r) => r,
+
+    let mut fallback_reason = String::new();
+    let llm_qs = match parsed {
+        Some(raw_json) => match post_process_batch(&raw_json, &state.pool, true).await {
+            Ok(qs) if !qs.is_empty() => qs,
+            other => {
+                let detail = match other {
+                    Ok(_) => "questions 为空".to_string(),
+                    Err((_, err)) => err["error"].as_str().unwrap_or("后处理失败").to_string(),
+                };
+                tracing::warn!("任务 {task_id} 批量后处理失败（{detail}），尝试规则草稿");
+                fallback_reason = detail;
+                Vec::new()
+            }
+        },
         None => {
             let e = last_err.expect("解析失败时必有错误");
-            let msg = format!("第 {} 块解析失败: {}", ci + 1, map_ai_error_msg(&e));
+            let msg = format!("批量 Stage2 失败: {}", map_ai_error_msg(&e));
             if is_fatal_ai_error(&e) {
                 return Err((true, msg));
             }
-            tracing::warn!("任务 {task_id} {msg}，降级为 OCR 草稿题干（保留配图）");
-            let mut qs = vec![draft_question_from_chunk(chunk, &map_ai_error_msg(&e))];
-            assign_chunk_images(chunk, &mut qs);
-            return Ok(qs);
+            tracing::warn!("任务 {task_id} {msg}，尝试规则草稿");
+            fallback_reason = map_ai_error_msg(&e);
+            Vec::new()
         }
     };
 
-    let mut chunk_questions = match post_process_batch(&raw_json, &state.pool, true).await {
-        Ok(qs) if !qs.is_empty() => qs,
-        other => {
-            let detail = match other {
-                Ok(_) => "questions 为空".to_string(),
-                Err((_, err)) => err["error"].as_str().unwrap_or("后处理失败").to_string(),
+    let mut out = Vec::with_capacity(group.len());
+    for (i, (ci, chunk, draft)) in group.iter().enumerate() {
+        let one = llm_qs.get(i).cloned().into_iter().collect::<Vec<_>>();
+        let mut chunk_questions = merge_script_and_llm(chunk, draft, one);
+        if chunk_questions.is_empty() {
+            let reason = if fallback_reason.is_empty() {
+                "Stage2 未能结构化"
+            } else {
+                fallback_reason.as_str()
             };
             tracing::warn!(
-                "任务 {task_id} 第 {} 块后处理失败（{detail}），降级为 OCR 草稿题干（保留配图）",
+                "任务 {task_id} 第 {} 块无规则草稿可用，降级为 OCR 题干",
                 ci + 1
             );
-            vec![draft_question_from_chunk(chunk, &detail)]
+            chunk_questions = vec![draft_question_from_chunk(chunk, reason)];
         }
-    };
-    assign_chunk_images(chunk, &mut chunk_questions);
-    Ok(chunk_questions)
+        restore_script_analysis_if_needed(&mut chunk_questions, draft);
+        for q in &mut chunk_questions {
+            append_validation_warnings(q, draft);
+            strip_llm_analysis_for_recover(q);
+        }
+        recover_chunk_questions(&mut chunk_questions, chunk);
+        assign_chunk_images(chunk, &mut chunk_questions);
+        out.push((*ci, chunk_questions));
+    }
+    Ok(out)
 }
 
 fn draft_question_from_chunk(chunk: &str, reason: &str) -> ParsedQuestion {
     let question_type = guess_chunk_question_type(chunk);
-    ParsedQuestion {
+    let mut q = ParsedQuestion {
         question_type: question_type.clone(),
         sub_type: None,
         difficulty: None,
@@ -3068,34 +3398,23 @@ fn draft_question_from_chunk(chunk: &str, reason: &str) -> ParsedQuestion {
         image_placeholders: vec![],
         image_urls: vec![],
         kp_matches: vec![],
+        parts: vec![],
         question_no: extract_chunk_question_no(chunk),
         display_order: None,
         score: None,
         chapter_path: vec![],
         solution_methods: vec![],
-    }
+    };
+    recover_question_sections(&mut q, chunk);
+    q
 }
 
 fn extract_chunk_question_no(chunk: &str) -> Option<String> {
-    for line in chunk.lines() {
-        if let Some(caps) = crate::ai::layout::question_start_regex().captures(line) {
-            return caps.get(1).map(|m| m.as_str().to_string());
-        }
-    }
-    None
+    crate::ai::structure::extract_chunk_question_no(chunk)
 }
 
 fn guess_chunk_question_type(chunk: &str) -> String {
-    static CHOICE_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r"(?m)^\s*A\s*[\.．、\)]").expect("choice option")
-    });
-    if CHOICE_RE.is_match(chunk) {
-        "choice".into()
-    } else if chunk.contains("____") || chunk.contains("填空") {
-        "fill".into()
-    } else {
-        "solution".into()
-    }
+    crate::ai::structure::guess_chunk_question_type(chunk)
 }
 
 fn looks_like_analysis_paper(md: &str, paper_meta: &serde_json::Value) -> bool {
@@ -3121,29 +3440,16 @@ fn split_stage2_markdown(md: &str, paper_meta: &serde_json::Value) -> Vec<String
     };
     let by_q = split_markdown_by_question_no(md, max_q);
     if by_q.len() >= 2 {
-        return by_q;
+        return rehome_trailing_exam_sections(by_q);
     }
-    split_markdown_chunks(md, STAGE2_CHUNK_MAX_CHARS)
-}
-
-fn question_start_regex() -> &'static regex::Regex {
-    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(
-            r"^\s*(?:\*\*|__|#+\s*)?(?:第\s*)?([1-9]\d{0,2})\s*(?:题|[.．、]\s|[.．、][\u{4e00}-\u{9fff}]|[.．、]$)",
-        )
-        .expect("question start regex")
-    });
-    &RE
-}
-
-fn exam_section_heading_regex() -> &'static regex::Regex {
-    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(
-            r"(?:第\s*[IⅠⅡⅢIV一二三四五1-9]+\s*卷)|(^[一二三四五六七八九十]+[、．，.､]?\s*(?:选|多选|填空|解答|计算|证明|综合))",
-        )
-        .expect("exam section heading regex")
-    });
-    &RE
+    if md.chars().count() <= STAGE2_SINGLE_QUESTION_MAX_CHARS {
+        let t = md.trim();
+        if t.is_empty() {
+            return Vec::new();
+        }
+        return rehome_trailing_exam_sections(vec![t.to_string()]);
+    }
+    rehome_trailing_exam_sections(split_markdown_chunks(md, STAGE2_CHUNK_MAX_CHARS))
 }
 
 fn is_notice_heading(line: &str) -> bool {
@@ -3197,16 +3503,16 @@ fn looks_like_math_question_start(line: &str) -> bool {
 /// 卷头「注意事项」序号与考场说明不计入题号。
 fn split_markdown_by_question_no(md: &str, max_questions_per_chunk: usize) -> Vec<String> {
     let re = question_start_regex();
-    let section_re = exam_section_heading_regex();
     let mut starts: Vec<usize> = Vec::new();
     let mut offset = 0usize;
     let mut in_notice = false;
+    let mut last_major: Option<u32> = None;
     for line in md.split_inclusive('\n') {
         let trimmed = line.trim();
         if is_notice_heading(trimmed) {
             in_notice = true;
         }
-        if section_re.is_match(trimmed) {
+        if exam_section_heading(trimmed) {
             in_notice = false;
         }
         if re.is_match(trimmed) {
@@ -3214,8 +3520,19 @@ fn split_markdown_by_question_no(md: &str, max_questions_per_chunk: usize) -> Ve
             let math_like = looks_like_math_question_start(trimmed);
             if instruction || (in_notice && !math_like) {
                 // 卷头说明序号，跳过
+            } else if let (Some(prev), Some(curr)) = (last_major, question_major_no(trimmed)) {
+                if is_implausible_major_no_drop(prev, curr) {
+                    // OCR 把小问收成「2. 若过…」，不要当成新大题
+                } else {
+                    in_notice = false;
+                    last_major = Some(curr);
+                    starts.push(offset);
+                }
             } else {
                 in_notice = false;
+                if let Some(n) = question_major_no(trimmed) {
+                    last_major = Some(n);
+                }
                 starts.push(offset);
             }
         }
@@ -3235,6 +3552,12 @@ fn split_markdown_by_question_no(md: &str, max_questions_per_chunk: usize) -> Ve
             pieces.push(body.to_string());
         }
     }
+
+    let pieces: Vec<String> = pieces
+        .into_iter()
+        .flat_map(|p| split_markdown_on_question_starts(&p))
+        .filter(|s| !s.trim().is_empty())
+        .collect();
 
     let pack = max_questions_per_chunk.max(1);
     pieces
@@ -3584,6 +3907,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_ocr_progress_extractors() {
+        let empty = json!({});
+        assert!(ocr_markdown_from_progress(&empty).is_none());
+        assert!(ocr_engine_from_progress(&empty).is_none());
+        let progress = json!({
+            "ocr_markdown": "  # 卷一  ",
+            "ocr_engine": "mineru"
+        });
+        assert_eq!(ocr_markdown_from_progress(&progress).as_deref(), Some("# 卷一"));
+        assert_eq!(ocr_engine_from_progress(&progress).as_deref(), Some("mineru"));
+    }
+
+    #[test]
+    fn test_force_ocr_requested() {
+        let user = Uuid::new_v4();
+        let doc = Uuid::new_v4();
+        let mut task = fake_task(user, doc);
+        assert!(!force_ocr_requested(&task));
+        task.paper_meta = json!({ "force_ocr": true });
+        assert!(force_ocr_requested(&task));
+        task.paper_meta = json!({ "force_ocr": false });
+        assert!(!force_ocr_requested(&task));
+    }
+
     fn fake_parsed(question_no: Option<&str>, stem: &str) -> ParsedQuestion {
         ParsedQuestion {
             question_type: "solution".into(),
@@ -3607,6 +3955,7 @@ mod tests {
             image_placeholders: vec![],
             image_urls: vec![],
             kp_matches: vec![],
+            parts: vec![],
             question_no: question_no.map(|s| s.to_string()),
             display_order: Some(1),
             score: Some(8),
@@ -3740,6 +4089,33 @@ mod tests {
         assert_eq!(q.question_type, "choice");
         assert!(q.stem.contains("/uploads/q5a.png"));
         assert!(q.warnings.iter().any(|w| w.contains("OCR")));
+    }
+
+    #[test]
+    fn test_draft_from_chunk_peels_analysis_and_keeps_six_methods() {
+        let chunk = "\
+16. 已知椭圆\n\
+（1）求离心率\n\
+【解析】\n\
+法一：平移\n\
+法二：点差\n\
+法三：韦达\n\
+法四：参数\n\
+法五：斜率不存在\n\
+法六：水平宽乘铅垂高\n";
+        let q = draft_question_from_chunk(chunk, "JSON 截断");
+        assert!(!q.stem.contains("【解析】"), "题干不应再含解析: {}", q.stem);
+        assert!(q.stem.contains("已知椭圆"));
+        let n = q
+            .parts
+            .iter()
+            .flat_map(|p| p.analyses.iter())
+            .chain(q.analysis.iter())
+            .filter(|a| a.content.contains("水平宽") || a.title.contains("六"))
+            .count();
+        assert!(n >= 1, "应回填法六: parts={:?} analysis={:?}", q.parts, q.analysis);
+        let total = q.parts.iter().map(|p| p.analyses.len()).sum::<usize>().max(q.analysis.len());
+        assert!(total >= 6, "应保留 6 种解法, total={total}, parts={:?}", q.parts);
     }
 
     #[test]
@@ -4100,9 +4476,21 @@ mod tests {
                 assert!(
                     unmatched_knowledge
                         .iter()
-                        .any(|n| n.as_str() == Some(planted.as_str())),
-                    "未匹配知识点应随暂存项保存：{staged}"
+                        .any(|v| v.as_str() == Some(planted.as_str())
+                            || v.to_string().contains(&planted)),
+                    "未匹配知识点应随暂存保存：{staged}"
                 );
+            }
+            Some("idle") => {
+                let queued: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM ai_tagging_tasks WHERE parse_task_id = $1 AND source_index = $2",
+                )
+                .bind(task.id)
+                .bind("p1_i0")
+                .fetch_one(&pool)
+                .await
+                .expect("查询打标队列失败");
+                assert_eq!(queued, 0, "切片测试阶段不应自动入队打标：{staged}");
             }
             other => panic!("暂存项 tagging_status 异常：{other:?}，staged={staged}"),
         }
@@ -4231,6 +4619,24 @@ mod tests {
         // 42% × 20 页 → floor(8.4)=8 页完成，正在第 9 页
         let p = map_pdf_poll_progress(Some(&json!(42)), 20, None).unwrap();
         assert_eq!((p.current_page, p.processed_count), (9, 8));
+    }
+
+    #[test]
+    fn test_progress_phase_patch_values() {
+        assert_eq!(progress_phase_patch("ocr")["phase"], "ocr");
+        assert_eq!(progress_phase_patch("structuring")["phase"], "structuring");
+        assert_eq!(progress_phase_patch("stage2")["phase"], "stage2");
+        assert_ne!(progress_phase_patch("structuring")["phase"], "ocr_ready");
+    }
+
+    #[test]
+    fn test_ocr_export_pipeline_detected_from_progress() {
+        let mut task = fake_task(Uuid::nil(), Uuid::nil());
+        task.progress = json!({ "pipeline": "ocr_export", "phase": "ocr_ready" });
+        assert!(is_ocr_export(&task));
+        task.progress = json!({ "pipeline": "full", "phase": "structuring" });
+        task.paper_meta = json!({ "document_type": "class_exercise" });
+        assert!(!is_ocr_export(&task));
     }
 
     #[test]
@@ -4412,6 +4818,29 @@ mod tests {
     }
 
     #[test]
+    fn test_split_stage2_rehomes_section_heading_on_analysis_paper() {
+        let md = "\
+8. 已知函数 $f(x)$。\n\
+故选：B\n\
+\n\
+## 二、选择题：本题共3小题，每小题6分，共18分。有多项符合题目要求。\n\
+9. 已知随机变量服从正态分布。\n\
+故选：BC\n";
+        let chunks = split_stage2_markdown(md, &json!({"title": "2024年高考数学试卷（解析卷）"}));
+        assert!(chunks.len() >= 2, "{chunks:?}");
+        let q8 = chunks.iter().find(|c| c.contains("8. 已知函数")).expect("第8题");
+        let q9 = chunks.iter().find(|c| c.contains("9. 已知随机变量")).expect("第9题");
+        assert!(
+            !q8.contains("二、选择题") && !q8.contains("多项符合"),
+            "卷头不得留在上一题: {q8}"
+        );
+        assert!(
+            q9.contains("二、选择题") && q9.contains("9. 已知随机变量"),
+            "卷头应交给下一题: {q9}"
+        );
+    }
+
+    #[test]
     fn test_split_by_question_no_ignores_sub_items_and_decimals() {
         let md = "1. 大题\n（1）小问一\n（2）小问二\n3.14 不是题号\n2. 第二大题";
         let chunks = split_markdown_by_question_no(md, 1);
@@ -4419,6 +4848,25 @@ mod tests {
         assert!(chunks[0].contains("（1）小问一"));
         assert!(chunks[0].contains("3.14"));
         assert!(chunks[1].starts_with("2. 第二大题") || chunks[1].contains("2. 第二大题"));
+    }
+
+    #[test]
+    fn test_split_by_question_no_keeps_item_16_with_ocr_subquestion_two() {
+        let md = "\
+16. 已知 $A(0,3)$ 为椭圆上两点.\n\
+（1）求离心率\n\
+2. 若过 $P$ 的直线 $l$ 交 $C$ 于另一点 $B$\n\
+【解析】\n\
+法五：斜率不存在\n\
+法六：水平宽\n";
+        let chunks = split_markdown_by_question_no(md, 1);
+        assert!(
+            chunks.is_empty(),
+            "16 后的行首「2. 若过」不应切成第二道大题，chunks={chunks:?}"
+        );
+        let stage2 = split_stage2_markdown(md, &serde_json::json!({}));
+        assert_eq!(stage2.len(), 1, "单题长解析应整题送 Stage2: {stage2:?}");
+        assert!(stage2[0].contains("法六"));
     }
 
     #[test]
@@ -4570,6 +5018,10 @@ A. ${0<x<1}$\n\
         // 付费模型（含 OpenRouter vendor/model ID）走默认并发
         assert_eq!(stage2_concurrency_for(Some("deepseek-chat"), None), STAGE2_CONCURRENCY);
         assert_eq!(stage2_concurrency_for(Some("stealth/ox-alpha"), None), STAGE2_CONCURRENCY);
+        // 用户设置优先于 glm/gemini 启发式，付费模型不会被压成 1
+        assert_eq!(stage2_concurrency(Some("deepseek-chat"), None), STAGE2_CONCURRENCY);
+        assert_eq!(stage2_concurrency(Some("qwen-plus"), Some(8)), 8);
+        assert_eq!(stage2_concurrency(Some("glm-4.7-flash"), Some(4)), 4);
         // 环境变量覆盖优先，且被夹在 [1,16]
         assert_eq!(stage2_concurrency_for(Some("gemini-3.7-flash"), Some(8)), 8);
         assert_eq!(stage2_concurrency_for(Some("deepseek-chat"), Some(0)), 1);

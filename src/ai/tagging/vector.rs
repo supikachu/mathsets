@@ -99,7 +99,7 @@ pub async fn recall_nodes_vector(
             },
         ));
     };
-    let Some(client) = EmbeddingClient::from_env() else {
+    let Some(client) = EmbeddingClient::from_pool(pool).await else {
         return Ok((
             vec![],
             VectorRecallStats {
@@ -185,7 +185,7 @@ pub async fn vector_match_tag_top1(
     if !vector_ready(pool).await {
         return Ok(None);
     }
-    let Some(client) = EmbeddingClient::from_env() else {
+    let Some(client) = EmbeddingClient::from_pool(pool).await else {
         return Ok(None);
     };
     let key = name.trim();
