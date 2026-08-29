@@ -173,6 +173,12 @@ pub struct TaskStatusResponse {
     /// OCR 全文 Markdown（`progress.ocr_markdown`）。站外结构化模式导入前展示。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ocr_markdown: Option<String>,
+    /// OCR 引擎 id（`progress.ocr_engine`，如 mineru / doc2x）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ocr_engine: Option<String>,
+    /// 本任务是否复用了同文档已有 OCR（`progress.ocr_reused`）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ocr_reused: Option<bool>,
     /// `full`（默认，OCR+Stage2）或 `ocr_export`（仅 OCR，等待外部 JSON 导入）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pipeline: Option<String>,

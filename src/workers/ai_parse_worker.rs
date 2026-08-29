@@ -24,21 +24,20 @@ use crate::ai::continuation::merge_split_questions;
 use crate::ai::structure::{
     append_validation_warnings, finalize_parsed_question, merge_script_and_llm,
     recover_chunk_questions, recover_parsed_questions, recover_question_sections,
-    restore_script_analysis_if_needed, script_skip_accepted, should_call_llm_with,
-    stage2_llm_input, stage2_patch_user_input, structure_chunk, validate_structured,
+    restore_script_analysis_if_needed, script_skip_accepted, stage2_batch_user_input,
+    strip_llm_analysis_for_recover, structure_chunk, validate_structured, ScriptDraft,
 };
 use crate::ai::layout::{
     exam_section_heading, is_implausible_major_no_drop, layout_sidecar_path, load_layout_sidecar,
-    question_major_no, question_start_regex, rehome_trailing_exam_sections, split_question_chunks,
-    LayoutDocument, LayoutSource,
+    question_major_no, question_start_regex, rehome_trailing_exam_sections, split_markdown_on_question_starts,
+    split_question_chunks, LayoutDocument, LayoutSource,
 };
 use crate::ai::ocr::{
     create_ocr_provider, parse_percent_value, should_fallback, OcrError, OcrProvider,
     PdfProgressCallback,
 };
 use crate::ai::prompt::{
-    BATCH_IMAGE_OCR_FULL_PROMPT, STAGE2_PARSE_FULL_PROMPT, STAGE2_PARSE_SLIM_PROMPT,
-    STAGE2_PATCH_PROMPT,
+    BATCH_IMAGE_OCR_FULL_PROMPT, STAGE2_PARSE_FULL_PROMPT, STAGE2_PATCH_PROMPT,
 };
 use crate::ai::provider::{
     create_provider, is_transient_openrouter_error, AiError, AiProvider,
@@ -2156,6 +2155,8 @@ const STAGE2_CHUNK_MAX_CHARS: usize = 6000;
 const STAGE2_SINGLE_QUESTION_MAX_CHARS: usize = 24000;
 /// Stage2 同时解析的切块数（暂存仍串行，避免 jsonb 追加丢题）
 const STAGE2_CONCURRENCY: usize = 4;
+/// 残块批量：一次 LLM 处理 3～8 题，默认 6。
+const STAGE2_LLM_BATCH: usize = 6;
 
 /// 明确已知限流很紧的档位：智谱、Gemini 免费档、OpenRouter `:free` 免费模型。
 ///
@@ -2245,10 +2246,11 @@ async fn run_pdf_fast_path(
         engine.id()
     );
 
-    let markdown = if let Some(cached) = cached_ocr_markdown(task) {
+    let markdown = if let Some((cached, cached_engine)) = resolve_reusable_ocr(state, task).await {
         tracing::info!(
-            "任务 {task_id} 复用已落库 OCR Markdown（{} 字符，跳过 OCR）",
-            cached.chars().count()
+            "任务 {task_id} 复用已落库 OCR Markdown（{} 字符，引擎 {}，跳过 OCR）",
+            cached.chars().count(),
+            if cached_engine.is_empty() { "-" } else { cached_engine.as_str() }
         );
         cached
     } else {
@@ -2335,11 +2337,6 @@ async fn run_pdf_fast_path(
     if chunks.is_empty() {
         return Err("PDF 直传 OCR 结果为空".into());
     }
-    let prompt = if analysis_paper {
-        STAGE2_PARSE_SLIM_PROMPT.as_str()
-    } else {
-        STAGE2_PARSE_FULL_PROMPT.as_str()
-    };
     tracing::info!(
         "任务 {task_id} 全文 Markdown {} 字符 → {} 块解析（切题={split_via}，版面来源={}，{} 块，解析卷={}，并发={}）",
         markdown.chars().count(),
@@ -2364,39 +2361,75 @@ async fn run_pdf_fast_path(
         std::collections::BTreeMap::new();
     let mut high_skip_n = 0u32;
     let mut llm_n = 0u32;
+    let mut llm_calls = 0u32;
 
-    while !pending.is_empty() {
+    let mut llm_pending: Vec<(usize, String, ScriptDraft)> = Vec::new();
+    for (ci, chunk) in pending.drain(..) {
+        refresh_heartbeat(state, task_id).await;
+        if is_cancel_requested(state, task_id).await {
+            outcome.cancelled = true;
+            return Ok(outcome);
+        }
+        let draft = structure_chunk(&chunk);
+        tracing::info!(
+            confidence = ?draft.confidence,
+            method_heading_count = draft.method_heading_count,
+            question_no = draft.question.question_no.as_deref().unwrap_or("-"),
+            skip_llm = script_skip_accepted(&draft),
+            "任务 {task_id} 第 {} 块规则结构化",
+            ci + 1
+        );
+        if let Some(qs) = try_accept_script_skip(state, &draft, &chunk).await {
+            high_skip_n += 1;
+            parsed_by_chunk.insert(ci, qs);
+        } else {
+            llm_pending.push((ci, chunk, draft));
+        }
+    }
+
+    tracing::info!(
+        "任务 {task_id} 规则跳过 {high_skip_n} 块，其余 {} 块按每批最多 {STAGE2_LLM_BATCH} 题打 Stage2（并发={stage2_n}）",
+        llm_pending.len()
+    );
+
+    while !llm_pending.is_empty() {
         refresh_heartbeat(state, task_id).await;
         if is_cancel_requested(state, task_id).await {
             outcome.cancelled = true;
             return Ok(outcome);
         }
 
-        let take_n = stage2_n.min(pending.len());
-        let batch: Vec<(usize, String)> = pending.drain(..take_n).collect();
+        let mut groups: Vec<Vec<(usize, String, ScriptDraft)>> = Vec::new();
+        for _ in 0..stage2_n {
+            if llm_pending.is_empty() {
+                break;
+            }
+            let take = STAGE2_LLM_BATCH.min(llm_pending.len());
+            groups.push(llm_pending.drain(..take).collect());
+        }
 
-        // 通用 N 路：必须覆盖整个 batch。batch 已从 pending 里 drain 出来，漏处理任何一块
-        // 都会让该块的题目凭空消失且不报错。
-        let results: Vec<(usize, Result<(Vec<ParsedQuestion>, bool), (bool, String)>)> =
-            futures::future::join_all(batch.iter().map(|(ci, chunk)| async move {
-                let r = parse_stage2_chunk_cancellable(
-                    state, task_id, text_provider, text_model, prompt, *ci, chunk,
+        let results: Vec<Result<Vec<(usize, Vec<ParsedQuestion>)>, (bool, String)>> =
+            futures::future::join_all(groups.iter().map(|group| async move {
+                parse_stage2_batch_cancellable(
+                    state,
+                    task_id,
+                    text_provider,
+                    text_model,
+                    group,
                 )
-                .await;
-                (*ci, r)
+                .await
             }))
             .await;
 
         let mut fatal = false;
-        for (ci, res) in results {
+        for (group, res) in groups.into_iter().zip(results) {
             match res {
-                Ok((qs, skipped_llm)) => {
-                    if skipped_llm {
-                        high_skip_n += 1;
-                    } else {
-                        llm_n += 1;
+                Ok(pairs) => {
+                    llm_calls += 1;
+                    llm_n += pairs.len() as u32;
+                    for (ci, qs) in pairs {
+                        parsed_by_chunk.insert(ci, qs);
                     }
-                    parsed_by_chunk.insert(ci, qs);
                 }
                 Err((is_fatal, msg)) => {
                     if msg.contains("任务已取消") || is_cancel_requested(state, task_id).await {
@@ -2404,13 +2437,13 @@ async fn run_pdf_fast_path(
                         return Ok(outcome);
                     }
                     tracing::warn!("任务 {task_id} {msg}");
-                    outcome.failed_count += 1;
-                    outcome.processed_count += 1;
+                    outcome.failed_count += group.len() as i32;
+                    outcome.processed_count += group.len() as i32;
                     set_last_error(state, task_id, &msg).await;
                     if is_fatal {
                         tracing::warn!(
                             "任务 {task_id} 遇到不可恢复的 AI 错误，停止后续 {} 块",
-                            pending.len()
+                            llm_pending.len()
                         );
                         fatal = true;
                     }
@@ -2426,7 +2459,8 @@ async fn run_pdf_fast_path(
         split_via,
         high_skip_n,
         llm_n,
-        "任务 {task_id} 块处理完成（切题={split_via}，高置信跳过={high_skip_n}，LLM={llm_n}）"
+        llm_calls,
+        "任务 {task_id} 块处理完成（切题={split_via}，高置信跳过={high_skip_n}，LLM题={llm_n}，LLM调用={llm_calls}）"
     );
 
     let after_chunks = Instant::now();
@@ -2445,6 +2479,7 @@ async fn run_pdf_fast_path(
         "chunk_count": merged.len(),
         "high_skip_n": high_skip_n,
         "llm_n": llm_n,
+        "llm_calls": llm_calls,
         "split_via": split_via,
         "tagging_paused": crate::ai::slice::tagging_paused(),
     });
@@ -2520,12 +2555,119 @@ async fn run_pdf_fast_path(
 }
 
 fn cached_ocr_markdown(task: &AiParseTask) -> Option<String> {
-    task.progress
+    ocr_markdown_from_progress(&task.progress)
+}
+
+fn ocr_markdown_from_progress(progress: &serde_json::Value) -> Option<String> {
+    progress
         .get("ocr_markdown")
         .and_then(|v| v.as_str())
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
+}
+
+fn ocr_engine_from_progress(progress: &serde_json::Value) -> Option<String> {
+    progress
+        .get("ocr_engine")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+fn force_ocr_requested(task: &AiParseTask) -> bool {
+    task.paper_meta
+        .get("force_ocr")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// 本任务或同 `document_id` 已完成任务上的 OCR Markdown。
+/// `force_ocr` 为 true 时返回 None，调用方必须重跑 OCR。
+async fn resolve_reusable_ocr(state: &AppState, task: &AiParseTask) -> Option<(String, String)> {
+    if force_ocr_requested(task) {
+        tracing::info!("任务 {} 指定 force_ocr，不复用 OCR 缓存", task.id);
+        return None;
+    }
+    if let Some(md) = cached_ocr_markdown(task) {
+        return Some((
+            md,
+            ocr_engine_from_progress(&task.progress).unwrap_or_default(),
+        ));
+    }
+    let doc_id = task.document_id?;
+    let (md, engine, src_id) = sibling_ocr_cache(state, doc_id, task.id).await?;
+    let engine = engine.unwrap_or_default();
+    tracing::info!(
+        "任务 {} 复用同文档任务 {} 的 OCR Markdown（{} 字符，跳过 MinerU）",
+        task.id,
+        src_id,
+        md.chars().count()
+    );
+    let engine_id = if engine.is_empty() { "unknown" } else { engine.as_str() };
+    persist_ocr_markdown(state, task.id, &md, engine_id).await;
+    let patch = serde_json::json!({
+        "ocr_reused": true,
+        "ocr_reused_from": src_id.to_string(),
+    });
+    if let Err(e) = sqlx::query(
+        r#"
+        UPDATE ai_parse_tasks
+        SET progress = COALESCE(progress, '{}'::jsonb) || $2::jsonb, updated_at = NOW()
+        WHERE id = $1
+        "#,
+    )
+    .bind(task.id)
+    .bind(&patch)
+    .execute(&state.pool)
+    .await
+    {
+        tracing::warn!("任务 {} 写入 OCR 复用标记失败: {e}", task.id);
+    }
+    Some((md, engine))
+}
+
+async fn sibling_ocr_cache(
+    state: &AppState,
+    document_id: Uuid,
+    current_task_id: Uuid,
+) -> Option<(String, Option<String>, Uuid)> {
+    let row: Option<(Option<String>, Option<String>, Uuid)> = sqlx::query_as(
+        r#"
+        SELECT progress->>'ocr_markdown', progress->>'ocr_engine', id
+        FROM ai_parse_tasks
+        WHERE document_id = $1
+          AND id <> $2
+          AND COALESCE(length(trim(progress->>'ocr_markdown')), 0) > 0
+        ORDER BY COALESCE(completed_at, updated_at) DESC NULLS LAST
+        LIMIT 1
+        "#,
+    )
+    .bind(document_id)
+    .bind(current_task_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| {
+        tracing::warn!("查询同文档 OCR 缓存失败: {e}");
+        e
+    })
+    .ok()
+    .flatten();
+    let (md, engine, src_id) = row?;
+    let md = md?.trim().to_string();
+    if md.is_empty() {
+        return None;
+    }
+    let engine = engine.and_then(|s| {
+        let t = s.trim();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t.to_string())
+        }
+    });
+    Some((md, engine, src_id))
 }
 
 async fn persist_ocr_markdown(state: &AppState, task_id: Uuid, markdown: &str, engine_id: &str) {
@@ -2609,6 +2751,31 @@ async fn run_page_ocr_export(
     is_mixed: bool,
 ) -> Result<FastPathOutcome, String> {
     let task_id = task.id;
+    if let Some((cached, cached_engine)) = resolve_reusable_ocr(state, task).await {
+        tracing::info!(
+            "任务 {task_id} 复用 OCR Markdown 导出（{} 字符，引擎 {}，跳过逐页 OCR）",
+            cached.chars().count(),
+            if cached_engine.is_empty() { "-" } else { cached_engine.as_str() }
+        );
+        let layout = resolve_ocr_layout(state, task, &cached);
+        persist_ocr_layout(state, task_id, &layout).await;
+        persist_ocr_export_ready(
+            state,
+            task_id,
+            space_id,
+            paper_id,
+            collection_id,
+            is_mixed,
+        )
+        .await;
+        return Ok(FastPathOutcome {
+            cancelled: false,
+            success_count: 0,
+            failed_count: 0,
+            processed_count: page_files.len() as i32,
+            ocr_export: true,
+        });
+    }
     let mut parts: Vec<String> = Vec::new();
     for (page_idx, page_file) in page_files.iter().enumerate() {
         refresh_heartbeat(state, task_id).await;
@@ -3053,18 +3220,46 @@ fn split_stage2_with_layout(
     )
 }
 
-/// Ok((questions, skipped_llm)) / Err((fatal, message))
-async fn parse_stage2_chunk_cancellable(
+async fn try_accept_script_skip(
+    state: &AppState,
+    draft: &ScriptDraft,
+    chunk: &str,
+) -> Option<Vec<ParsedQuestion>> {
+    if !script_skip_accepted(draft) {
+        return None;
+    }
+    let mut qs =
+        finalize_script_questions(vec![draft.question.clone()], &state.pool, true).await;
+    if qs.is_empty() {
+        return None;
+    }
+    recover_chunk_questions(&mut qs, chunk);
+    assign_chunk_images(chunk, &mut qs);
+    let report = validate_structured(
+        &qs[0],
+        draft.method_heading_count,
+        draft.confidence,
+    );
+    if report.schema_ok && !report.method_count_mismatch {
+        tracing::info!(
+            question_no = draft.question.question_no.as_deref().unwrap_or("-"),
+            "规则结构化跳过 Stage2"
+        );
+        return Some(qs);
+    }
+    None
+}
+
+/// Ok(pairs) / Err((fatal, message))
+async fn parse_stage2_batch_cancellable(
     state: &AppState,
     task_id: Uuid,
     text_provider: &dyn AiProvider,
     text_model: Option<&str>,
-    prompt: &str,
-    ci: usize,
-    chunk: &str,
-) -> Result<(Vec<ParsedQuestion>, bool), (bool, String)> {
+    group: &[(usize, String, ScriptDraft)],
+) -> Result<Vec<(usize, Vec<ParsedQuestion>)>, (bool, String)> {
     tokio::select! {
-        r = parse_stage2_chunk(state, task_id, text_provider, text_model, prompt, ci, chunk) => r,
+        r = parse_stage2_llm_group(state, task_id, text_provider, text_model, group) => r,
         _ = wait_until_cancel(state, task_id) => Err((false, "任务已取消".into())),
     }
 }
@@ -3078,74 +3273,38 @@ async fn wait_until_cancel(state: &AppState, task_id: Uuid) {
     }
 }
 
-/// Ok((questions, skipped_llm)) / Err((fatal, message))
-async fn parse_stage2_chunk(
+async fn parse_stage2_llm_group(
     state: &AppState,
     task_id: Uuid,
     text_provider: &dyn AiProvider,
     text_model: Option<&str>,
-    prompt: &str,
-    ci: usize,
-    chunk: &str,
-) -> Result<(Vec<ParsedQuestion>, bool), (bool, String)> {
-    let draft = structure_chunk(chunk);
+    group: &[(usize, String, ScriptDraft)],
+) -> Result<Vec<(usize, Vec<ParsedQuestion>)>, (bool, String)> {
+    if group.is_empty() {
+        return Ok(Vec::new());
+    }
+    let refs: Vec<(&str, &ScriptDraft)> = group
+        .iter()
+        .map(|(_, chunk, draft)| (chunk.as_str(), draft))
+        .collect();
+    let llm_input = stage2_batch_user_input(&refs);
+    let nos: Vec<String> = group
+        .iter()
+        .map(|(_, _, d)| d.question.question_no.clone().unwrap_or_else(|| "-".into()))
+        .collect();
     tracing::info!(
-        confidence = ?draft.confidence,
-        method_heading_count = draft.method_heading_count,
-        question_no = draft.question.question_no.as_deref().unwrap_or("-"),
-        skip_llm = script_skip_accepted(&draft),
-        "任务 {task_id} 第 {} 块规则结构化",
-        ci + 1
+        "任务 {task_id} Stage2 批量 {} 题（{}），输入 {} 字",
+        group.len(),
+        nos.join(","),
+        llm_input.chars().count()
     );
-
-    if script_skip_accepted(&draft) {
-        let mut qs =
-            finalize_script_questions(vec![draft.question.clone()], &state.pool, true).await;
-        if !qs.is_empty() {
-            let report = validate_structured(
-                &qs[0],
-                draft.method_heading_count,
-                draft.confidence,
-            );
-            if report.schema_ok && !report.method_count_mismatch {
-                recover_chunk_questions(&mut qs, chunk);
-                assign_chunk_images(chunk, &mut qs);
-                tracing::info!("任务 {task_id} 第 {} 块高置信，跳过 Stage2", ci + 1);
-                return Ok((qs, true));
-            }
-        }
-        tracing::info!(
-            "任务 {task_id} 第 {} 块高置信校验失败，回退 Stage2",
-            ci + 1
-        );
-    }
-
-    let use_patch = should_call_llm_with(&draft, false);
-    let llm_input = if use_patch {
-        stage2_patch_user_input(chunk, &draft)
-    } else {
-        stage2_llm_input(chunk)
-    };
-    let prompt = if use_patch {
-        STAGE2_PATCH_PROMPT
-    } else {
-        prompt
-    };
-    if !use_patch && llm_input.chars().count() != chunk.chars().count() {
-        tracing::info!(
-            "任务 {task_id} 第 {} 块 Stage2 只送题干 {} 字（原文 {} 字，解析由规则回填）",
-            ci + 1,
-            llm_input.chars().count(),
-            chunk.chars().count()
-        );
-    }
 
     set_progress_phase(state, task_id, "stage2").await;
     let mut last_err: Option<AiError> = None;
     let mut parsed: Option<String> = None;
     for attempt in 0..2u8 {
         match text_provider
-            .parse_text_with_prompt(&llm_input, prompt, text_model)
+            .parse_text_with_prompt(&llm_input, STAGE2_PATCH_PROMPT, text_model)
             .await
         {
             Ok(r) => {
@@ -3154,8 +3313,7 @@ async fn parse_stage2_chunk(
             }
             Err(e) if (matches!(e, AiError::Timeout) || e.is_rate_limited()) && attempt == 0 => {
                 tracing::warn!(
-                    "任务 {task_id} 第 {} 块{}，3s 后重试 1 次",
-                    ci + 1,
+                    "任务 {task_id} 批量 Stage2{}，3s 后重试 1 次",
                     if e.is_rate_limited() { "限流" } else { "超时" }
                 );
                 tokio::time::sleep(Duration::from_secs(3)).await;
@@ -3177,17 +3335,14 @@ async fn parse_stage2_chunk(
                     Ok(_) => "questions 为空".to_string(),
                     Err((_, err)) => err["error"].as_str().unwrap_or("后处理失败").to_string(),
                 };
-                tracing::warn!(
-                    "任务 {task_id} 第 {} 块后处理失败（{detail}），尝试规则草稿",
-                    ci + 1
-                );
+                tracing::warn!("任务 {task_id} 批量后处理失败（{detail}），尝试规则草稿");
                 fallback_reason = detail;
                 Vec::new()
             }
         },
         None => {
             let e = last_err.expect("解析失败时必有错误");
-            let msg = format!("第 {} 块解析失败: {}", ci + 1, map_ai_error_msg(&e));
+            let msg = format!("批量 Stage2 失败: {}", map_ai_error_msg(&e));
             if is_fatal_ai_error(&e) {
                 return Err((true, msg));
             }
@@ -3197,26 +3352,32 @@ async fn parse_stage2_chunk(
         }
     };
 
-    let mut chunk_questions = merge_script_and_llm(chunk, &draft, llm_qs);
-    if chunk_questions.is_empty() {
-        let reason = if fallback_reason.is_empty() {
-            "Stage2 未能结构化"
-        } else {
-            fallback_reason.as_str()
-        };
-        tracing::warn!(
-            "任务 {task_id} 第 {} 块无规则草稿可用，降级为 OCR 题干（保留配图）",
-            ci + 1
-        );
-        chunk_questions = vec![draft_question_from_chunk(chunk, reason)];
+    let mut out = Vec::with_capacity(group.len());
+    for (i, (ci, chunk, draft)) in group.iter().enumerate() {
+        let one = llm_qs.get(i).cloned().into_iter().collect::<Vec<_>>();
+        let mut chunk_questions = merge_script_and_llm(chunk, draft, one);
+        if chunk_questions.is_empty() {
+            let reason = if fallback_reason.is_empty() {
+                "Stage2 未能结构化"
+            } else {
+                fallback_reason.as_str()
+            };
+            tracing::warn!(
+                "任务 {task_id} 第 {} 块无规则草稿可用，降级为 OCR 题干",
+                ci + 1
+            );
+            chunk_questions = vec![draft_question_from_chunk(chunk, reason)];
+        }
+        restore_script_analysis_if_needed(&mut chunk_questions, draft);
+        for q in &mut chunk_questions {
+            append_validation_warnings(q, draft);
+            strip_llm_analysis_for_recover(q);
+        }
+        recover_chunk_questions(&mut chunk_questions, chunk);
+        assign_chunk_images(chunk, &mut chunk_questions);
+        out.push((*ci, chunk_questions));
     }
-    restore_script_analysis_if_needed(&mut chunk_questions, &draft);
-    for q in &mut chunk_questions {
-        append_validation_warnings(q, &draft);
-    }
-    recover_chunk_questions(&mut chunk_questions, chunk);
-    assign_chunk_images(chunk, &mut chunk_questions);
-    Ok((chunk_questions, false))
+    Ok(out)
 }
 
 fn draft_question_from_chunk(chunk: &str, reason: &str) -> ParsedQuestion {
@@ -3391,6 +3552,12 @@ fn split_markdown_by_question_no(md: &str, max_questions_per_chunk: usize) -> Ve
             pieces.push(body.to_string());
         }
     }
+
+    let pieces: Vec<String> = pieces
+        .into_iter()
+        .flat_map(|p| split_markdown_on_question_starts(&p))
+        .filter(|s| !s.trim().is_empty())
+        .collect();
 
     let pack = max_questions_per_chunk.max(1);
     pieces
@@ -3738,6 +3905,31 @@ mod tests {
             heartbeat_at: None,
             cancel_requested_at: None,
         }
+    }
+
+    #[test]
+    fn test_ocr_progress_extractors() {
+        let empty = json!({});
+        assert!(ocr_markdown_from_progress(&empty).is_none());
+        assert!(ocr_engine_from_progress(&empty).is_none());
+        let progress = json!({
+            "ocr_markdown": "  # 卷一  ",
+            "ocr_engine": "mineru"
+        });
+        assert_eq!(ocr_markdown_from_progress(&progress).as_deref(), Some("# 卷一"));
+        assert_eq!(ocr_engine_from_progress(&progress).as_deref(), Some("mineru"));
+    }
+
+    #[test]
+    fn test_force_ocr_requested() {
+        let user = Uuid::new_v4();
+        let doc = Uuid::new_v4();
+        let mut task = fake_task(user, doc);
+        assert!(!force_ocr_requested(&task));
+        task.paper_meta = json!({ "force_ocr": true });
+        assert!(force_ocr_requested(&task));
+        task.paper_meta = json!({ "force_ocr": false });
+        assert!(!force_ocr_requested(&task));
     }
 
     fn fake_parsed(question_no: Option<&str>, stem: &str) -> ParsedQuestion {
@@ -4826,6 +5018,10 @@ A. ${0<x<1}$\n\
         // 付费模型（含 OpenRouter vendor/model ID）走默认并发
         assert_eq!(stage2_concurrency_for(Some("deepseek-chat"), None), STAGE2_CONCURRENCY);
         assert_eq!(stage2_concurrency_for(Some("stealth/ox-alpha"), None), STAGE2_CONCURRENCY);
+        // 用户设置优先于 glm/gemini 启发式，付费模型不会被压成 1
+        assert_eq!(stage2_concurrency(Some("deepseek-chat"), None), STAGE2_CONCURRENCY);
+        assert_eq!(stage2_concurrency(Some("qwen-plus"), Some(8)), 8);
+        assert_eq!(stage2_concurrency(Some("glm-4.7-flash"), Some(4)), 4);
         // 环境变量覆盖优先，且被夹在 [1,16]
         assert_eq!(stage2_concurrency_for(Some("gemini-3.7-flash"), Some(8)), 8);
         assert_eq!(stage2_concurrency_for(Some("deepseek-chat"), Some(0)), 1);

@@ -57,6 +57,7 @@ pub fn structure_chunk(chunk: &str) -> ScriptDraft {
         .collect();
     question.question_no = question_no;
     question.image_urls = image_urls_in_chunk.clone();
+    super::choice::fill_choice_answers(&mut question);
 
     let mut draft = ScriptDraft {
         question,
@@ -152,23 +153,34 @@ fn blank_question(question_type: &str) -> ParsedQuestion {
     }
 }
 
-/// Low 置信补丁：OCR 原文 + 规则草稿 JSON，供短 Prompt 一次一题。
+/// Low 置信补丁：只送题干+选项，解法由规则从原文回填。
 pub fn stage2_patch_user_input(chunk: &str, draft: &ScriptDraft) -> String {
+    let stem_only = super::analysis::stage2_llm_input(chunk);
     let hint = serde_json::json!({
         "question_type": draft.question.question_type,
         "question_no": draft.question.question_no,
         "stem": draft.question.stem,
         "options": draft.question.options,
-        "analysis": draft.question.analysis,
         "confidence": format!("{:?}", draft.confidence),
         "reasons": draft.reasons,
-        "method_heading_count": draft.method_heading_count,
     });
     format!(
-        "{}\n\n---\n规则草稿（仅供参考，以 OCR 原文为准）：\n{}",
-        chunk.trim(),
+        "{}\n\n---\n规则草稿（题干/选项，解法由系统回填）：\n{}",
+        stem_only.trim(),
         hint
     )
+}
+
+/// 3～8 题一批：按顺序拼接 slim 题干。
+pub fn stage2_batch_user_input(items: &[(&str, &ScriptDraft)]) -> String {
+    items
+        .iter()
+        .enumerate()
+        .map(|(i, (chunk, draft))| {
+            format!("### 第{}题\n{}", i + 1, stage2_patch_user_input(chunk, draft))
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 #[cfg(test)]
@@ -417,9 +429,62 @@ D. 4\n";
             !crate::ai::structure::script_skip_accepted_with(&draft, false),
             "校验失败的 High 必须回退 LLM"
         );
-        assert!(
-            crate::ai::structure::should_call_llm_with(&draft, true),
+        assert!(crate::ai::structure::should_call_llm_with(&draft, true),
             "MATHSET_ALWAYS_STAGE2=1 强制走 LLM"
         );
+    }
+
+    #[test]
+    fn analysis_choice_without_fa_n_is_high_if_answer_printed() {
+        let md = "\
+8. 已知向量 $\\vec{a}=(0,1)$，则 $x=(\\quad)$\n\
+A. $-2$\n\
+B. $-1$\n\
+C. $1$\n\
+D. $2$\n\
+【答案】$\\mathrm{B}$\n\
+【解析】\n\
+【分析】根据向量垂直可求 $x$。\n\
+【详解】因为垂直，所以 $x=-1$。故选：B。\n";
+        let draft = structure_chunk(md);
+        assert_eq!(draft.question.question_type, "choice");
+        assert_eq!(draft.question.options.as_ref().map(|o| o.len()), Some(4));
+        assert_eq!(draft.confidence, Confidence::High, "{:?}", draft.reasons);
+        assert!(crate::ai::structure::script_skip_accepted_with(&draft, false));
+    }
+
+    #[test]
+    fn analysis_solution_subs_without_fa_n_is_high() {
+        let md = "\
+16. 已知椭圆 $C$。\n\
+（1）求离心率；\n\
+（2）求直线 $l$ 的方程。\n\
+【答案】（1）$e=\\frac12$（2）$x=1$\n\
+【解析】\n\
+由 $a=2,b=1$ 得离心率，再求直线。\n";
+        let draft = structure_chunk(md);
+        assert_eq!(draft.question.question_type, "solution");
+        assert_eq!(draft.confidence, Confidence::High, "{:?}", draft.reasons);
+        assert!(crate::ai::structure::script_skip_accepted_with(&draft, false));
+    }
+
+    #[test]
+    fn patch_input_sends_stem_not_jiexi() {
+        let md = "\
+8. 下列结论正确的是\n\
+A. 1\n\
+B. 2\n\
+C. 3\n\
+D. 4\n\
+【答案】$\\mathrm{B}$\n\
+【解析】\n\
+【详解】很长的演算过程不该送给模型。\n";
+        let draft = structure_chunk(md);
+        let input = stage2_patch_user_input(md, &draft);
+        assert!(input.contains("下列结论正确的是"), "{input}");
+        assert!(!input.contains("很长的演算过程"), "{input}");
+        let batch = stage2_batch_user_input(&[(md, &draft)]);
+        assert!(batch.contains("### 第1题"));
+        assert!(!batch.contains("很长的演算过程"));
     }
 }

@@ -9,6 +9,14 @@
 
     python scripts/bench_full_auto_parse.py --compare bench/out/baseline_latest.json bench/out/after_latest.json
 
+    # 不新建解析任务：按上一轮 JSON 里的 task_id 拉取 MinerU 原文与全自动 JSON
+    python scripts/bench_full_auto_parse.py --dump-from bench/out/after_latest.json
+
+每份成功试卷会在 bench/eval/<试卷名>/ 落下：
+  paper.md   MinerU OCR 原文（拿去跑站外模型）
+  full.json  全自动 staged ParsedQuestion
+  meta.json  任务 id、hash、耗时摘要
+
 接口限制：POST /ai/documents 仍要求 pages 页图。本脚本附一张合法占位 PNG，
 并把原 PDF 放在 pdf 字段，解析任务使用 pipeline=full + parse_mode=pdf_direct
 （MinerU 整档直传，与界面全自动一致）。打标默认暂停，轮询不等待打标。
@@ -20,7 +28,9 @@ from __future__ import annotations
 
 import argparse
 import binascii
+import hashlib
 import json
+import re
 import struct
 import sys
 import time
@@ -36,6 +46,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_INBOX = REPO_ROOT / "bench" / "inbox"
 DEFAULT_CREDS = REPO_ROOT / "bench" / "credentials.txt"
 DEFAULT_OUT = REPO_ROOT / "bench" / "out"
+DEFAULT_EVAL = REPO_ROOT / "bench" / "eval"
+PROMPT_SOURCE = REPO_ROOT / "docs" / "rules-prompts.md"
+PATCH_PROMPT_SOURCE = REPO_ROOT / "src" / "ai" / "prompt.rs"
+WIN_RESERVED = re.compile(
+    r"^(con|prn|aux|nul|com[1-9]|lpt[1-9])$", re.IGNORECASE
+)
 API_PREFIX = "/api/v1"
 TERMINAL = frozenset(
     {"success", "partial_success", "failed", "cancelled", "completed"}
@@ -280,10 +296,14 @@ class ApiClient:
             raise SystemExit(f"建任务响应没有 task_id：{resp!r}")
         return resp
 
-    def get_task(self, task_id: str) -> dict[str, Any]:
-        resp = self.request("GET", f"/ai/parse-task/{task_id}", timeout=60)
+    def get_task(self, task_id: str, timeout: float = 60) -> dict[str, Any]:
+        resp = self.request("GET", f"/ai/parse-task/{task_id}", timeout=timeout)
         if not isinstance(resp, dict):
             raise SystemExit(f"任务状态不是 JSON 对象：{resp!r}")
+        if isinstance(resp.get("data"), dict) and "status" in resp["data"]:
+            inner = resp["data"]
+            if isinstance(inner, dict):
+                return inner
         return resp
 
 
@@ -436,19 +456,22 @@ def poll_until_done(
     raise SystemExit(f"任务 {task_id} 超过 {timeout_sec:.0f}s 仍未结束")
 
 
-def load_reuse_map(path: Path) -> dict[str, str]:
+def load_reuse_map(path: Path) -> dict[str, dict[str, str]]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     papers = payload.get("papers") if isinstance(payload, dict) else None
     if not isinstance(papers, list):
         raise SystemExit(f"{path} 不是压测结果（缺少 papers 数组）")
-    mapping: dict[str, str] = {}
+    mapping: dict[str, dict[str, str]] = {}
     for row in papers:
         if not isinstance(row, dict):
             continue
         name = row.get("filename")
         doc = row.get("document_id")
         if name and doc:
-            mapping[str(name)] = str(doc)
+            rec: dict[str, str] = {"document_id": str(doc)}
+            if row.get("task_id"):
+                rec["task_id"] = str(row["task_id"])
+            mapping[str(name)] = rec
     if not mapping:
         raise SystemExit(f"{path} 里没有 filename → document_id")
     return mapping
@@ -578,6 +601,394 @@ def _fmt(value: Any, as_int: bool = False) -> str:
     return str(value)
 
 
+def paper_slug(filename: str) -> str:
+    name = str(filename).replace("\\", "/").rstrip("/")
+    if "/" in name:
+        name = name.rsplit("/", 1)[-1]
+    stem = name.rsplit(".", 1)[0] if "." in name else name
+    stem = stem.strip() or "paper"
+    cleaned = "".join("_" if ch in '<>:"/\\|?*' else ch for ch in stem).strip(" .")
+    cleaned = cleaned or "paper"
+    if WIN_RESERVED.match(cleaned):
+        cleaned = f"_{cleaned}"
+    return cleaned[:120]
+
+
+def sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def relpath(path: Path) -> str:
+    try:
+        return path.resolve().relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def load_locked_prompt() -> tuple[str | None, str | None]:
+    if not PROMPT_SOURCE.is_file():
+        return None, None
+    text = PROMPT_SOURCE.read_text(encoding="utf-8")
+    return text, sha256_text(text)
+
+
+def load_stage2_patch_sha() -> tuple[str | None, str | None]:
+    if not PATCH_PROMPT_SOURCE.is_file():
+        return None, None
+    text = PATCH_PROMPT_SOURCE.read_text(encoding="utf-8")
+    marker = 'pub const STAGE2_PATCH_PROMPT: &str = r#"'
+    start = text.find(marker)
+    if start < 0:
+        return None, None
+    start += len(marker)
+    end = text.find('"#;', start)
+    if end < 0:
+        return None, None
+    body = text[start:end]
+    return body, sha256_text(body)
+
+
+def extract_full_questions(task: dict[str, Any]) -> list[dict[str, Any]]:
+    staged = task.get("staged_questions") or []
+    if not isinstance(staged, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for i, item in enumerate(staged):
+        if not isinstance(item, dict):
+            continue
+        if item.get("merged_into"):
+            continue
+        parsed = item.get("parsed")
+        if not isinstance(parsed, dict):
+            parsed = {}
+        order = item.get("order") if isinstance(item.get("order"), dict) else {}
+        question_no = parsed.get("question_no") or order.get("question_no")
+        display_order = parsed.get("display_order")
+        if display_order is None:
+            display_order = order.get("display_order")
+        if display_order is None:
+            display_order = i + 1
+        rec: dict[str, Any] = {
+            "question_no": question_no,
+            "display_order": display_order,
+            "index": item.get("index"),
+            "parsed": parsed,
+        }
+        if "skip_or_llm" in item:
+            rec["skip_or_llm"] = item.get("skip_or_llm")
+        out.append(rec)
+    return out
+
+
+def dump_chunks_jsonl(
+    paper_dir: Path,
+    markdown: str,
+    task: dict[str, Any],
+    timing: dict[str, Any],
+) -> None:
+    """运行时没有切块时按评测再切，并标记 slice_source=eval_reparse。"""
+    split_via = timing.get("split_via")
+    rows: list[dict[str, Any]] = []
+    runtime_chunks = task.get("chunks")
+    if isinstance(runtime_chunks, list) and runtime_chunks:
+        for i, ch in enumerate(runtime_chunks):
+            if not isinstance(ch, dict):
+                continue
+            rows.append(
+                {
+                    "chunk_index": ch.get("chunk_index", i),
+                    "source_md": ch.get("source_md") or "",
+                    "split_via": ch.get("split_via") or split_via,
+                    "bbox": ch.get("bbox"),
+                    "slice_source": "runtime_chunk",
+                }
+            )
+    else:
+        slices: dict[str, str] = {}
+        try:
+            import importlib.util
+
+            spec = importlib.util.spec_from_file_location(
+                "bench_eval_quality",
+                Path(__file__).with_name("bench_eval_quality.py"),
+            )
+            if spec and spec.loader:
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                slices = mod.slice_paper(markdown)
+        except Exception:
+            slices = {}
+        if slices:
+            for i, (key, md) in enumerate(slices.items()):
+                rows.append(
+                    {
+                        "chunk_index": i,
+                        "question_no": key,
+                        "source_md": md,
+                        "split_via": split_via,
+                        "bbox": None,
+                        "slice_source": "eval_reparse",
+                    }
+                )
+        elif markdown.strip():
+            rows.append(
+                {
+                    "chunk_index": 0,
+                    "source_md": markdown,
+                    "split_via": split_via,
+                    "bbox": None,
+                    "slice_source": "eval_reparse",
+                }
+            )
+    path = paper_dir / "chunks.jsonl"
+    path.write_text(
+        "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows),
+        encoding="utf-8",
+    )
+
+
+def dump_eval_paper(
+    eval_root: Path,
+    *,
+    filename: str,
+    document_id: str | None,
+    task: dict[str, Any],
+    prompt_text: str | None,
+    prompt_sha256: str | None,
+    patch_sha256: str | None = None,
+) -> dict[str, Any]:
+    """把 MinerU 原文与全自动 JSON 写到 bench/eval/<试卷名>/。"""
+    slug = paper_slug(filename)
+    paper_dir = eval_root / slug
+    if paper_dir.is_dir():
+        meta_path = paper_dir / "meta.json"
+        if meta_path.is_file():
+            try:
+                old = json.loads(meta_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                old = {}
+            old_doc = old.get("document_id")
+            if old_doc and document_id and old_doc != document_id:
+                paper_dir = eval_root / f"{slug}__{(document_id or '')[:8]}"
+    paper_dir.mkdir(parents=True, exist_ok=True)
+
+    markdown = task.get("ocr_markdown")
+    if not isinstance(markdown, str):
+        markdown = ""
+    questions = extract_full_questions(task)
+    timing = task.get("slice_timing") if isinstance(task.get("slice_timing"), dict) else {}
+    md_sha = sha256_text(markdown) if markdown else None
+
+    paper_md = paper_dir / "paper.md"
+    full_json = paper_dir / "full.json"
+    meta_json = paper_dir / "meta.json"
+    export_json = paper_dir / "export.json"
+    old_meta: dict[str, Any] = {}
+    old_sha = None
+    if meta_json.is_file():
+        try:
+            loaded = json.loads(meta_json.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                old_meta = loaded
+                ocr_old = loaded.get("ocr") if isinstance(loaded.get("ocr"), dict) else {}
+                old_sha = ocr_old.get("markdown_sha256")
+        except (OSError, json.JSONDecodeError):
+            old_meta = {}
+
+    stale_export = False
+    kept_export = None
+    if md_sha and old_sha and md_sha != old_sha and export_json.is_file():
+        stale_path = paper_dir / "export.stale.json"
+        export_json.replace(stale_path)
+        stale_export = True
+        warnings_pre = ["OCR markdown 已变，已将 export.json 改名为 export.stale.json"]
+    else:
+        warnings_pre = []
+        if export_json.is_file() and (not md_sha or old_sha == md_sha):
+            kept_export = old_meta.get("export")
+            if kept_export is None:
+                kept_export = {"path": "export.json"}
+
+    paper_md.write_text(markdown, encoding="utf-8")
+    full_payload = {
+        "schema_version": "1",
+        "pipeline": "full",
+        "task_id": task.get("id"),
+        "document_id": document_id or task.get("document_id"),
+        "questions": questions,
+    }
+    full_json.write_text(
+        json.dumps(full_payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    if prompt_text is not None:
+        (eval_root / "prompt.md").write_text(prompt_text, encoding="utf-8")
+
+    engine = task.get("ocr_engine")
+    if not isinstance(engine, str) or not engine.strip():
+        engine = None
+    reused = bool(task.get("ocr_reused")) if "ocr_reused" in task else None
+    meta = {
+        "schema_version": "1",
+        "document_id": document_id or task.get("document_id"),
+        "source": {
+            "filename": filename,
+            "page_count": task.get("total_pages"),
+        },
+        "ocr": {
+            "engine": engine,
+            "markdown_sha256": md_sha,
+            "chars": len(markdown),
+            "path": "paper.md",
+            "reused": reused,
+        },
+        "prompt": {
+            "rules_prompts": {
+                "source": "docs/rules-prompts.md",
+                "sha256": prompt_sha256,
+                "path": "../prompt.md",
+            },
+            "stage2_patch": {
+                "source": "src/ai/prompt.rs STAGE2_PATCH_PROMPT",
+                "sha256": patch_sha256,
+            },
+            "source": "docs/rules-prompts.md",
+            "sha256": prompt_sha256,
+            "path": "../prompt.md",
+        },
+        "full": {
+            "task_id": task.get("id"),
+            "pipeline": task.get("pipeline") or "full",
+            "status": task.get("status"),
+            "progress_summary": {
+                "llm_n": timing.get("llm_n"),
+                "high_skip_n": timing.get("high_skip_n"),
+                "llm_calls": timing.get("llm_calls"),
+                "markdown_to_json_ms": timing.get("markdown_to_json_ms"),
+                "chunk_count": timing.get("chunk_count"),
+                "split_via": timing.get("split_via"),
+            },
+            "questions_path": "full.json",
+            "question_count": len(questions),
+        },
+        "export": kept_export if not stale_export else None,
+        "next": "把 paper.md 与 ../prompt.md 交给站外模型，将 {\"questions\":[...]} 存为同目录 export.json",
+    }
+    dump_chunks_jsonl(paper_dir, markdown, task, timing)
+    meta_json.write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    warnings: list[str] = list(warnings_pre)
+    if not markdown.strip():
+        warnings.append("ocr_markdown 为空")
+    if not questions:
+        warnings.append("staged_questions 为空")
+    return {
+        "filename": filename,
+        "slug": paper_dir.name,
+        "dir": relpath(paper_dir),
+        "document_id": document_id or task.get("document_id"),
+        "task_id": task.get("id"),
+        "markdown_sha256": md_sha,
+        "markdown_chars": len(markdown),
+        "question_count": len(questions),
+        "files": {
+            "paper_md": relpath(paper_md),
+            "full_json": relpath(full_json),
+            "meta_json": relpath(meta_json),
+        },
+        "warnings": warnings,
+    }
+
+
+def write_eval_manifest(
+    eval_root: Path,
+    records: list[dict[str, Any]],
+    prompt_sha256: str | None,
+) -> Path:
+    payload = {
+        "schema_version": "1",
+        "dumped_at": datetime.now(timezone.utc).isoformat(),
+        "prompt_source": "docs/rules-prompts.md",
+        "prompt_sha256": prompt_sha256,
+        "papers": records,
+    }
+    path = eval_root / "manifest.json"
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def dump_from_existing(args: argparse.Namespace) -> int:
+    creds = parse_credentials(Path(args.credentials))
+    src = Path(args.dump_from)
+    if not src.is_file():
+        raise SystemExit(f"找不到上一轮结果：{src}")
+    payload = json.loads(src.read_text(encoding="utf-8"))
+    papers = payload.get("papers") if isinstance(payload, dict) else None
+    if not isinstance(papers, list) or not papers:
+        raise SystemExit(f"{src} 里没有 papers")
+
+    eval_root = Path(args.eval_dir)
+    eval_root.mkdir(parents=True, exist_ok=True)
+    prompt_text, prompt_sha = load_locked_prompt()
+    _, patch_sha = load_stage2_patch_sha()
+    if prompt_text is None:
+        print("警告：找不到 docs/rules-prompts.md，未写入 prompt.md")
+    else:
+        (eval_root / "prompt.md").write_text(prompt_text, encoding="utf-8")
+
+    client = ApiClient(creds["base_url"])
+    print(f"登录 {creds['base_url']} 用户 {creds['username']} …")
+    client.login(creds["username"], creds["password"])
+    print(f"从 {src} 拉取 {len(papers)} 份任务的 OCR / 全自动 JSON → {relpath(eval_root)}")
+
+    records: list[dict[str, Any]] = []
+    failed = 0
+    for i, row in enumerate(papers, 1):
+        if not isinstance(row, dict):
+            continue
+        filename = str(row.get("filename") or f"paper_{i}")
+        task_id = row.get("task_id")
+        document_id = row.get("document_id")
+        print(f"\n[{i}/{len(papers)}] {filename}")
+        if not task_id:
+            print("  跳过：没有 task_id")
+            failed += 1
+            continue
+        try:
+            task = client.get_task(str(task_id), timeout=120)
+        except ApiError as e:
+            print(f"  拉取失败：{e}")
+            failed += 1
+            continue
+        rec = dump_eval_paper(
+            eval_root,
+            filename=filename,
+            document_id=str(document_id) if document_id else None,
+            task=task,
+            prompt_text=prompt_text,
+            prompt_sha256=prompt_sha,
+            patch_sha256=patch_sha,
+        )
+        records.append(rec)
+        warn = f"（{'; '.join(rec['warnings'])}）" if rec["warnings"] else ""
+        print(
+            f"  已写入 {rec['dir']}  "
+            f"markdown={rec['markdown_chars']}字 题数={rec['question_count']}{warn}"
+        )
+
+    manifest = write_eval_manifest(eval_root, records, prompt_sha)
+    print(f"\n清单 {relpath(manifest)}，成功 {len(records)}/{len(papers)}")
+    if records:
+        print("把各目录下的 paper.md 与 bench/eval/prompt.md 交给站外模型；")
+        print("返回的 {\"questions\":[...]} 存为同目录 export.json（下一步）。")
+    return 1 if failed else 0
+
+
 def compare_runs(a_path: Path, b_path: Path) -> int:
     a = json.loads(a_path.read_text(encoding="utf-8"))
     b = json.loads(b_path.read_text(encoding="utf-8"))
@@ -613,44 +1024,78 @@ def run_bench(args: argparse.Namespace) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     inbox = Path(args.inbox)
     pdfs = list_pdfs(inbox)
-    reuse_map: dict[str, str] = {}
+    reuse_map: dict[str, dict[str, str]] = {}
     if args.reuse:
         reuse_map = load_reuse_map(Path(args.reuse))
-        print(f"复用上一轮 document_id：{Path(args.reuse)}（{len(reuse_map)} 份）")
+        print(f"复用上一轮 document_id：{Path(args.reuse)}（{len(reuse_map)} 份）；无 OCR 缓存则失败退出")
 
-    jobs: list[tuple[str, Path | None, str | None]] = []
+    jobs: list[tuple[str, Path | None, dict[str, str] | None]] = []
     if pdfs:
         for path in pdfs:
             jobs.append((path.name, path, reuse_map.get(path.name)))
     elif reuse_map:
-        for name, doc_id in reuse_map.items():
-            jobs.append((name, None, doc_id))
+        for name, rec in reuse_map.items():
+            jobs.append((name, None, rec))
     else:
         raise SystemExit(
             f"{inbox} 里没有 PDF。\n"
             "把待测试卷放进该文件夹后再跑；优化后复测可用 --reuse 指向上一轮 JSON。"
         )
+    if args.reuse:
+        missing = [name for name, _, rec in jobs if not rec or not rec.get("document_id")]
+        if missing:
+            raise SystemExit(
+                f"--reuse 缺少 document_id：{', '.join(missing)}。禁止默默重跑 OCR。"
+            )
 
     client = ApiClient(creds["base_url"])
     print(f"登录 {creds['base_url']} 用户 {creds['username']} …")
     client.login(creds["username"], creds["password"])
     print(f"开始全自动压测 {len(jobs)} 份，label={args.label}")
 
+    eval_root = Path(args.eval_dir)
+    eval_root.mkdir(parents=True, exist_ok=True)
+    prompt_text, prompt_sha = load_locked_prompt()
+    _, patch_sha = load_stage2_patch_sha()
+    if prompt_text is None:
+        print("警告：找不到 docs/rules-prompts.md，未写入 prompt.md")
+    else:
+        (eval_root / "prompt.md").write_text(prompt_text, encoding="utf-8")
+
     papers: list[dict[str, Any]] = []
-    for i, (name, path, reused_doc) in enumerate(jobs, 1):
+    eval_records: list[dict[str, Any]] = []
+    for i, (name, path, reuse_rec) in enumerate(jobs, 1):
         print(f"\n[{i}/{len(jobs)}] {name}")
         reused = False
+        reused_doc: str | None = None
         try:
-            if reused_doc:
-                document_id = reused_doc
+            if reuse_rec:
+                document_id = reuse_rec["document_id"]
+                reused_doc = document_id
                 reused = True
-                print(f"  复用 document_id={document_id}")
+                prev_task_id = reuse_rec.get("task_id")
+                if not prev_task_id:
+                    raise SystemExit(
+                        f"{name} 上一轮没有 task_id，无法确认 OCR 缓存。禁止 --reuse 默默重跑 OCR。"
+                    )
+                prev_task = client.get_task(prev_task_id, timeout=120)
+                prev_md = prev_task.get("ocr_markdown")
+                if not isinstance(prev_md, str) or not prev_md.strip():
+                    raise SystemExit(
+                        f"{name} 上一轮任务 {prev_task_id} 没有 ocr_markdown，"
+                        "禁止 --reuse 默默重跑 OCR。请改用 --dump-from。"
+                    )
+                print(
+                    f"  复用 document_id={document_id}；"
+                    f"已确认 OCR 缓存 {len(prev_md)} 字，将跳过 MinerU"
+                )
             else:
                 assert path is not None
                 print("  上传 PDF（占位页图 + 原文件，pdf_direct）…")
                 doc = client.upload_pdf(path)
                 document_id = str(doc["id"])
                 print(f"  document_id={document_id}")
+                prev_md = None
             t0 = time.monotonic()
             created = client.create_parse_task(document_id)
             task_id = str(created["task_id"])
@@ -662,6 +1107,14 @@ def run_bench(args: argparse.Namespace) -> int:
                 poll_sec=args.poll_sec,
             )
             client_wall_ms = int((time.monotonic() - t0) * 1000)
+            new_md = task.get("ocr_markdown") if isinstance(task.get("ocr_markdown"), str) else ""
+            if reused and isinstance(prev_md, str):
+                if sha256_text(new_md or "") == sha256_text(prev_md):
+                    print("  跳过 OCR（markdown sha 与上一轮一致）")
+                else:
+                    print("  警告：--reuse 后 markdown sha 变化，可能仍跑了 OCR")
+            if task.get("ocr_reused") is True:
+                print("  后端标记 ocr_reused=true")
             row = summarize_task(
                 filename=name,
                 document_id=document_id,
@@ -669,12 +1122,32 @@ def run_bench(args: argparse.Namespace) -> int:
                 client_wall_ms=client_wall_ms,
                 reused=reused,
             )
+            rec = dump_eval_paper(
+                eval_root,
+                filename=name,
+                document_id=document_id,
+                task=task,
+                prompt_text=prompt_text,
+                prompt_sha256=prompt_sha,
+                patch_sha256=patch_sha,
+            )
+            eval_records.append(rec)
+            row["eval_dir"] = rec["dir"]
+            row["eval_files"] = rec["files"]
+            row["ocr_reused"] = bool(task.get("ocr_reused"))
             papers.append(row)
+            warn = f" {' '.join(rec['warnings'])}" if rec["warnings"] else ""
             print(
                 f"  完成 status={row['status']} 题数={row['question_count']} "
                 f"结构={row['ms_per_question_struct']}ms/题 "
                 f"LLM={row['llm_n']} 跳过={row['high_skip_n']}"
             )
+            print(
+                f"  已导出 {rec['dir']}/paper.md 与 full.json"
+                f"（{rec['markdown_chars']} 字 / {rec['question_count']} 题）{warn}"
+            )
+        except SystemExit:
+            raise
         except ApiError as e:
             err = {
                 "filename": name,
@@ -714,6 +1187,10 @@ def run_bench(args: argparse.Namespace) -> int:
     print(f"\n已写入 {latest}")
     print(f"已写入 {stamped}")
     print(f"已写入 {csv_path}")
+    if eval_records:
+        manifest = write_eval_manifest(eval_root, eval_records, prompt_sha)
+        print(f"评测原文/JSON 已写入 {relpath(eval_root)} （{len(eval_records)} 份）")
+        print(f"清单 {relpath(manifest)}")
     failed = [p for p in papers if p.get("status") not in {"success", "partial_success", "completed"}]
     return 1 if failed else 0
 
@@ -734,7 +1211,7 @@ def main() -> int:
     parser.add_argument(
         "--reuse",
         default="",
-        help="上一轮结果 JSON：按文件名复用 document_id，跳过上传与 OCR",
+        help="上一轮结果 JSON：按文件名复用 document_id；须已有 ocr_markdown，否则失败退出（不重跑 OCR）",
     )
     parser.add_argument(
         "--timeout-sec",
@@ -744,6 +1221,16 @@ def main() -> int:
     )
     parser.add_argument("--poll-sec", type=float, default=3.0, help="轮询间隔秒")
     parser.add_argument(
+        "--eval-dir",
+        default=str(DEFAULT_EVAL),
+        help="MinerU 原文与全自动 JSON 落盘目录（默认 bench/eval）",
+    )
+    parser.add_argument(
+        "--dump-from",
+        default="",
+        help="上一轮压测 JSON：按 task_id 拉取 OCR/全自动 JSON 落盘，不新建解析任务",
+    )
+    parser.add_argument(
         "--compare",
         nargs=2,
         metavar=("BEFORE", "AFTER"),
@@ -752,6 +1239,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.compare:
         return compare_runs(Path(args.compare[0]), Path(args.compare[1]))
+    if args.dump_from:
+        return dump_from_existing(args)
     return run_bench(args)
 
 

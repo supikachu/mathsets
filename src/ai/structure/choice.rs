@@ -146,6 +146,10 @@ fn convert_to_choice_if_needed(q: &mut ParsedQuestion) {
     }
 }
 
+pub(crate) fn has_printed_choice_answer(text: &str) -> bool {
+    !parse_choice_letters_ex(text, false).is_empty()
+}
+
 pub(crate) fn fill_choice_answers(q: &mut ParsedQuestion) {
     if !matches!(q.question_type.as_str(), "choice" | "multiple") {
         return;

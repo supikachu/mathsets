@@ -134,6 +134,19 @@ fn task_ocr_markdown(task: &AiParseTask) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+fn task_ocr_engine(task: &AiParseTask) -> Option<String> {
+    task.progress
+        .get("ocr_engine")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+fn task_ocr_reused(task: &AiParseTask) -> Option<bool> {
+    task.progress.get("ocr_reused").and_then(|v| v.as_bool())
+}
+
 fn task_pipeline(task: &AiParseTask) -> Option<String> {
     task.paper_meta
         .get("pipeline")
@@ -229,6 +242,9 @@ pub struct SubmitParseTaskRequest {
     /// - `ocr_export`：OCR 完成后停止，等待 `POST .../import-questions`
     #[serde(default)]
     pub pipeline: Option<String>,
+    /// 为 true 时不复用同文档已有 `ocr_markdown`，强制重跑 OCR。
+    #[serde(default)]
+    pub force_ocr: bool,
 }
 
 pub async fn submit_parse_task(
@@ -344,6 +360,7 @@ pub async fn submit_parse_task(
         "collections": doc_metadata.get("collections").cloned().unwrap_or(json!([])),
         "parse_mode": req.parse_mode,
         "pipeline": req.pipeline,
+        "force_ocr": req.force_ocr,
     });
 
     let page_count: i32 = sqlx::query_scalar("SELECT page_count FROM documents WHERE id = $1")
@@ -474,6 +491,8 @@ pub async fn get_task_status(
         pending_candidate_count,
         staged_questions: task_staged_questions(&task),
         ocr_markdown: task_ocr_markdown(&task),
+        ocr_engine: task_ocr_engine(&task),
+        ocr_reused: task_ocr_reused(&task),
         pipeline: task_pipeline(&task),
         phase: task_phase(&task),
         slice_timing: task_slice_timing(&task),
@@ -870,6 +889,28 @@ mod tests {
         let req: SubmitParseTaskRequest =
             serde_json::from_str(&format!(r#"{{"document_id":"{DOC_ID}"}}"#)).unwrap();
         assert_eq!(req.pipeline, None);
+        assert!(!req.force_ocr);
+    }
+
+    #[test]
+    fn test_force_ocr_deserializes() {
+        let req: SubmitParseTaskRequest = serde_json::from_str(&format!(
+            r#"{{"document_id":"{DOC_ID}","force_ocr":true}}"#
+        ))
+        .expect("force_ocr 应可解析");
+        assert!(req.force_ocr);
+    }
+
+    #[test]
+    fn test_task_ocr_engine_from_progress() {
+        let mut task = fake_task();
+        assert_eq!(task_ocr_engine(&task), None);
+        task.progress = serde_json::json!({
+            "ocr_markdown": "# 卷",
+            "ocr_engine": "mineru"
+        });
+        assert_eq!(task_ocr_engine(&task).as_deref(), Some("mineru"));
+        assert!(task_ocr_markdown(&task).is_some());
     }
 
     #[test]

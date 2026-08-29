@@ -24,7 +24,8 @@ use crate::models::question::{
     AiCreateMeta, CreateQuestionRequest, KnowledgeLinkSource, KnowledgeNodeSummary, Question,
     QuestionDetail, QuestionPaperBrief, QuestionQuery, QuestionStatus, QuestionSummary,
     QuestionType, RejectRequest, SubmitReviewRequest, TagCategory, TagSummary,
-    TransferQuestionRequest, UpdateQuestionRequest, is_answer_empty, refresh_system_flags_typed,
+    TransferQuestionRequest, UpdateQuestionRequest, attach_parse_pointer,
+    canonicalize_correct_answer, is_answer_empty, refresh_system_flags_typed,
 };
 use crate::models::question_structure::{
     is_solution_analysis_missing, is_solution_answer_empty, parse_structure, structure_text_blobs,
@@ -457,6 +458,22 @@ pub(crate) fn db_err(msg: impl Into<String>) -> (StatusCode, Json<serde_json::Va
             "code": "ERR_INTERNAL_SERVER"
         })),
     )
+}
+
+fn reject_solution_parent_id(
+    question_type: &QuestionType,
+    parent_id: Option<Uuid>,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    if *question_type == QuestionType::Solution && parent_id.is_some() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "解答题小问只写入 structure，不能用 parent_id 拆成子题",
+                "code": "ERR_SOLUTION_PARENT_ID"
+            })),
+        ));
+    }
+    Ok(())
 }
 
 /// 提交审核前的完整性校验（T2-1 ~ T2-4）
@@ -1311,6 +1328,8 @@ pub async fn create_question(
         return Err((StatusCode::FORBIDDEN, Json(json!({"error": "无权在该空间创建题目"}))));
     }
 
+    reject_solution_parent_id(&req.question_type, req.parent_id)?;
+
     // ── AI 智能录入：加载暂存项（校验归属）；已保存则幂等返回已有题目 ──
     let ai_staged: Option<serde_json::Value> = match &req.ai_meta {
         Some(meta) => {
@@ -1365,11 +1384,7 @@ pub async fn create_question(
     } else {
         None
     };
-    let persist_answer = if is_solution {
-        None
-    } else {
-        req.correct_answer.clone()
-    };
+    let persist_answer = canonicalize_correct_answer(&req.question_type, req.correct_answer.as_ref());
     let persist_analysis = if is_solution { None } else { req.analysis.clone() };
     let answer_for_hash = persist_answer.as_ref().unwrap_or(&serde_json::Value::Null);
     let content_hash = crate::util::normalize::compute_content_hash_ex(
@@ -1395,6 +1410,9 @@ pub async fn create_question(
         Some(&req.question_type),
         persist_structure.as_ref(),
     );
+    if let Some(meta) = &req.ai_meta {
+        attach_parse_pointer(&mut metadata, meta.task_id, &meta.staged_index, now);
+    }
 
     sqlx::query(
         r#"
@@ -1414,7 +1432,7 @@ pub async fn create_question(
     .bind(&req.difficulty)
     .bind(QuestionStatus::Draft)
     .bind(&req.options)
-    // 空答案统一写入 JSON null（非 SQL NULL，不违反 NOT NULL 约束）
+    // 规范 {kind,value}；缺省/null 写 JSON null。空 [] 写成空结构以便 pending_answer。
     .bind(persist_answer.as_ref().unwrap_or(&serde_json::Value::Null))
     .bind(&persist_analysis)
     .bind(&persist_structure)
@@ -1685,6 +1703,10 @@ pub async fn update_question(
         }
     }
     let effective_type = req.question_type.as_ref().unwrap_or(&existing.question_type);
+    if req.parent_id.is_some() {
+        reject_solution_parent_id(effective_type, req.parent_id)?;
+    }
+
     let persist_structure = if *effective_type == QuestionType::Solution {
         req.structure.clone().or_else(|| existing.structure.clone())
     } else {
@@ -1712,13 +1734,10 @@ pub async fn update_question(
         .metadata
         .clone()
         .unwrap_or_else(|| existing.metadata.clone());
-    let persist_answer = if *effective_type == QuestionType::Solution {
-        None
-    } else {
-        req.correct_answer
-            .clone()
-            .or_else(|| existing.correct_answer.clone())
-    };
+    let persist_answer = canonicalize_correct_answer(
+        effective_type,
+        req.correct_answer.as_ref().or(existing.correct_answer.as_ref()),
+    );
     let persist_analysis = if *effective_type == QuestionType::Solution {
         None
     } else {
@@ -1757,7 +1776,7 @@ pub async fn update_question(
     .bind(&req.question_type)
     .bind(&req.difficulty)
     .bind(&req.options)
-    .bind(&req.correct_answer)
+    .bind(&persist_answer)
     .bind(&req.analysis)
     .bind(&effective_metadata)
     .bind(&req.images)
@@ -2802,7 +2821,31 @@ pub async fn reject_question(
         );
     }
 
-    // ── 状态流转：pending → draft ──
+    // ── 状态流转：pending → draft（事务内 FOR UPDATE 锁定，防止并发审核竞态：
+    //    锁后复核状态，避免把已被其他审核人通过的题目改回草稿） ──
+    let mut tx = state.pool.begin().await.map_err(|e| db_err(format!("开启事务失败: {}", e)))?;
+
+    let locked = sqlx::query_as::<_, Question>(
+        "SELECT * FROM questions WHERE id = $1 FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| db_err(format!("锁定题目失败: {}", e)))?
+    .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "题目不存在"}))))?;
+
+    if locked.status != QuestionStatus::Pending {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": format!("状态流转违规：当前状态 {:?} 不可驳回，仅 pending 可驳回", locked.status),
+                "code": "ERR_INVALID_STATE_TRANSITION",
+                "current_status": format!("{:?}", locked.status),
+                "expected_status": "pending"
+            })),
+        ));
+    }
+
     sqlx::query(
         r#"
         UPDATE questions
@@ -2815,9 +2858,11 @@ pub async fn reject_question(
     .bind(chrono::Utc::now())
     .bind(auth_user.id)
     .bind(id)
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await
     .map_err(|e| db_err(format!("驳回题目失败: {}", e)))?;
+
+    tx.commit().await.map_err(|e| db_err(format!("提交事务失败: {}", e)))?;
 
     // ── 通知题目创建者：题目被驳回 ──
     // 个人空间允许自审退回，此时不通知自己

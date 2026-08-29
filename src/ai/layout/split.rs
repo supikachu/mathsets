@@ -19,6 +19,7 @@ pub fn split_question_chunks(doc: &LayoutDocument) -> Option<Vec<String>> {
     Some(rehome_trailing_exam_sections(
         spans
             .into_iter()
+            .flat_map(|s| super::split_markdown_on_question_starts(&s))
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect(),
@@ -463,5 +464,44 @@ mod tests {
             "卷头应交给下一题: {}",
             chunks[1]
         );
+    }
+
+    #[test]
+    fn splits_next_major_glued_with_single_newline() {
+        let doc = LayoutDocument {
+            source: LayoutSource::Markdown,
+            blocks: vec![
+                blk(
+                    0,
+                    0,
+                    "1. 已知集合 $M=\\{1\\}$ 。故选：A",
+                    80.0,
+                    80.0,
+                    900.0,
+                    140.0,
+                ),
+                blk(
+                    0,
+                    1,
+                    "18. 已知函数 $f(x)=x^{2}+mx+n$ 。\n【答案】略\n【详解】略\n19.已知 $a\\in [0,8]$ ，函数 $f(x)=\\frac{4x-a}{x^2+1}$（1）求 $a$（2）求证不等式。",
+                    80.0,
+                    160.0,
+                    900.0,
+                    400.0,
+                ),
+            ],
+        };
+        let chunks = split_question_chunks(&doc).expect("应拆出第19题");
+        assert!(
+            chunks.iter().any(|c| c.contains("19.已知") || c.contains("19. 已知")),
+            "漏切第19题: {chunks:?}"
+        );
+        let i18 = chunks.iter().position(|c| c.contains("18. 已知函数")).expect("18");
+        let i19 = chunks
+            .iter()
+            .position(|c| c.contains("19.已知") || c.contains("19. 已知"))
+            .expect("19");
+        assert!(i18 < i19);
+        assert!(!chunks[i18].contains("19.已知"), "第19题不得留在第18题块里: {}", chunks[i18]);
     }
 }

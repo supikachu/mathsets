@@ -299,6 +299,45 @@ pub(crate) fn is_implausible_major_no_drop(prev: u32, curr: u32) -> bool {
     curr < prev && curr <= 9 && prev >= 10
 }
 
+/// 按行首大题号切开 Markdown。版面块把「18. …\n19.已知」粘在同一段时，切块后仍能拆出第 19 题。
+pub fn split_markdown_on_question_starts(md: &str) -> Vec<String> {
+    let mut starts: Vec<usize> = Vec::new();
+    let mut offset = 0usize;
+    let mut last_major: Option<u32> = None;
+    for line in md.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if !is_instruction_numbered_line(trimmed) {
+            if let Some(curr) = question_major_no(trimmed) {
+                let drop = last_major
+                    .is_some_and(|prev| is_implausible_major_no_drop(prev, curr));
+                if !drop {
+                    starts.push(offset);
+                    last_major = Some(curr);
+                }
+            }
+        }
+        offset += line.len();
+    }
+    if starts.len() < 2 {
+        let t = md.trim();
+        return if t.is_empty() {
+            Vec::new()
+        } else {
+            vec![md.to_string()]
+        };
+    }
+    let mut pieces = Vec::new();
+    for (i, &s) in starts.iter().enumerate() {
+        let end = starts.get(i + 1).copied().unwrap_or(md.len());
+        if i == 0 && s > 0 {
+            pieces.push(md[..end].to_string());
+        } else {
+            pieces.push(md[s..end].to_string());
+        }
+    }
+    pieces
+}
+
 pub(crate) fn is_instruction_numbered_line(line: &str) -> bool {
     const HINTS: &[&str] = &[
         "答卷前",

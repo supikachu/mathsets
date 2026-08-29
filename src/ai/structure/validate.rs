@@ -48,7 +48,7 @@ pub fn validate_structured(
     }
 
     let analysis_n = q.analysis.len();
-    let method_count_mismatch = method_heading_count != analysis_n;
+    let method_count_mismatch = method_heading_count > 0 && method_heading_count != analysis_n;
     if method_count_mismatch {
         issues.push(format!(
             "解法标题 {method_heading_count} 项，analysis {analysis_n} 项"
@@ -168,6 +168,14 @@ mod tests {
         let report = validate_structured(&q, 2, Confidence::Low);
         assert!(report.schema_ok);
         assert!(report.method_count_mismatch);
+    }
+
+    #[test]
+    fn unnamed_analysis_blob_is_not_method_mismatch() {
+        let q = choice("下列结论正确的是", 4);
+        let report = validate_structured(&q, 0, Confidence::High);
+        assert!(report.schema_ok);
+        assert!(!report.method_count_mismatch);
     }
 
     #[test]

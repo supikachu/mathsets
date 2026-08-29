@@ -854,6 +854,7 @@ import {
   statusBadgeColor,
 } from '@/utils/questionDisplay'
 import { leafCount, partsFromStructureJson, type QuestionPart } from '@/utils/questionParts'
+import { extractChoiceLetters, extractFillBlanks } from '@/utils/choiceAnswer'
 
 // keep-alive 缓存匹配名：AppLayout 中 <keep-alive :include="['QuestionList']"> 据此识别
 defineOptions({ name: 'QuestionList' })
@@ -1614,51 +1615,14 @@ function parseOptions(raw: any): { label: string; content: string }[] {
 }
 
 // ---- 工具函数：解析正确答案 ----
-function extractAnswerItem(item: any): string {
-  if (typeof item === 'string') return item
-  if (item && typeof item === 'object') {
-    if (item.answer) return item.answer
-    if (item.value) return item.value
-    if (item.text) return item.text
-  }
-  return String(item)
-}
-
-// 判断是否为选择题答案（单个大写字母 A-Z 数组）
-function isChoiceLabels(arr: string[]): boolean {
-  return arr.length > 0 && arr.every(s => /^[A-Za-z]$/.test(s.trim()))
-}
-
 function parseAnswer(raw: any): string {
+  const letters = extractChoiceLetters(raw)
+  if (letters.length) return `$\\mathrm{${letters.join('')}}$`
+  const blanks = extractFillBlanks(raw)
+  if (blanks.length) return blanks.map((b) => b.answer).join(', ')
   if (raw == null) return ''
-  if (typeof raw === 'string') {
-    try {
-      const parsed = JSON.parse(raw)
-      if (typeof parsed === 'string') return parsed
-      if (Array.isArray(parsed)) {
-        const items = parsed.map(extractAnswerItem)
-        // 选择题答案：["A", "B"] → $\mathrm{AB}$
-        if (isChoiceLabels(items)) {
-          return `$\\mathrm{${items.map(s => s.trim().toUpperCase()).join('')}}$`
-        }
-        return items.join(', ')
-      }
-      if (typeof parsed === 'object') return extractAnswerItem(parsed)
-      return String(parsed)
-    } catch {
-      return raw
-    }
-  }
-  if (Array.isArray(raw)) {
-    const items = raw.map(extractAnswerItem)
-    // 选择题答案：["A", "B"] → $\mathrm{AB}$
-    if (isChoiceLabels(items)) {
-      return `$\\mathrm{${items.map(s => s.trim().toUpperCase()).join('')}}$`
-    }
-    return items.join(', ')
-  }
-  if (typeof raw === 'object') return extractAnswerItem(raw)
-  return String(raw)
+  if (typeof raw === 'string') return raw
+  return ''
 }
 
 function isCorrectOption(card: QuestionCard, label: string): boolean {

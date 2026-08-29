@@ -31,6 +31,7 @@ pub fn clean_analysis_text(text: &str) -> String {
 
 pub fn clean_question_editorial(q: &mut ParsedQuestion) {
     for a in &mut q.analysis {
+        a.title = normalize_analysis_title(&a.title);
         a.content = clean_analysis_text(&a.content);
     }
     clean_parts_editorial(&mut q.parts);
@@ -39,6 +40,7 @@ pub fn clean_question_editorial(q: &mut ParsedQuestion) {
 fn clean_parts_editorial(parts: &mut [ParsedPart]) {
     for p in parts {
         for a in &mut p.analyses {
+            a.title = normalize_analysis_title(&a.title);
             a.content = clean_analysis_text(&a.content);
         }
         if let Some(ans) = p.answer.as_mut() {
@@ -106,12 +108,15 @@ fn drop_leading_strategy_paragraph(text: &str) -> String {
     if t.is_empty() {
         return String::new();
     }
-    for sep in ["\n\n", "；"] {
+    for sep in ["\n\n", "\n", "；"] {
         if let Some((first, rest)) = t.split_once(sep) {
             if looks_like_strategy_blurb(first) && looks_like_worked_solution(rest) {
                 return rest.trim().to_string();
             }
         }
+    }
+    if looks_like_strategy_blurb(t) {
+        return String::new();
     }
     t.to_string()
 }
@@ -132,6 +137,7 @@ fn looks_like_strategy_blurb(text: &str) -> bool {
         "即可求",
         "即可解",
         "即可判断",
+        "判断即可",
         "即可选",
         "即可求解",
         "可求",
@@ -139,7 +145,22 @@ fn looks_like_strategy_blurb(text: &str) -> bool {
         "根据图象即可",
         "由递推即可",
     ];
-    HINTS.iter().any(|h| t.contains(*h))
+    if HINTS.iter().any(|h| t.contains(*h)) {
+        return true;
+    }
+    let stripped = t.trim_end_matches(['。', '．', '.', ' ']);
+    stripped.starts_with("根据") && stripped.ends_with("即可")
+}
+
+fn normalize_analysis_title(title: &str) -> String {
+    let t = title.trim();
+    if t.is_empty() {
+        return String::new();
+    }
+    if t == "分析" || t == "点睛" || t == "详解" || t.contains("详解") {
+        return "解析".to_string();
+    }
+    t.to_string()
 }
 
 fn looks_like_worked_solution(text: &str) -> bool {

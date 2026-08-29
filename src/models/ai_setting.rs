@@ -56,6 +56,15 @@ pub struct AiSettingsResponse {
     pub tagging_llm_base_url: Option<String>,
     pub stage2_concurrency: i16,
     pub tagging_concurrency: i16,
+    /// 全站 embedding 模型；仅管理员响应带此字段
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embedding_model: Option<String>,
+    /// 固定 1024，与 `vector(1024)` 库表一致；仅管理员
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embedding_dim: Option<i32>,
+    /// 白名单模型列表；仅管理员
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embedding_models: Option<Vec<String>>,
 }
 
 /// 更新请求
@@ -84,6 +93,8 @@ pub struct UpdateAiSettingsRequest {
     pub tagging_llm_base_url: Option<String>,
     pub stage2_concurrency: Option<i16>,
     pub tagging_concurrency: Option<i16>,
+    /// 全站 embedding 模型；仅管理员写入，教师请求忽略
+    pub embedding_model: Option<String>,
 }
 
 /// 从 base64 字符串解析 32 字节主密钥

@@ -61,20 +61,22 @@ pub(crate) fn evaluate(
 
     let heading_n = draft.method_heading_count;
     let analysis_n = draft.question.analysis.len();
-    if heading_n != analysis_n {
+    if heading_n > 0 && heading_n != analysis_n {
         high = false;
         reasons.push(format!(
             "解法标题 {heading_n} 项，analysis {analysis_n} 项"
         ));
     }
     if heading_n == 0 && looks_like_analysis_chunk(source_chunk) {
-        high = false;
-        reasons.push("解析卷没有明确的法一/法二/另解标题".into());
+        if !analysis_paper_script_complete(&draft.question, source_chunk) {
+            high = false;
+            reasons.push("解析卷结构不完整（缺选项/答案/小问或解析）".into());
+        }
     }
 
     // 与 ScriptDraft.method_heading_count 交叉核对原文
     let counted = count_method_headings(source_chunk);
-    if counted != heading_n && major_count <= 1 {
+    if counted != heading_n && major_count <= 1 && heading_n > 0 {
         high = false;
         reasons.push(format!(
             "块内解法标题计数 {counted} 与草稿 {heading_n} 不一致"
@@ -122,6 +124,29 @@ pub fn script_skip_accepted_with(draft: &ScriptDraft, force: bool) -> bool {
         draft.confidence,
     );
     report.schema_ok && !report.method_count_mismatch
+}
+
+/// 解析卷没有「法N」时，结构足够完整也可以跳过 Stage2。
+fn analysis_paper_script_complete(q: &ParsedQuestion, chunk: &str) -> bool {
+    let has_jiexi = chunk.contains("【解析】") || chunk.contains("【详解】");
+    let has_answer_heading = chunk.contains("【答案】") || chunk.contains("[答案]");
+    match q.question_type.as_str() {
+        "choice" | "multiple" => {
+            let n = q.options.as_ref().map(|o| o.len()).unwrap_or(0);
+            n == 4
+                && !stem_has_option_residue(&q.stem)
+                && super::choice::has_printed_choice_answer(chunk)
+        }
+        "solution" => has_answer_heading && has_jiexi && stem_has_subquestions(&q.stem),
+        "fill" => has_answer_heading && has_jiexi,
+        _ => false,
+    }
+}
+
+fn stem_has_subquestions(stem: &str) -> bool {
+    let has1 = stem.contains("（1）") || stem.contains("(1)");
+    let has2 = stem.contains("（2）") || stem.contains("(2)");
+    has1 && has2
 }
 
 fn fields_blob(q: &ParsedQuestion) -> String {

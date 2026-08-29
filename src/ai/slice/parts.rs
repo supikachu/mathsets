@@ -20,12 +20,18 @@ pub fn peel_solution_sub_stems(q: &mut ParsedQuestion) {
         return;
     }
     let Some((shared, subs)) = extract_sub_stems(&q.stem) else {
+        sink_solution_analysis_to_parts(q);
         return;
     };
     if subs.is_empty() {
+        sink_solution_analysis_to_parts(q);
         return;
     }
-    q.stem = shared;
+    q.stem = if shared_is_only_question_no(&shared) {
+        String::new()
+    } else {
+        shared
+    };
     if q.parts.is_empty() {
         q.ensure_solution_parts();
     }
@@ -37,6 +43,27 @@ pub fn peel_solution_sub_stems(q: &mut ParsedQuestion) {
             }
         }
     }
+    sink_solution_analysis_to_parts(q);
+}
+
+/// 解答题有 parts 时，整题 analysis 必须清空（解法只留在叶子 analyses）。
+pub fn sink_solution_analysis_to_parts(q: &mut ParsedQuestion) {
+    if q.question_type != "solution" || q.parts.is_empty() {
+        return;
+    }
+    let leftover = std::mem::take(&mut q.analysis);
+    if leftover.is_empty() {
+        return;
+    }
+    let mut leaves = leaves_mut(&mut q.parts);
+    let any = leaves
+        .iter()
+        .any(|l| l.analyses.iter().any(|a| !a.content.trim().is_empty()));
+    if !any {
+        if let Some(first) = leaves.first_mut() {
+            first.analyses = leftover;
+        }
+    }
 }
 
 fn extract_sub_stems(stem: &str) -> Option<(String, Vec<(u32, String)>)> {
@@ -46,7 +73,7 @@ fn extract_sub_stems(stem: &str) -> Option<(String, Vec<(u32, String)>)> {
     }
     let first = marks[0].0;
     let shared = stem[..first].trim().to_string();
-    if !shared_has_given(&shared) {
+    if !shared_has_given(&shared) && !shared_is_only_question_no(&shared) {
         return None;
     }
     let mut subs = Vec::new();
@@ -66,6 +93,10 @@ fn extract_sub_stems(stem: &str) -> Option<(String, Vec<(u32, String)>)> {
         return None;
     }
     Some((shared, subs))
+}
+
+fn shared_is_only_question_no(shared: &str) -> bool {
+    strip_leading_question_no(shared).trim().is_empty()
 }
 
 fn shared_has_given(shared: &str) -> bool {

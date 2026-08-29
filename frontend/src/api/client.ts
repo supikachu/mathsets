@@ -1238,6 +1238,12 @@ export interface AiSettings {
   tagging_llm_base_url: string | null
   stage2_concurrency: number
   tagging_concurrency: number
+  /** 全站 embedding 模型；仅管理员响应带此字段 */
+  embedding_model?: string | null
+  /** 固定 1024，与库表 vector(1024) 一致；仅管理员 */
+  embedding_dim?: number | null
+  /** 白名单模型列表；仅管理员 */
+  embedding_models?: string[] | null
 }
 
 export const aiApi = {
@@ -1260,6 +1266,7 @@ export const aiApi = {
     tagging_llm_base_url?: string
     stage2_concurrency?: number
     tagging_concurrency?: number
+    embedding_model?: string
   }) {
     return client.put<AiSettings>('/ai/settings', data)
   },
@@ -1484,6 +1491,10 @@ export interface AiParseTaskDetail {
   staged_questions: AiStagedQuestion[]
   /** OCR 全文 Markdown（站外结构化导入前展示） */
   ocr_markdown?: string | null
+  /** OCR 引擎 id（progress.ocr_engine） */
+  ocr_engine?: string | null
+  /** 是否复用同文档已有 OCR */
+  ocr_reused?: boolean | null
   /** full | ocr_export */
   pipeline?: string | null
   /** 如 ocr_ready */
@@ -1496,6 +1507,7 @@ export interface AiParseTaskDetail {
     chunk_count?: number
     high_skip_n?: number
     llm_n?: number
+    llm_calls?: number
     split_via?: string
     tagging_paused?: boolean
   } | null

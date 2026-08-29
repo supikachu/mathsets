@@ -476,6 +476,7 @@ import { hasUnfinishedSnapshot, clearBatchSnapshot, type BatchSnapshot } from '@
 import { clearAiSourceFile } from '@/utils/aiSourceFile'
 import { processMarkdownImages, type UploadCache } from '@/utils/markdownImages'
 import { normalizeChoiceAnswerBlank } from '@/utils/parseMarkdown'
+import { extractChoiceLetters, extractFillBlanks } from '@/utils/choiceAnswer'
 import { sortByPaperQuestionNo } from '@/utils/paperQuestionOrder'
 import {
   allLeavesSkipAnalysis,
@@ -1846,18 +1847,23 @@ function buildPayloadFromSource(src: any, extra?: {
   }
   switch (qType) {
     case 'choice':
-    case 'multiple':
+    case 'multiple': {
       payload.options = (src.options || []).filter((o: { content?: string }) => o.content?.trim())
-      if (Array.isArray(src.correctAnswer)) {
-        payload.correct_answer = src.correctAnswer
-      } else {
-        payload.correct_answer = src.correctAnswer ? [src.correctAnswer] : []
-      }
+      const letters = Array.isArray(src.correctAnswer)
+        ? src.correctAnswer.filter((x: unknown) => String(x || '').trim())
+        : (src.correctAnswer ? [src.correctAnswer] : [])
+      payload.correct_answer = { kind: 'choice', value: { options: letters } }
       break
+    }
     case 'fill':
-      payload.correct_answer = (src.blanks || [])
-        .filter((b: { answer?: string }) => b.answer?.trim())
-        .map((b: { position: number; answer: string }) => ({ position: b.position, answer: b.answer.trim() }))
+      payload.correct_answer = {
+        kind: 'fill',
+        value: {
+          blanks: (src.blanks || [])
+            .filter((b: { answer?: string }) => b.answer?.trim())
+            .map((b: { position: number; answer: string }) => ({ position: b.position, answer: b.answer.trim() })),
+        },
+      }
       break
     case 'solution':
       payload.correct_answer = null
@@ -2724,16 +2730,16 @@ async function loadQuestion() {
           return { label: '', content: String(opt) }
         })
       }
-      if (Array.isArray(d.correct_answer)) {
-        if (d.question_type === 'multiple' || form.sub_type === 'multi' || (d as any).sub_type === 'multi' || d.correct_answer.length > 1) {
-          form.sub_type = 'multi'
-          form.correctAnswer = d.correct_answer as string[]
-        } else {
-          form.correctAnswer = d.correct_answer[0] || ''
-        }
+      const letters = extractChoiceLetters(d.correct_answer)
+      if (d.question_type === 'multiple' || form.sub_type === 'multi' || (d as any).sub_type === 'multi' || letters.length > 1) {
+        form.sub_type = 'multi'
+        form.correctAnswer = letters
+      } else {
+        form.correctAnswer = letters[0] || ''
       }
-    } else if (d.question_type === 'fill' && Array.isArray(d.correct_answer)) {
-      form.blanks = (d.correct_answer as any[]).map((b: any) => ({ position: b.position, answer: b.answer }))
+    } else if (d.question_type === 'fill') {
+      const blanks = extractFillBlanks(d.correct_answer)
+      form.blanks = blanks.length ? blanks : [{ position: 1, answer: '' }]
     } else if (d.question_type === 'solution') {
       const rawStruct = (d as { structure?: { parts?: unknown } }).structure
       form.parts = normalizeIncomingParts(rawStruct?.parts)
@@ -3620,7 +3626,6 @@ function findImgRowAlignForUrl(
     partId: partRef?.partId,
     slot: partRef?.slot,
     analysisId: partRef?.analysisId,
-    inImgRow: false,
   })
   for (const md of mds) {
     const fence = findImgRowFenceByImgUrl(md, url)

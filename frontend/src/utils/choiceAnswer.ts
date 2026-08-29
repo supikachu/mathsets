@@ -40,3 +40,31 @@ export function choiceAnswerLatex(raw: unknown): string {
   if (!letters.length) return ''
   return `$\\mathrm{${letters.join('')}}$`
 }
+
+export type FillBlank = { position: number; answer: string }
+
+export function extractFillBlanks(raw: unknown): FillBlank[] {
+  if (raw == null || raw === '') return []
+  if (Array.isArray(raw)) {
+    const out: FillBlank[] = []
+    raw.forEach((item, i) => {
+      if (item && typeof item === 'object' && !Array.isArray(item)) {
+        const obj = item as Record<string, unknown>
+        const answer = String(obj.answer ?? '').trim()
+        if (!answer) return
+        const position = typeof obj.position === 'number' ? obj.position : i + 1
+        out.push({ position, answer })
+        return
+      }
+      const s = String(item ?? '').trim()
+      if (s) out.push({ position: i + 1, answer: s })
+    })
+    return out
+  }
+  if (typeof raw === 'object') {
+    const obj = raw as Record<string, unknown>
+    if (Array.isArray(obj.blanks)) return extractFillBlanks(obj.blanks)
+    if (obj.value != null) return extractFillBlanks(obj.value)
+  }
+  return []
+}

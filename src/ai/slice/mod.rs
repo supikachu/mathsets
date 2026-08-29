@@ -169,4 +169,82 @@ D. $4$\n\
         assert!(!once.contains("由题意即可"));
         assert!(once.contains("因为"));
     }
+
+    /// 杭州二中样卷图：【分析】与演算只隔一个换行，「判断即可」也要丢掉。
+    #[test]
+    fn fixture_hangzhou_choice_drops_strategy_first_line() {
+        let md = "\
+1. 命题“ $\\exists x > 0, x^2 + 2x + 3 = 0$ ”的否定是（）\n\
+A. $\\forall x \\leq 0, x^2 + 2x + 3 = 0$\n\
+B. $\\forall x > 0, x^2 + 2x + 3 \\neq 0$\n\
+C. $\\exists x \\leq 0, x^2 + 2x + 3 = 0$\n\
+D. $\\exists x > 0, x^2 + 2x + 3 \\neq 0$\n\
+故选：B\n\
+【解析】\n\
+【分析】根据存在量词命题的否定为全称量词命题判断即可.\n\
+【详解】命题“ $\\exists x>0,x^{2}+2x+3=0$ ”为存在量词命题，其否定为全称量词命题。故选：B\n";
+        let q = from_mineru(md);
+        let blob: String = q.analysis.iter().map(|a| a.content.clone()).collect();
+        assert!(!blob.contains("判断即可"), "短思路不应留在解析: {blob}");
+        assert!(!blob.contains("根据存在量词"), "{blob}");
+        assert!(blob.contains("存在量词命题") || blob.contains("故选"), "{blob}");
+        assert!(q.analysis.iter().all(|a| a.title != "分析" && a.title != "详解"));
+    }
+
+    /// 杭州二中第 15 题：无总前提、行首就是（1）（2）。
+    #[test]
+    fn fixture_hangzhou_q15_peels_leading_subqs_and_clears_analysis() {
+        let md = "\
+15. （1）求值： $\\left(3\\frac{3}{8}\\right)^{-\\frac{2}{3}}$ ；\n\
+（2）若 $a + a^{-1} = 3$ ，求 $\\frac{9}{4}$\n\
+【答案】（1） $-5\\sqrt{5}$ ；（2） $\\frac{9}{4}$\n\
+【解析】\n\
+【详解】（1）原式 $= -5\\sqrt{5}$\n\
+（2）平方得 $\\frac{9}{4}$\n";
+        let q = from_mineru(md);
+        assert_eq!(q.question_type, "solution");
+        assert!(
+            !q.stem.contains("（1）") && !q.stem.contains("（2）"),
+            "无总前提时小问不得留在 stem: {}",
+            q.stem
+        );
+        assert!(q.parts.len() >= 2, "parts={:?}", q.parts.iter().map(|p| &p.label).collect::<Vec<_>>());
+        assert!(
+            q.analysis.is_empty(),
+            "解答题整题 analysis 应为空: {:?}",
+            q.analysis
+        );
+    }
+
+    /// 杭州二中第 16 题：parts 已有解析时，丢掉整题 analysis 副本。
+    #[test]
+    fn fixture_hangzhou_q16_sinks_question_analysis() {
+        let md = "\
+16. 已知全集为 $\\mathbf{R}$ ，集合 $A = \\{x|0 < x < 2\\}$ ， $B = \\{x|1\\leq x\\leq 3\\}$ 。\n\
+（1）求 $A \\cup B$ ；\n\
+（2）若 $A \\cup C = A$ ，求实数 $t$ 的取值范围。\n\
+【答案】（1） $\\{x \\mid 0 < x \\leq 3\\}$ （2） $[0, +\\infty)$\n\
+【解析】\n\
+（1） $A \\cup B = \\{x \\mid 0 < x \\leq 3\\}$\n\
+(2) $[0, +\\infty)$\n\
+【详解】由 $1 < 2^{x} < 4$ 得 $A$。故 $A \\cup B = \\{x \\mid 0 < x \\leq 3\\}$ 。\n";
+        let q = from_mineru(md);
+        assert_eq!(q.question_type, "solution");
+        assert!(q.parts.len() >= 2, "parts len={}", q.parts.len());
+        assert!(
+            q.analysis.is_empty(),
+            "解答题整题 analysis 应为空: {:?}",
+            q.analysis
+        );
+        let leaf_blob: String = q
+            .parts
+            .iter()
+            .flat_map(|p| p.analyses.iter().map(|a| a.content.clone()))
+            .collect();
+        assert!(
+            leaf_blob.contains("A") || q.parts.iter().any(|p| p.answer.as_ref().is_some_and(|a| !a.is_empty())),
+            "叶子应有解析或答案: parts={:?}",
+            q.parts
+        );
+    }
 }

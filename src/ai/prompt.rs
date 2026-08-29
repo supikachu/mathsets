@@ -35,8 +35,6 @@ pub const CORE_PARSE_RULES: &str = r#"
 - 绝对禁止自行推导公式（如把题目条件推导为结论）
 - 绝对禁止自行生成解答过程（如自己写一段解析）
 - 绝对禁止补全缺失的答案（如题目没给答案，绝不自行编造）
-【唯一例外】`knowledge_points` / `chapter_path` / `solution_methods` 是标签分类推断，不属于做题：必须根据题目内容主动推断（考查的知识点、所属章节、所用**通用解题方法/数学思想**），不受上述禁止约束。
-不要把题型专题名（如「凹凸反转」「隐零点」「极值点偏移」）写入 `solution_methods`；该字段只放通法（数形结合、分类讨论、换元法、待定系数法等）。
 如果原图/原文中没有答案，`correct_answer` 必须为对应题型的空结构（choice→`{"kind":"choice","value":{"options":[]}}`，fill→`{"kind":"fill","value":{"blanks":[]}}`，solution→`{"kind":"solution","value":{"subs":[]}}`），**绝不允许输出 `null`**。`analysis` 必须为 []。
 
 # 输出 JSON Schema（必须严格遵守）
@@ -70,7 +68,7 @@ pub const CORE_PARSE_RULES: &str = r#"
       "no_analysis_needed": false
     }
   ],
-  "knowledge_points": ["一次函数"],
+  "knowledge_points": [],
   "confidence": 0.0-1.0,
   "warnings": [],
   "image_placeholders": [],
@@ -78,16 +76,9 @@ pub const CORE_PARSE_RULES: &str = r#"
   "question_no": "题号，如 17(2) / 1 / 一、1（无法判断可省略）",
   "display_order": 整数展示顺序（可省略，按出现顺序）,
   "score": 分值整数（原图标注的分值，没有可省略）,
-  "chapter_path": ["章节", "子章节"]（推断本题所属教材章节，由大到小，如 ["函数","函数的奇偶性"]；无法判断才为空数组）,
-  "solution_methods": [{"name":"通用解题方法名","confidence":0.0-1.0}]（推断本题用到的通用解题方法/数学思想，如 数形结合、分类讨论、待定系数法；不要写入题型专题名；无法判断才为空数组）
+  "chapter_path": [],
+  "solution_methods": []
 }
-
-# 三维标签推断规则（chapter_path / solution_methods / knowledge_points）
-这三个字段是标签分类任务，不属于"做题"，必须对每一道题主动推断输出：
-1. `chapter_path`：推断题目所属教材章节，由大到小排列（如 ["函数","函数的奇偶性"]），1-3 层
-2. `solution_methods`：推断解题所用的**通用方法/数学思想**，每题 1-3 个。常见示例：数形结合、分类讨论、待定系数法、换元法、配方法、转化与化归、函数与方程思想、整体思想、构造法、反证法、归纳法、特殊值法。严禁把「凹凸反转」「隐零点」「极值点偏移」等题型专题名写入本字段
-3. `knowledge_points`：推断考查的具体知识点
-【强制】三者在能判断时都必须输出，不允许因为"原文没写"就整体省略字段；确实无法判断才输出空数组。
 
 # 题型识别规则
 - 有 A/B/C/D 选项 → choice（即使挤在同一行，如 `A.3 B.4 C.6 D.8`）
@@ -143,7 +134,8 @@ pub const CORE_PARSE_RULES: &str = r#"
 - 【分析】+【详解】是同一种解法的思路和演算（选择题/填空放进同一项 analysis）；解答题的独立解法只按【详解】或【小问N详解】里的「法一」「法二」拆
 - 选择题/填空：拆到整题 `analysis` 数组，每种解法一项
 - 解答题：拆到**对应叶子**的 `analyses` 数组，整题 `analysis` 必须为 []
-- `title` 用原文标题；`content` 必须是该解法全文，禁止摘要或删步骤
+- `title` 只用解法名（法二 / 另解 / 解法一 / 解析）；禁止写成「分析」「点睛」「详解」「小问N详解」
+- 【分析】【点睛】丢掉；禁止把「根据……即可」短思路写入 content；`content` 必须是该解法全文，禁止摘要或删步骤
 - 原文有几种解法就必须输出几项，禁止只保留解法一
 - 如果原文/原图没有提供解答过程，对应数组为空 []
 
@@ -297,12 +289,31 @@ pub const STAGE2_PARSE_SYSTEM_PROMPT: &str = r#"你是一个数学题结构化�
 - 输入若已不含【解析】/【小问详解】，不要把解法写进 stem，`analysis` / `analyses` 留空即可
 "#;
 
+/// 文本 / 单图 / 批量图识别：三维标签由本步推断（全自动 Stage2 不用这段）。
+pub const TAG_INFERENCE_RULES: &str = r#"
+# 三维标签推断规则（chapter_path / solution_methods / knowledge_points）
+【唯一例外】`knowledge_points` / `chapter_path` / `solution_methods` 是标签分类推断，不属于做题：必须根据题目内容主动推断（考查的知识点、所属章节、所用**通用解题方法/数学思想**），不受禁止做题约束。
+不要把题型专题名（如「凹凸反转」「隐零点」「极值点偏移」）写入 `solution_methods`；该字段只放通法（数形结合、分类讨论、换元法、待定系数法等）。
+这三个字段必须对每一道题主动推断输出：
+1. `chapter_path`：推断题目所属教材章节，由大到小排列（如 ["函数","函数的奇偶性"]），1-3 层
+2. `solution_methods`：推断解题所用的**通用方法/数学思想**，每题 1-3 个。常见示例：数形结合、分类讨论、待定系数法、换元法、配方法、转化与化归、函数与方程思想、整体思想、构造法、反证法、归纳法、特殊值法。严禁把「凹凸反转」「隐零点」「极值点偏移」等题型专题名写入本字段
+3. `knowledge_points`：推断考查的具体知识点
+【强制】三者在能判断时都必须输出，不允许因为"原文没写"就整体省略字段；确实无法判断才输出空数组。
+"#;
+
+/// 全自动 Stage2：标签留给打标，本步只切结构。
+pub const STAGE2_SKIP_TAG_RULES: &str = r#"
+# 标签（全自动 Stage2）
+`knowledge_points` / `chapter_path` / `solution_methods` 一律输出空数组 []。禁止推断知识点、章节、解题方法；这些由后续打标完成。
+"#;
+
 /// 解析卷 Stage2 附加约束：优先闭合 JSON，但不得删解法
 pub const STAGE2_ANALYSIS_SLIM_RULES: &str = r#"
 # 解析卷输出约束
 - stem / options / correct_answer / parts 必须完整提取
 - 解答题：原文有几种解法，对应叶子 `analyses` 就必须有几项；选择题/填空走整题 analysis
 - 【分析】是思路摘要，【详解】是演算；【分析】里列举的方法一/方法二不是独立解法
+- `title` 禁止写成「分析」「点睛」「详解」；短思路「根据……即可」不要写入 content
 - 解答题：只按【详解】/【小问N详解】里的法一、法二拆 `analyses`
 - 禁止把多道题的解析写进同一题
 - 单题过长时宁可该题单独成段输出，也不要删解法或写「解析已缩短」
@@ -384,17 +395,20 @@ use std::sync::LazyLock;
 
 /// 文本解析模式 — 完整系统提示词（文本特有指令 + 核心规则）
 pub static TEXT_PARSE_FULL_PROMPT: LazyLock<String> = LazyLock::new(|| {
-    format!("{}{}", TEXT_PARSE_SYSTEM_PROMPT, CORE_PARSE_RULES)
+    format!("{}{}{}", TEXT_PARSE_SYSTEM_PROMPT, CORE_PARSE_RULES, TAG_INFERENCE_RULES)
 });
 
 /// 单图 OCR 模式 — 完整系统提示词（单图特有指令 + 核心规则）
 pub static IMAGE_OCR_FULL_PROMPT: LazyLock<String> = LazyLock::new(|| {
-    format!("{}{}", IMAGE_OCR_SYSTEM_PROMPT, CORE_PARSE_RULES)
+    format!("{}{}{}", IMAGE_OCR_SYSTEM_PROMPT, CORE_PARSE_RULES, TAG_INFERENCE_RULES)
 });
 
 /// 批量图片 OCR 模式 — 完整系统提示词（批量特有指令 + 核心规则）
 pub static BATCH_IMAGE_OCR_FULL_PROMPT: LazyLock<String> = LazyLock::new(|| {
-    format!("{}{}", BATCH_IMAGE_OCR_SYSTEM_PROMPT, CORE_PARSE_RULES)
+    format!(
+        "{}{}{}",
+        BATCH_IMAGE_OCR_SYSTEM_PROMPT, CORE_PARSE_RULES, TAG_INFERENCE_RULES
+    )
 });
 
 /// 资料类型分类 — 完整文本系统提示词（Level 1：输入=文件名）
@@ -411,26 +425,34 @@ pub static AI_CLASSIFY_FULL_PROMPT_VISION: LazyLock<String> = LazyLock::new(|| {
 ///
 /// 用于两阶段流水线第二步：把 OCR Markdown 解析为 `{"questions":[...]}`。
 pub static STAGE2_PARSE_FULL_PROMPT: LazyLock<String> = LazyLock::new(|| {
-    format!("{}{}", STAGE2_PARSE_SYSTEM_PROMPT, CORE_PARSE_RULES)
-});
-
-/// 解析卷 Stage2：完整规则 + 缩短 analysis
-pub static STAGE2_PARSE_SLIM_PROMPT: LazyLock<String> = LazyLock::new(|| {
     format!(
         "{}{}{}",
-        STAGE2_PARSE_SYSTEM_PROMPT, CORE_PARSE_RULES, STAGE2_ANALYSIS_SLIM_RULES
+        STAGE2_PARSE_SYSTEM_PROMPT, CORE_PARSE_RULES, STAGE2_SKIP_TAG_RULES
     )
 });
 
-/// 全自动低置信补丁：短 Prompt、一次一题。不要注入 `CORE_PARSE_RULES`。
-pub const STAGE2_PATCH_PROMPT: &str = r#"你是数学题结构化校对器。用户消息是一道题的 OCR Markdown，末尾可能附带规则草稿 JSON。
-只输出裸 JSON：{"questions":[恰好一项]}，不要 markdown 围栏，不要解释。
+/// 解析卷 Stage2：结构规则 + 不推断标签（解法由规则从 Markdown 回填）
+pub static STAGE2_PARSE_SLIM_PROMPT: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{}{}{}{}",
+        STAGE2_PARSE_SYSTEM_PROMPT,
+        CORE_PARSE_RULES,
+        STAGE2_ANALYSIS_SLIM_RULES,
+        STAGE2_SKIP_TAG_RULES
+    )
+});
+
+/// 全自动残块：与核心结构规则一致，可一次 1～8 题。不要推断标签，不要写长解析。
+pub const STAGE2_PATCH_PROMPT: &str = r#"你是数学题结构化提取器。用户消息含 1 道或多道题的 OCR 题干（可能含选项），通常不含解析正文。
+只输出裸 JSON：{"questions":[与输入题数相同、按出现顺序]}，不要 markdown 围栏，不要解释。
 
 规则：
 - 只提取原文已有内容。禁止做题，禁止编造答案或解析。
-- 选择题把 A–D 放到 options，题干不得残留 A. / A、。
-- （1）（2）留在题干，不要放进 analysis。
-- 原文有几种「法一 / 法二 / 另解」标题，analysis 就必须有几项，禁止丢掉。
+- knowledge_points / chapter_path / solution_methods 一律 []。
+- 选择题：A–D 进 options，stem 不得残留 A. / A、。解析卷【答案】$\mathrm{B}$ / 故选：B 写入 correct_answer.options。
+- 解答题：stem 只放各问共用的总前提；（1）（2）进 parts[].stem 与 parts[].label；整题 analysis 为 []（解法由系统从原文回填）。
+- 去掉【分析】【点睛】；【答案】【详解】【解析】不得留在 stem。
+- analysis / analyses 的 title 禁止「分析」「详解」「点睛」；根据……即可短思路不要写入 content。
 - 只用 $...$ / $$...$$，不要 \( \)。
 - 保留 ![...](url) 原样，不要改 URL。
 - 无答案时 correct_answer 用对应题型空结构，不要 null。
@@ -464,13 +486,19 @@ mod tests {
         assert!(CORE_PARSE_RULES.contains("绝不允许输出 `null`"));
         assert!(CORE_PARSE_RULES.contains("analysis` 必须为 []"));
 
-        // 验证三维度标签为推断式（chapter/method 不再是"原文有才填"）
-        assert!(CORE_PARSE_RULES.contains("推断本题所属教材章节"));
-        assert!(CORE_PARSE_RULES.contains("通用解题方法"));
-        assert!(CORE_PARSE_RULES.contains("标签分类推断，不属于做题"));
-        assert!(CORE_PARSE_RULES.contains("三维标签推断规则"));
-        assert!(CORE_PARSE_RULES.contains("数形结合、分类讨论、待定系数法"));
-        assert!(CORE_PARSE_RULES.contains("严禁把「凹凸反转」"));
+        // 三维标签只在文本/图片识别 Prompt 里推断，不进核心规则与全自动 Stage2
+        assert!(!CORE_PARSE_RULES.contains("三维标签推断规则"));
+        assert!(TAG_INFERENCE_RULES.contains("推断题目所属教材章节"));
+        assert!(TAG_INFERENCE_RULES.contains("通用解题方法"));
+        assert!(TAG_INFERENCE_RULES.contains("标签分类推断，不属于做题"));
+        assert!(TAG_INFERENCE_RULES.contains("三维标签推断规则"));
+        assert!(TAG_INFERENCE_RULES.contains("数形结合、分类讨论、待定系数法"));
+        assert!(TAG_INFERENCE_RULES.contains("严禁把「凹凸反转」"));
+        assert!(TEXT_PARSE_FULL_PROMPT.contains("三维标签推断规则"));
+        assert!(STAGE2_PARSE_FULL_PROMPT.contains("一律输出空数组"));
+        assert!(!STAGE2_PARSE_FULL_PROMPT.contains("三维标签推断规则"));
+        assert!(STAGE2_PARSE_SLIM_PROMPT.contains("一律输出空数组"));
+        assert!(!STAGE2_PARSE_SLIM_PROMPT.contains("三维标签推断规则"));
 
         // GFM 表格必须带分隔行，否则预览画不出表
         assert!(CORE_PARSE_RULES.contains("| --- | --- |"));
@@ -530,6 +558,9 @@ mod tests {
         assert!(external.contains("没有共用总前提时"));
         assert!(external.contains(r#""stem": """#));
         assert!(external.contains(r#"$(\hspace{2em})$"#));
+        assert!(external.contains("「分析」「点睛」「详解」"));
+        assert!(CORE_PARSE_RULES.contains("禁止写成「分析」「点睛」「详解」"));
+        assert!(CORE_PARSE_RULES.contains("根据……即可"));
     }
 
     #[test]
@@ -540,10 +571,13 @@ mod tests {
         assert!(STAGE2_PARSE_FULL_PROMPT.contains("本块只解析输入中出现的题目"));
         assert!(STAGE2_PARSE_FULL_PROMPT.contains("文本模型看不见图片像素"));
         assert!(STAGE2_PARSE_SLIM_PROMPT.contains("解析卷输出约束"));
-        assert!(STAGE2_PATCH_PROMPT.contains("几种「法一 / 法二 / 另解」"));
-        assert!(STAGE2_PATCH_PROMPT.contains(r#"{"questions":[恰好一项]}"#));
+        assert!(STAGE2_PATCH_PROMPT.contains("parts[].stem"));
+        assert!(STAGE2_PATCH_PROMPT.contains("【分析】"));
+        assert!(STAGE2_PATCH_PROMPT.contains(r#"{"questions":[与输入题数相同、按出现顺序]}"#));
+        assert!(!STAGE2_PATCH_PROMPT.contains("恰好一项"));
         assert!(!STAGE2_PATCH_PROMPT.contains("三维标签推断规则"));
         assert!(!STAGE2_PATCH_PROMPT.contains("【最高指令：禁止做题】"));
+        assert!(STAGE2_PATCH_PROMPT.contains("一律 []"));
         // Stage 1 Qwen-VL OCR 输出纯 Markdown（非 JSON）
         assert!(QWEN_VL_OCR_PROMPT.contains("只输出 Markdown 文本"));
         assert!(QWEN_VL_OCR_PROMPT.contains("IMAGE_PLACEHOLDER_N"));

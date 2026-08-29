@@ -1,4 +1,4 @@
-//! 脚本草稿与 LLM 结果合并。阶段 2 仍每块调用 LLM；脚本是解法/选项安全网。
+//! 脚本草稿与 LLM 结果合并。解法以 OCR 规则回填为准。
 
 use crate::ai::types::ParsedQuestion;
 
@@ -41,6 +41,7 @@ pub fn merge_script_and_llm(
             restore_script_analysis_on(primary, draft);
         }
         strip_options_residue_from_stem(primary);
+        strip_stage2_tags(primary);
     }
     out
 }
@@ -48,6 +49,26 @@ pub fn merge_script_and_llm(
 pub fn restore_script_analysis_if_needed(qs: &mut [ParsedQuestion], draft: &ScriptDraft) {
     if let Some(q) = qs.first_mut() {
         restore_script_analysis_on(q, draft);
+    }
+}
+
+/// Stage2 不推断标签。
+pub fn strip_stage2_tags(q: &mut ParsedQuestion) {
+    q.knowledge_points.clear();
+    q.chapter_path.clear();
+    q.solution_methods.clear();
+}
+
+/// 解法从 Markdown 回填前清掉模型写的 analysis。
+pub fn strip_llm_analysis_for_recover(q: &mut ParsedQuestion) {
+    q.analysis.clear();
+    clear_part_analyses(&mut q.parts);
+}
+
+fn clear_part_analyses(parts: &mut [crate::ai::types::ParsedPart]) {
+    for p in parts {
+        p.analyses.clear();
+        clear_part_analyses(&mut p.children);
     }
 }
 
@@ -185,6 +206,34 @@ D. 4\n";
         let out = merge_script_and_llm(md, &draft, vec![]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].analysis.len(), 2);
+    }
+
+    #[test]
+    fn llm_tag_fields_are_stripped() {
+        let md = "\
+8. 下列结论正确的是\n\
+A. 1\n\
+B. 2\n\
+C. 3\n\
+D. 4\n";
+        let draft = structure_chunk(md);
+        let llm = parse_q(json!({
+            "question_type": "choice",
+            "stem": "下列结论正确的是",
+            "options": [
+                {"label": "A", "content": "1"},
+                {"label": "B", "content": "2"},
+                {"label": "C", "content": "3"},
+                {"label": "D", "content": "4"}
+            ],
+            "knowledge_points": ["一次函数"],
+            "chapter_path": ["函数"],
+            "solution_methods": [{"name": "数形结合", "confidence": 0.9}]
+        }));
+        let out = merge_script_and_llm(md, &draft, vec![llm]);
+        assert!(out[0].knowledge_points.is_empty());
+        assert!(out[0].chapter_path.is_empty());
+        assert!(out[0].solution_methods.is_empty());
     }
 
     fn titles(methods: &[AnalysisMethod]) -> Vec<&str> {

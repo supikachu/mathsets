@@ -3,7 +3,7 @@
 //! 长解析卷一次丢给 Stage2 时，模型常把【解析】写进 stem，再被 max_tokens 截断。
 //! 这里先切开题干再送模型，最后用原文解法回填。
 //!
-//! 全自动路径另提供纯脚本 `structure_chunk` → `ScriptDraft`（阶段 1 仍每块打 LLM）。
+//! 全自动路径另提供纯脚本 `structure_chunk` → `ScriptDraft`（High 跳过 Stage2）。
 
 mod analysis;
 mod choice;
@@ -20,9 +20,13 @@ pub use analysis::{
     stage2_llm_input,
 };
 pub use chunk::{
-    extract_chunk_question_no, guess_chunk_question_type, stage2_patch_user_input, structure_chunk,
+    extract_chunk_question_no, guess_chunk_question_type, stage2_batch_user_input,
+    stage2_patch_user_input, structure_chunk,
 };
-pub use merge::{merge_script_and_llm, restore_script_analysis_if_needed, script_usable};
+pub use merge::{
+    merge_script_and_llm, restore_script_analysis_if_needed, script_usable,
+    strip_llm_analysis_for_recover, strip_stage2_tags,
+};
 pub use validate::{
     append_validation_warnings, llm_core_ok, strip_options_residue_from_stem, validate_structured,
     StructuredValidation,

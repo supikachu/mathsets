@@ -15,6 +15,7 @@ use crate::ai::gemini_limit::{GEMINI_RPD_USER_MESSAGE, GEMINI_UNAVAILABLE_USER_M
 pub(crate) use crate::ai::structure::strip_options_residue_from_stem;
 use crate::ai::types::{AnalysisMethod, ParsedAnswer, ParsedQuestion};
 use crate::auth::middleware::AuthUser;
+use crate::auth::permissions::is_admin_user;
 use crate::handlers::ai_tagging::match_knowledge_nodes;
 use crate::models::ai_setting::{
     decrypt_api_key, encrypt_api_key, parse_master_key, AiSettingsResponse, UpdateAiSettingsRequest,
@@ -508,7 +509,7 @@ pub async fn get_settings(
         None => empty_ai_settings_response(),
     };
 
-    Ok(Json(resp))
+    Ok(Json(attach_embedding_admin_fields(resp, &state.pool, &auth).await))
 }
 
 /// 更新 AI 配置
@@ -517,6 +518,18 @@ pub async fn update_settings(
     State(state): State<AppState>,
     Json(req): Json<UpdateAiSettingsRequest>,
 ) -> Result<Json<AiSettingsResponse>, (StatusCode, Json<serde_json::Value>)> {
+    if is_admin_user(&auth) {
+        if let Some(ref model) = req.embedding_model {
+            let t = model.trim();
+            if !t.is_empty() && crate::ai::embedding::parse_embedding_model(t).is_none() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "不支持的 embedding 模型，仅允许 text-embedding-v3 或 qwen3.7-text-embedding"})),
+                ));
+            }
+        }
+    }
+
     let master_key = match &state.ai_config.key_encryption_key {
         Some(k) => match parse_master_key(k) {
             Ok(mk) => mk,
@@ -705,7 +718,31 @@ pub async fn update_settings(
         )
     })?;
 
-    let resp = ai_settings_response(setting);
+    if is_admin_user(&auth) {
+        if let Some(ref model) = req.embedding_model {
+            let t = model.trim();
+            if !t.is_empty() {
+                let changed = crate::ai::embedding::save_embedding_model(&state.pool, t, auth.id)
+                    .await
+                    .map_err(|e| {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": format!("保存 embedding 模型失败: {e}")})),
+                        )
+                    })?;
+                if changed {
+                    tracing::info!(
+                        user_id = %auth.id,
+                        model = t,
+                        "管理员切换全站 embedding 模型，后台重嵌全部知识树节点与标签"
+                    );
+                    tokio::spawn(crate::ai::embedding::start_backfill(state.pool.clone()));
+                }
+            }
+        }
+    }
+
+    let resp = attach_embedding_admin_fields(ai_settings_response(setting), &state.pool, &auth).await;
 
     Ok(Json(resp))
 }
@@ -731,6 +768,9 @@ fn empty_ai_settings_response() -> AiSettingsResponse {
         tagging_llm_base_url: None,
         stage2_concurrency: DEFAULT_STAGE2_CONCURRENCY,
         tagging_concurrency: DEFAULT_TAGGING_CONCURRENCY,
+        embedding_model: None,
+        embedding_dim: None,
+        embedding_models: None,
     }
 }
 
@@ -757,7 +797,24 @@ fn ai_settings_response(s: UserAiSetting) -> AiSettingsResponse {
             .tagging_concurrency
             .map(clamp_llm_concurrency)
             .unwrap_or(DEFAULT_TAGGING_CONCURRENCY),
+        embedding_model: None,
+        embedding_dim: None,
+        embedding_models: None,
     }
+}
+
+async fn attach_embedding_admin_fields(
+    mut resp: AiSettingsResponse,
+    pool: &sqlx::PgPool,
+    auth: &AuthUser,
+) -> AiSettingsResponse {
+    if !is_admin_user(auth) {
+        return resp;
+    }
+    resp.embedding_model = Some(crate::ai::embedding::load_embedding_model(pool).await);
+    resp.embedding_dim = Some(crate::ai::embedding::EMBEDDING_DIM as i32);
+    resp.embedding_models = Some(crate::ai::embedding::embedding_model_ids());
+    resp
 }
 
 fn decrypt_stored_key(

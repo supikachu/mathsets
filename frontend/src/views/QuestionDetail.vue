@@ -123,7 +123,7 @@
                 </div>
                 <!-- 填空题答案 -->
                 <div v-else-if="q?.question_type === 'fill'" class="card-answer-content as-fill-list">
-                  <span v-for="(item, i) in (q!.correct_answer as any[])" :key="i" class="as-fill-item">
+                  <span v-for="(item, i) in fillBlanks" :key="i" class="as-fill-item">
                     {{ i + 1 }}. <LatexRender :text="item.answer || String(item)" :inline="true" :sub-question-badge="true" />
                   </span>
                 </div>
@@ -303,7 +303,7 @@ import { markQuestionDeleted, markQuestionDirty } from '@/composables/useQuestio
 import { typeLabel, typeBadgeColor, statusLabel, statusIcon, formatTime } from '@/utils/questionDisplay'
 import { useOptionsLayout } from '@/composables/useOptionsLayout'
 import { partsFromStructureJson, walkLeaves } from '@/utils/questionParts'
-import { extractChoiceLetters } from '@/utils/choiceAnswer'
+import { extractChoiceLetters, extractFillBlanks } from '@/utils/choiceAnswer'
 
 const route = useRoute()
 const router = useRouter()
@@ -393,6 +393,7 @@ const optionList = computed(() => {
 
 // 正确答案标签列表
 const correctLabels = computed(() => extractChoiceLetters(q.value?.correct_answer))
+const fillBlanks = computed(() => extractFillBlanks(q.value?.correct_answer))
 
 // ===== 多解法 =====
 const cnNums = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十']
@@ -435,10 +436,10 @@ const hasAnswer = computed(() => {
   if (q.value?.question_type === 'solution') {
     return walkLeaves(solutionParts.value).some((l) => (l.answer || '').trim())
   }
-  const ans = q.value?.correct_answer
-  if (!ans) return false
-  if (Array.isArray(ans)) return ans.length > 0
-  return !!ans
+  if (q.value?.question_type === 'fill') {
+    return fillBlanks.value.some((b) => (b.answer || '').trim())
+  }
+  return correctLabels.value.length > 0
 })
 
 // 是否有评分标准
@@ -640,19 +641,15 @@ async function confirmReview(action: string, comment?: string): Promise<boolean>
 }
 
 function isCorrect(label: string): boolean {
-  const ans = q.value?.correct_answer
-  if (!ans) return false
-  if (Array.isArray(ans)) return ans.map(String).includes(label)
-  return String(ans) === label
+  return extractChoiceLetters(q.value?.correct_answer).includes(label)
 }
 
 const isMultiChoice = computed(() => {
   if (!q.value) return false
   if (q.value.question_type === 'multiple') return true
   if (q.value.question_type !== 'choice') return false
-  if ((q.value as any)?.sub_type === 'multi') return true
-  const ans = q.value.correct_answer
-  return Array.isArray(ans) && ans.length > 1
+  if ((q.value as { sub_type?: string })?.sub_type === 'multi') return true
+  return extractChoiceLetters(q.value.correct_answer).length > 1
 })
 
 // ── 空间切换监听：防止幽灵页面 ──

@@ -11,6 +11,7 @@ import { useQuestionBasket } from '@/composables/useQuestionBasket'
 import { displayPaperSource } from '@/utils/questionSource'
 import { typeLabel, diffLabel } from '@/utils/questionDisplay'
 import { partsFromStructureJson } from '@/utils/questionParts'
+import { extractChoiceLetters, extractFillBlanks } from '@/utils/choiceAnswer'
 
 const route = useRoute()
 const router = useRouter()
@@ -124,39 +125,18 @@ function getParsedQuestion(q: PaperQuestionItemDetail) {
 
 // 获取正确答案标号数组（用于选择题高亮与展示）
 function getCorrectLabels(q: PaperQuestionItemDetail): string[] {
-  const ans = q.correct_answer
-  if (!ans) return []
-  if (Array.isArray(ans)) {
-    return ans.map((item) => (typeof item === 'string' ? item.trim().toUpperCase() : String(item).trim().toUpperCase())).filter(Boolean)
-  }
-  if (typeof ans === 'string') {
-    const trimmed = ans.trim()
-    if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
-      try {
-        const parsed = JSON.parse(trimmed)
-        if (Array.isArray(parsed)) {
-          return parsed.map((x) => String(x).trim().toUpperCase()).filter(Boolean)
-        }
-      } catch {}
-    }
-    return trimmed.replace(/[^A-Za-z]/g, '').split('').map((c) => c.toUpperCase()).filter(Boolean)
-  }
-  return []
+  return extractChoiceLetters(q.correct_answer)
 }
 
 // 格式化非选择题答案展示
 function formatAnswerText(q: PaperQuestionItemDetail): string {
-  const ans = q.correct_answer
-  if (!ans) return '暂无参考答案'
-  if (typeof ans === 'string') return ans
-  if (Array.isArray(ans)) {
-    return ans.join('； ')
-  }
-  try {
-    return JSON.stringify(ans)
-  } catch {
-    return String(ans)
-  }
+  const letters = extractChoiceLetters(q.correct_answer)
+  if (letters.length) return letters.join('')
+  const blanks = extractFillBlanks(q.correct_answer)
+  if (blanks.length) return blanks.map((b) => b.answer).join('； ')
+  if (!q.correct_answer) return '暂无参考答案'
+  if (typeof q.correct_answer === 'string') return q.correct_answer
+  return '暂无参考答案'
 }
 
 function paperSolutionParts(q: PaperQuestionItemDetail) {

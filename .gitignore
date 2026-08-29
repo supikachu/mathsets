@@ -42,6 +42,9 @@ bench/inbox/*
 !bench/inbox/.gitkeep
 !bench/inbox/PUT_PDFS_HERE.txt
 bench/out/
+bench/eval/*
+!bench/eval/.gitkeep
+!bench/eval/README.txt
 
 # ==========================================
 # 5. Rust 后端编译输出 (Cargo / Rust)

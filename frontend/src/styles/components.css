@@ -766,6 +766,10 @@
   border: none;
 }
 
+[data-theme='dark'] .toggle {
+  background: #39393d;
+}
+
 .toggle.active {
   background: var(--success);
 }

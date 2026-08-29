@@ -571,6 +571,10 @@ async fn test_question_full_lifecycle() {
     // 注：grade 字段已 deprecated 且 #[serde(skip_serializing)]，不再出现在响应中
     assert_eq!(body["knowledge_nodes"].as_array().unwrap().len(), 1);
     assert_eq!(body["version"], 1);
+    assert_eq!(
+        body["correct_answer"],
+        json!({"kind":"choice","value":{"options":["B"]}})
+    );
 
     let question_id = body["id"].as_str().unwrap().to_string();
 
@@ -1035,6 +1039,123 @@ async fn test_ai_settings_default() {
     assert!(body["tagging_provider"].is_null());
     assert_eq!(body["stage2_concurrency"], 4);
     assert_eq!(body["tagging_concurrency"], 4);
+    assert!(
+        body.get("embedding_model").is_none(),
+        "教师响应不应包含 embedding_model: {:?}",
+        body
+    );
+    assert!(body.get("embedding_dim").is_none());
+    assert!(body.get("embedding_models").is_none());
+}
+
+#[tokio::test]
+async fn test_ai_settings_embedding_admin_only() {
+    let mut app = match create_test_app().await {
+        Some(app) => app,
+        None => return,
+    };
+    let teacher = register_and_login(&mut app).await;
+    let admin = register_leader_and_login(&mut app).await;
+    let (status, before) = get_auth(&mut app, "/api/v1/ai/settings", &admin).await;
+    assert_eq!(status, StatusCode::OK, "管理员获取失败: {:?}", before);
+    let before_model = before["embedding_model"].as_str().unwrap_or("");
+    assert!(
+        before_model == "text-embedding-v3" || before_model == "qwen3.7-text-embedding",
+        "管理员应看到白名单模型: {:?}",
+        before
+    );
+    assert_eq!(before["embedding_dim"], 1024);
+    assert_eq!(
+        before["embedding_models"],
+        json!(["text-embedding-v3", "qwen3.7-text-embedding"])
+    );
+
+    let (status, body) = put_auth(
+        &mut app,
+        "/api/v1/ai/settings",
+        json!({
+            "provider": "deepseek",
+            "api_key": "sk-teacher",
+            "model_text": "deepseek-chat",
+            "embedding_model": "qwen3.7-text-embedding"
+        }),
+        &teacher,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "教师保存失败: {:?}", body);
+    assert!(
+        body.get("embedding_model").is_none(),
+        "教师 PUT 响应不应带 embedding 字段: {:?}",
+        body
+    );
+
+    let (status, after_teacher) = get_auth(&mut app, "/api/v1/ai/settings", &admin).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        after_teacher["embedding_model"].as_str().unwrap_or(""),
+        before_model,
+        "教师不应改掉全站 embedding 模型"
+    );
+
+    let (status, body) = put_auth(
+        &mut app,
+        "/api/v1/ai/settings",
+        json!({
+            "provider": "deepseek",
+            "api_key": "sk-admin",
+            "model_text": "deepseek-chat",
+            "embedding_model": "not-a-real-model"
+        }),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "非法模型应 400: {:?}", body);
+
+    let other = if before_model == "qwen3.7-text-embedding" {
+        "text-embedding-v3"
+    } else {
+        "qwen3.7-text-embedding"
+    };
+    let (status, body) = put_auth(
+        &mut app,
+        "/api/v1/ai/settings",
+        json!({
+            "provider": "deepseek",
+            "api_key": "sk-admin",
+            "model_text": "deepseek-chat",
+            "embedding_model": other
+        }),
+        &admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "管理员切换模型失败: {:?}", body);
+    assert_eq!(body["embedding_model"], other);
+    assert_eq!(body["embedding_dim"], 1024);
+
+    let (status, body) = get_auth(&mut app, "/api/v1/ai/settings", &admin).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["embedding_model"], other);
+
+    let (status, body) = get_auth(&mut app, "/api/v1/ai/settings", &teacher).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.get("embedding_model").is_none(),
+        "教师 GET 仍不应看到全站 embedding 配置: {:?}",
+        body
+    );
+
+    let _ = put_auth(
+        &mut app,
+        "/api/v1/ai/settings",
+        json!({
+            "provider": "deepseek",
+            "api_key": "sk-admin",
+            "model_text": "deepseek-chat",
+            "embedding_model": "text-embedding-v3"
+        }),
+        &admin,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -1357,4 +1478,90 @@ async fn test_solution_normalized_hash_ignores_leaf_analysis() {
     let c2 = mathset::util::normalize::compute_content_hash_ex(&stem, None, &Value::Null, None, Some(&s2));
     assert_eq!(n1, n2, "normalized hash 应去掉叶子 analyses");
     assert_ne!(c1, c2, "content hash 应包含叶子解法");
+}
+
+#[tokio::test]
+async fn test_correct_answer_canonical_and_solution_parent_id() {
+    let mut app = match create_test_app().await {
+        Some(app) => app,
+        None => return,
+    };
+    let token = register_and_login(&mut app).await;
+
+    let (status, body) = post_auth(
+        &mut app,
+        "/api/v1/questions",
+        json!({
+            "stem": "多选规范化",
+            "question_type": "multiple",
+            "difficulty": 2,
+            "options": [
+                {"label": "A", "content": "1"},
+                {"label": "B", "content": "2"},
+                {"label": "C", "content": "3"}
+            ],
+            "correct_answer": ["A", "C"]
+        }),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        body["correct_answer"],
+        json!({"kind":"choice","value":{"options":["A","C"]}})
+    );
+
+    let (status, body) = post_auth(
+        &mut app,
+        "/api/v1/questions",
+        json!({
+            "stem": "填空规范化",
+            "question_type": "fill",
+            "difficulty": 2,
+            "correct_answer": [{"position": 1, "answer": "2"}]
+        }),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        body["correct_answer"],
+        json!({"kind":"fill","value":{"blanks":[{"position":1,"answer":"2"}]}})
+    );
+
+    let (status, body) = post_auth(
+        &mut app,
+        "/api/v1/questions",
+        json!({
+            "stem": "空答案待补全",
+            "question_type": "choice",
+            "difficulty": 1,
+            "options": [{"label":"A","content":"1"}],
+            "correct_answer": []
+        }),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        body["correct_answer"],
+        json!({"kind":"choice","value":{"options":[]}})
+    );
+    assert_eq!(body["metadata"]["system_flags"]["pending_answer"], true);
+
+    let (status, body) = post_auth(
+        &mut app,
+        "/api/v1/questions",
+        json!({
+            "stem": "解答题禁止 parent_id",
+            "question_type": "solution",
+            "difficulty": 3,
+            "parent_id": Uuid::new_v4(),
+            "structure": mathset::testing::solution_structure_json("解。", "过程")
+        }),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "ERR_SOLUTION_PARENT_ID");
 }

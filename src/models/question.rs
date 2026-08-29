@@ -526,35 +526,181 @@ impl From<(Question, Vec<KnowledgeNodeSummary>)> for QuestionDetail {
 // 异步补全：空答案检测 + 系统标签刷新
 // ===========================================================================
 
+/// 把入站 `correct_answer` 收成规范 `{kind,value}`；解答题一律 `None`（JSON null）。
+///
+/// 兼容裸 `["A"]`、`"A"`、`[{position,answer}]`、缺 `kind` 的对象。
+pub fn canonicalize_correct_answer(
+    question_type: &QuestionType,
+    raw: Option<&serde_json::Value>,
+) -> Option<serde_json::Value> {
+    if *question_type == QuestionType::Solution {
+        return None;
+    }
+    let Some(v) = raw else {
+        return None;
+    };
+    if v.is_null() {
+        return None;
+    }
+    match question_type {
+        QuestionType::Choice | QuestionType::Multiple => Some(serde_json::json!({
+            "kind": "choice",
+            "value": { "options": extract_choice_options(v) }
+        })),
+        QuestionType::Fill => Some(serde_json::json!({
+            "kind": "fill",
+            "value": { "blanks": extract_fill_blanks(v) }
+        })),
+        QuestionType::Solution => None,
+    }
+}
+
+fn json_string_trim(v: &serde_json::Value) -> Option<String> {
+    v.as_str().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+fn extract_choice_options(v: &serde_json::Value) -> Vec<String> {
+    match v {
+        serde_json::Value::Array(arr) => arr.iter().filter_map(json_string_trim).collect(),
+        serde_json::Value::String(s) => {
+            let t = s.trim();
+            if t.is_empty() {
+                Vec::new()
+            } else if t.starts_with('[') {
+                serde_json::from_str::<Vec<String>>(t)
+                    .map(|items| items.into_iter().map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+                    .unwrap_or_else(|_| vec![t.to_string()])
+            } else {
+                vec![t.to_string()]
+            }
+        }
+        serde_json::Value::Object(map) => {
+            let value = map.get("value");
+            if let Some(opts) = value
+                .and_then(|val| val.get("options"))
+                .and_then(|o| o.as_array())
+            {
+                return opts.iter().filter_map(json_string_trim).collect();
+            }
+            if let Some(arr) = value.and_then(|val| val.as_array()) {
+                return arr.iter().filter_map(json_string_trim).collect();
+            }
+            if let Some(opts) = map.get("options").and_then(|o| o.as_array()) {
+                return opts.iter().filter_map(json_string_trim).collect();
+            }
+            Vec::new()
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn extract_fill_blanks(v: &serde_json::Value) -> Vec<serde_json::Value> {
+    let from_items = |arr: &[serde_json::Value]| -> Vec<serde_json::Value> {
+        arr.iter()
+            .enumerate()
+            .filter_map(|(i, item)| {
+                if let Some(obj) = item.as_object() {
+                    let answer = obj
+                        .get("answer")
+                        .and_then(|a| a.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())?;
+                    let position = obj
+                        .get("position")
+                        .and_then(|p| p.as_i64())
+                        .unwrap_or((i as i64) + 1);
+                    Some(serde_json::json!({ "position": position, "answer": answer }))
+                } else {
+                    let answer = json_string_trim(item)?;
+                    Some(serde_json::json!({ "position": (i as i64) + 1, "answer": answer }))
+                }
+            })
+            .collect()
+    };
+
+    match v {
+        serde_json::Value::Array(arr) => from_items(arr),
+        serde_json::Value::Object(map) => {
+            let value = map.get("value");
+            if let Some(blanks) = value
+                .and_then(|val| val.get("blanks"))
+                .and_then(|b| b.as_array())
+            {
+                return from_items(blanks);
+            }
+            if let Some(arr) = value.and_then(|val| val.as_array()) {
+                return from_items(arr);
+            }
+            if let Some(blanks) = map.get("blanks").and_then(|b| b.as_array()) {
+                return from_items(blanks);
+            }
+            Vec::new()
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// 检测 correct_answer 是否为「空」
 ///
 /// 空值定义：
-/// - `None` / `Value::Null`
+/// - `None` / `Value::Null` / 空字符串
+/// - 裸 `[]`
 /// - `{"value":{"options":[]}}` 等 options/blanks/subs 为空数组
 /// - `{"value":"   "}` 纯空格字符串（trim 后为空，覆盖 text/math 题型）
 pub fn is_answer_empty(answer: &Option<serde_json::Value>) -> bool {
     match answer {
         None => true,
         Some(serde_json::Value::Null) => true,
+        Some(serde_json::Value::String(s)) => s.trim().is_empty(),
+        Some(v @ serde_json::Value::Array(arr)) => {
+            arr.is_empty()
+                || (extract_choice_options(v).is_empty() && extract_fill_blanks(v).is_empty())
+        }
         Some(v) => {
             if let Some(value) = v.get("value") {
-                // 数组类答案：options/blanks/subs 为空数组
                 if let Some(arr) = value.get("options").and_then(|o| o.as_array()) {
-                    return arr.is_empty();
+                    return arr.iter().all(|x| json_string_trim(x).is_none());
                 }
                 if let Some(arr) = value.get("blanks").and_then(|b| b.as_array()) {
-                    return arr.is_empty();
+                    return extract_fill_blanks(v).is_empty() || arr.is_empty();
                 }
                 if let Some(arr) = value.get("subs").and_then(|s| s.as_array()) {
                     return arr.is_empty();
                 }
-                // 字符串类答案：纯空格判定（覆盖 text/math 题型）
                 if let Some(s) = value.as_str() {
                     return s.trim().is_empty();
                 }
+                if let Some(arr) = value.as_array() {
+                    return arr.is_empty();
+                }
+            }
+            if let Some(arr) = v.get("options").and_then(|o| o.as_array()) {
+                return arr.is_empty();
             }
             false
         }
+    }
+}
+
+/// AI 保存时写入题目行上的解析任务指针（不加列）。
+pub fn attach_parse_pointer(
+    metadata: &mut serde_json::Value,
+    task_id: Uuid,
+    staged_index: &str,
+    saved_at: DateTime<Utc>,
+) {
+    if !metadata.is_object() {
+        *metadata = serde_json::json!({});
+    }
+    if let Some(obj) = metadata.as_object_mut() {
+        obj.insert(
+            "parse".to_string(),
+            serde_json::json!({
+                "task_id": task_id,
+                "staged_index": staged_index,
+                "saved_at": saved_at.to_rfc3339(),
+            }),
+        );
     }
 }
 
@@ -997,4 +1143,69 @@ pub struct TagQuery {
     pub as_tree: bool,
     /// 按父节点过滤（NULL = 仅根节点）
     pub parent_id: Option<Uuid>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn canonicalize_choice_from_bare_array() {
+        let out = canonicalize_correct_answer(&QuestionType::Choice, Some(&json!(["B"])));
+        assert_eq!(out, Some(json!({"kind":"choice","value":{"options":["B"]}})));
+    }
+
+    #[test]
+    fn canonicalize_multiple_keeps_kind_choice() {
+        let out = canonicalize_correct_answer(&QuestionType::Multiple, Some(&json!(["A", "C"])));
+        assert_eq!(
+            out,
+            Some(json!({"kind":"choice","value":{"options":["A","C"]}}))
+        );
+    }
+
+    #[test]
+    fn canonicalize_fill_from_position_array() {
+        let raw = json!([{"position": 1, "answer": "2"}]);
+        let out = canonicalize_correct_answer(&QuestionType::Fill, Some(&raw));
+        assert_eq!(
+            out,
+            Some(json!({"kind":"fill","value":{"blanks":[{"position":1,"answer":"2"}]}}))
+        );
+    }
+
+    #[test]
+    fn canonicalize_solution_always_none() {
+        let raw = json!({"kind":"solution","value":{"subs":[{"sub_id":1,"content":"x"}]}});
+        assert!(canonicalize_correct_answer(&QuestionType::Solution, Some(&raw)).is_none());
+        assert!(canonicalize_correct_answer(&QuestionType::Solution, Some(&json!(["x"]))).is_none());
+    }
+
+    #[test]
+    fn is_answer_empty_bare_array_and_canonical() {
+        assert!(is_answer_empty(&None));
+        assert!(is_answer_empty(&Some(json!([]))));
+        assert!(is_answer_empty(&Some(json!(""))));
+        assert!(is_answer_empty(
+            &Some(json!({"kind":"choice","value":{"options":[]}}))
+        ));
+        assert!(!is_answer_empty(&Some(json!(["B"]))));
+        assert!(!is_answer_empty(
+            &Some(json!({"kind":"choice","value":{"options":["B"]}}))
+        ));
+        assert!(is_answer_empty(
+            &Some(json!({"kind":"fill","value":{"blanks":[]}}))
+        ));
+    }
+
+    #[test]
+    fn attach_parse_pointer_keeps_other_metadata() {
+        let mut meta = json!({"year": 2025});
+        let tid = Uuid::nil();
+        attach_parse_pointer(&mut meta, tid, "p1_i0", Utc::now());
+        assert_eq!(meta["year"], 2025);
+        assert_eq!(meta["parse"]["staged_index"], "p1_i0");
+        assert_eq!(meta["parse"]["task_id"], tid.to_string());
+    }
 }
