@@ -110,19 +110,6 @@
 
         <!-- ── 3. 右侧操作组 (Right Group: 统一 rounded-full 胶囊圆角风格) ── -->
         <div class="ql-header-actions flex items-center gap-3 shrink-0">
-          <!-- 批量提交审核按钮（多选时显示） -->
-          <button
-            v-if="selectedIds.size > 0"
-            class="ql-batch-btn flex items-center gap-1.5 px-4 h-9 bg-emerald-500 hover:bg-emerald-600 active:bg-emerald-700 text-white rounded-full text-sm font-medium shadow-sm transition-colors cursor-pointer shrink-0"
-            :disabled="batchSubmitting"
-            :class="{ 'opacity-60 cursor-not-allowed': batchSubmitting }"
-            @click="handleBatchSubmit"
-          >
-            <AppIcon name="send" :size="14" />
-            <span>批量提交审核</span>
-            <span class="ql-batch-count">{{ selectedIds.size }}</span>
-          </button>
-
           <!-- 筛选按钮 (Outline 胶囊按钮) -->
           <button
             v-if="navView !== 'papers'"
@@ -133,16 +120,6 @@
             <AppIcon name="filter" :size="14" />
             <span class="ql-filter-label">筛选</span>
             <span v-if="hasAnyFilter" class="ql-filter-dot w-1.5 h-1.5 rounded-full bg-blue-500"></span>
-          </button>
-
-          <!-- 试题篮按钮 (胶囊按钮) -->
-          <button
-            v-if="basket.count.value > 0 && navView !== 'papers'"
-            class="ql-basket-btn relative flex items-center h-9 px-3 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-full text-sm text-gray-700 dark:text-gray-200 hover:border-blue-500 hover:text-blue-500 transition-colors shrink-0 shadow-sm"
-            @click="toast.info(`试题篮中有 ${basket.count.value} 道题目`)"
-          >
-            <AppIcon name="shopping-cart" :size="15" />
-            <span class="ql-basket-count">{{ basket.count.value }}</span>
           </button>
 
           <!-- 新建题目按钮 (Primary CTA: bg-blue-500 hover:bg-blue-600 rounded-full) -->
@@ -511,18 +488,26 @@
                 class="q-card"
                 :class="{ 'is-expanded': expandedIds.has(card.id) }"
               >
-            <!-- 来源角标：绝对定位，贴左上角边缘 -->
-            <span v-if="sourceMeta(card)" class="q-source-badge" :title="sourceMeta(card)">
-              {{ sourceMeta(card) }}
-            </span>
+            <!-- 顶栏：来源属性 + 待补全标记（学校名靠右） -->
+            <div class="q-card-topbar">
+              <div class="q-card-topbar-left">
+                <span v-if="sourceMeta(card)" class="q-top-capsule q-source-meta" :title="sourceMeta(card)">
+                  {{ sourceMeta(card) }}
+                </span>
+                <span v-if="card.systemFlags?.pending_answer" class="q-top-capsule q-flag-tag q-flag--answer flex-shrink-0">
+                  答案待补全
+                </span>
+                <span v-if="card.systemFlags?.missing_analysis" class="q-top-capsule q-flag-tag q-flag--analysis flex-shrink-0">
+                  解析待补全
+                </span>
+              </div>
+              <span v-if="schoolName(card)" class="q-school-tag" :title="schoolName(card)">
+                <AppIcon name="landmark" :size="11" :stroke="1.6" />
+                <span class="q-school-name">{{ schoolName(card) }}</span>
+              </span>
+            </div>
 
-            <!-- 学校角标：绝对定位，贴右上角边缘（窄屏隐藏） -->
-            <span v-if="schoolName(card)" class="q-school-tag" :title="schoolName(card)">
-              <AppIcon name="landmark" :size="11" :stroke="1.6" />
-              <span class="q-school-name">{{ schoolName(card) }}</span>
-            </span>
-
-            <!-- Row 1: 属性标签 -->
+            <!-- 题型 / 难度 / 状态 -->
             <div class="q-card-header">
               <div class="q-card-tags">
                 <AppBadge :color="typeBadgeColor(card.question_type)" class="flex-shrink-0">
@@ -536,17 +521,6 @@
                   <span class="q-dot" :class="`q-dot--${statusBadgeColor(card.status)}`"></span>
                   {{ statusLabel(card.status) }}
                 </span>
-                <span v-if="card.partCount > 1" class="q-ghost-tag flex-shrink-0">
-                  {{ card.partCount }} 问
-                </span>
-                <span v-if="card.systemFlags?.pending_answer" class="q-flag-tag q-flag--answer flex-shrink-0">
-                  <AppIcon name="alert-circle" :size="11" :stroke="2" />
-                  答案待补全
-                </span>
-                <span v-if="card.systemFlags?.missing_analysis" class="q-flag-tag q-flag--analysis flex-shrink-0">
-                  <AppIcon name="alert-circle" :size="11" :stroke="2" />
-                  解析待补全
-                </span>
                 <button
                   v-if="card.papers.length"
                   type="button"
@@ -558,14 +532,6 @@
                   <span class="q-paper-tag-text">{{ paperTagLabel(card) }}</span>
                 </button>
               </div>
-              <!-- 多选 Checkbox（批量提交审核） -->
-              <label class="q-select-check flex-shrink-0" @click.stop>
-                <input
-                  type="checkbox"
-                  :checked="selectedIds.has(card.id)"
-                  @change="toggleSelect(card.id)"
-                />
-              </label>
             </div>
 
             <!-- Row 2: Body — 题干 + 选项 -->
@@ -691,16 +657,6 @@
                 </div>
               </div>
 
-              <!-- 移动端元信息：窄屏独占（w-fit 紧凑包裹，消除贪婪拉伸） -->
-              <span
-                v-if="card && sourceMeta(card)"
-                class="q-mobile-meta inline-flex items-center gap-1.5 w-fit max-w-full min-w-0 shrink"
-                :title="sourceMeta(card)"
-              >
-                <AppIcon name="book-open" :size="11" :stroke="1.6" class="shrink-0" />
-                <span class="truncate min-w-0">{{ sourceMeta(card) }}</span>
-              </span>
-
               <!-- 右侧操作按钮组：窄屏纯圆形图标/宽屏胶囊按钮 rounded-full -->
               <div class="q-actions flex items-center gap-2 shrink-0">
                 <button
@@ -745,77 +701,14 @@
     </div>
   </div>
 
-  <!-- 批量提交审核结果 Modal -->
-  <AppModal v-model="showBatchResult" title="批量提交审核结果" size="lg">
-    <div v-if="batchResult" class="batch-result-body">
-      <!-- 汇总统计 -->
-      <div class="batch-summary-row">
-        <div class="batch-summary-item">
-          <span class="batch-summary-label">总数</span>
-          <span class="batch-summary-value">{{ batchResult.total }}</span>
-        </div>
-        <div class="batch-summary-item batch-summary--success">
-          <span class="batch-summary-label">成功</span>
-          <span class="batch-summary-value">{{ batchResult.succeeded }}</span>
-        </div>
-        <div class="batch-summary-item batch-summary--failed">
-          <span class="batch-summary-label">失败</span>
-          <span class="batch-summary-value">{{ batchResult.failed }}</span>
-        </div>
-      </div>
-
-      <!-- 逐题结果列表 -->
-      <div class="batch-result-list">
-        <div
-          v-for="r in batchResult.results"
-          :key="r.id"
-          class="batch-result-item"
-          :class="{ 'is-failed': r.status === 'failed' }"
-        >
-          <div class="batch-result-icon">
-            <AppIcon
-              v-if="r.status === 'success'"
-              name="check"
-              :size="16"
-              :stroke="2.5"
-              class="text-emerald-500"
-            />
-            <AppIcon
-              v-else
-              name="x"
-              :size="16"
-              :stroke="2.5"
-              class="text-red-500"
-            />
-          </div>
-          <div class="batch-result-info">
-            <span class="batch-result-id">{{ r.id }}</span>
-            <template v-if="r.status === 'failed'">
-              <span class="batch-result-error">{{ batchErrorCodeLabel(r.code) }}</span>
-              <span v-if="r.missing && r.missing.length > 0" class="batch-result-missing">
-                缺失字段：{{ r.missing.join('、') }}
-              </span>
-            </template>
-          </div>
-        </div>
-      </div>
-
-      <!-- 操作按钮 -->
-      <div class="batch-result-actions">
-        <button
-          v-if="batchResult.failed > 0"
-          type="button"
-          class="batch-action-btn batch-action--primary"
-          @click="goToFirstFailed"
-        >
-          查看失败题目
-        </button>
-        <button type="button" class="batch-action-btn batch-action--ghost" @click="closeBatchResult">
-          关闭
-        </button>
-      </div>
-    </div>
-  </AppModal>
+  <router-link
+    to="/basket"
+    class="ql-basket-fab"
+    aria-label="打开试题篮"
+  >
+    <AppIcon name="shopping-cart" :size="20" />
+    <span v-if="basket.count.value > 0" class="ql-basket-fab-badge">{{ basket.count.value > 99 ? '99+' : basket.count.value }}</span>
+  </router-link>
 
 
 </template>
@@ -831,7 +724,7 @@ import { DynamicScroller, DynamicScrollerItem } from 'vue-virtual-scroller'
 import 'vue-virtual-scroller/dist/vue-virtual-scroller.css'
 import KnowledgeTreeNav from '@/components/KnowledgeTreeNav.vue'
 import SpaceSwitcher from '@/components/SpaceSwitcher.vue'
-import { AppButton, AppSelect, AppPagination, AppIcon, AppBadge, AppModal } from '@/components/ui'
+import { AppButton, AppSelect, AppPagination, AppIcon, AppBadge } from '@/components/ui'
 import { useQuestionBasket } from '@/composables/useQuestionBasket'
 import { useToast } from '@/composables/useToast'
 import { useSpaceStore } from '@/stores/space'
@@ -853,7 +746,7 @@ import {
   diffBadgeColor,
   statusBadgeColor,
 } from '@/utils/questionDisplay'
-import { leafCount, partsFromStructureJson, type QuestionPart } from '@/utils/questionParts'
+import { partsFromStructureJson, type QuestionPart } from '@/utils/questionParts'
 import { extractChoiceLetters, extractFillBlanks } from '@/utils/choiceAnswer'
 
 // keep-alive 缓存匹配名：AppLayout 中 <keep-alive :include="['QuestionList']"> 据此识别
@@ -1019,7 +912,6 @@ function handleViewChange(view: 'questions' | 'papers') {
   paperStatus.value = 'ALL'
   query.status = undefined
   page.value = 1
-  selectedIds.value = new Set()
   if (view === 'papers') {
     query.paper_id = undefined
     fromPaper.value = null
@@ -1205,7 +1097,6 @@ interface QuestionCard {
   correctAnswer: string
   analysis: string | null
   structureParts: QuestionPart[]
-  partCount: number
   knowledgeNodes: KnowledgeNodeSummary[]
   systemFlags: { pending_answer?: boolean; missing_analysis?: boolean; no_analysis_needed?: boolean }
   papers: { id: string; title: string }[]
@@ -1724,7 +1615,6 @@ function buildCard(s: QuestionSummary, detail: QuestionDetail | null): QuestionC
     correctAnswer: parseAnswer(answer),
     analysis,
     structureParts,
-    partCount: leafCount(structureParts),
     knowledgeNodes,
     systemFlags: {
       pending_answer: !!rawFlags.pending_answer,
@@ -1843,71 +1733,6 @@ function toggleBasket(id: string) {
     basket.add(id)
     toast.success('已加入试题篮')
   }
-}
-
-// ===== 批量提交审核（T3-7）=====
-// 多选：卡片头部 Checkbox，选中 ID 集合
-const selectedIds = ref<Set<string>>(new Set())
-const batchSubmitting = ref(false)
-const showBatchResult = ref(false)
-const batchResult = ref<{
-  total: number
-  succeeded: number
-  failed: number
-  results: Array<{ id: string; status: 'success' | 'failed'; code?: string; missing?: string[] }>
-} | null>(null)
-
-function toggleSelect(id: string) {
-  const next = new Set(selectedIds.value)
-  if (next.has(id)) next.delete(id)
-  else next.add(id)
-  selectedIds.value = next
-}
-
-function clearSelection() {
-  selectedIds.value = new Set()
-}
-
-// 批量提交审核：调用后端 batch-submit 接口，展示结构化结果 Modal
-async function handleBatchSubmit() {
-  if (selectedIds.value.size === 0 || batchSubmitting.value) return
-  batchSubmitting.value = true
-  try {
-    const res = await questionApi.batchSubmit(Array.from(selectedIds.value))
-    batchResult.value = res
-    showBatchResult.value = true
-  } catch (e: any) {
-    toast.error(e.response?.data?.error || e.response?.data?.message || e.message || '批量提交失败')
-  } finally {
-    batchSubmitting.value = false
-  }
-}
-
-// 错误代码 → 中文描述
-function batchErrorCodeLabel(code?: string): string {
-  if (!code) return '未知错误'
-  if (code === 'ERR_ANSWER_INCOMPLETE') return '答案不完整'
-  if (code === 'ERR_OPTIONS_INCOMPLETE') return '选项不完整'
-  if (code === 'ERR_ANALYSIS_INCOMPLETE') return '解析不完整'
-  return code
-}
-
-// 跳转到第一个失败题目的编辑页
-function goToFirstFailed() {
-  const failed = batchResult.value?.results.find(r => r.status === 'failed')
-  if (failed) {
-    showBatchResult.value = false
-    router.push(`/questions/${failed.id}/edit`)
-  }
-}
-
-// 关闭结果弹窗：刷新列表 + 计数 + 清空选择
-function closeBatchResult() {
-  showBatchResult.value = false
-  batchResult.value = null
-  clearSelection()
-  fetchList()
-  refreshBadgeCounts()
 }
 
 // 左侧导航节点变化已由 handleKnowledgeNodeSelect 处理，无需 watch
@@ -2165,21 +1990,24 @@ onBeforeUnmount(() => {
   overflow: hidden; /* 锁定外层高度，彻底掐断全局滚动条 */
 }
 
-/* ===== 主体：左侧知识树 + 右侧列表区 ===== */
-/* 浅灰背景托起白色卡片，padding+gap 营造呼吸感 */
+/* ===== 主体：知识树 + 列表作为一份居中文稿 ===== */
 .ql-body {
   flex: 1;
   min-height: 0;
   display: flex;
+  justify-content: center;
+  align-items: stretch;
   gap: 16px;
   padding: 16px;
   background: var(--bg-primary);
   overflow: hidden;
 }
 
-/* 右侧主区：卡片化容器（与知识树卡片视觉对齐） */
+/* 右侧主区：与知识树并排居中，不再拉满剩余视口 */
 .ql-main {
-  flex: 1;
+  flex: 0 1 860px;
+  width: 860px;
+  max-width: 860px;
   min-width: 600px; /* 防止 LaTeX 公式与题目选项被挤压变形 */
   display: flex;
   flex-direction: column;
@@ -2269,41 +2097,42 @@ onBeforeUnmount(() => {
   transform: scale(0.96);
 }
 
-/* 试题篮按钮 */
-.ql-basket-btn {
-  position: relative;
-  display: flex;
-  align-items: center;
-  height: 36px;
-  padding: 0 12px;
-  border-radius: 10px;
-  background: var(--bg-input);
-  border: 1px solid var(--border-color);
-  color: var(--text-secondary);
-  transition: var(--transition-fast);
-  flex-shrink: 0;
+.ql-basket-fab {
+  display: none;
 }
 
-.ql-basket-btn:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-}
+@media (max-width: 768px) {
+  .ql-basket-fab {
+    display: flex;
+    position: fixed;
+    right: 16px;
+    bottom: calc(var(--nav-height, 56px) + 16px);
+    width: 52px;
+    height: 52px;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    background: #2563eb;
+    color: #fff;
+    box-shadow: 0 8px 24px rgba(37, 99, 235, 0.38);
+    z-index: 45;
+  }
 
-.ql-basket-count {
-  position: absolute;
-  top: -4px;
-  right: -4px;
-  min-width: 18px;
-  height: 18px;
-  border-radius: 9px;
-  background: var(--accent);
-  color: #fff;
-  font-size: 11px;
-  font-weight: 700;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0 4px;
+  .ql-basket-fab-badge {
+    position: absolute;
+    top: -2px;
+    right: -2px;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 9px;
+    background: #ef4444;
+    color: #fff;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 18px;
+    text-align: center;
+  }
 }
 
 /* ===== 筛选面板展开/折叠动画：CSS Grid 0fr→1fr 高度过渡 =====
@@ -2860,36 +2689,55 @@ onBeforeUnmount(() => {
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
 }
 
-/* ---- 来源角标：贴左上角边缘，绝对定位（与学校角标镜像统一） ---- */
-.q-source-badge {
-  position: absolute;
-  top: 0;
-  left: 0;
-  max-width: 70%;
-  padding: 4px 16px 4px 12px;
+/* ---- 顶栏：来源属性 + 待补全 + 学校 ---- */
+.q-card-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 14px 4px 12px;
+}
+
+.q-card-topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+  flex-wrap: wrap;
+}
+
+/* 顶栏胶囊共用：与原先来源角标一致的字号/字色 */
+.q-top-capsule {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
   font-size: 11px;
   line-height: 1.4;
+  font-weight: 400;
   color: var(--text-muted);
-  background: rgba(100, 116, 139, 0.08); /* 极浅灰蓝底，融入卡片 */
-  border-radius: 16px 0 6px 0; /* 左上外角贴合卡片 16px 圆角，右下小圆角 */
   white-space: nowrap;
+}
+
+.q-source-meta {
+  max-width: 100%;
+  background: rgba(100, 116, 139, 0.08);
   overflow: hidden;
   text-overflow: ellipsis;
-  pointer-events: none; /* 不阻挡卡片点击 */
-  z-index: 2;
+  min-width: 0;
 }
 
-[data-theme='dark'] .q-source-badge,
-[data-theme='dark'] .q-school-tag {
-  background: rgba(148, 163, 184, 0.12); /* dark 下浅灰蓝微亮化，保持无边框 */
+[data-theme='dark'] .q-source-meta {
+  background: rgba(148, 163, 184, 0.12);
 }
 
-/* ---- Header Row 1: 属性标签 ---- */
+/* ---- Header：题型 / 难度 / 状态 ---- */
 .q-card-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 26px 20px 10px; /* 顶部加大：避开左上角来源角标 */
+  padding: 10px 20px 10px;
   border-bottom: 1px solid var(--divider);
   gap: 12px;
 }
@@ -2918,26 +2766,13 @@ onBeforeUnmount(() => {
   color: var(--text-secondary);
 }
 
-/* 系统标记徽标：答案/解析待补全（淡底色 + 深色文字，极简风格） */
-.q-flag-tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  padding: 2px 7px;
-  border-radius: 6px;
-  font-size: 11.5px;
-  font-weight: 550;
-  line-height: 1.5;
-}
-
+/* 系统标记：与来源属性同字色，仅胶囊底色区分 */
 .q-flag--answer {
-  background: rgba(249, 115, 22, 0.1); /* orange-500/10 */
-  color: #c2410c; /* orange-700 */
+  background: rgba(254, 202, 202, 0.55);
 }
 
 .q-flag--analysis {
-  background: rgba(234, 179, 8, 0.12); /* yellow-500/12 */
-  color: #a16207; /* yellow-700 */
+  background: rgba(254, 243, 199, 0.75);
 }
 
 /* 关联试卷：标签行内联，点击进试卷详情 */
@@ -2981,13 +2816,11 @@ onBeforeUnmount(() => {
 }
 
 [data-theme='dark'] .q-flag--answer {
-  background: rgba(251, 146, 60, 0.16);
-  color: #fdba74;
+  background: rgba(248, 113, 113, 0.18);
 }
 
 [data-theme='dark'] .q-flag--analysis {
   background: rgba(250, 204, 21, 0.16);
-  color: #fde047;
 }
 
 .q-dot {
@@ -3006,26 +2839,19 @@ onBeforeUnmount(() => {
 .q-dot--purple { background: var(--purple); }
 .q-dot--gray { background: var(--text-secondary); }
 
-/* ---- 学校角标：贴右上角边缘，绝对定位（与来源角标镜像统一） ---- */
+/* ---- 学校名：顶栏右侧 ---- */
 .q-school-tag {
-  position: absolute;
-  top: 0;
-  right: 0;
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  max-width: 60%;
-  padding: 4px 12px 4px 16px;
+  max-width: 36%;
+  flex-shrink: 0;
   font-size: 11px;
   line-height: 1.4;
   color: var(--text-muted);
-  background: rgba(100, 116, 139, 0.08); /* 极浅灰蓝底，与来源角标一致 */
-  border-radius: 0 16px 0 6px; /* 右上外角贴合卡片 16px 圆角，左下小圆角（镜像） */
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  pointer-events: none;
-  z-index: 2;
 }
 
 .q-school-name {
@@ -3505,197 +3331,14 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 
-/* ===== 批量提交审核按钮 ===== */
-.ql-batch-btn {
-  border: none;
-}
-
-.ql-batch-btn:active {
-  transform: scale(0.97);
-}
-
-.ql-batch-count {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 5px;
-  border-radius: 9px;
-  background: rgba(255, 255, 255, 0.25);
-  color: #fff;
-  font-size: 11px;
-  font-weight: 700;
-}
-
-/* ===== 卡片多选 Checkbox ===== */
-.q-select-check {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  padding: 2px;
-}
-
-.q-select-check input[type='checkbox'] {
-  width: 16px;
-  height: 16px;
-  cursor: pointer;
-  accent-color: var(--accent, #007aff);
-  border-radius: 4px;
-}
-
-/* ===== 批量提交结果 Modal 内容 ===== */
-.batch-result-body {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  padding: 4px 0;
-}
-
-.batch-summary-row {
-  display: flex;
-  gap: 12px;
-}
-
-.batch-summary-item {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  padding: 14px 12px;
-  border-radius: 10px;
-  background: var(--bg-input);
-}
-
-.batch-summary-label {
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-muted);
-}
-
-.batch-summary-value {
-  font-size: 24px;
-  font-weight: 800;
-  color: var(--text-primary);
-  letter-spacing: -0.02em;
-}
-
-.batch-summary--success {
-  background: rgba(16, 185, 129, 0.08);
-}
-
-.batch-summary--success .batch-summary-value {
-  color: #10b981;
-}
-
-.batch-summary--failed {
-  background: rgba(239, 68, 68, 0.08);
-}
-
-.batch-summary--failed .batch-summary-value {
-  color: #ef4444;
-}
-
-.batch-result-list {
-  max-height: 320px;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 2px;
-}
-
-.batch-result-item {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 10px 12px;
-  border-radius: 8px;
-  background: var(--bg-input);
-}
-
-.batch-result-item.is-failed {
-  background: rgba(239, 68, 68, 0.05);
-}
-
-.batch-result-icon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  margin-top: 1px;
-}
-
-.batch-result-info {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  min-width: 0;
-  flex: 1;
-}
-
-.batch-result-id {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-primary);
-  font-family: monospace;
-  word-break: break-all;
-}
-
-.batch-result-error {
-  font-size: 12px;
-  font-weight: 550;
-  color: #ef4444;
-}
-
-.batch-result-missing {
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
-.batch-result-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  padding-top: 4px;
-}
-
-.batch-action-btn {
-  padding: 8px 18px;
-  border-radius: 9999px;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  border: none;
-}
-
-.batch-action--primary {
-  background: var(--accent, #007aff);
-  color: #fff;
-}
-
-.batch-action--primary:hover {
-  opacity: 0.9;
-}
-
-.batch-action--ghost {
-  background: var(--bg-input);
-  color: var(--text-secondary);
-  border: 1px solid var(--border-color);
-}
-
-.batch-action--ghost:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
-
 /* ===== Responsive ===== */
 
 /* ── 中窄屏 (< 1280px)：极简图标化 + 动态收缩策略 ── */
 @media (max-width: 1279px) {
+  .ql-main {
+    min-width: 0;
+  }
+
   /* +新建题目 图标化：隐藏文字，缩为方形图标按钮 */
   .ql-new-label {
     display: none;
@@ -3721,20 +3364,6 @@ onBeforeUnmount(() => {
 
 
 
-/* ── 移动端元信息：窄屏独占，替代左上角 source-badge 和左下角知识点 ── */
-.q-mobile-meta {
-  display: none; /* 默认隐藏（桌面端） */
-  align-items: center;
-  gap: 4px;
-  width: fit-content;
-  min-width: 0;
-  font-size: 11px;
-  color: var(--text-muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 /* ── 响应式：窄屏（<768px）修复布局高度链 + 隐藏次要信息 ── */
 @media (max-width: 767px) {
   /* --- 高度链修复：absolute → flex 流式布局 --- */
@@ -3746,11 +3375,25 @@ onBeforeUnmount(() => {
   }
 
   .ql-body {
+    position: relative;
     padding: 0;
     gap: 0;
+    justify-content: stretch;
+  }
+
+  /* 窄屏改为浮层，避免 260px 树把列表挤没 */
+  :deep(.kt-nav-wrapper) {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    z-index: 80;
   }
 
   .ql-main {
+    flex: 1;
+    width: auto;
+    max-width: none;
     min-width: 0; /* 移除 600px 下限，允许自适应窄屏 */
     border-radius: 0;
     border-left: none;
@@ -3759,33 +3402,12 @@ onBeforeUnmount(() => {
 
   /* --- 移动端卡片紧凑化 + 隐藏次要信息，显示移动端元微标签 --- */
   .q-card-header {
-    padding: 12px 14px 10px; /* 移除顶部 26px 源角标避让空白 */
+    padding: 10px 14px 8px;
   }
 
   .q-school-tag,
-  .q-source-badge,
   .q-footer-kp {
     display: none;
-  }
-
-  .q-mobile-meta {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    padding: 4px 10px;
-    font-size: 11.5px;
-    font-weight: 500;
-    color: var(--text-muted);
-    background: var(--bg-input);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius-sm);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    min-width: 0;
-    max-width: 100%;
-    width: fit-content;
-    flex-shrink: 1;
   }
 
   .q-action-label {

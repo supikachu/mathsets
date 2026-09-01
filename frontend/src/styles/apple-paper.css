@@ -1,0 +1,807 @@
+/* ==========================================================================
+   Paper / basket assembly layout (shared by PaperDetail.vue and Basket.vue)
+   Apple Human Interface Guidelines (HIG)
+   ========================================================================== */
+
+.apple-paper-scope {
+  min-height: calc(100vh - 64px);
+  background: #f5f5f7;
+  padding: 24px 28px 72px;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+[data-theme='dark'] .apple-paper-scope {
+  background: #000000;
+}
+
+/* 加载动画与空状态 */
+.apple-loading-box,
+.apple-empty-state {
+  padding: 100px 20px;
+  text-align: center;
+  color: #86868b;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+
+.apple-spinner {
+  width: 32px;
+  height: 32px;
+  border: 2.5px solid rgba(0, 113, 227, 0.15);
+  border-top-color: #0071e3;
+  border-radius: 50%;
+  animation: appleSpin 0.75s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+@keyframes appleSpin {
+  to { transform: rotate(360deg); }
+}
+
+.apple-loading-text {
+  font-size: 14px;
+  color: #86868b;
+  font-weight: 500;
+}
+
+/* 主内容两栏布局 */
+.apple-content-layout {
+  max-width: 1240px;
+  margin: 0 auto;
+  display: flex;
+  gap: 24px;
+  align-items: flex-start;
+}
+
+.apple-main-column {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* 顶部试卷头部卡片 */
+.apple-header-card {
+  background: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: 16px;
+  padding: 24px 32px 22px;
+  text-align: center;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.03), 0 1px 2px rgba(0, 0, 0, 0.02);
+  position: relative;
+}
+
+[data-theme='dark'] .apple-header-card {
+  background: #1c1c1e;
+  border-color: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+}
+
+.apple-back-btn {
+  position: absolute;
+  top: 20px;
+  left: 24px;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: none;
+  background: transparent;
+  color: #86868b;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 6px 10px;
+  border-radius: 9999px;
+  transition: all 0.18s ease;
+  text-decoration: none;
+}
+
+.apple-back-btn:hover {
+  color: #0071e3;
+  background: rgba(0, 113, 227, 0.08);
+}
+
+.apple-title-wrapper {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 10px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+
+.apple-paper-title {
+  font-size: 21px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  color: #1d1d1f;
+  line-height: 1.35;
+  margin: 0;
+}
+
+[data-theme='dark'] .apple-paper-title {
+  color: #f5f5f7;
+}
+
+.apple-pill-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 9px;
+  border-radius: 9999px;
+  display: inline-block;
+}
+
+.apple-pill-badge.accent-orange {
+  background: #ff9500;
+  color: #ffffff;
+}
+
+.apple-meta-pill-group {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.meta-pill {
+  font-size: 12.5px;
+  color: #6e6e73;
+  background: rgba(0, 0, 0, 0.035);
+  padding: 3px 10px;
+  border-radius: 9999px;
+  font-weight: 450;
+}
+
+[data-theme='dark'] .meta-pill {
+  color: #a1a1a6;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.meta-pill.text-blue {
+  color: #0071e3;
+  background: rgba(0, 113, 227, 0.08);
+  font-weight: 500;
+}
+
+.meta-pill.strong {
+  font-weight: 600;
+}
+
+/* 分大题区块 */
+.apple-sections-container {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.apple-section-block {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.apple-section-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 6px;
+}
+
+.section-title-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.section-accent-dash {
+  width: 4px;
+  height: 16px;
+  background: #0071e3;
+  border-radius: 9999px;
+}
+
+.apple-section-heading {
+  font-size: 16px;
+  font-weight: 650;
+  color: #1d1d1f;
+  letter-spacing: -0.01em;
+  margin: 0;
+}
+
+[data-theme='dark'] .apple-section-heading {
+  color: #f5f5f7;
+}
+
+.section-count-tag {
+  font-size: 12.5px;
+  color: #86868b;
+  font-weight: 500;
+}
+
+.apple-ghost-btn {
+  border: 1px solid rgba(0, 113, 227, 0.25);
+  background: rgba(0, 113, 227, 0.04);
+  color: #0071e3;
+  padding: 5px 12px;
+  border-radius: 9999px;
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.apple-ghost-btn:hover {
+  background: rgba(0, 113, 227, 0.1);
+  border-color: rgba(0, 113, 227, 0.4);
+}
+
+/* 题目卡片列表 */
+.apple-card-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* Apple HIG 题目卡片 */
+.apple-q-card {
+  background: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.07);
+  border-radius: 16px;
+  padding: 24px 28px 20px;
+  position: relative;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.03), 0 1px 2px rgba(0, 0, 0, 0.02);
+  transition: all 0.24s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+[data-theme='dark'] .apple-q-card {
+  background: #1c1c1e;
+  border-color: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+}
+
+/* 悬浮聚焦高亮状态：柔和的 Apple 聚焦光晕 */
+.apple-q-card:hover {
+  border-color: rgba(0, 113, 227, 0.35);
+  box-shadow: 0 12px 32px -4px rgba(0, 0, 0, 0.08), 0 0 0 1px rgba(0, 113, 227, 0.25);
+  transform: translateY(-2px);
+}
+
+.apple-q-card.is-expanded {
+  border-color: rgba(0, 113, 227, 0.4);
+}
+
+/* 题干排版 */
+.apple-q-body {
+  font-size: 15.5px;
+  line-height: 1.75;
+  color: #1d1d1f;
+}
+
+[data-theme='dark'] .apple-q-body {
+  color: #f5f5f7;
+}
+
+.apple-stem-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.apple-q-index {
+  font-weight: 700;
+  color: #1d1d1f;
+  flex-shrink: 0;
+  min-width: 22px;
+  line-height: 1.75;
+}
+
+[data-theme='dark'] .apple-q-index {
+  color: #f5f5f7;
+}
+
+.apple-q-stem {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.apple-q-stem p {
+  margin: 0;
+}
+
+/* 选择题选项包装区：与 QuestionList.vue 一致的缩进排版 */
+.q-options-wrap {
+  padding-left: 28px;
+}
+
+/* 折叠展开的答案与解析区（Apple Inset 材质） */
+.apple-answer-panel {
+  margin-top: 20px;
+  padding: 18px 22px;
+  background: rgba(0, 113, 227, 0.025);
+  border: 1px solid rgba(0, 113, 227, 0.1);
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  cursor: default;
+}
+
+[data-theme='dark'] .apple-answer-panel {
+  background: rgba(0, 113, 227, 0.05);
+  border-color: rgba(0, 113, 227, 0.2);
+}
+
+.ans-section-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ans-tag-label {
+  font-size: 13px;
+  font-weight: 650;
+  color: #0071e3;
+}
+
+.ans-value-box {
+  padding-left: 2px;
+}
+
+.ans-hero-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  font-weight: 700;
+  color: #0071e3;
+  background: rgba(0, 113, 227, 0.1);
+  padding: 3px 12px;
+  border-radius: 6px;
+}
+
+.ans-plain-text {
+  font-size: 14.5px;
+  color: #3a3a3c;
+  line-height: 1.6;
+}
+
+[data-theme='dark'] .ans-plain-text {
+  color: #d1d1d6;
+}
+
+.ans-analysis-content {
+  font-size: 14.5px;
+  color: #3a3a3c;
+  line-height: 1.75;
+  padding-left: 2px;
+}
+
+[data-theme='dark'] .ans-analysis-content {
+  color: #d1d1d6;
+}
+
+.ans-analysis-content p {
+  margin: 4px 0;
+}
+
+.ans-footer-meta {
+  display: flex;
+  gap: 10px;
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px dashed rgba(0, 113, 227, 0.15);
+}
+
+.sub-meta-pill {
+  font-size: 12px;
+  color: #86868b;
+}
+
+/* 悬浮浮现的底部操作栏 */
+.apple-card-footer {
+  margin-top: 16px;
+  padding-top: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 16px;
+  border-top: 1px dashed transparent;
+  opacity: 0;
+  transform: translateY(6px);
+  pointer-events: none;
+  transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.apple-q-card:hover .apple-card-footer {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+  border-top-color: rgba(0, 0, 0, 0.05);
+}
+
+[data-theme='dark'] .apple-q-card:hover .apple-card-footer {
+  border-top-color: rgba(255, 255, 255, 0.08);
+}
+
+.apple-action-cluster {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.apple-card-action-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  color: #6e6e73;
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 10px;
+  border-radius: 9999px;
+  transition: all 0.15s ease;
+}
+
+.apple-card-action-btn:hover {
+  background: rgba(0, 113, 227, 0.08);
+  color: #0071e3;
+  border-color: rgba(0, 113, 227, 0.15);
+}
+
+.apple-card-action-btn.is-favorited {
+  color: #ff9500;
+}
+
+[data-theme='dark'] .apple-card-action-btn {
+  color: #a1a1a6;
+}
+
+[data-theme='dark'] .apple-card-action-btn:hover {
+  background: rgba(0, 113, 227, 0.15);
+  color: #2997ff;
+}
+
+/* 加入试题篮 CTA 按钮（Apple System Blue / Green） */
+.apple-basket-cta {
+  height: 32px;
+  padding: 0 16px;
+  background: #0071e3;
+  color: #ffffff;
+  border: none;
+  border-radius: 9999px;
+  font-size: 13px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: 0 2px 8px rgba(0, 113, 227, 0.28);
+}
+
+.apple-basket-cta:hover {
+  background: #0077ed;
+  box-shadow: 0 4px 12px rgba(0, 113, 227, 0.38);
+  transform: scale(1.02);
+}
+
+.apple-basket-cta.in-basket {
+  background: #34c759;
+  box-shadow: 0 2px 8px rgba(52, 199, 89, 0.28);
+}
+
+.apple-basket-cta.in-basket:hover {
+  background: #30b753;
+  box-shadow: 0 4px 12px rgba(52, 199, 89, 0.38);
+}
+
+/* 右侧边栏 */
+.apple-sidebar-column {
+  width: 284px;
+  flex-shrink: 0;
+  position: sticky;
+  top: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.apple-sidebar-widget {
+  background: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: 16px;
+  padding: 18px 20px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.03), 0 1px 2px rgba(0, 0, 0, 0.02);
+}
+
+[data-theme='dark'] .apple-sidebar-widget {
+  background: #1c1c1e;
+  border-color: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+}
+
+/* 顶部答案开关与分享 */
+.apple-switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 14px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+  margin-bottom: 14px;
+}
+
+[data-theme='dark'] .apple-switch-row {
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+
+/* iOS Cupertino Switch */
+.apple-switch-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.apple-switch-input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.apple-switch-track {
+  width: 40px;
+  height: 22px;
+  background-color: #e5e5ea;
+  border-radius: 9999px;
+  position: relative;
+  transition: background-color 0.22s ease;
+}
+
+[data-theme='dark'] .apple-switch-track {
+  background-color: #39393d;
+}
+
+.apple-switch-track::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background-color: #ffffff;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+  transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.apple-switch-input:checked + .apple-switch-track {
+  background-color: #34c759;
+}
+
+.apple-switch-input:checked + .apple-switch-track::after {
+  transform: translateX(18px);
+}
+
+.apple-switch-label {
+  font-size: 13px;
+  color: #1d1d1f;
+  font-weight: 500;
+}
+
+[data-theme='dark'] .apple-switch-label {
+  color: #f5f5f7;
+}
+
+.apple-share-pill {
+  background: rgba(0, 113, 227, 0.08);
+  border: none;
+  color: #0071e3;
+  font-size: 12.5px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  padding: 4px 10px;
+  border-radius: 9999px;
+  transition: all 0.15s ease;
+}
+
+.apple-share-pill:hover {
+  background: rgba(0, 113, 227, 0.16);
+}
+
+/* 六宫格快捷工具 */
+.apple-tools-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px 8px;
+  text-align: center;
+}
+
+.apple-tool-tile {
+  background: transparent;
+  border: none;
+  padding: 8px 4px;
+  border-radius: 12px;
+  color: #6e6e73;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.18s ease;
+}
+
+.tool-icon-squircle {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.035);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #1d1d1f;
+  transition: all 0.18s ease;
+}
+
+[data-theme='dark'] .tool-icon-squircle {
+  background: rgba(255, 255, 255, 0.06);
+  color: #f5f5f7;
+}
+
+.tool-title {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.apple-tool-tile:hover {
+  color: #0071e3;
+}
+
+.apple-tool-tile:hover .tool-icon-squircle {
+  background: rgba(0, 113, 227, 0.1);
+  color: #0071e3;
+  transform: translateY(-1px);
+}
+
+.apple-tool-tile.is-active {
+  color: #ff9500;
+}
+
+.apple-tool-tile.is-active .tool-icon-squircle {
+  color: #ff9500;
+}
+
+/* 试题统计卡片 */
+.apple-stats-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.stats-title-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.apple-dot-indicator {
+  width: 6px;
+  height: 6px;
+  background-color: #0071e3;
+  border-radius: 50%;
+}
+
+.stats-heading {
+  font-size: 14px;
+  font-weight: 650;
+  color: #1d1d1f;
+  margin: 0;
+}
+
+[data-theme='dark'] .stats-heading {
+  color: #f5f5f7;
+}
+
+.stats-total-capsule {
+  font-size: 12px;
+  color: #86868b;
+  font-weight: 500;
+}
+
+.apple-stats-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.apple-stats-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: rgba(0, 0, 0, 0.025);
+  border-radius: 8px;
+  font-size: 13px;
+  color: #1d1d1f;
+  cursor: pointer;
+  transition: all 0.16s ease;
+}
+
+[data-theme='dark'] .apple-stats-row {
+  background: rgba(255, 255, 255, 0.04);
+  color: #f5f5f7;
+}
+
+.apple-stats-row:hover {
+  background: rgba(0, 113, 227, 0.08);
+  color: #0071e3;
+}
+
+.stats-count-tag {
+  font-size: 12px;
+  color: #86868b;
+  font-weight: 600;
+}
+
+/* 展开动效 */
+.apple-expand-enter-active,
+.apple-expand-leave-active {
+  transition: opacity 0.22s cubic-bezier(0.16, 1, 0.3, 1), transform 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.apple-expand-enter-from,
+.apple-expand-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
+}
+
+@media (max-width: 900px) {
+  .apple-content-layout {
+    flex-direction: column;
+  }
+  .apple-sidebar-column {
+    width: 100%;
+    position: static;
+  }
+}
+
+@media print {
+  .apple-sidebar-column,
+  .apple-back-btn,
+  .apple-card-footer,
+  .apple-ghost-btn {
+    display: none !important;
+  }
+  .apple-paper-scope {
+    background: #ffffff !important;
+    padding: 0;
+  }
+  .apple-content-layout {
+    display: block;
+    max-width: none;
+  }
+  .apple-q-card {
+    box-shadow: none;
+    break-inside: avoid;
+  }
+}

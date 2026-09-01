@@ -36,6 +36,11 @@ const router = createRouter({
           component: () => import('@/views/QuestionList.vue'),
         },
         {
+          path: 'basket',
+          name: 'Basket',
+          component: () => import('@/views/Basket.vue'),
+        },
+        {
           path: 'papers/:id',
           name: 'PaperDetail',
           component: () => import('@/views/PaperDetail.vue'),

@@ -33,11 +33,25 @@
           </nav>
         </div>
 
-        <!-- 底部：替换为纯 Icon 主题切换按钮 (Theme Toggle) -->
-        <div class="group relative flex items-center justify-center shrink-0">
-          <ThemeToggle />
-          <div class="absolute left-full ml-4 px-2.5 py-1 bg-gray-800 dark:bg-slate-700 text-white text-xs rounded-md shadow-md opacity-0 invisible group-hover:opacity-100 group-hover:visible whitespace-nowrap z-50 pointer-events-none transition-all duration-200">
-            切换主题
+        <!-- 底端工具区：试题篮（会话工具）+ 主题，与上方路由图标分开 -->
+        <div class="sidebar-tools">
+          <router-link
+            to="/basket"
+            class="sidebar-tool-btn group relative text-gray-500 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-gray-100 dark:hover:bg-slate-800"
+            :class="{ 'is-current text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/40': isBasketPage }"
+            title="试题篮"
+          >
+            <AppIcon name="shopping-cart" :size="20" />
+            <span v-if="basket.count.value > 0" class="sidebar-tool-badge">{{ basketBadge }}</span>
+            <div class="absolute left-full ml-4 px-2.5 py-1 bg-gray-800 dark:bg-slate-700 text-white text-xs rounded-md shadow-md opacity-0 invisible group-hover:opacity-100 group-hover:visible whitespace-nowrap z-50 pointer-events-none transition-all duration-200">
+              试题篮
+            </div>
+          </router-link>
+          <div class="group relative flex items-center justify-center shrink-0">
+            <ThemeToggle />
+            <div class="absolute left-full ml-4 px-2.5 py-1 bg-gray-800 dark:bg-slate-700 text-white text-xs rounded-md shadow-md opacity-0 invisible group-hover:opacity-100 group-hover:visible whitespace-nowrap z-50 pointer-events-none transition-all duration-200">
+              切换主题
+            </div>
           </div>
         </div>
       </aside>
@@ -75,11 +89,18 @@ import BottomNav from '@/components/BottomNav.vue'
 import ThemeToggle from '@/components/ThemeToggle.vue'
 import NotificationDrawer from '@/components/NotificationDrawer.vue'
 import { useNotification } from '@/composables/useNotification'
+import { useQuestionBasket } from '@/composables/useQuestionBasket'
 
 const route = useRoute()
 const auth = useAuthStore()
 const space = useSpaceStore()
 const { items } = useNavItems()
+const basket = useQuestionBasket()
+
+const isBasketPage = computed(() => route.path === '/basket' || route.path.startsWith('/basket/'))
+const basketBadge = computed(() =>
+  basket.count.value > 99 ? '99+' : String(basket.count.value),
+)
 
 const showNotifDrawer = ref(false)
 const { init: initNotifications } = useNotification()
@@ -136,6 +157,43 @@ onMounted(() => {
 }
 
 /* ===== Sidebar user card ===== */
+.sidebar-tools {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding-top: 12px;
+  margin-top: 8px;
+  border-top: 1px solid var(--border-color, rgba(0, 0, 0, 0.06));
+}
+
+.sidebar-tool-btn {
+  position: relative;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.sidebar-tool-badge {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: #2563eb;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+}
+
 .sidebar-user-card {
   position: relative;
 }
