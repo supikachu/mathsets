@@ -597,3 +597,30 @@ crate 支持 `matrix`/`pmatrix`/`bmatrix`/`vmatrix`/`align`，但不支持 `case
 
 **结论：门通过，按计划继续 `latex2mathml`**；`cases`/`aligned`/`array` 改写作为 T2.2 的必做项而非可选项，
 非法输入（如 `\frac{1}{`）仍走「红色原文 + 警告」降级路径。
+
+### 二、T2.2 latex2mathml 封装与输入归一
+
+`src/export/math/mod.rs` 两个出口：`normalize(latex) -> Cow<str>`（源串级）与
+`to_mathml(latex, display) -> MathOutcome::{Ok, Failed}`（失败只给 reason，调用方降级为「原文 + 警告」，
+不参与控制流中断）。
+
+归一做两件事：
+
+- **符号**：与前端 `LatexRender.vue` 的 KaTeX 配置对齐 —— `\emptyset` → `\varnothing`、U+2205 `∅` → `\varnothing`。
+- **环境改写**：`cases`/`dcases` → `\left\{ \begin{matrix} … \end{matrix} \right.`、`rcases` → 镜像形式、
+  `aligned`/`array`/`subarray`/`gathered`/`gather`/`split`/`eqnarray`/`smallmatrix` → 原位 `matrix`；
+  `array` 系的列描述符 `{l}` / `{p{2cm}}` 按花括号平衡剥掉；`matrix`/`pmatrix`/`align` 等 crate 本就支持的不动。
+  嵌套按深度配对递归处理，`\begin`/`\end` 不配对或名字不一致时**原样返回**，交给下游降级。
+
+一个必须有的守卫：语料里 `\left\{\begin{array}{l}…\right.` 已是常见形态，改写时若再补一层会得到
+`\left\{\left\{…\right.\right.` 直接编译失败，因此定界符**只补缺失的一侧**（前文已以 `\left\{` 结尾 /
+后文已以 `\right\}` 开头时不补）。
+
+代价：`array{l}` 的左对齐语义退化成 matrix 的居中。取它是为了换 0 条环境类降级，方向上不划算的说法也讲得通——
+但红色原文比轻微对不齐糟糕得多，且 M3 的 typst 路径不吃这条归一（mitex 直接支持这些环境），届时 PDF 侧不受影响。
+
+`scan_latex` 改为调用同一管线，实测：语料 989 条 **0 失败（0.00%）**；52 条覆盖矩阵仅「故意喂的 `\frac{1}{`」
+按预期降级。T2.1 那张表里的 1.01% 由此成为归一前的历史基线，已写进工具的文件头注释。
+
+测试：`export::math` 新增 14 例（含 cases/array/aligned/rcases/嵌套/未配对/定界符不重复补/T2.1 三条语料锚点）；
+`cargo test --lib` 498 passed / 0 failed。

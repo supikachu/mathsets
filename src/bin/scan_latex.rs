@@ -1,8 +1,12 @@
 //! T2.1 ⛔ latex2mathml 覆盖率预扫描（实施计划 §15.3 P1）
 //!
-//! 只读工具：把全库题目文本切成公式，逐条跑 `latex2mathml`，统计降级率。
+//! 只读工具：把全库题目文本切成公式，逐条走导出引擎实际使用的公式管线
+//! （`export::math::to_mathml` = T2.2 归一 + `latex2mathml`），统计降级率。
 //! 出口条件：语料降级率 ≤5% 通过门；>5% 停下评审备选方案（KaTeX `output:'mathml'`
 //! 预转换 / temml），不得带病推进。
+//!
+//! 门的历史基线：归一层落地前（裸调 crate）实测 989 条公式降级 10 条 = 1.01%，
+//! 全部为 UnknownEnvironment（cases / aligned / array）；归一后同口径 0 条。
 //!
 //! 两道信号分开看：
 //!   1. 真实语料（DB）——决定门是否通过，但受本地库规模限制，样本小则结论弱
@@ -22,6 +26,7 @@ use serde_json::Value;
 use mathset::config::AppConfig;
 use mathset::db;
 use mathset::export::content::split_content;
+use mathset::export::math::{MathOutcome, to_mathml};
 use mathset::export::model::InlineNode;
 
 #[derive(Debug, sqlx::FromRow)]
@@ -85,11 +90,11 @@ async fn run(limit: u32, samples: usize) {
     for row in &rows {
         let mut failed_here = false;
         for (field, text) in question_texts(row) {
-            for latex in math_in(&text) {
+            for (latex, display) in math_in(&text) {
                 let counter = stats.per_field.entry(field).or_insert((0, 0));
                 counter.0 += 1;
                 stats.total += 1;
-                if let Err(reason) = convert(&latex) {
+                if let Err(reason) = convert(&latex, display) {
                     stats.failed += 1;
                     counter.1 += 1;
                     failed_here = true;
@@ -132,7 +137,7 @@ async fn run(limit: u32, samples: usize) {
         }
     );
     if probe_failed > 0 && gate_ok {
-        println!("⚠ 探针集有 {probe_failed} 条高频环境失败，门虽通过仍需在 M2 排期里记为已知边界");
+        println!("⚠ 覆盖矩阵有 {probe_failed} 条高频写法非预期降级，需在 M2 排期里记为已知边界");
     }
     std::process::exit(if gate_ok { 0 } else { 2 });
 }
@@ -179,17 +184,17 @@ fn collect_strings(v: Option<&Value>, buf: &mut String) {
     }
 }
 
-/// 文本 → 公式源串列表（表格单元格二次切分）
-fn math_in(text: &str) -> Vec<String> {
+/// 文本 → 公式（源串, 是否块级）列表（表格单元格二次切分）
+fn math_in(text: &str) -> Vec<(String, bool)> {
     let mut out = Vec::new();
     collect_math(&split_content(text), &mut out);
     out
 }
 
-fn collect_math(nodes: &[InlineNode], out: &mut Vec<String>) {
+fn collect_math(nodes: &[InlineNode], out: &mut Vec<(String, bool)>) {
     for node in nodes {
         match node {
-            InlineNode::Math { latex, .. } => out.push(latex.clone()),
+            InlineNode::Math { latex, display } => out.push((latex.clone(), *display)),
             InlineNode::Table { header, rows, .. } => {
                 for cell in header.iter().chain(rows.iter().flatten()) {
                     collect_math(&split_content(cell), out);
@@ -205,11 +210,12 @@ fn collect_math(nodes: &[InlineNode], out: &mut Vec<String>) {
     }
 }
 
-fn convert(latex: &str) -> Result<(), String> {
-    match latex2mathml::latex_to_mathml(latex, latex2mathml::DisplayStyle::Block) {
-        Ok(mathml) if mathml.contains("<math") => Ok(()),
-        Ok(_) => Err("输出为空（未产出 mathml）".to_string()),
-        Err(e) => Err(e.to_string()),
+/// 走导出引擎实际使用的管线（归一 + 转换），而不是裸调 crate
+fn convert(latex: &str, display: bool) -> Result<(), String> {
+    match to_mathml(latex, display) {
+        MathOutcome::Ok(mathml) if mathml.contains("<math") => Ok(()),
+        MathOutcome::Ok(_) => Err("输出为空（未产出 mathml）".to_string()),
+        MathOutcome::Failed(reason) => Err(reason),
     }
 }
 
@@ -330,7 +336,7 @@ fn println_probe() -> usize {
         ("反斜杠绝对值", r"\left|-\dfrac{1}{2}\right|=\dfrac{1}{2}"),
         ("组合宏", r"\binom{2025}{2}"),
         ("斜体分数堆叠", r"{1\over 2}"),
-        // —— 环境改写可行性探测（决定 T2.2 归一层的方案）——
+        // —— 归一层的端到端覆盖矩阵（cases/aligned/array 等经改写后是否真能出公式）——
         ("matrix 含 & 对齐", r"\begin{matrix}a&=1\\b&=2\end{matrix}"),
         (
             "matrix 含 text 条件",
@@ -361,20 +367,24 @@ fn println_probe() -> usize {
         ),
         ("非法输入（预期失败）", r"\frac{1}{"),
     ];
-    println!("━━ 教辅高频环境探针集（内置，不参与门判定）━━");
-    let mut failed = 0usize;
+    println!("━━ 教辅高频写法端到端覆盖矩阵（经归一层，不参与门判定）━━");
+    let mut unexpected = 0usize;
     for (label, latex) in PROBES {
-        let r = convert(latex);
-        match &r {
-            Ok(()) => println!("  ✅ {label}"),
-            Err(reason) => {
-                failed += 1;
-                println!("  ❌ {label}  {latex}\n         ↳ {reason}");
+        // 标签含「预期失败」的用例走的就是降级路径，失败才算通过
+        let want_fail = label.contains("预期失败");
+        let outcome = convert(latex, true);
+        if outcome.is_ok() == !want_fail {
+            println!("  ✅ {label}");
+        } else {
+            unexpected += 1;
+            match outcome {
+                Err(reason) => println!("  ❌ {label}  {latex}\n         ↳ {reason}"),
+                Ok(()) => println!("  ❌ {label}  {latex}\n         ↳ 预期降级却成功了"),
             }
         }
     }
-    println!("探针：{} 条 / 失败 {failed} 条", PROBES.len());
-    failed
+    println!("探针：{} 条 / 非预期失败 {unexpected} 条", PROBES.len());
+    unexpected
 }
 
 fn arg_usize(args: &[String], flag: &str) -> Option<u32> {
