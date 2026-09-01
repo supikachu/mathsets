@@ -527,3 +527,35 @@ d0c0db9 feat: Apple风格吸顶工具栏 + 筛选面板弹出式
 - 警告超过 8000 编码字符只保留前缀 + 哨兵，完整清单需等 T3.x 的预检/预览接口
 - 面板打开时对分组做一次快照，期间不能改排序（遮罩已挡住页面），故无「改排序后面板内容不同步」的路径
 - 验收用的 `export_ui_probe` 账号与其 4 道样题仍留在本地开发库 `mathset`，可随时删除
+- 「按加入顺序」排法只有一个分组，分组名会原样成为大题标题（`## 按加入顺序（共 16 题 · 80 分）`），M2 前靠用户改标题或前端换中性文案
+- 部分导入题题干自带源试卷题号（`**9.**（5 分）12. 设双曲线 …`），导出引擎按试卷顺序重排后不改写题干文本
+
+### 八、visualtest 真实题库复测（导出阶段）
+
+换 `visualtest` 账号（41 道可见题，题篮取 16 道跨三大题）把 T1.9/T1.10 清单再走一遍：
+
+| 验收项 | 结果 |
+| --- | --- |
+| 三模式内容矩阵 | ✅ 学生练习 `mode: student` 无答案无解析；教师讲义内嵌 8 处 `**答案**`/`**解析**`；标准考卷题末 `## 参考答案` + `## 试题解析` |
+| 卷末编号一致性 | ✅ 题干编号 = 参考答案编号 = 解析编号；只有 8 道已录入答案的题进答案区，其余不生成空占位 |
+| 两种排法 | ✅ 按题型（一/二/三大题）与按加入顺序（单组）均重排为连续 1–16，与页面题号逐一对应 |
+| 单大题导出 | ✅ 「导出范围：一、单选题（3 题）」，仅 3 道、`total_score: 15`、题号从 1 起 |
+| zip 打包 | ✅ `application/zip` 50186 B：`exam.md` + `images/` 3 张，md 内 `/uploads/` 零残留 |
+| 缺图降级 | ✅ 临时移开 `uploads/questions/bb8d4874-….jpg` 后仍 200 出包，`X-Export-Warnings` 一条 `{"field":"image","question_no":1,…}`，md 保留原 `/uploads/…` 引用；测毕按 sha256 校验还原 |
+| 中文文件名 | ✅ `attachment; filename="…"; filename*=UTF-8''…` |
+| 分值兜底 | ✅ 16 题 80 分（`metadata` 无 `default_score` → 逐题兜底 5 分） |
+
+复测查出一个真实缺陷并已修：
+
+- **学生用卷的 zip 夹带解析配图**。`collect_bundle_images` 无条件扫 `q.analyses` 与问树叶子答案/解析，而 `render_markdown`
+  是按 `include_analysis`/`include_answer` 门控渲染的 —— 学生练习 + ZIP 时 markdown 里 0 张图片引用，包里却躺着 3 张仅教师可见的
+  解析配图（内容泄漏 + 45 KB 冗余）。改为收集范围跟随渲染门控，补回归单测 `bundle_images_follow_analysis_switch`；
+  修复后同一份 16 题请求：学生包 1 条目 0 图，教师包 4 条目 3 图。
+
+本地数据缺口（非缺陷）：`mathset` 开发库里 0 道题标注了知识点/易错标签，「考点清单」「易错警示」两类 callout 只能靠单测覆盖；
+打开「思路点拨」后 `> [TIP] 名师点拨` 由解析文本正常生成，callout 渲染链路在真实数据上已验证。
+
+回归：`cargo test --no-fail-fast` 570 passed / 0 failed（16 个测试二进制，`export::*` 单测 93 例，含新增
+`bundle_images_follow_analysis_switch`）。另注意到一个与导出无关的抖动用例：`tests/ai_tagging_engine.rs`
+的 `test_engine_no_silent_top1_and_max_limit` 单线程连跑 3 次挂了 2 次（`超出上限的知识点不应被静默丢弃: []`），
+`--no-fail-fast` 整轮里又通过，属 AI 标注侧的既有不稳定，未在本次范围内处理。
