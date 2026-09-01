@@ -526,7 +526,7 @@ d0c0db9 feat: Apple风格吸顶工具栏 + 筛选面板弹出式
 - Word/PDF 入口置灰，分别随 M2/M3 交付
 - 警告超过 8000 编码字符只保留前缀 + 哨兵，完整清单需等 T3.x 的预检/预览接口
 - 面板打开时对分组做一次快照，期间不能改排序（遮罩已挡住页面），故无「改排序后面板内容不同步」的路径
-- 验收用的 `export_ui_probe` 账号与其 4 道样题仍留在本地开发库 `mathset`，可随时删除
+- 验收用的 `export_ui_probe` 账号与其 4 道样题已从本地开发库 `mathset` 清除（连带其个人题库空间）
 - 「按加入顺序」排法只有一个分组，分组名会原样成为大题标题（`## 按加入顺序（共 16 题 · 80 分）`），M2 前靠用户改标题或前端换中性文案
 - 部分导入题题干自带源试卷题号（`**9.**（5 分）12. 设双曲线 …`），导出引擎按试卷顺序重排后不改写题干文本
 
@@ -559,3 +559,41 @@ d0c0db9 feat: Apple风格吸顶工具栏 + 筛选面板弹出式
 `bundle_images_follow_analysis_switch`）。另注意到一个与导出无关的抖动用例：`tests/ai_tagging_engine.rs`
 的 `test_engine_no_silent_top1_and_max_limit` 单线程连跑 3 次挂了 2 次（`超出上限的知识点不应被静默丢弃: []`），
 `--no-fail-fast` 整轮里又通过，属 AI 标注侧的既有不稳定，未在本次范围内处理。
+
+## 2026-09-02 导出引擎 M2（OMML + DOCX）
+
+### 一、T2.1 ⛔ latex2mathml 覆盖率预扫描（决策门）
+
+工具 `src/bin/scan_latex.rs`（只读，不写任何业务字段）：
+
+```
+cargo run --bin scan_latex [--limit N] [--samples M]
+退出码 0 = 门下通过（语料降级率 ≤5%）；2 = 未通过，须停下评审备选方案
+```
+
+取 `split_content` 作为唯一切分口径（与导出引擎同一实现），扫 stem / analysis / options /
+correct_answer / structure 五类文本里的全部公式，逐条跑 `latex_to_mathml`。
+
+| 指标 | 实测 |
+| --- | --- |
+| 题目 / 公式 | 43 道 / 989 条 |
+| 失败 | 10 条 → **降级率 1.01%** |
+| 受影响题目 | 6 道（14%） |
+| 按字段 | structure 5/326、analysis 3/369、stem 2/208、options 0/83、correct_answer 0/3 |
+
+**根因单一**：10 条失败全是 `LatexError::UnknownEnvironment`，环境分布为 `array` 4 / `aligned` 4 / `cases` 2。
+crate 支持 `matrix`/`pmatrix`/`bmatrix`/`vmatrix`/`align`，但不支持 `cases`、`aligned`、`array`、`gathered`、
+`split`、`gather`、`dcases`、`rcases`、`eqnarray`、`subarray` —— 恰恰是教辅高频的分段函数与方程组写法。
+
+**归一可行性已验证**（同一工具的探针集，52 条）：`matrix` 接受 `&` 对齐列与 `\text` 条件，且改写后必须产出的
+定界形式 `\left\{…\right.` 与 `\left.…\right\}` 均可解析 → 把不支持环境改写成 `matrix` 能消除全部环境类降级，
+无需引入 KaTeX 预转换或 temml。该改写落在 T2.2 的「输入归一」职责内（与既定的 `\emptyset→\varnothing` 同层）。
+
+**两点口径提醒**：
+
+- 43 道是本地开发库规模，不代表生产语料；上线前应在真实题库上重跑一次取基线（工具已具备，`--limit` 可控）。
+- 门指标按「公式条数」算（1.01%），按「题目数」算是 14%——失败集中在少数题的长篇解析里。Word 里一处红字原文
+  就足以让教师觉得「这份卷不能用」，故不能只盯 1.01% 这个数字。
+
+**结论：门通过，按计划继续 `latex2mathml`**；`cases`/`aligned`/`array` 改写作为 T2.2 的必做项而非可选项，
+非法输入（如 `\frac{1}{`）仍走「红色原文 + 警告」降级路径。
