@@ -462,3 +462,68 @@ d0c0db9 feat: Apple风格吸顶工具栏 + 筛选面板弹出式
 - `api/client.ts`：401 拦截器改用 `window.location.href` 跳转，避免 router/store 循环依赖导致 HMR 问题
 - `stores/auth.ts`：login/logout 跳转同样改用 `window.location.href`，消除循环依赖
 - `components/LatexRender.vue`：新增 `\emptyset` → `\varnothing` 宏映射 + Unicode ∅ (U+2205) 预处理，符合国内教材椭圆空集符号
+
+---
+
+## 2026-09-02 导出引擎 M1 收尾（Markdown 端到端 + 前端接入）
+
+对应 `docs/导出引擎与排版系统_开发任务分解.md` 的 T1.6 补漏与 T1.7-T1.10。
+
+### 一、修复 crate 编译断裂（T1.6 遗留）
+
+`markdown.rs`（965 行）随 T1.6 提交时漏了 `pub mod markdown;` 声明，导致 `src/export/mod.rs` 未导出该模块、
+`cargo check` 自那次提交起即 E0432 失败，markdown 生成器的单测从未真正跑过。补齐声明后连带修掉：
+
+- `build_zip` 两处 E0308：`ZipWriter::start_file` 返 `ZipError`、`write_all` 返 `io::Error`，不能 `and_then` 串接，拆成逐语句
+- 测试模块导入：`AnalysisBlock` 应从 `crate::models::question_structure` 取（`model.rs` 只做私有 re-export，E0603）、补 `use std::io::Read`
+- 删除恒等死函数 `indent_multiline`
+
+### 二、`X-Export-Warnings` 截断口径修正（T1.7）
+
+原实现按**原始 JSON 字节数**判断是否超 8000，而响应头承载的是 **percent-编码后**的字符串——中文 3 字节编码成 9 字符，
+实际阈值被放大近 9 倍，B3 约定的截断形同虚设（旧断言写成 `<= 12000` 也正好把这个 bug 藏住了）。
+改为按编码后长度逐条试探回退，超限时保留前缀 + `truncated:true` 哨兵；断言收紧到 `<= WARNINGS_HEADER_LIMIT`。
+
+### 三、导出端点集成测试（T1.7）
+
+新增 `tests/export_markdown_api.rs`（6 例，tower oneshot + 真实 `DATABASE_URL_TEST`）：
+未认证 401、RFC 5987 中文文件名、frontmatter/大题分节/连续题号、B2 留白与公式原样保留、
+三模式答案与解析位置矩阵、不可见题目降级为 `field=other` 警告、`?bundle=true` 返回 zip 且图片重写为 `images/`、空 sections。
+
+### 四、`exportApi` 与类型（T1.8）
+
+`frontend/src/api/client.ts` 新增 `exportApi.markdown/docx/pdf`：`responseType: 'blob'` + 单请求 `timeout: 60000`
+（全局实例仍是 10s），解析 `Content-Disposition`（优先 `filename*=UTF-8''`）与 `X-Export-Warnings`，
+并在 blob 模式下把后端 JSON 错误体读回文本再抛错。类型一律复用 ts-rs 产物 `api/types/exam.ts`，不手写。
+
+### 五、`ExportDialog.vue` 首版 + 试题篮接入（T1.9）
+
+- 新建 `components/ExportDialog.vue`：格式分段控件（Word/PDF 置灰并标 M2/M3 交付）、三张模式卡（学生练习/教师讲义/标准考卷，
+  切换即联动答案/解析/卷末默认值）、内容开关组、教师提示框开关（非讲义模式禁用）、Markdown 的 zip 打包开关、
+  loading 导出按钮、黄色可展开警告条（含截断提示）、`改用浏览器打印` 兜底入口
+- `views/Basket.vue`：`downloadPaper()` 的 `window.print()` 占位移除，改为按页面所见 `groupedSections` 序列化
+  `ExamSectionRequest` 打开面板；整卷、单大题两个入口都接上，print 兜底保留在面板内
+- 分值序列化只在 `default_score > 0` 时下发，避免前端 0 覆盖后端 `metadata.default_score → 兜底 5` 的回退链
+
+### 六、M1 手工验收记录（T1.10）
+
+真实数据（4 道跨题型 + 1 道缺图题）走通浏览器全流程：
+
+| 验收项 | 结果 |
+| --- | --- |
+| 三种排序模式与页面所见一致 | ✅ 按题型（一/二/三大题）与按加入顺序倒序（单组「按加入顺序（倒序）」）均与页面题号逐一对应 |
+| 三模式内容矩阵 | ✅ 学生卷无答案无解析；教师卷内嵌 `**答案**`/`**解析**`；考卷卷末 `## 参考答案` + `## 试题解析` |
+| 单大题导出 | ✅ 面板显示「导出范围：一、单选题（1 题）」，文件仅含该大题且题号从 1 起 |
+| zip 打包与图片重写 | ✅ `application/zip`，缺图降级为警告不中断整卷 |
+| 警告条 | ✅ 展开显示「第 2 题 · 图片 … 处理失败：本地图片不存在」 |
+| 空试题篮 | ✅ 不开面板，toast「试题篮是空的，先去题库选题」 |
+| print 兜底 | ✅ `window.print()` 调用 1 次且面板关闭 |
+
+回归：`cargo test` 569 passed / 0 failed（15 个测试二进制，其中 `export::*` 单测 85 例）、`npm run build` 绿。
+
+### 七、已知边界
+
+- Word/PDF 入口置灰，分别随 M2/M3 交付
+- 警告超过 8000 编码字符只保留前缀 + 哨兵，完整清单需等 T3.x 的预检/预览接口
+- 面板打开时对分组做一次快照，期间不能改排序（遮罩已挡住页面），故无「改排序后面板内容不同步」的路径
+- 验收用的 `export_ui_probe` 账号与其 4 道样题仍留在本地开发库 `mathset`，可随时删除
