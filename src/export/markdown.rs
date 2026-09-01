@@ -45,7 +45,7 @@ pub async fn generate_markdown(
     let mut images: Vec<(String, Vec<u8>)> = Vec::new();
 
     if make_zip {
-        let urls = collect_bundle_images(bundle);
+        let urls = collect_bundle_images(bundle, options);
         for (qno, url) in urls {
             if img_map.contains_key(&url) {
                 continue;
@@ -107,17 +107,27 @@ fn build_zip(markdown: &str, images: &[(String, Vec<u8>)]) -> Vec<u8> {
 // ═══════════════════════════ 图片 URL 收集 ═══════════════════════════
 
 /// 收集全卷图片 URL（含问树/解析原始文本切分后的结果），带关联题号
-fn collect_bundle_images(bundle: &ExamBundle) -> Vec<(Option<u32>, String)> {
+///
+/// 收集范围与 `render_markdown` 的门控保持一致：解析配图仅在 include_analysis 时打包，
+/// 否则学生用卷的 zip 会夹带仅教师可见的解析图片。
+fn collect_bundle_images(
+    bundle: &ExamBundle,
+    options: &ExportOptions,
+) -> Vec<(Option<u32>, String)> {
     let mut out = Vec::new();
     for sec in &bundle.sections {
         for q in &sec.questions {
-            collect_question_images(q, &mut out);
+            collect_question_images(q, options, &mut out);
         }
     }
     out
 }
 
-fn collect_question_images(q: &ExamQuestion, out: &mut Vec<(Option<u32>, String)>) {
+fn collect_question_images(
+    q: &ExamQuestion,
+    options: &ExportOptions,
+    out: &mut Vec<(Option<u32>, String)>,
+) {
     let qno = Some(q.number);
     collect_inline_images(&q.stem, qno, out);
     for opt in &q.options {
@@ -126,22 +136,35 @@ fn collect_question_images(q: &ExamQuestion, out: &mut Vec<(Option<u32>, String)
     for c in &q.callouts {
         collect_inline_images(&c.nodes, qno, out);
     }
-    for blk in &q.analyses {
-        collect_inline_images(&split_content(&blk.content), qno, out);
-    }
-    collect_part_images(&q.structure_parts, qno, out);
-}
-
-fn collect_part_images(parts: &[QuestionPart], qno: Option<u32>, out: &mut Vec<(Option<u32>, String)>) {
-    for p in parts {
-        collect_inline_images(&split_content(&p.stem), qno, out);
-        if let Some(a) = p.answer.as_deref().filter(|a| !a.trim().is_empty()) {
-            collect_inline_images(&split_content(a), qno, out);
-        }
-        for blk in &p.analyses {
+    if options.include_analysis {
+        for blk in &q.analyses {
             collect_inline_images(&split_content(&blk.content), qno, out);
         }
-        collect_part_images(&p.children, qno, out);
+    }
+    collect_part_images(&q.structure_parts, options, qno, out);
+}
+
+fn collect_part_images(
+    parts: &[QuestionPart],
+    options: &ExportOptions,
+    qno: Option<u32>,
+    out: &mut Vec<(Option<u32>, String)>,
+) {
+    for p in parts {
+        collect_inline_images(&split_content(&p.stem), qno, out);
+        if let Some(a) = p
+            .answer
+            .as_deref()
+            .filter(|a| options.include_answer && !a.trim().is_empty())
+        {
+            collect_inline_images(&split_content(a), qno, out);
+        }
+        if options.include_analysis {
+            for blk in &p.analyses {
+                collect_inline_images(&split_content(&blk.content), qno, out);
+            }
+        }
+        collect_part_images(&p.children, options, qno, out);
     }
 }
 
@@ -943,6 +966,40 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn bundle_images_follow_analysis_switch() {
+        // 学生用卷打包时不得夹带仅教师可见的解析配图（内容泄漏 + 冗余）
+        let mut q = choice_question(
+            1,
+            vec![InlineNode::Image {
+                alt: None,
+                url: "/uploads/questions/stem.png".to_string(),
+                width: None,
+                align: None,
+            }],
+        );
+        q.analyses = vec![AnalysisBlock {
+            id: "analysis".to_string(),
+            title: String::new(),
+            content: "![解析图](/uploads/questions/an.png)".to_string(),
+        }];
+        let b = bundle_1q(ExportMode::Student, q);
+
+        let student: Vec<String> = collect_bundle_images(&b, &ExportOptions::default())
+            .into_iter()
+            .map(|(_, u)| u)
+            .collect();
+        assert_eq!(student, vec!["/uploads/questions/stem.png".to_string()]);
+
+        let teacher = ExportOptions {
+            include_analysis: true,
+            ..ExportOptions::default()
+        };
+        let urls = collect_bundle_images(&b, &teacher);
+        assert!(urls.iter().any(|(_, u)| u.ends_with("an.png")));
+        assert_eq!(urls[0].0, Some(1));
     }
 
     #[test]
