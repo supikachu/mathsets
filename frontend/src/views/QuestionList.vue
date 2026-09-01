@@ -671,14 +671,14 @@
                   <span class="q-action-label hidden md:inline">{{ expandedIds.has(card.id) ? '收起解析' : '答案解析' }}</span>
                 </button>
                 <button
-                  class="q-action-btn w-8 h-8 md:w-auto md:h-auto md:px-3 md:py-1.5 flex items-center justify-center gap-1.5 rounded-full shrink-0 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 text-gray-600 dark:text-gray-300 hover:text-blue-500 hover:border-blue-200 dark:hover:border-blue-800 transition-colors cursor-pointer"
-                  :class="{ '!bg-blue-50 dark:!bg-blue-950/40 !border-blue-500 !text-blue-600 dark:!text-blue-400': basket.isInBasket(card.id) }"
+                  class="q-action-btn q-action--basket w-8 h-8 md:w-auto md:h-auto md:px-3.5 md:py-1.5 flex items-center justify-center gap-1.5 rounded-full shrink-0 cursor-pointer font-medium"
+                  :class="{ 'is-in-basket': basket.isInBasket(card.id) }"
                   @click="toggleBasket(card.id)"
                 >
                   <AppIcon
                     :name="basket.isInBasket(card.id) ? 'check' : 'plus'"
                     :size="14"
-                    :stroke="2.5"
+                    :stroke="2.2"
                   />
                   <span class="q-action-label hidden md:inline">{{ basket.isInBasket(card.id) ? '已加入' : '加入试题篮' }}</span>
                 </button>
@@ -2650,28 +2650,28 @@ onBeforeUnmount(() => {
 }
 
 /* ===== Question Card ===== */
-/* 悬浮卡片方案：纯白本体 + 实体边框 + 弥散阴影，浮于灰色画布之上 */
+/* 悬浮卡片方案：纯白本体 + 实体细边框 + 细腻弥散阴影，浮于灰色画布之上 */
 .q-card {
   position: relative; /* 来源角标 & hover-expand 面板绝对定位基础 */
   background: var(--bg-card);
   border-radius: 12px; /* 现代感圆角 */
-  border: 1px solid var(--border-color); /* 清晰实体边框，强化卡片边界 */
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04); /* 常态轻微弥散阴影，赋予物理厚度 */
-  /* 仅过渡 transform（hover 上浮动效所需）
-     严禁过渡 all：会导致主题切换时 50-200 张卡片同时
-     动画 background/box-shadow/border-color，引发卡顿闪烁 */
-  transition: transform 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+  border: 1px solid var(--border-color, #e2e8f0); /* 柔和实体细边框 */
+  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.04), 0 1px 2px -1px rgba(0, 0, 0, 0.02); /* 常态轻微弥散阴影 */
+  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1),
+              border-color 0.25s cubic-bezier(0.4, 0, 0.2, 1),
+              box-shadow 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 /* 强化悬浮交互反馈：上浮 + 阴影加重 + 边框泛起主题色 */
 .q-card:hover {
   transform: translateY(-2px); /* 视觉上浮起 */
-  box-shadow: 0 8px 24px rgba(149, 157, 165, 0.15); /* Hover 阴影加重 */
-  border-color: rgba(0, 113, 227, 0.3); /* 边框微微泛起主题色 */
+  border-color: rgba(59, 130, 246, 0.35); /* 边框微微泛起主题色 */
+  box-shadow: 0 6px 16px -2px rgba(15, 23, 42, 0.08), 0 2px 6px -1px rgba(15, 23, 42, 0.04); /* Hover 阴影加重 */
 }
 
 .q-card.is-expanded {
-  box-shadow: 0 8px 24px rgba(149, 157, 165, 0.15);
+  border-color: rgba(59, 130, 246, 0.3);
+  box-shadow: 0 4px 12px -2px rgba(15, 23, 42, 0.06);
 }
 
 /* 暗色模式：卡片恢复阴影 + 微亮边框，避免“平铺文本”扁平感 */
@@ -2681,11 +2681,12 @@ onBeforeUnmount(() => {
 }
 
 [data-theme='dark'] .q-card:hover {
-  border-color: rgba(10, 132, 255, 0.4);
+  border-color: rgba(59, 130, 246, 0.45);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
 }
 
 [data-theme='dark'] .q-card.is-expanded {
+  border-color: rgba(59, 130, 246, 0.4);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
 }
 
@@ -2707,29 +2708,35 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
 }
 
-/* 顶栏胶囊共用：与原先来源角标一致的字号/字色 */
+/* 顶栏胶囊共用：微圆角精致胶囊 */
 .q-top-capsule {
   display: inline-flex;
   align-items: center;
-  padding: 4px 10px;
-  border-radius: 999px;
-  font-size: 11px;
+  padding: 2.5px 8px;
+  border-radius: 4px;
+  font-size: 11.5px;
   line-height: 1.4;
-  font-weight: 400;
-  color: var(--text-muted);
+  font-weight: 450;
+  color: #64748b;
   white-space: nowrap;
 }
 
 .q-source-meta {
   max-width: 100%;
-  background: rgba(100, 116, 139, 0.08);
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
 }
 
+[data-theme='dark'] .q-top-capsule {
+  color: #94a3b8;
+}
+
 [data-theme='dark'] .q-source-meta {
-  background: rgba(148, 163, 184, 0.12);
+  background: rgba(148, 163, 184, 0.08);
+  border-color: rgba(255, 255, 255, 0.08);
 }
 
 /* ---- Header：题型 / 难度 / 状态 ---- */
@@ -2766,13 +2773,19 @@ onBeforeUnmount(() => {
   color: var(--text-secondary);
 }
 
-/* 系统标记：与来源属性同字色，仅胶囊底色区分 */
-.q-flag--answer {
-  background: rgba(254, 202, 202, 0.55);
+/* 系统标记：统一暖琥珀橙待办警示风格 */
+.q-flag-tag {
+  font-weight: 500;
+  font-size: 11px;
+  padding: 2.5px 7px;
+  border-radius: 4px;
 }
 
+.q-flag--answer,
 .q-flag--analysis {
-  background: rgba(254, 243, 199, 0.75);
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  color: #c2410c;
 }
 
 /* 关联试卷：标签行内联，点击进试卷详情 */
@@ -2815,12 +2828,11 @@ onBeforeUnmount(() => {
   color: #bfdbfe;
 }
 
-[data-theme='dark'] .q-flag--answer {
-  background: rgba(248, 113, 113, 0.18);
-}
-
+[data-theme='dark'] .q-flag--answer,
 [data-theme='dark'] .q-flag--analysis {
-  background: rgba(250, 204, 21, 0.16);
+  background: rgba(234, 88, 12, 0.15);
+  border-color: rgba(234, 88, 12, 0.35);
+  color: #fdba74;
 }
 
 .q-dot {
@@ -2899,12 +2911,39 @@ onBeforeUnmount(() => {
   color: var(--purple, #8b5cf6);
 }
 
-/* +N 折叠徽标：极浅灰蓝底变体，hover 时提示可展开 */
+/* 未关联知识点：虚线微边框 + 浅色底，提升可读性与交互线索 */
 .q-kp-text-empty {
-  font-size: 12px;
-  color: var(--text-muted);
-  opacity: 0.6;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  color: #64748b;
+  background: #f8fafc;
+  border: 1px dashed #cbd5e1;
+  border-radius: 4px;
+  padding: 1.5px 7px;
+  line-height: 18px;
   white-space: nowrap;
+  cursor: default;
+  transition: all 0.15s ease;
+}
+
+.q-kp-text-empty:hover {
+  color: #2563eb;
+  background: #eff6ff;
+  border-color: #93c5fd;
+}
+
+[data-theme='dark'] .q-kp-text-empty {
+  color: #94a3b8;
+  background: rgba(148, 163, 184, 0.06);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+[data-theme='dark'] .q-kp-text-empty:hover {
+  color: #60a5fa;
+  background: rgba(59, 130, 246, 0.12);
+  border-color: rgba(59, 130, 246, 0.35);
 }
 
 /* ---- 知识点 Hover-Expand 面板 ---- */
@@ -3267,39 +3306,86 @@ onBeforeUnmount(() => {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 5px 10px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-input);
-  border: 1px solid var(--border-color);
-  color: var(--text-secondary);
+  padding: 5px 12px;
+  border-radius: 999px;
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 500;
   white-space: nowrap;
-  transition: var(--transition-fast);
-}
-
-.q-action-btn:hover {
-  background: var(--bg-hover);
-  border-color: var(--border-strong);
-  color: var(--text-primary);
+  transition: all 0.15s ease-in-out;
 }
 
 .q-action-btn:active {
   transform: scale(0.96);
 }
 
-/* Active state for basket button */
-.q-action--active {
-  background: var(--success-light) !important;
-  border-color: var(--success) !important;
-  color: var(--success) !important;
+/* 核心 CTA：加入试题篮按钮（默认浅蓝高亮，Hover 实心深蓝） */
+.q-action--basket {
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  color: #2563eb;
 }
 
-/* Ghost style for analysis button */
+.q-action--basket:hover {
+  background: #2563eb;
+  border-color: #2563eb;
+  color: #ffffff;
+  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.25);
+}
+
+.q-action--basket.is-in-basket {
+  background: #f0fdf4 !important;
+  border-color: #86efac !important;
+  color: #16a34a !important;
+}
+
+.q-action--basket.is-in-basket:hover {
+  background: #16a34a !important;
+  border-color: #16a34a !important;
+  color: #ffffff !important;
+  box-shadow: 0 2px 8px rgba(22, 163, 74, 0.25);
+}
+
+[data-theme='dark'] .q-action--basket {
+  background: rgba(37, 99, 235, 0.15);
+  border-color: rgba(59, 130, 246, 0.35);
+  color: #60a5fa;
+}
+
+[data-theme='dark'] .q-action--basket:hover {
+  background: #2563eb;
+  border-color: #2563eb;
+  color: #ffffff;
+}
+
+[data-theme='dark'] .q-action--basket.is-in-basket {
+  background: rgba(22, 163, 74, 0.18) !important;
+  border-color: rgba(34, 197, 94, 0.35) !important;
+  color: #4ade80 !important;
+}
+
+/* 次要操作：答案解析（白底细灰框） */
+.q-action--ghost {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  color: #64748b;
+}
+
 .q-action--ghost:hover {
-  color: var(--accent);
-  border-color: var(--accent);
-  background: var(--accent-light);
+  color: #1e293b;
+  border-color: #cbd5e1;
+  background: #f8fafc;
+}
+
+[data-theme='dark'] .q-action--ghost {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.1);
+  color: #94a3b8;
+}
+
+[data-theme='dark'] .q-action--ghost:hover {
+  color: #f1f5f9;
+  border-color: rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.08);
 }
 
 /* ===== Transitions ===== */
