@@ -1,1 +1,6 @@
 *.sql text eol=lf
+
+# 思源宋体/黑体 SC（约 60MB）—— git-lfs 托管
+# 警告：本规则必须先于首次字体提交生效，否则二进制将进入 git 历史，
+#       后续迁出需 filter-branch / BFG 重写历史。
+assets/fonts/** filter=lfs diff=lfs merge=lfs -text
