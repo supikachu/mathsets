@@ -607,6 +607,7 @@ crate 支持 `matrix`/`pmatrix`/`bmatrix`/`vmatrix`/`align`，但不支持 `case
 归一做两件事：
 
 - **符号**：与前端 `LatexRender.vue` 的 KaTeX 配置对齐 —— `\emptyset` → `\varnothing`、U+2205 `∅` → `\varnothing`。
+  （**这一条在下一节被推翻**：方向恰好与 `latex2mathml` 的支持面相反。）
 - **环境改写**：`cases`/`dcases` → `\left\{ \begin{matrix} … \end{matrix} \right.`、`rcases` → 镜像形式、
   `aligned`/`array`/`subarray`/`gathered`/`gather`/`split`/`eqnarray`/`smallmatrix` → 原位 `matrix`；
   `array` 系的列描述符 `{l}` / `{p{2cm}}` 按花括号平衡剥掉；`matrix`/`pmatrix`/`align` 等 crate 本就支持的不动。
@@ -624,3 +625,74 @@ crate 支持 `matrix`/`pmatrix`/`bmatrix`/`vmatrix`/`align`，但不支持 `case
 
 测试：`export::math` 新增 14 例（含 cases/array/aligned/rcases/嵌套/未配对/定界符不重复补/T2.1 三条语料锚点）；
 `cargo test --lib` 498 passed / 0 failed。
+
+（**这个 0.00% 是虚的** —— 见下一节：`latex2mathml` 对不认的命令不报错，而是把错误文本混进 MathML 里返回 Ok。）
+
+### 三、T2.2 补：命令别名、降级判定与 XML 修复
+
+写 T2.3 的快照用例时，`f(x)=\begin{cases}x^2,&x\ge 0\\-x,&x<0\end{cases}` 的 MathML 里赫然出现
+`<mtext>[PARSE ERROR: Undefined("Command(\"ge\")")]</mtext>`。两件事同时暴露：
+
+1. **降级判定不能只看 `Result`**。crate 对不认的写法（`\ge`、`\varnothing`、`\Big`、`\lg`…）不返回 `Err`，
+   而是把 `[PARSE ERROR: …]` 当文本节点塞进输出。之前 T2.1/T2.2 只判 `Err`，于是这类公式全部记为「成功」——
+   真到 Word 里就是印着 `[PARSE ERROR: Undefined("Command(\"ge\")")]` 的一行。`to_mathml` 现在扫描输出，
+   命中即 `Failed`，并把原因翻成人话（`Undefined("Command(\"ge\")")` → `不支持的命令 \ge`，同类去重、最多列 3 项）。
+2. **空集方向映射当初做反了**。crate 认 `\emptyset` 和 U+2205 `∅`，**不认** `\varnothing`；前端 KaTeX 恰好相反。
+   现在导出侧统一折算成 `\emptyset`，`∅` 原样保留（不再改写）。
+
+据此把 crate 的支持面摸清（200 条命令逐个探针 + 带参数形态复测），补两类归一：
+
+- **命令别名表**（约 50 条，只收录语义不变的折算，按 token 边界匹配所以 `\ge` 不会命中 `\geq`）：
+  `\ge\le\ne→\geq\leq\neq`、`\dfrac\tfrac\cfrac→\frac`、`\dots→\ldots`、`\stackrel→\overset`、
+  `\overparen\overgroup→\overbrace`、`\lg\lb\gcd\lcm→\operatorname{…}`、`\mathcal\mathsf\mathtt→\mathrm`、
+  `\limits\nolimits\displaystyle` 直接丢掉、`\big\Big\bigg\Bigg`（含 l/r 变体）丢掉（crate 只认 `\left…\right`，
+  最多退化成普通尺寸括号）、`\prime→'`、`\degree→^{\circ}` 等。会丢信息的写法（`\nleq`、`\cancel` 的斜线）
+  **不改写**，宁可降级成红色原文。
+- **参数级改写**（花括号平衡读参数）：`\textcolor{red}{x}`/`\boxed{…}`/`\href{}{}`/`\mathrel{…}` 取参数内容，
+  `\phantom{…}`/`\hspace{…}`/`\kern` 整段删除，`\substack{a\\b}` → `\begin{matrix}a\\b\end{matrix}`。
+  AI 生成的题里 `\textcolor`/`\boxed` 不少，crate 全不认。
+
+还有一个必须修的硬伤：crate 把公式里的裸 `<` 原样写进文本节点 —— `x<0` 产出 `<mo><</mo>`，
+**整串不是良构 XML**。`x<0` 在国内教辅是海量写法，而官方 XSLT 与 T2.4 要用的 roxmltree 都要良构输入。
+`escape_stray_markup` 按 MathML 标签白名单判别，非标签开头的 `<` / `&` 一律转义（实体引用不二次转义）。
+
+复测（同一工具、同一口径）：
+
+| 指标 | 归一后 |
+| --- | --- |
+| 语料公式 | 989 条 / **0 失败（0.00%）** |
+| 覆盖矩阵 | 52 条，非预期降级 1 条 |
+| 受影响题目 | 0 道 |
+
+剩下的 1 条是 `{1\over 2}`（TeX 原始 `\over`，本地语料 0 次），记为已知边界：真遇到会走「红色原文 + 警告」。
+另有一条 crate 的硬限制：`\text{a & b}` 里的 `&` 会被当列分隔符报 `Undefined("RBrace")` —— 语料未见，同样按降级处理。
+
+测试：`export::math` 20 例（新增别名表 token 边界、参数级改写、PARSE ERROR 判定与原因、转义幂等）；
+`cargo test --lib` 504 passed / 0 failed。
+
+### 四、T2.3 MML2OMML 黄金快照基建（R2）
+
+本机 `C:\Program Files\Microsoft Office\root\Office16\MML2OMML.XSL` 存在，python 3.11.9 + lxml 6.1.2 可用，
+无 xsltproc → 走 lxml 执行官方 XSL。
+
+- `tests/snapshots/cases/*.mathml`：26 个 Presentation MathML 用例（22 个由真实管线跑出的 LaTeX 落盘 +
+  4 个手写补 `mfenced`/`menclose`/`linethickness="0"`/`mathvariant` 家族/crate 与转换器都不认的构造），
+  首行 `<!-- latex: … -->` 记录来源。
+- `scripts/gen_omml_snapshots.py`：XSL 查找顺序 `--xsl` → `MML2OMML_XSL` → `assets/xsl/MML2OMML.XSL` → Office 目录；
+  生成 `tests/snapshots/<名>.omml`；`--check` 只比对不写（CI 用），缺固件或不一致时列清单并退出码 1。
+  输出剥掉 XML 声明、统一 `\n`、UTF-8，重复生成结果逐字节稳定（已 `--check` 验证）。
+- `.gitignore` `/assets/xsl/*` + `!/assets/xsl/README.md`；`assets/xsl/README.md` 写清拷贝来源、用途、再生成命令，
+  并强调**运行时绝不执行 XSL**（服务端不引 libxslt）。
+
+快照给出的 OMML 事实（T2.4 的实现基准，与 §5.3 有几处出入，以固件为准）：
+
+- `m:r` 里**没有** `w:rPr/rFonts="Cambria Math"`，只有裸 `m:t` —— 计划 §5.3 那句 run 属性写在 MathML→OMML
+  转换器之外（Word 在 `m:oMath` 内自动用数学字体），否则黄金快照对不上。
+- `munderover(∑)` → `m:nary` + `naryPr{chr,limLoc=undOvr,grow=1,subHide,supHide}`，且**被加和式落在 `m:e` 之外**
+  （MathML 里 `<mi>i</mi>` 本就是 munderover 的兄弟），`m:e` 留空。
+- `mspace` 被整个丢弃；`mtext`/`merror` → `m:r` + `m:rPr/m:nor`；`mathvariant` → `m:sty`/`m:scr`；
+  `mfenced` → `m:d`+`sepChr`；`menclose[box]` → `m:borderBox`，`updiagonalstrike` → 四边 hide + `strikeBLTR`；
+  `mmultiscripts` → `m:sPre`（官方支持，我们的「未知节点递归子节点」兜底留给更偏的构造）。
+- 矩阵会生成完整 `m:mPr{baseJc,plcHide,mcs/mc{count,mcJc}}`，而 `pmatrix` / `cases` 的定界符落在 `<m:oMath>`
+  的**首尾两个普通 `m:r`**（`(` `{`），官方实现也不给 `m:d` 包裹 —— 后果是括号不随矩阵高度伸缩。
+  与 Word 自己粘贴 MathML 的结果一致，按固件为准，转换器不自作主张改形。

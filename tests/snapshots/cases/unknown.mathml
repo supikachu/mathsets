@@ -1,0 +1,2 @@
+<!-- 手写用例：crate 与转换器都不支持的构造（须降级为递归子节点 + 警告，绝不 panic） -->
+<math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mmultiscripts><mi>a</mi><mprescripts/><mi>b</mi><none/></mmultiscripts><msqrt><merror><mtext>这里坏了</mtext></merror></msqrt></math>

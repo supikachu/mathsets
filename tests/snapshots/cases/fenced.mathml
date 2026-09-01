@@ -1,0 +1,2 @@
+<!-- 手写用例：mfenced / menclose（crate 不产，映射表要求支持） -->
+<math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mfenced open="(" close=")" separators=","><mi>x</mi><mi>y</mi></mfenced><menclose notation="box"><mi>A</mi></menclose><menclose notation="updiagonalstrike"><mrow><mn>2</mn><mo>×</mo><mn>3</mn></mrow></menclose></math>

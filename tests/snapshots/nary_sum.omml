@@ -1,0 +1,25 @@
+<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:mml="http://www.w3.org/1998/Math/MathML">
+  <m:nary>
+    <m:naryPr>
+      <m:chr m:val="∑"/>
+      <m:limLoc m:val="undOvr"/>
+      <m:grow m:val="1"/>
+      <m:subHide m:val="off"/>
+      <m:supHide m:val="off"/>
+    </m:naryPr>
+    <m:sub>
+      <m:r>
+        <m:t>i=1</m:t>
+      </m:r>
+    </m:sub>
+    <m:sup>
+      <m:r>
+        <m:t>n</m:t>
+      </m:r>
+    </m:sup>
+    <m:e/>
+  </m:nary>
+  <m:r>
+    <m:t>i</m:t>
+  </m:r>
+</m:oMath>

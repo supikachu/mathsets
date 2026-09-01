@@ -1,0 +1,2 @@
+<!-- 手写用例：\binom 与二级结论里的无横线堆叠分数（crate 不产 linethickness，转换器须支持） -->
+<math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mfrac linethickness="0"><mi>n</mi><mi>m</mi></mfrac></math>

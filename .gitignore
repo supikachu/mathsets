@@ -48,6 +48,12 @@ bench/eval/*
 !bench/eval/.gitkeep
 !bench/eval/README.txt
 
+# OMML 参考样式表（R2）：微软随 Office 分发，许可上不宜入库。本地从
+# C:\Program Files\Microsoft Office\root\Office16\MML2OMML.XSL 拷入，
+# 仓库只提交由它生成的快照固件 tests/snapshots/*.omml（见 assets/xsl/README.md）。
+/assets/xsl/*
+!/assets/xsl/README.md
+
 # ==========================================
 # 5. Rust 后端编译输出 (Cargo / Rust)
 # ==========================================

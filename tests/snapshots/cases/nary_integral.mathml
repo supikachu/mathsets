@@ -1,0 +1,2 @@
+<!-- latex: \int_{0}^{1} x\,dx -->
+<math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><msubsup><mo>∫</mo><mn>0</mn><mn>1</mn></msubsup><mi>x</mi><mspace width="0.16666667em"/><mi>d</mi><mi>x</mi></math>

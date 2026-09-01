@@ -1,0 +1,29 @@
+<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:mml="http://www.w3.org/1998/Math/MathML">
+  <m:sPre>
+    <m:e>
+      <m:r>
+        <m:t>a</m:t>
+      </m:r>
+    </m:e>
+    <m:sub>
+      <m:r>
+        <m:t>b</m:t>
+      </m:r>
+    </m:sub>
+    <m:sup/>
+  </m:sPre>
+  <m:rad>
+    <m:radPr>
+      <m:degHide m:val="on"/>
+    </m:radPr>
+    <m:deg/>
+    <m:e>
+      <m:r>
+        <m:rPr>
+          <m:nor/>
+        </m:rPr>
+        <m:t>这里坏了</m:t>
+      </m:r>
+    </m:e>
+  </m:rad>
+</m:oMath>

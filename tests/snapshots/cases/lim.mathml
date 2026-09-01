@@ -1,0 +1,2 @@
+<!-- latex: \lim_{x\to 0}\frac{\sin x}{x}=1 -->
+<math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><munder><mi>lim</mi><mrow><mi>x</mi><mo>→</mo><mn>0</mn></mrow></munder><mfrac><mrow><mi>sin</mi><mi>x</mi></mrow><mi>x</mi></mfrac><mo>=</mo><mn>1</mn></math>

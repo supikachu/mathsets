@@ -1,0 +1,2 @@
+<!-- latex: \frac{\frac{a}{b}}{\frac{c}{d}} -->
+<math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mfrac><mfrac><mi>a</mi><mi>b</mi></mfrac><mfrac><mi>c</mi><mi>d</mi></mfrac></mfrac></math>

@@ -1,0 +1,2 @@
+<!-- latex: \sqrt[3]{x} -->
+<math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mroot><mi>x</mi><mn>3</mn></mroot></math>

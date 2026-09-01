@@ -1,0 +1,2 @@
+<!-- 手写用例：mathvariant / 文本 / 间距 / 容器透传（映射表 mi、mtext、mspace、mpadded、mstyle 行） -->
+<math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mi mathvariant="normal">x</mi><mi mathvariant="bold">a</mi><mi mathvariant="double-struck">R</mi><mi mathvariant="script">F</mi><mtext>在区间上</mtext><mspace width="0.2em"/><mstyle mathcolor="#ff0000"><mrow><mpadded depth="2pt"><mi>y</mi></mpadded></mrow></mstyle><mphantom><mi>z</mi></mphantom></math>
