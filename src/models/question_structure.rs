@@ -4,9 +4,11 @@
 //! 叶子节点：`children` 为空，可有答案与多种解法。
 
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
-/// 一种解法
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// 一种解法（导出引擎复用；TS 绑定随 exam.ts 一并导出）
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "../frontend/src/api/types/exam.ts")]
 pub struct AnalysisBlock {
     pub id: String,
     #[serde(default)]
@@ -16,7 +18,8 @@ pub struct AnalysisBlock {
 }
 
 /// 问树节点（递归）
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[ts(export, export_to = "../frontend/src/api/types/exam.ts")]
 pub struct QuestionPart {
     pub id: String,
     #[serde(default)]

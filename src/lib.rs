@@ -2,6 +2,7 @@ pub mod ai;
 pub mod auth;
 pub mod config;
 pub mod db;
+pub mod export;
 pub mod handlers;
 pub mod models;
 pub mod testing;

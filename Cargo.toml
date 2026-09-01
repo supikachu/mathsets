@@ -72,6 +72,9 @@ sha2 = "0.10"
 # ZIP 解压（MinerU 云端 Precision API 返回 zip 包，内含 full.md）
 zip = "2"
 
+# 导出引擎 IR 类型 → TypeScript 绑定生成（frontend/src/api/types/exam.ts）
+ts-rs = { version = "10", features = ["serde-json-impl", "uuid-impl"] }
+
 [dev-dependencies]
 # Axum 测试工具（oneshot 调用 Router）
 tower = { version = "0.5", features = ["util"] }
