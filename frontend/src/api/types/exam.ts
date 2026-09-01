@@ -6,6 +6,217 @@
 export type AnalysisBlock = { id: string, title: string, content: string, };
 
 /**
+ * 答题留白配置（高度由 options 管、样式细节由 spec 管，冲突以 options 为准 — B5）
+ */
+export type AnswerSpace = { style: BlankStyle, 
+/**
+ * 留白高度（cm）
+ */
+height_cm: number, };
+
+/**
+ * 留白样式：横线格 / 点阵 / 纯空白
+ */
+export type BlankStyle = "lines" | "dots" | "blank";
+
+/**
+ * 教师模式提示框（§5.1：考点/易错/点拨/思路四类，统一挂题块）
+ */
+export type Callout = { kind: CalloutKind, title: string, nodes: Array<InlineNode>, };
+
+/**
+ * Callout 类别（四色框）
+ */
+export type CalloutKind = "knowledge" | "error_prone" | "tip" | "approach";
+
+/**
+ * Callout 开关（教师/讲义模式生效）
+ */
+export type CalloutOptions = { knowledge: boolean, error_prone: boolean, analysis: boolean, };
+
+/**
+ * 装配完成的试卷包（导出域 IR；三种生成器共用的唯一输入）
+ */
+export type ExamBundle = { title: string, subtitle?: string, exam_meta: ExamMeta, mode: ExportMode, sections: Array<ExamSection>, };
+
+/**
+ * 考试元信息（卷头）
+ */
+export type ExamMeta = { school?: string, 
+/**
+ * 考试时长（分钟）
+ */
+duration?: number, 
+/**
+ * 总分
+ */
+total_score?: number, 
+/**
+ * 考试说明（逐条渲染）
+ */
+instructions: Array<string>, };
+
+/**
+ * 选项（content 已切分为 InlineNode）
+ */
+export type ExamOption = { 
+/**
+ * 选项字母（A/B/C/D…）
+ */
+label: string, content: Array<InlineNode>, };
+
+/**
+ * 题块（装配后）
+ */
+export type ExamQuestion = { 
+/**
+ * 后端按请求顺序重排的连续题号（从 1 起、跨大题连续）
+ */
+number: number, score: number, kind: QuestionKind, 
+/**
+ * 题干（已切分为 InlineNode 序列）
+ */
+stem: Array<InlineNode>, 
+/**
+ * 选项（选择/多选题；其余题型为空）
+ */
+options: Array<ExamOption>, 
+/**
+ * 答案（多选字母 / 多空逐空；选择题为字母串）
+ */
+answers: Array<string>, 
+/**
+ * 名师点拨等解法块（复用问树 AnalysisBlock；content 为原始文本，生成期切分）
+ */
+analyses: Array<AnalysisBlock>, 
+/**
+ * 解答题问树（复用 QuestionPart；stem/answer/analyses 为原始文本，生成期切分）
+ */
+structure_parts: Array<QuestionPart>, 
+/**
+ * 教师模式派生的四类提示框
+ */
+callouts: Array<Callout>, 
+/**
+ * 本题留白覆盖（None = 沿用请求级 options.answer_space）
+ */
+answer_space?: AnswerSpace, 
+/**
+ * 本题装配/生成期问题（公式降级、图片跳过等）
+ */
+issues: Array<Issue>, };
+
+/**
+ * 请求中的题目引用（后端按此批量取题并重排连续题号）
+ */
+export type ExamQuestionRequest = { id: string, 
+/**
+ * 缺省时按后端默认值
+ */
+default_score?: number, };
+
+/**
+ * 导出请求（三格式共用；sections 由前端 groupedSections + displayNoMap 序列化，
+ * 保留用户排序选择）
+ */
+export type ExamRequest = { title: string, subtitle?: string, exam_meta: ExamMeta, mode: ExportMode, sections: Array<ExamSectionRequest>, options: ExportOptions, 
+/**
+ * 版面参数覆盖（完整 LayoutSpec 于 T3.2 定义，当前阶段透传 JSON）
+ */
+spec?: Record<string, unknown>, };
+
+/**
+ * 大题（装配后）
+ */
+export type ExamSection = { title: string, instruction?: string, questions: Array<ExamQuestion>, };
+
+/**
+ * 请求中的大题（前端分组序列化）
+ */
+export type ExamSectionRequest = { title: string, instruction?: string, questions: Array<ExamQuestionRequest>, };
+
+/**
+ * 导出模式：student=学生卷 / teacher=讲义（内嵌 Callout）/ exam=考卷（卷末答案）
+ */
+export type ExportMode = "student" | "teacher" | "exam";
+
+/**
+ * 导出内容开关（§四 options）
+ */
+export type ExportOptions = { 
+/**
+ * 是否包含答案
+ */
+include_answer: boolean, 
+/**
+ * 是否包含解析
+ */
+include_analysis: boolean, 
+/**
+ * 答案内嵌（false）还是卷末汇总（true）
+ */
+answer_at_end: boolean, callouts: CalloutOptions, 
+/**
+ * 答题留白（B5：管开关与高度；None = 不留白）
+ */
+answer_space?: AnswerSpace, };
+
+/**
+ * 图片对齐
+ */
+export type ImageAlign = "left" | "center" | "right";
+
+/**
+ * 图组内单图（无 align —— 对齐作用于 img-row 容器整体）
+ */
+export type InlineImage = { alt?: string, url: string, width?: number, };
+
+/**
+ * 内容切分器输出（§5.2：对 stem/analysis/选项/问树文本一次性扫描）
+ */
+export type InlineNode = { "type": "text", text: string, } | { "type": "line_break" } | { "type": "math", latex: string, display: boolean, } | { "type": "image", alt?: string, url: string, 
+/**
+ * 宽度（px，编辑器语法原值；导出期按目标单位换算，docx 上限 14cm）
+ */
+width?: number, align?: ImageAlign, } | { "type": "img_row", align?: ImageAlign, images: Array<InlineImage>, 
+/**
+ * 图注行（围栏内图片下方的说明文字）
+ */
+caption?: string, } | { "type": "table", header: Array<string>, 
+/**
+ * 各列对齐（与 header 等长；缺省左对齐）
+ */
+aligns: Array<TableAlign>, rows: Array<Array<string>>, };
+
+/**
+ * 装配/生成期问题（X-Export-Warnings 头与预检报告共用载体）
+ */
+export type Issue = { 
+/**
+ * 关联题号（卷级问题为 None）
+ */
+question_no?: number, field: IssueField, severity: IssueSeverity, 
+/**
+ * 公式降级时的原始 LaTeX（其余场景为 None）
+ */
+latex?: string, reason: string, };
+
+/**
+ * 问题所在字段
+ */
+export type IssueField = "stem" | "analysis" | "choice" | "answer" | "structure" | "image" | "other";
+
+/**
+ * 问题级别
+ */
+export type IssueSeverity = "info" | "warning" | "error";
+
+/**
+ * 题型（§7.4：Composite 综合题对应前端 bucketType 第 5 桶，不可遗漏）
+ */
+export type QuestionKind = "single_choice" | "multi_choice" | "fill" | "solution" | "composite";
+
+/**
  * 问树节点（递归）
  */
 export type QuestionPart = { id: string, label: string, stem: string, children: Array<QuestionPart>, answer: string | null, analyses: Array<AnalysisBlock>, no_analysis_needed: boolean, 
@@ -13,3 +224,8 @@ export type QuestionPart = { id: string, label: string, stem: string, children: 
  * 为 true 时编号重排不覆盖 label
  */
 label_dirty: boolean, };
+
+/**
+ * 表格列对齐
+ */
+export type TableAlign = "left" | "center" | "right";

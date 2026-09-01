@@ -348,6 +348,8 @@ pub fn build_app(state: AppState) -> Router {
             "/notifications/{id}",
             delete(handlers::notifications::delete_notification),
         )
+        // 导出引擎（模块 A）— Markdown 直出（T1.4 路由占位，T1.6-1.7 实装）
+        .route("/export/markdown", post(handlers::export::export_markdown))
         // 统一应用认证中间件
         .layer(middleware::from_fn_with_state(
             state.clone(),

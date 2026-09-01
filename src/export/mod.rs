@@ -7,5 +7,6 @@
 //! - `assets.rs`  图片抓取（本地映射 + 外链拉取，T1.5）
 //! - `markdown.rs` Markdown 生成器 + bundle zip（T1.6）
 
+pub mod assembler;
 pub mod content;
 pub mod model;

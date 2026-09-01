@@ -6,6 +6,7 @@ pub mod ai_tasks;
 pub mod auth;
 pub mod collections;
 pub mod documents;
+pub mod export;
 pub mod health;
 pub mod knowledge_nodes;
 pub mod knowledge_trees;
