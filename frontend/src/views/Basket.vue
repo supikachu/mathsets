@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { questionApi, type QuestionDetail } from '@/api/client'
+import { questionApi, type ExamSectionRequest, type QuestionDetail } from '@/api/client'
 import { AppIcon } from '@/components/ui'
+import ExportDialog from '@/components/ExportDialog.vue'
 import LatexRender from '@/components/LatexRender.vue'
 import QuestionOptions from '@/components/QuestionOptions.vue'
 import QuestionStructureView from '@/components/QuestionStructureView.vue'
@@ -322,12 +323,44 @@ function shareBasket() {
   }
 }
 
-function downloadPaper(sectionTitle?: string) {
+// ── 导出（T1.9）：ExportDialog 负责格式/模式/开关，本视图只按页面所见序列化请求体 ──
+
+const showExport = ref(false)
+const exportSections = ref<ExamSectionRequest[]>([])
+const exportQuestionCount = ref(0)
+const exportScopeLabel = ref('')
+
+/// 题号由后端按请求顺序重排为连续编号，因此只传 id 与分值（displayNoMap 仅用于页面展示）
+/// 分值缺省时不传：后端按 metadata.default_score → 兜底 5 分逐级回退
+function sectionsPayload(groups: SectionGroup[]): ExamSectionRequest[] {
+  return groups.map((sec) => ({
+    title: sec.title,
+    questions: sec.questions.map((q) => {
+      const score = Number(q.default_score)
+      return score > 0
+        ? { id: q.id, default_score: score }
+        : { id: q.id }
+    }),
+  }))
+}
+
+function openExport(sectionTitle?: string) {
   if (!items.value.length) {
     toast.info('试题篮是空的，先去题库选题')
     return
   }
-  toast.info(sectionTitle ? `正在准备下载【${sectionTitle}】...` : '正在准备生成试卷下载文档...')
+  const groups = sectionTitle
+    ? groupedSections.value.filter((s) => s.title === sectionTitle)
+    : groupedSections.value
+  const target = groups.length ? groups : groupedSections.value
+  exportSections.value = sectionsPayload(target)
+  exportQuestionCount.value = target.reduce((n, s) => n + s.questions.length, 0)
+  exportScopeLabel.value = groups.length && sectionTitle ? sectionTitle : ''
+  showExport.value = true
+}
+
+/// print 兜底：导出引擎未覆盖的排版需求仍可用浏览器打印
+function printPaper() {
   setTimeout(() => window.print(), 300)
 }
 
@@ -408,7 +441,7 @@ function goDetail(id: string) {
                 <h2 class="apple-section-heading">{{ sec.title }}</h2>
                 <span class="section-count-tag">{{ sec.questions.length }} 题</span>
               </div>
-              <button type="button" class="apple-ghost-btn" @click="downloadPaper(sec.title)">
+              <button type="button" class="apple-ghost-btn" @click="openExport(sec.title)">
                 <AppIcon name="download" :size="13" />
                 <span>下载本大题</span>
               </button>
@@ -554,7 +587,7 @@ function goDetail(id: string) {
               </div>
               <span class="tool-title">保存组卷</span>
             </button>
-            <button type="button" class="apple-tool-tile" @click="downloadPaper()">
+            <button type="button" class="apple-tool-tile" @click="openExport()">
               <div class="tool-icon-squircle">
                 <AppIcon name="download" :size="18" />
               </div>
@@ -574,7 +607,7 @@ function goDetail(id: string) {
             </button>
           </div>
 
-          <button type="button" class="bk-download-cta" @click="downloadPaper()">
+          <button type="button" class="bk-download-cta" @click="openExport()">
             <AppIcon name="download" :size="15" />
             <span>下载试卷</span>
           </button>
@@ -675,6 +708,15 @@ function goDetail(id: string) {
         </button>
       </aside>
     </div>
+
+    <ExportDialog
+      v-model="showExport"
+      :sections="exportSections"
+      :question-count="exportQuestionCount"
+      :scope-label="exportScopeLabel"
+      default-title="试题篮组卷"
+      @print="printPaper"
+    />
   </div>
 </template>
 

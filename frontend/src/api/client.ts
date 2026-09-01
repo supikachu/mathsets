@@ -1,5 +1,6 @@
 import axios from 'axios'
 import { useToast } from '@/composables/useToast'
+import type { ExamRequest, IssueField } from './types/exam'
 
 // ===========================================================================
 // Axios 实例 & 拦截器（保持不变）
@@ -1995,5 +1996,130 @@ export const notificationApi = {
   },
   getUnreadCount() {
     return client.get<{ count: number }>('/notifications/unread-count')
+  },
+}
+
+// ===========================================================================
+// 导出引擎（T1.8）— Markdown / DOCX / PDF 三格式 blob 下载
+// ===========================================================================
+
+export type { ExamRequest, ExamSectionRequest, ExamQuestionRequest, ExportMode, ExportOptions } from './types/exam'
+
+/// 导出类请求超时（B4：全局 10s 对百页大卷 + 大 blob 下载会触顶）
+const EXPORT_TIMEOUT_MS = 60000
+
+/// X-Export-Warnings 解码后的单条警告（后端契约仅四字段，不含 severity）
+export interface ExportWarning {
+  question_no?: number | null
+  field: IssueField
+  latex?: string | null
+  reason: string
+}
+
+export interface ExportResult {
+  blob: Blob
+  /// 服务端 Content-Disposition 给出的文件名（已解码中文）；缺省时为空串
+  filename: string
+  warnings: ExportWarning[]
+  /// 警告清单超长度上限被截断（B3）—— 应提示改用预览接口看完整清单
+  truncated: boolean
+}
+
+/// 百分号解码（后端 percent_encode 的逆变换）；非法序列时原样返回
+function percentDecode(s: string): string {
+  try {
+    return decodeURIComponent(s)
+  } catch {
+    return s
+  }
+}
+
+/// 解析 Content-Disposition：优先 RFC 5987 `filename*=UTF-8''<pct>`，回退 `filename="..."`
+function parseFilename(value: string | undefined): string {
+  if (!value) return ''
+  const ext = /filename\*\s*=\s*([^']*)'([^']*)'(.+)/i.exec(value)
+  if (ext) return percentDecode(ext[3])
+  const basic = /filename\s*=\s*"([^"]*)"/i.exec(value)
+  return basic ? basic[1] : ''
+}
+
+/// 解析 X-Export-Warnings：URL-encoded JSON 数组，末项可能带 truncated 哨兵
+function parseWarnings(value: string | undefined): { warnings: ExportWarning[]; truncated: boolean } {
+  if (!value) return { warnings: [], truncated: false }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(percentDecode(value))
+  } catch {
+    return { warnings: [], truncated: false }
+  }
+  if (!Array.isArray(parsed)) return { warnings: [], truncated: false }
+  const truncated = parsed.some((i) => (i as ExportWarning & { truncated?: boolean })?.truncated === true)
+  const warnings = parsed
+    .filter((i) => (i as ExportWarning & { truncated?: boolean })?.truncated !== true)
+    .map((i) => {
+      const raw = i as Partial<ExportWarning>
+      return {
+        question_no: raw.question_no ?? null,
+        field: (raw.field ?? 'other') as IssueField,
+        latex: raw.latex ?? null,
+        reason: raw.reason ?? '',
+      }
+    })
+  return { warnings, truncated }
+}
+
+/// responseType=blob 下后端 JSON 错误体需读回文本才能展示 message
+async function blobErrorMessage(error: unknown): Promise<string> {
+  const err = error as { response?: { status?: number; data?: unknown }; message?: string }
+  const data = err?.response?.data
+  if (data instanceof Blob) {
+    try {
+      const text = await data.text()
+      const json = JSON.parse(text) as { message?: string; error?: string }
+      if (json.message) return json.message
+      if (json.error) return json.error
+    } catch {
+      /* 非 JSON 错误体，落到通用文案 */
+    }
+  }
+  if (typeof data === 'string' && data) return data
+  return err?.message || '导出失败'
+}
+
+async function download(
+  path: string,
+  body: ExamRequest,
+  params?: Record<string, unknown>,
+): Promise<ExportResult> {
+  try {
+    const res = await client.post<Blob>(path, body, {
+      responseType: 'blob',
+      params,
+      timeout: EXPORT_TIMEOUT_MS,
+    })
+    const { warnings, truncated } = parseWarnings(res.headers?.['x-export-warnings'])
+    return {
+      blob: res.data,
+      filename: parseFilename(res.headers?.['content-disposition']),
+      warnings,
+      truncated,
+    }
+  } catch (e) {
+    throw new Error(await blobErrorMessage(e))
+  }
+}
+
+export const exportApi = {
+  /// Markdown；bundle=true 时返回 md + images/ 的 zip
+  markdown(req: ExamRequest, opts?: { bundle?: boolean }) {
+    return download('/export/markdown', req, opts?.bundle ? { bundle: true } : undefined)
+  },
+  /// Word（公式为可编辑 OMML）— 端点于 M2 交付
+  docx(req: ExamRequest) {
+    return download('/export/docx', req)
+  },
+  /// PDF（委托排版系统）— 端点于 M3 交付
+  pdf(req: ExamRequest) {
+    return download('/export/pdf', req)
   },
 }
