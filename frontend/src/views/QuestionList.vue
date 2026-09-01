@@ -1,5 +1,5 @@
 <template>
-  <div class="ql-page">
+  <div class="ql-page" @wheel.passive="onPageWheel">
     <!-- ===== 主体：左侧知识树导航 + 右侧列表区 ===== -->
     <div class="ql-body">
       <!-- 左侧常驻知识树导航（替代旧的 KpTreePanel） -->
@@ -1129,6 +1129,46 @@ function resetListScroll() {
   area.scrollTop = 0
   const scrollerEl = area.querySelector('.vue-recycle-scroller, .q-card-list') as HTMLElement | null
   if (scrollerEl) scrollerEl.scrollTop = 0
+}
+
+/** 列表真正的滚动盒：虚拟列表模式下是 DynamicScroller 根节点(.vue-recycle-scroller)，
+ *  试卷视图/空态下则是 .ql-scroll-area 本体 */
+function getListScrollEl(): HTMLElement | null {
+  const area = scrollAreaRef.value
+  if (!area) return null
+  return area.querySelector<HTMLElement>('.vue-recycle-scroller') ?? area
+}
+
+/** 从指针下元素逐级向上找"内容确实溢出"的可滚动祖先 */
+function findScrollableAncestor(start: Element | null): Element | null {
+  let node: Element | null = start
+  while (node) {
+    if (node instanceof HTMLElement) {
+      const flow = window.getComputedStyle(node).overflowY
+      if ((flow === 'auto' || flow === 'scroll') && node.scrollHeight > node.clientHeight) {
+        return node
+      }
+    }
+    node = node.parentElement
+  }
+  return null
+}
+
+/** 滚轮转发：本页是"居中 860px 面板"布局，面板外的左右留白、吸顶工具栏
+ *  下方没有任何可滚动祖先（html/body/.layout-root 全部锁 overflow:hidden），
+ *  原生滚轮在那里完全失效。悬停在这类死区时把位移转投给列表滚动盒；
+ *  指针下若本就有可滚动元素（列表/知识树/下拉面板），放行交给浏览器原生滚动。 */
+function onPageWheel(e: WheelEvent) {
+  if (e.ctrlKey) return // 触控板捏合缩放手势，不劫持
+  if (findScrollableAncestor(e.target instanceof Element ? e.target : null)) return
+  const scroller = getListScrollEl()
+  if (!scroller) return
+  // deltaMode 归一化：Firefox 传统滚轮按"行/页"上报，折算成像素
+  const dy =
+    e.deltaMode === WheelEvent.DOM_DELTA_LINE ? e.deltaY * 40
+    : e.deltaMode === WheelEvent.DOM_DELTA_PAGE ? e.deltaY * 640
+    : e.deltaY
+  scroller.scrollTop += dy
 }
 
 /** 已有卡片时后台刷新，不拆掉列表 DOM */
@@ -2403,6 +2443,7 @@ onBeforeUnmount(() => {
 
 /* ===== 可滚动列表区域（独立滚动域） ===== */
 .ql-scroll-area {
+  --ql-content-pad-right: 20px;
   position: relative; /* 建立层叠上下文，确保 z-index 生效 */
   z-index: 1; /* 双保险：永远低于顶部 .ql-sticky-bar (z-index:100) 及其内部下拉浮层 */
   flex: 1;
@@ -2412,7 +2453,8 @@ onBeforeUnmount(() => {
   overflow-anchor: none; /* 题卡高度变化时禁止浏览器锚点跳变 */
   scroll-behavior: auto; /* 覆盖 html 的 smooth，滚轮/触控板保持跟手 */
   -webkit-overflow-scrolling: touch;
-  padding: 16px 20px;
+  /* 右侧不留 padding，滚动条贴 .ql-main 右缘；内容区用 --ql-content-pad-right 补间距 */
+  padding: 16px 0 16px 20px;
   background: var(--bg-primary); /* 画布涂灰：与白色卡片拉开对比，卡片瞬间“跳”出 */
 }
 
@@ -2421,7 +2463,11 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  padding-bottom: 8px;
+  padding: 16px 0 8px 20px;
+}
+
+.ql-scroll-area :deep(.pagination) {
+  margin-right: var(--ql-content-pad-right);
 }
 
 .ql-scroll-area.is-virtual-host :deep(.pagination) {
@@ -2438,6 +2484,7 @@ onBeforeUnmount(() => {
 
 .ql-scroll-area.is-virtual-host .ql-from-paper {
   flex-shrink: 0;
+  margin-right: var(--ql-content-pad-right);
 }
 
 /* ===== Header Actions ===== */
@@ -2545,7 +2592,7 @@ onBeforeUnmount(() => {
 }
 
 .pr-list {
-  padding: 0 8px 24px;
+  padding: 0 var(--ql-content-pad-right, 20px) 24px 8px;
 }
 
 .ql-empty-state {
@@ -2645,6 +2692,7 @@ onBeforeUnmount(() => {
 .q-card-slot {
   padding-top: 8px;
   padding-bottom: 8px;
+  padding-right: var(--ql-content-pad-right, 20px);
   box-sizing: border-box;
   contain: layout;
 }

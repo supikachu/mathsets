@@ -211,7 +211,8 @@ function toggleAllAnswers() {
 }
 
 function bucketType(q: QuestionDetail): string {
-  let t = q.question_type || 'choice'
+  // 宽松为 string：兼容库里可能残留的旧版题型别名（multi_choice / single_choice 等）
+  const t: string = q.question_type || 'choice'
   if (t === 'multiple' || t === 'multi_choice') return 'multi_choice'
   if (t === 'choice' || t === 'single_choice') {
     return getCorrectLabels(q).length > 1 ? 'multi_choice' : 'single_choice'
