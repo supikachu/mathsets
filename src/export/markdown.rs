@@ -92,17 +92,16 @@ fn short_hash(s: &str) -> String {
 fn build_zip(markdown: &str, images: &[(String, Vec<u8>)]) -> Vec<u8> {
     let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     let opts = zip::write::SimpleFileOptions::default();
-    w.start_file("exam.md", opts)
-        .and_then(|_| w.write_all(markdown.as_bytes()))
-        .expect("write exam.md");
+    // start_file 返 ZipError 而 write_all 返 io::Error，错误类型不同不可 and_then 串接
+    w.start_file("exam.md", opts).expect("start exam.md");
+    w.write_all(markdown.as_bytes()).expect("write exam.md");
     for (name, bytes) in images {
         w.start_file(format!("images/{}", name), opts)
-            .and_then(|_| w.write_all(bytes))
+            .unwrap_or_else(|e| panic!("start image {}: {}", name, e));
+        w.write_all(bytes)
             .unwrap_or_else(|e| panic!("write image {}: {}", name, e));
     }
-    w.finish()
-        .expect("finish zip")
-        .into_inner()
+    w.finish().expect("finish zip").into_inner()
 }
 
 // ═══════════════════════════ 图片 URL 收集 ═══════════════════════════
@@ -521,11 +520,6 @@ fn ensure_block(out: &mut String) {
     }
 }
 
-/// 多行答案在卷末/内嵌场景下的缩进拼接
-fn indent_multiline(s: &str) -> String {
-    s.to_string()
-}
-
 // ── 转义与小工具 ──
 
 /// 文本段最小转义（公式段不转义）：`*` `_` `` ` `` `#`
@@ -574,11 +568,11 @@ fn fmt_score(v: f64) -> String {
 mod tests {
     use super::*;
     use crate::export::model::{
-        AnalysisBlock, AnswerSpace, BlankStyle, CalloutOptions, ExamMeta, ExamOption, ExamSection,
-        InlineImage, TableAlign,
+        AnswerSpace, BlankStyle, ExamMeta, ExamOption, ExamSection, InlineImage, TableAlign,
     };
-    use crate::models::question_structure::QuestionPart;
+    use crate::models::question_structure::{AnalysisBlock, QuestionPart};
     use std::collections::HashMap;
+    use std::io::Read;
 
     fn bundle_1q(mode: ExportMode, q: ExamQuestion) -> ExamBundle {
         ExamBundle {
@@ -941,7 +935,7 @@ mod tests {
         assert!(result.issues.is_empty());
         assert!(result.markdown.contains("](images/"));
         let zip_bytes = result.zip.unwrap();
-        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&zip_bytes)).unwrap();
+        let archive = zip::ZipArchive::new(std::io::Cursor::new(&zip_bytes)).unwrap();
         assert_eq!(
             archive
                 .file_names()

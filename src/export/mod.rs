@@ -10,4 +10,5 @@
 pub mod assembler;
 pub mod assets;
 pub mod content;
+pub mod markdown;
 pub mod model;
