@@ -11,7 +11,7 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-/// 纸张：M3 基础版只用 `A4`；两档 A3 的字段先定齐，对折与三栏的版式在 T4.7/T4.8 落地
+/// 纸张：A3 两档都按长边横置出纸；一张纸算几个「逻辑页」由 `Paper::logical_slots_per_sheet` 定
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export, export_to = "../frontend/src/api/types/layout.ts")]
@@ -30,6 +30,17 @@ impl Paper {
         match self {
             Self::A4 => (210, 297),
             Self::A3Fold | Self::A3Tri => (420, 297),
+        }
+    }
+
+    /// 一张物理纸承载几**逻辑页**（R4）
+    ///
+    /// 只有 A3 对折例外：左右半张各自是一页 A4，读者按「左半 → 右半」读，页码与奇偶外侧都得
+    /// 按半张计。A4 与 A3 三栏都是「一张纸一页」—— 那里的栏只是栏，不多造页码。
+    pub fn logical_slots_per_sheet(self) -> u8 {
+        match self {
+            Self::A3Fold => 2,
+            Self::A4 | Self::A3Tri => 1,
         }
     }
 }
@@ -93,8 +104,16 @@ pub struct Binding {
     pub areas: BindingAreas,
 }
 
-/// 页眉页脚开关。动态页眉取当前大题名（T4.10）与按逻辑页判定的奇偶外侧对齐（T4.7）尚未实现，
-/// 字段先按 §6.1 定齐，免得 M4 再改前端 TS 类型
+/// 密封装订带的宽度（mm，T4.8）
+///
+/// 带子里要并排放下竖虚线、旋转 90° 的「密封装订线，请勿折叠」与学校 / 班级 / 姓名 / 考号
+/// 四个填涂字段，20mm 是这些内容转成竖排后能塞下的下限。[`LayoutSpec::margin_left_mm`] 在
+/// `Left` 时把它加到左边距之外，[`LayoutSpec::column_gutter_mm`] 在 `CenterFold` 时把它作为
+/// 栏距下限 —— 装订带要占中线，中线版心就得给它让路。
+pub const SEALING_BAND_MM: f32 = 20.0;
+
+/// 页眉页脚开关。页码按**逻辑页**计（T4.7 / R4：A3 对折的一张纸报两页号），奇偶外侧对齐同期
+/// 落地；只剩动态页眉取当前大题名（T4.10）还没接
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(default)]
 #[ts(export, export_to = "../frontend/src/api/types/layout.ts")]
@@ -239,23 +258,52 @@ pub struct ResolvedBlank {
 }
 
 impl LayoutSpec {
-    /// 单栏可用版心宽（mm）= 纸宽 − 左边距 − 右边距 − (n−1) × 栏距，再除以 n
+    /// 单栏可用版心宽（mm）= 纸宽 − 生效左边距 − 右边距 − (n−1) × 生效栏距，再除以 n
+    ///
+    /// 两个「生效」都带装订（[`margin_left_mm`](Self::margin_left_mm) /
+    /// [`column_gutter_mm`](Self::column_gutter_mm)）：装订带吃掉的每一份宽度必须同时从栏宽里
+    /// 扣掉，否则选项栅格与配图裁宽用的就不是纸上那一栏的真实宽度 —— 那是比排不满更难看的错。
     ///
     /// docx 侧另有一套 twips 口径（T2.7），两边都只有一处实现，漂了用例会先炸
     pub fn column_width_mm(&self) -> f32 {
         let (w, _) = self.paper.size_mm();
         let n = self.columns.max(1) as f32;
-        let gutters = (n - 1.0) * self.margins.gutter_mm;
-        ((w as f32) - self.margins.left_mm - self.margins.right_mm - gutters) / n
+        let gutters = (n - 1.0) * self.column_gutter_mm();
+        ((w as f32) - self.margin_left_mm() - self.margins.right_mm - gutters) / n
     }
 
-    /// 生效的栏间距：单栏恒为 0，避免母版里写出没有意义的 `column-gutter`
-    pub fn column_gutter_mm(&self) -> f32 {
-        if self.columns > 1 {
-            self.margins.gutter_mm
-        } else {
-            0.0
+    /// 生效的左边距（mm）：`Left` 装订带不是装饰，它真的吃掉版面前这条带子，正文整块右移
+    pub fn margin_left_mm(&self) -> f32 {
+        match self.binding {
+            Some(b) if b.position == BindingPosition::Left => {
+                self.margins.left_mm + SEALING_BAND_MM
+            }
+            _ => self.margins.left_mm,
         }
+    }
+
+    /// 生效的栏间距（mm）：单栏恒为 0，避免母版里写出没有意义的 `column-gutter`；
+    /// `CenterFold` 时不得低于装订带 —— 对折的密封线走版心中线，栏距不给够它就会压上正文
+    pub fn column_gutter_mm(&self) -> f32 {
+        if self.columns <= 1 {
+            return 0.0;
+        }
+        match self.binding {
+            Some(b) if b.position == BindingPosition::CenterFold => {
+                self.margins.gutter_mm.max(SEALING_BAND_MM)
+            }
+            _ => self.margins.gutter_mm,
+        }
+    }
+
+    /// 一张物理纸上的逻辑页格数（R4）：页脚要切成几格、页码要不要 ×2 全看这里
+    ///
+    /// 取纸张口径与实际栏数的较小值：A3 对折排成单栏时「半张 = 一页」根本不成立，
+    /// 与其编出一个对不上折痕的页号，不如老实只编一个。
+    pub fn logical_slots(&self) -> u8 {
+        self.paper
+            .logical_slots_per_sheet()
+            .min(self.columns.max(1))
     }
 
     /// 版面侧的留白折算：`None` = 高度没给 → `None`；`Some(非正数)` 视为「没填」退回本 spec 的
@@ -434,8 +482,63 @@ mod tests {
     #[test]
     fn three_columns_pay_two_gutters() {
         let spec = LayoutSpec::preset("a3_tri_exam").unwrap();
-        // (420 − 14 − 14 − 20) / 3 = 124
-        assert!((spec.column_width_mm() - 124.0).abs() < 1e-6);
+        // 三栏卷是左侧装订：(420 − (14+20) − 14 − 2×10) / 3 = 117.33
+        assert!((spec.column_width_mm() - 352.0 / 3.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn center_fold_gutter_floors_at_the_sealing_band() {
+        let fold = LayoutSpec::preset("a3_fold_exam").unwrap();
+        // 预设写的 12mm 栏距放不下 20mm 装订带：对折的密封线走版心中线，栏距得兜高
+        assert_eq!(fold.margins.gutter_mm, 12.0);
+        assert_eq!(fold.column_gutter_mm(), SEALING_BAND_MM);
+        // (420 − 16 − 16 − 20) / 2 = 184
+        assert!((fold.column_width_mm() - 184.0).abs() < 1e-6);
+        // 折痕 = 左边距 + 栏宽 + 半栏距 = 210 = 纸宽中线，页码格与装订带都按它对齐
+        let fold_x = fold.margin_left_mm() + fold.column_width_mm() + fold.column_gutter_mm() / 2.0;
+        assert!((fold_x - 210.0).abs() < 1e-6);
+        // 对折的带子吃栏距，不吃页边距
+        assert_eq!(fold.margin_left_mm(), fold.margins.left_mm);
+    }
+
+    #[test]
+    fn left_binding_shifts_the_text_right_by_the_band() {
+        let mut spec = LayoutSpec::preset("a4_lecture").unwrap();
+        let plain = spec.column_width_mm();
+        spec.binding = Some(Binding {
+            position: BindingPosition::Left,
+            areas: BindingAreas::default(),
+        });
+        assert_eq!(
+            spec.margin_left_mm(),
+            spec.margins.left_mm + SEALING_BAND_MM
+        );
+        // 正文整块右移：栏宽少掉的正是那条带子
+        assert!((plain - spec.column_width_mm() - SEALING_BAND_MM).abs() < 1e-6);
+        // 左侧装订不碰中线，栏距口径不变（单栏更是恒为 0）
+        assert_eq!(spec.column_gutter_mm(), 0.0);
+    }
+
+    #[test]
+    fn only_the_fold_multiplies_page_numbers() {
+        assert_eq!(Paper::A3Fold.logical_slots_per_sheet(), 2);
+        assert_eq!(Paper::A4.logical_slots_per_sheet(), 1);
+        assert_eq!(Paper::A3Tri.logical_slots_per_sheet(), 1);
+        // A3 三栏的三栏只是栏：一张纸一个页号
+        assert_eq!(
+            LayoutSpec::preset("a3_tri_exam").unwrap().logical_slots(),
+            1
+        );
+        assert_eq!(
+            LayoutSpec::preset("a3_fold_exam").unwrap().logical_slots(),
+            2
+        );
+        // 对折排成单栏时「半张 = 一页」不成立，与其编出错号不如老实编一个
+        let single = LayoutSpec {
+            columns: 1,
+            ..LayoutSpec::preset("a3_fold_exam").unwrap()
+        };
+        assert_eq!(single.logical_slots(), 1);
     }
 
     #[test]

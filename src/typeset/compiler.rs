@@ -194,9 +194,11 @@ pub fn rendered_pages(doc: &PagedDocument) -> Vec<Vec<RenderedRun>> {
 /// 「这个字是哪个字体画的（豆腐块判定）」两件事共用一次遍历。
 ///
 /// 坐标口径：`Frame::items()` 本来就是 `(Point, FrameItem)`，段的位置 = 自身 Point +
-/// 各层 `GroupItem::transform` 的平移量累加。只累加平移、不乘缩放与斜切 —— 生成的源码里
-/// 没有 `rotate` / `scale`，而栅格与缩进给出的平移正是「第几列 / 第几行」的判据
-/// （T4.2 的选项栅格、T4.7 的答案分区都靠它）。
+/// 各层 `GroupItem::transform` 的平移量累加。只累加平移、不乘缩放与旋转 —— 栅格与缩进给出的
+/// 平移正是「第几列 / 第几行」的判据（T4.2 的选项栅格、T4.7 的答案分区都靠它）。
+/// 代价是**旋转过的内容**（T4.8 装订带上那行 `rotate(90deg)`）在这里报的是摆放锚点、不是它印在
+/// 纸上的那条包围盒（实测 x 恰等于 `place` 的 dx）。所以旋转内容只能断「出没出现、锚在哪」，
+/// 想要长度得另想办法。
 ///
 /// 只走 `Group` 递归；文字与栅格图共用这一次遍历，`Link` / `Tag` 与三者无关。
 pub fn placed_pages(doc: &PagedDocument) -> Vec<Vec<PlacedRun>> {

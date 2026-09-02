@@ -50,7 +50,7 @@ use crate::typeset::blocks::choice_grid;
 use crate::typeset::blocks::figure_float::Split;
 use crate::typeset::ir::{AnswerBlock, BlockMeta, LayoutBlock, LayoutDoc, QuestionBlock, Section};
 use crate::typeset::math::{MITEX_PREAMBLE, degraded, to_typst, typst_str};
-use crate::typeset::spec::{BlankStyle, ColorMode, LayoutSpec};
+use crate::typeset::spec::{BindingPosition, BlankStyle, ColorMode, LayoutSpec, SEALING_BAND_MM};
 
 /// 生成结果：可直接编译的 typst 源码 + 生成期发现的问题
 #[derive(Debug)]
@@ -76,11 +76,13 @@ pub fn generate(doc: &LayoutDoc, images: &HashMap<String, Option<String>>) -> Ge
         field: IssueField::Structure,
         black: spec.color == ColorMode::PrintBlackOnly,
     };
+    g.warn_page_conflicts();
     let body = g.body(doc);
 
     let mut source = String::with_capacity(MITEX_PREAMBLE.len() + body.len() + 2048);
     source.push_str(MITEX_PREAMBLE);
     source.push('\n');
+    source.push_str(PAGE_FURNITURE);
     source.push_str(&g.prologue(doc));
     source.push_str(FUNCTION_LIBRARY);
     source.push_str(&body);
@@ -93,14 +95,53 @@ pub fn generate(doc: &LayoutDoc, images: &HashMap<String, Option<String>>) -> Ge
 
 // ═══════════════════════════════════ 母版 ═══════════════════════════════════
 
+/// 页脚与密封线（T4.7 / T4.8）：只给母版 `#set page` 用的两枚小函数。
+///
+/// **为什么不进 [`FUNCTION_LIBRARY`]**：`#set page(…)` 的参数在写它的那一刻就求值，而函数库整段
+/// 排在母版之后（正文要用它）。实测让母版的 `footer: context { … }` 去调库里的函数，直接报
+/// `unknown variable: page-cell` —— 顺序上只能挑一头，页脚与装订带必须赶在母版前落地。
+///
+/// 代价是这两枚不许引用母版变量（`accent` / `body-font` 那四个此刻还不存在），颜色与字号只能写死
+/// —— 页脚与装订带本来就是全卷一套，不跟着 spec 漂。
+const PAGE_FURNITURE: &str = r#"
+// ─────────────────────── 页脚与密封线（T4.7 / T4.8）──────────────────────
+
+/// 页脚一格：`第 X 页 / 共 Y 页`。号由母版算好传进来（见 `Gen::footer`）：对折卷一张纸上的两格
+/// 只差这两个数与对齐，模板不自己数页。
+#let page-cell(x, total) = text(size: 9pt, fill: luma(110))[第 #x 页 / 共 #total 页]
+
+/// 密封装订带：一枚竖虚线 + 一整行旋转 90° 的填涂信息（学校 / 班级 / 姓名 / 考号 + 提示语）。
+///
+/// 走 page `background` 而不是正文流：背景帧**每页一枚、与页面等大、按绝对坐标摆放**（实测
+/// typst-layout `pages/run.rs` 用 `full_size` 排 background、`pages/finalize.rs` 把它挂在
+/// `bleed_origin` = 页面左上角），于是一条 20mm 的带子既不占版心也不进分栏流动。想让带子不进栏，
+/// 除了背景没有第二条路：columns 容器里 `pagebreak` 会直接报错（见 `Gen::prologue` 里那段
+/// 「栏数走页级」的实测说明）。
+///
+/// `rotate(90deg, origin: top + left)` 把整行转竖，读时头向右偏 —— 中文卷子密封线的常见朝向。
+/// 旋转原点必须是**文字框自己的左上角**：默认的 center 会把锚点甩到框中心，实测想放 (192, 18) 的
+/// 整条带子落在了 x≈278、y≈−64（压上右栏正文还越出页顶）。左上角为原点 + `reflow: false`（默认）
+/// 才是「锚点 = 带子右上角，向下长出」，于是 `x` 一个参数就够：带子恒贴虚线左侧 2mm。
+/// 行的自然宽度必须小于页高，否则 CJK 会在旋转前先折行，长度由 Rust 侧按字段数控制（`Gen::sealing`）。
+#let sealing-line(x, y0, span, label) = [
+  #place(top + left, dx: x, dy: y0, line(
+    length: span,
+    angle: 90deg,
+    stroke: (thickness: 0.5pt, paint: luma(140), dash: "dashed")))
+  #place(top + left, dx: x - 2mm, dy: y0,
+    rotate(90deg, origin: top + left)[#text(size: 8pt, fill: luma(90))[#label]])
+]
+"#;
+
 /// 函数库 v1：整段是常量，不进 `format!` —— 花括号不必转义，版式漂了就是在改这个常量。
 ///
 /// 只依赖母版里的四个变量（`accent` / `analysis-ink` / `body-font` / `heading-font`），
-/// 它们由 [`Gen::prologue`] 按 `LayoutSpec` 生成。
+/// 它们由 `Gen::prologue` 按 `LayoutSpec` 生成。
 const FUNCTION_LIBRARY: &str = r#"
 // ─────────────────────────── 函数库 v1（T3.6）───────────────────────────
-// M3 基础版：题块 / 大题标题 / 选项栅格 / 提示框 / 解析 / 留白 / 卷头。
-// 分页粘连（keep_with_next）在 typst 0.15 没有原语，动态页眉与密封线在 M4。
+// 题块 / 大题标题 / 选项栅格 / 提示框 / 解析 / 留白 / 卷头。
+// 分页粘连（keep_with_next）在 typst 0.15 没有原语，逐栏动态页眉在 T4.10；
+// 页脚与密封线在 PAGE_FURNITURE —— 它们要早于母版的 #set page 存在。
 
 /// 题块：首行是「5. （3 分）」这类标号，续行按 indent 缩进（hanging indent）。
 /// label 为空则不占行首；indent 同时决定块缩进与首行回抽，两者不会各改一半。
@@ -247,7 +288,8 @@ const FUNCTION_LIBRARY: &str = r#"
 #let blank-space(h) = block(width: 100%, height: h, above: 0.7em, breakable: false)
 
 /// 卷头（简化版）：题名 + 副题 + 一行元信息 + 注意事项。
-/// 完整考卷卷头（学校/班级/姓名栏与密封线）在 T4.9。
+/// 考卷的学校 / 班级 / 姓名 / 考号不占卷头，它们画在装订带上（`sealing-line`）；T4.9 补的是
+/// 完整卷头的排布（分值表、考号条码区）。
 #let masthead(title, subtitle: none, meta: none, instructions: ()) = block(
   width: 100%,
   below: 8pt,
@@ -357,15 +399,17 @@ impl Gen<'_> {
             mm(m.top_mm),
             mm(m.right_mm),
             mm(m.bottom_mm),
-            mm(m.left_mm)
+            mm(spec.margin_left_mm())
         );
+        // 装订带排在 `margin` 之后：它只是背景，不改正文流（见模板 `sealing-line`）
+        if let Some(background) = self.sealing() {
+            page.push_str(&background);
+        }
         if spec.header_footer.page_number {
-            page.push_str(", numbering: \"1\", number-align: center");
-            // 计数器只能在 context 里求值：裸 `counter(page).display()` 报
-            // "can only be used when context is known"（实测）
-            page.push_str(
-                ", footer: context align(center)[#text(size: 9pt, fill: luma(110))[第 #counter(page).display(\"1\") 页 / 共 #counter(page).final().first() 页]]",
-            );
+            // 内置页码只在**没给 `footer`** 时才出场（实测 typst-layout `pages/run.rs`：
+            // `footer.as_ref().unwrap_or(&numbering_marginal)`）。页脚由我们按逻辑页自己画，
+            // 再写 `numbering` / `number-align` 就是两条注定无效的规则 —— 不写。
+            page.push_str(&self.footer());
         }
         if spec.header_footer.header_title {
             // 静态近似：整份文档一个页眉（取卷名）。逐栏取当前大题名是 T4.10。
@@ -396,6 +440,139 @@ impl Gen<'_> {
         s.push_str("#set par(justify: true, leading: 0.7em, spacing: 0.55em)\n");
         s.push('\n');
         s
+    }
+
+    // ------------------------------------------------------------ 页脚与装订
+
+    /// 页脚（T4.7 / R4）：一张物理纸上的每个**逻辑页**各占一格
+    ///
+    /// 为什么得自己切格：typst 的 `footer` 每物理页只出一次、且按整个版心宽排版（实测
+    /// typst-layout `pages/run.rs` 用合并后的页框宽算 marginal、`pages/finalize.rs` 只把它挂在
+    /// 外层页框上），而「现在排到第几栏」只是 `flow/compose.rs` 里的一个循环变量，脚本层拿不到
+    /// —— 所以 A3 对折「左半 = 第 X 页、右半 = 第 X + 1 页」没有任何现成原语，只能自己算号。
+    /// 格的 `columns` / `gutter` 与正文那几栏同值，于是每格正好落在自己那一栏的正下方。
+    ///
+    /// `共 Y 页` = 格数 × 物理页数：最后一张只用半张时也会多报一页 —— 那半张确实存在，只是
+    /// 空着，与送印厂给的页数口径一致。
+    fn footer(&self) -> String {
+        let spec = self.spec;
+        let slots = spec.logical_slots() as i64;
+        let outer = spec.header_footer.odd_even_outer;
+        // 计数器只能在 context 里求值：裸 `counter(page).display()` 报
+        // "can only be used when context is known"（实测）。`here().page()` 给的是**物理**页号
+        // —— 正是我们要拿它去乘格数的那个底数。
+        let mut s = String::from(
+            ", footer: context { let p = here().page(); let t = counter(page).final().first(); ",
+        );
+        if slots == 1 {
+            let align = if outer {
+                // 一张纸一页：奇数页是正面，外沿在右；偶数页是背面，外沿在左。
+                // 奇偶只能用 `calc.even` —— typst 没有 `%` 运算符（实测报
+                // "the character `%` is not valid in code"）
+                "(if calc.even(p) { left } else { right })"
+            } else {
+                "center"
+            };
+            s.push_str(&format!("align({align} + horizon, [#page-cell(p, t)])"));
+        } else {
+            let cells: Vec<String> = (0..slots)
+                .map(|i| {
+                    // 对折的折痕在纸中央，所以左半页的外沿是纸的**左**沿、右半页是右沿 ——
+                    // 与单栏双面印正好相反。三栏卷的中栏没有外沿可言，留在格心。
+                    let align = match (outer, i == 0, i + 1 == slots) {
+                        (true, true, _) => "left",
+                        (true, _, true) => "right",
+                        _ => "center",
+                    };
+                    // 第 i 格 = slots × (p − 1) + i + 1，常数项合并后写成 `slots * p - (slots-1-i)`
+                    let offset = slots - 1 - i;
+                    let n = if offset == 0 {
+                        format!("{slots} * p")
+                    } else {
+                        format!("{slots} * p - {offset}")
+                    };
+                    format!("align({align} + horizon, [#page-cell({n}, {slots} * t)])")
+                })
+                .collect();
+            s.push_str(&format!(
+                "grid(columns: ({}), gutter: ({}mm, 0pt), {})",
+                vec!["1fr"; slots as usize].join(", "),
+                mm(spec.column_gutter_mm()),
+                cells.join(", ")
+            ));
+        }
+        s.push_str(" }");
+        s
+    }
+
+    /// 密封装订带（T4.8）：`None` = 这张纸不装订
+    ///
+    /// 两种装订位共用同一枚模板函数，几何在这里算完：
+    /// - `Left`：带子躺在**加出来的**左边距里（`LayoutSpec::margin_left_mm` 已经把带宽让给
+    ///   它），虚线贴带子右沿，正文从虚线右侧开始；
+    /// - `CenterFold`：虚线画在第 1、2 栏的分界上 = 对折后的折痕，文字带放在线的左侧；栏距由
+    ///   `column_gutter_mm()` 兜到不低于带宽，线才不会压上左右两栏正文。
+    ///
+    /// 每页都画：一张 A3 折成两页后每个对折面都得能认卷，这与真实考卷一致；首页母版分离是
+    /// T4.9 的事。
+    fn sealing(&self) -> Option<String> {
+        let spec = self.spec;
+        let binding = spec.binding?;
+        let (_, h) = spec.paper.size_mm();
+        let top = spec.margins.top_mm;
+        let span = h as f32 - top - spec.margins.bottom_mm;
+        let line_x = match binding.position {
+            BindingPosition::Left => SEALING_BAND_MM - 2.0,
+            BindingPosition::CenterFold => {
+                // 单栏没有「两栏之间的中线」，画出来只会压在正文上
+                let gutter = spec.column_gutter_mm();
+                if gutter <= 0.0 {
+                    return None;
+                }
+                spec.margin_left_mm() + spec.column_width_mm() + gutter / 2.0
+            }
+        };
+        let fields = [
+            (binding.areas.school, "学校：＿＿＿＿＿＿＿＿"),
+            (binding.areas.class_name, "班级：＿＿＿＿＿＿＿＿"),
+            (binding.areas.name, "姓名：＿＿＿＿＿＿＿＿"),
+            (binding.areas.exam_no, "考号：＿＿＿＿＿＿＿＿＿＿"),
+        ];
+        let filled: Vec<&str> = fields
+            .into_iter()
+            .filter(|(on, _)| *on)
+            .map(|(_, label)| label)
+            .collect();
+        let caption = "密封装订线，请勿折叠";
+        let label = if filled.is_empty() {
+            caption.to_string()
+        } else {
+            format!("{}    {caption}", filled.join("    "))
+        };
+        Some(format!(
+            ", background: sealing-line({}mm, {}mm, {}mm, {})",
+            mm(line_x),
+            mm(top),
+            mm(span),
+            typst_str(&label)
+        ))
+    }
+
+    /// 纸张与栏数对不上号（R4）：A3 对折的页码按「一栏 = 一页」编，栏数不是 2 就会与折痕错位
+    fn warn_page_conflicts(&mut self) {
+        let spec = self.spec;
+        let slots = spec.paper.logical_slots_per_sheet();
+        if slots > 1 && spec.columns != slots {
+            self.issue(
+                IssueField::Structure,
+                IssueSeverity::Warning,
+                None,
+                format!(
+                    "A3 对折每张纸是 {slots} 个逻辑页，当前分了 {} 栏：页码按每栏一页编，会与折痕错位",
+                    spec.columns
+                ),
+            );
+        }
     }
 
     // ------------------------------------------------------------ 正文骨架
@@ -1093,14 +1270,15 @@ mod tests {
     use crate::typeset::blocks::choice_grid;
     use crate::typeset::blocks::figure_float::{self, FIGURE_SHARE};
     use crate::typeset::compiler::{
-        CompileRequest, PlacedImage, PlacedLine, PlacedRun, compile_paged, compile_pdf, font_dirs,
-        placed_images, placed_lines, placed_pages, rendered_pages, rendered_runs,
+        CompileRequest, PlacedImage, PlacedLine, PlacedRun, compile_paged, compile_pdf,
+        compile_svg_pages, font_dirs, placed_images, placed_lines, placed_pages, rendered_pages,
+        rendered_runs,
     };
     use crate::typeset::ir::{
         AnalysisEntry, AnswerLine, BlankBlock, CalloutBlock, DocumentMeta, QuestionBlock, Section,
         SectionHeader, SubQuestionBlock,
     };
-    use crate::typeset::spec::OutputProfile;
+    use crate::typeset::spec::{Binding, BindingAreas, OutputProfile};
     use std::path::{Path, PathBuf};
 
     /// 1×1 灰块 SVG：注入型素材（`/ext/<n>`）的替身，省掉一张二进制固件
@@ -1431,10 +1609,13 @@ mod tests {
         let s = generate(&sim_doc(spec), &images()).source;
         assert!(s.contains("width: 420mm, height: 297mm"));
         assert!(s.contains("columns: 2"));
-        assert!(s.contains("#set columns(gutter: 12mm)"));
-        // 页码：计数器只能在 context 里求值
-        assert!(s.contains("footer: context align(center)"));
-        assert!(s.contains("第 #counter(page).display(\"1\") 页"));
+        // 折痕上要有 20mm 装订带：预设里 12mm 的栏距被 `column_gutter_mm()` 兜高
+        assert!(s.contains("#set columns(gutter: 20mm)"));
+        // 逻辑页码（T4.7）：一张纸切两格，格宽与栏宽同值，于是每格落在自己那栏正下方
+        assert!(s.contains("footer: context { let p = here().page();"));
+        assert!(s.contains("grid(columns: (1fr, 1fr), gutter: (20mm, 0pt)"));
+        assert!(s.contains("align(left + horizon, [#page-cell(2 * p - 1, 2 * t)])"));
+        assert!(s.contains("align(right + horizon, [#page-cell(2 * p, 2 * t)])"));
     }
 
     #[test]
@@ -2595,6 +2776,340 @@ mod tests {
                     (ref_pitch - 0.2..ref_pitch + 1.6).contains(&gap),
                     "{form}：{from}→{to} 块间距 {gap:.2}mm 与段内行距 {ref_pitch:.2}mm 不等高"
                 );
+            }
+        }
+    }
+
+    // ─────────────────── T4.7 / T4.8 逻辑页与装订带（编译几何）───────────────────
+    //
+    // 一张纸报几个页号、虚线压在哪条竖线上、竖排带子有没有吃掉正文 —— 这些都发生在**页级**，
+    // 源码字符串说了不算，只有帧树能作证。R4 那道门禁就是靠下面几条断言过的。
+
+    /// 页脚里的页码格，按 x 升序：`(页号, y, x)`
+    ///
+    /// 一格在帧树里是一整条明文（实测 `第 #x 页 / 共 #total 页` 不会因数字换字体而被切断），
+    /// 于是「这页有几个页号、各是几号、贴在哪儿」三件事共用一次解析。
+    fn footer_cells(page: &[PlacedRun]) -> Vec<(u32, f64, f64)> {
+        let mut cells: Vec<(u32, f64, f64)> = page
+            .iter()
+            .filter_map(|r| {
+                let (head, _) = r.run.text.split_once(" 页 / 共 ")?;
+                Some((head.strip_prefix("第 ")?.parse().ok()?, r.y_mm, r.x_mm))
+            })
+            .collect();
+        cells.sort_by(|a, b| a.2.total_cmp(&b.2));
+        cells
+    }
+
+    /// 某段文字第一次出现的位置：`(第几张纸, 第几栏)`
+    ///
+    /// 栏号按 x 落在哪一段版心判：`column_x` 是各栏左沿（升序），最后一个不超过它的就是所在栏。
+    fn spot(pages: &[Vec<PlacedRun>], needle: &str, column_x: &[f64]) -> Option<(usize, usize)> {
+        pages.iter().enumerate().find_map(|(sheet, page)| {
+            page.iter().find(|r| r.run.text.contains(needle)).map(|r| {
+                (
+                    sheet,
+                    column_x.iter().rposition(|x| r.x_mm >= *x).unwrap_or(0),
+                )
+            })
+        })
+    }
+
+    /// 对折卷：一张 A3 折成两页，页号按半张编，折痕上有一条虚线和一行竖排填涂信息
+    #[test]
+    fn a3_fold_sheet_reports_two_logical_pages_over_a_fold_band() {
+        let spec = LayoutSpec::preset("a3_fold_exam").unwrap();
+        let (pw, ph) = spec.paper.size_mm();
+        let (w, h) = (f64::from(pw), f64::from(ph));
+        let top = f64::from(spec.margins.top_mm);
+        let left = f64::from(spec.margin_left_mm());
+        let col_w = f64::from(spec.column_width_mm());
+        let gutter = f64::from(spec.column_gutter_mm());
+        let fold = left + col_w + gutter / 2.0;
+        let content_bottom = h - f64::from(spec.margins.bottom_mm);
+        let right_edge = w - f64::from(spec.margins.right_mm);
+        assert!(
+            near(fold, w / 2.0),
+            "对折的折痕就该是纸宽中线：{fold:.1} ≠ {:.1}/2",
+            w
+        );
+
+        let doc = sim_doc(spec);
+        let out = compiled(&doc);
+        let pages = placed_pages(&out);
+        let lines = placed_lines(&out);
+        assert!(
+            pages.len() >= 2,
+            "跨张才验得出「一张两页」的计数：只排出 {} 张",
+            pages.len()
+        );
+        let total = 2 * pages.len();
+
+        for (i, page) in pages.iter().enumerate() {
+            let cells = footer_cells(page);
+            assert_eq!(cells.len(), 2, "第 {} 张纸的页脚格数：{cells:?}", i + 1);
+            // 号按半张编：左半 = 2i+1、右半 = 2i+2，与这张纸本身是第几号奇偶无关
+            assert_eq!(cells[0].0, 2 * i as u32 + 1, "左半页号：{cells:?}");
+            assert_eq!(cells[1].0, 2 * i as u32 + 2, "右半页号：{cells:?}");
+            for run in page.iter().filter(|r| r.run.text.contains("页 / 共")) {
+                assert!(
+                    run.run.text.ends_with(&format!(" 页 / 共 {total} 页")),
+                    "共 Y 页该按逻辑页报：{}",
+                    run.run.text
+                );
+            }
+            assert!(
+                cells.iter().all(|c| c.1 > content_bottom),
+                "页脚不许挤进版心：{cells:?}"
+            );
+            assert!(
+                near(cells[0].1, cells[1].1),
+                "两格不在一条基线上：{cells:?}"
+            );
+            // 外侧 = 折痕的对边（与单栏双面印正好相反），而且逐张都不翻转
+            assert!(
+                near(cells[0].2, left),
+                "左半页页码没贴纸的左沿：x={:.1}",
+                cells[0].2
+            );
+            assert!(
+                cells[1].2 > right_edge - 30.0 && cells[1].2 < right_edge,
+                "右半页页码没贴纸的右沿：x={:.1} 右沿={right_edge:.1}",
+                cells[1].2
+            );
+            let rules: Vec<&PlacedLine> = lines[i]
+                .iter()
+                .filter(|l| l.dx_mm.abs() < 0.01 && l.dy_mm > 10.0)
+                .collect();
+            assert_eq!(rules.len(), 1, "第 {} 张纸的竖线：{rules:?}", i + 1);
+            let rule = rules[0];
+            assert!(
+                near(rule.x_mm, fold),
+                "折痕线不在中线上：x={:.1}",
+                rule.x_mm
+            );
+            assert!(
+                near(rule.y_mm, top) && near(rule.dy_mm, content_bottom - top),
+                "折痕线没盖满版心高：y={:.1} len={:.1}",
+                rule.y_mm,
+                rule.dy_mm
+            );
+            assert!(rule.dash_mm.is_some(), "密封线得是虚线：{rule:?}");
+            // 竖排填涂带：整张纸里只有它一家住在栏距那条带子里
+            let band: Vec<&PlacedRun> = page
+                .iter()
+                .filter(|r| r.x_mm >= left + col_w && r.x_mm < left + col_w + gutter)
+                .collect();
+            assert_eq!(band.len(), 1, "栏距里不该有正文：{band:?}");
+            assert!(
+                near(band[0].x_mm, fold - 2.0),
+                "填涂带没贴在线的左侧：x={:.1}",
+                band[0].x_mm
+            );
+            for field in ["学校", "班级", "姓名", "考号", "密封装订线，请勿折叠"]
+            {
+                assert!(
+                    band[0].run.text.contains(field),
+                    "装订带少了「{field}」：{}",
+                    band[0].run.text
+                );
+            }
+        }
+        // 双栏自然流动：先左栏到底、再右栏、再下一张
+        let columns = [left, left + col_w + gutter];
+        let first = spot(&pages, "第 1 题", &columns).expect("第 1 题没上纸");
+        let last = spot(&pages, "第 20 题", &columns).expect("第 20 题没上纸");
+        assert!(
+            first < last && first.1 == 0,
+            "阅读顺序不是「左栏 → 右栏 → 下一张」：{first:?} → {last:?}"
+        );
+    }
+
+    /// 一张纸一页时反过来：奇数页是正面，外沿在右；偶数页是背面，外沿在左
+    #[test]
+    fn duplex_sheets_align_page_numbers_on_the_outer_edge() {
+        let mut doc = pair_doc(BlockMeta::flow(), 12, Vec::new());
+        doc.spec.columns = 1;
+        doc.spec.header_footer.page_number = true;
+        doc.spec.header_footer.odd_even_outer = true;
+        let pages = placed_pages(&compiled(&doc));
+        assert!(
+            pages.len() >= 2,
+            "验不出奇偶交替：只排出 {} 页",
+            pages.len()
+        );
+        let left = f64::from(doc.spec.margin_left_mm());
+        let right_edge =
+            f64::from(doc.spec.paper.size_mm().0) - f64::from(doc.spec.margins.right_mm);
+        for (i, page) in pages.iter().enumerate() {
+            let cells = footer_cells(page);
+            assert_eq!(cells.len(), 1, "第 {} 页的页脚格数：{cells:?}", i + 1);
+            assert_eq!(cells[0].0, i as u32 + 1, "单栏的页号就是物理页号");
+            let x = cells[0].2;
+            if i % 2 == 0 {
+                assert!(
+                    x > right_edge - 30.0 && x < right_edge,
+                    "奇数页页码没贴右边：第 {} 页 x={x:.1} 右沿={right_edge:.1}",
+                    i + 1
+                );
+            } else {
+                assert!(near(x, left), "偶数页页码没贴左边：x={x:.1}");
+            }
+        }
+    }
+
+    /// 装订带的几何：两种装订位各自把线摆在哪、左边距让出多少，逐字段在源码里核账
+    #[test]
+    fn sealing_line_arguments_follow_the_binding_position() {
+        let fold = LayoutSpec::preset("a3_fold_exam").unwrap();
+        let s = generate(&sim_doc(fold), &HashMap::new()).source;
+        // 折痕 = 纸宽中线 210，竖直跨度就是版心高（297 − 18 − 18）
+        assert!(
+            s.contains(", background: sealing-line(210mm, 18mm, 261mm, "),
+            "对折中线：{s}"
+        );
+        assert!(
+            s.contains("rotate(90deg, origin: top + left)"),
+            "竖排带子必须绕自己的左上角转：默认绕中心会把整条带子甩出栏外"
+        );
+        // 对折的带子吃的是栏距，不是页边距
+        assert!(s.contains("left: 16mm"));
+        assert!(s.contains("#set columns(gutter: 20mm)"));
+
+        // 三栏卷走左侧装订：带子加在左边距之外，栏距用不着兜高
+        let tri = LayoutSpec::preset("a3_tri_exam").unwrap();
+        let t = generate(&sim_doc(tri), &HashMap::new()).source;
+        assert!(t.contains("left: 34mm"), "14mm 左边距 + 20mm 带子：{t}");
+        assert!(
+            t.contains("#set columns(gutter: 10mm)"),
+            "Left 装订不吃栏距"
+        );
+        assert!(
+            t.contains(", background: sealing-line(18mm, 18mm, 261mm, "),
+            "左侧装订的线贴带子右沿"
+        );
+        // 三栏是一张纸一页：页脚只切一格，奇偶外侧没开就恒在格心
+        assert!(
+            t.contains("align(center + horizon, [#page-cell(p, t)])"),
+            "{t}"
+        );
+    }
+
+    /// 左侧装订：带子躺在**加出来的**左边距里，正文整块右移，谁都不许压着谁
+    #[test]
+    fn left_binding_keeps_the_band_outside_the_text() {
+        let mut doc = pair_doc(BlockMeta::flow(), 1, Vec::new());
+        doc.spec.columns = 1;
+        doc.spec.binding = Some(Binding {
+            position: BindingPosition::Left,
+            areas: BindingAreas {
+                school: true,
+                class_name: true,
+                name: true,
+                exam_no: true,
+            },
+        });
+        let band = f64::from(SEALING_BAND_MM);
+        let out = compiled(&doc);
+        let pages = placed_pages(&out);
+        let lines = placed_lines(&out);
+        assert_eq!(pages.len(), 1, "单题卷只有一页，别把页脚算重");
+        assert!(
+            near(
+                f64::from(doc.spec.margin_left_mm()),
+                f64::from(doc.spec.margins.left_mm) + band
+            ),
+            "正文没给带子让路"
+        );
+
+        let rule = lines[0]
+            .iter()
+            .find(|l| l.dx_mm.abs() < 0.01)
+            .expect("左侧装订没画出竖虚线");
+        assert!(
+            near(rule.x_mm, band - 2.0),
+            "虚线该贴在带子右沿：x={:.1}",
+            rule.x_mm
+        );
+        assert!(rule.dash_mm.is_some(), "密封线得是虚线：{rule:?}");
+        let label = pages[0]
+            .iter()
+            .find(|r| r.run.text.contains("密封装订线"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "装订带文字没上纸：{}",
+                    pages[0]
+                        .iter()
+                        .map(|r| r.run.text.as_str())
+                        .collect::<String>()
+                )
+            });
+        assert!(
+            near(label.x_mm, band - 4.0) && label.y_mm > 0.0,
+            "填涂带该整条落在页面左侧的带子里：x={:.1} y={:.1}",
+            label.x_mm,
+            label.y_mm
+        );
+        for run in pages[0]
+            .iter()
+            .filter(|r| !r.run.text.contains("密封装订线"))
+        {
+            assert!(
+                run.x_mm >= band,
+                "正文压进了装订带：x={:.1} {:?}",
+                run.x_mm,
+                run.run.text
+            );
+        }
+    }
+
+    /// 对折纸排成三栏：页号按「每栏一页」编就会与折痕错位，必须出声（R4）
+    #[test]
+    fn fold_paper_with_a_foreign_column_count_warns() {
+        let three = LayoutSpec {
+            columns: 3,
+            ..LayoutSpec::preset("a3_fold_exam").unwrap()
+        };
+        let g = generate(&sim_doc(three), &HashMap::new());
+        let issue = g
+            .issues
+            .iter()
+            .find(|i| i.field == IssueField::Structure)
+            .expect("栏数与折痕对不上必须记 Issue");
+        assert_eq!(issue.severity, IssueSeverity::Warning);
+        assert!(issue.reason.contains("折痕"), "{}", issue.reason);
+        // 正常预设不许有这条：静默才是默认状态
+        let two = LayoutSpec::preset("a3_fold_exam").unwrap();
+        let g = generate(&sim_doc(two), &HashMap::new());
+        assert!(
+            g.issues.iter().all(|i| i.field != IssueField::Structure),
+            "{:?}",
+            g.issues
+        );
+    }
+
+    /// 样张（人眼验收）：两种 A3 装订版式各出一张 SVG 到临时目录
+    ///
+    /// 帧树断言证得了「线在哪、字在哪」，证不了「看着对不对」。要看真东西：
+    /// `cargo test --lib typeset::typst_gen::tests::writes_fold_and_seal_samples -- --ignored --nocapture`
+    #[test]
+    #[ignore = "往临时目录写样张，不参与常规回归"]
+    fn writes_fold_and_seal_samples() {
+        let dir = std::env::temp_dir().join("mathset-t47-samples");
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, id) in [("对折", "a3_fold_exam"), ("三栏左装订", "a3_tri_exam")] {
+            let doc = sim_doc(LayoutSpec::preset(id).unwrap());
+            let generated = generate(&doc, &HashMap::new());
+            let dirs = font_dirs();
+            let req = request(&generated.source, &dirs, &[]);
+            let pages = match compile_svg_pages(&req) {
+                Ok(out) => out.output,
+                Err(err) => panic!("{name} 编译失败：{:?}", err.diagnostics),
+            };
+            for (i, svg) in pages.iter().enumerate() {
+                let path = dir.join(format!("{name}-第{}张.svg", i + 1));
+                std::fs::write(&path, svg).unwrap();
+                println!("{}", path.display());
             }
         }
     }

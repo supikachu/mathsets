@@ -58,8 +58,8 @@ heading: string,
 math: string, };
 
 /**
- * 页眉页脚开关。动态页眉取当前大题名（T4.10）与按逻辑页判定的奇偶外侧对齐（T4.7）尚未实现，
- * 字段先按 §6.1 定齐，免得 M4 再改前端 TS 类型
+ * 页眉页脚开关。页码按**逻辑页**计（T4.7 / R4：A3 对折的一张纸报两页号），奇偶外侧对齐同期
+ * 落地；只剩动态页眉取当前大题名（T4.10）还没接
  */
 export type HeaderFooter = { 
 /**
@@ -99,7 +99,7 @@ gutter_mm: number, };
 export type OutputProfile = "student" | "teacher" | "exam";
 
 /**
- * 纸张：M3 基础版只用 `A4`；两档 A3 的字段先定齐，对折与三栏的版式在 T4.7/T4.8 落地
+ * 纸张：A3 两档都按长边横置出纸；一张纸算几个「逻辑页」由 `Paper::logical_slots_per_sheet` 定
  */
 export type Paper = "a4" | "a3_fold" | "a3_tri";
 

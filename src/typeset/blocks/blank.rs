@@ -23,7 +23,7 @@
 //! 印两遍。
 
 use crate::export::model::{AnswerSpace, BlankStyle as WireBlankStyle, ExamQuestion};
-use crate::typeset::blocks::{BlockCtx, Policy, Registry};
+use crate::typeset::blocks::{BlockCtx, Policy};
 use crate::typeset::ir::BlankBlock;
 use crate::typeset::spec::{BlankStyle, LayoutSpec, OutputProfile, ResolvedBlank};
 
@@ -72,6 +72,7 @@ fn style_of(s: WireBlankStyle) -> BlankStyle {
 mod tests {
     use super::*;
     use crate::export::model::{ExportOptions, QuestionKind};
+    use crate::typeset::blocks::Registry;
     use crate::typeset::spec::LayoutSpec;
 
     fn space(style: WireBlankStyle, height_cm: f64) -> Option<AnswerSpace> {
