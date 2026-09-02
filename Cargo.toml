@@ -80,6 +80,18 @@ latex2mathml = "0.2"
 roxmltree = "0.21.1"
 quick-xml = "0.42.0"
 
+# ── 排版系统（模块 B）：Typst 内核（T3.1）──────────────────────────────
+# 版本按实施时 crates.io 稳定版锁定；升级要同步 typst / typst-pdf / typst-svg / typst-assets
+# 四个同批发布的 crate，且核对 comemo 与 typst 传递依赖仍是同一主版本（否则 trait 签名对不上）
+typst = "0.15.1"          # 编译器与 World trait
+typst-pdf = "0.15.1"      # Document → PDF 字节（默认全字体内嵌）
+typst-svg = "0.15.1"      # 逐页 SVG，供预览
+typst-assets = "0.15.1"   # 内嵌 New Computer Modern（拉丁/数学）；中文字体走 assets/fonts 运行时读（R6）
+mitex = "0.2.4"           # LaTeX math → Typst math 源码，不依赖 typst 本体
+comemo = "0.5.1"          # typst 增量缓存的 peer 依赖
+ecow = "0.2"              # typst 公开签名里的 Sm / Arc 字符串类型；必须跟 typst 的传递依赖同主版本
+                          # （钉 0.3 会同时编进两份 ecow，`Sm` 变成两个不同类型，World 实现直接对不上）
+
 [dev-dependencies]
 # Axum 测试工具（oneshot 调用 Router）
 tower = { version = "0.5", features = ["util"] }
