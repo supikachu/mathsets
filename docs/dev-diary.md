@@ -951,3 +951,96 @@ docx **没有 `?bundle=` 开关** —— 图片一律内嵌进 OPC 包，包本�
 
 M2 到此交付完：`LaTeX →(规范化 + latex2mathml)→ Presentation MathML →(MML2OMML 等价转换器)→ OMML → OOXML`，
 Word 与 WPS 里公式可编辑，一枚坏公式只降级不失败整卷。M3 是排版系统与 PDF 委托。
+
+## 2026-09-02 导出引擎 M3（排版内核与 PDF 基础版）
+
+### 一、T3.1 typst 全家桶依赖引入与构建耗时基线（P4）
+
+版本按实施时 crates.io 稳定版锁：`typst` / `typst-pdf` / `typst-svg` / `typst-assets` = **0.15.1**，
+`mitex` = **0.2.4**（计划 §依赖清单写的 `0.3` 当时尚未发布，不是笔误），`comemo` 0.5.1，`ecow` 0.2。
+
+**ecow 必须跟 typst 的传递依赖同主版本**。一开始照最新钉 0.3.0，`Cargo.lock` 里同时编进 0.2.6 与 0.3.0 两份，
+实现 `World` 时报的是「两个不同的类型相遇」—— 因为 typst 0.15 的签名用的是 0.2 的 `EcoString` / `Sm`。
+最坏的是报错点在使用处而不是依赖声明处，回看要绕一圈。现在回钉 0.2 并在 `Cargo.toml` 注释里写明这条约束。
+
+构建耗时（P4 要求实测，不测就不知道代价）：`Cargo.lock` 361 → 545 个包（+184）；dev 首次含新依赖全量构建
+**10m54s** 退出码 0；release 首次全量 **19.9 分钟** 编完依赖树，修复后 release 增量重建 **2m55s**。
+两个 profile 都不需要额外的 Windows 原生工具链 —— 新增依赖里唯一的 `-sys` 是 `linux-raw-sys`
+（target-gated，Windows 根本不参与编译），typst 的字体/图形栈（`rustybuzz` / `ttf-parser` /
+`resvg` / `pdf-writer` / `zlib-rs`）全是纯 Rust。副作用记一笔：typst 的 feature 统一把 `image` 重新编了一遍
+（多解了几种格式），这是构建时长与产物体积的常态成本，不是配置错了。
+
+`World` trait 摸底（供 T3.5）：0.15.1 是 **7 个方法**（`library` / `book` / `main` / `source` / `file` /
+`font` / `today`）；PDF 出口 `typst_pdf::pdf(&PagedDocument, &PdfOptions)`；`mitex::convert_math` 返回
+`Result<String, String>`，与本项目 `MathOutcome` 的 Ok/Failed 口径天然对齐。
+
+### 二、T3.2 `LayoutSpec` 九字段与四内置预设
+
+`src/typeset/spec.rs`：§6.1 字段定齐（`paper` / `columns` / `margins` / `binding` / `header_footer` /
+`profile` / `fonts` / `answer_blank` / `color`）+ 4 预设（A4 讲义单栏、A4 练习双栏、A3 对折双栏考卷、
+A3 三栏考卷）+ `for_profile()` 的 mode→默认 spec 映射（讲义 A4 单栏、学生 A4 双栏、考卷 A3 对折双栏）。
+**依赖方向守死：typeset 不 import export** —— `ExportMode → OutputProfile` 的翻译留给适配器（T3.3），
+spec.rs 只交出合并规则，一个 export 符号都不碰。
+
+B5 留白合并落成 `resolve_blank(options_height_cm)`，口径是**开关在 options 手里**：`None` 就不留白
+（spec 的兜底高度不许自己生效，否则「没勾留白」的卷会被 spec 悄悄加一块石板），`Some(h)` 才留白；
+`h` 非正数视为「没填高度」退回 spec 的 6cm；样式恒取 spec。三档都有断言。
+
+版心宽只有一处算法：`column_width_mm() = (纸宽 − 左右边距 − (n−1)×栏距) / n`，A4 单栏 174 / A4 双栏 86 /
+A3 三栏 124 各一条断言；`column_gutter_mm()` 在单栏时归零，免得母版写出没有意义的 `column-gutter`。
+覆盖语义是字段级的：所有嵌套结构都 `#[serde(default)]`，只给 `{"binding":{"position":"center_fold"}}`
+也能反序列化，未知键一律忽略 —— 前端会带未来版本的键，400 不是正确表现。
+
+ts-rs 导出 `frontend/src/api/types/layout.ts`（14 个类型，B6），`ExamRequest.spec` 从「透传 JSON 占位」
+改成 `Option<LayoutSpec>` + `#[ts(optional)]`（前端是可缺省键而不是 `LayoutSpec | undefined`）。
+测试 12 例 + 预设序列化固件 `tests/snapshots/layout_presets.json`；固件是**编译期 `include_str!`** 读的，
+改预设会先编不过，所以重生成走一枚 `#[ignore]` 的写盘用例。
+
+偏离计划一处：§6.1 纸张注里的「双面标记」没做成字段 —— M3 无人消费它，奇偶外侧对齐属 T4.7，
+届时随逻辑页码一起加，避免空字段先进前端类型。
+
+### 三、T3.3 `LayoutDoc` IR 与两域之间唯一的桥
+
+`src/typeset/ir.rs`（排版域）三条不变式写在模块头：**① 没有裸文本**，一切文字到 IR 已是 `InlineNode`
+（公式在导出域就归一过了，typeset 不再解析 stem）；**② 每个块自带 `BlockMeta{breakable, keep_with_next}`**，
+母版不需要回头查上下文，四档语义构造子 `flow()` / `attach()` / `glued()` / `solid()`；**③ 线性块序列**，
+分页、跨栏、藏答案由下游 `typst_gen`（T3.6）按 spec 决定，IR 不掺和版式细节。
+
+`src/export/pdf.rs` 是 `ExamBundle → LayoutDoc` 的**唯一桥**，反向依赖为零：typeset 只借用 `export::model`
+里的纯数据类型（`InlineNode` / `ExamOption` / `Callout`），不碰 assembler / generator / handler。这条方向在
+两个模块头都写死了 —— 不写下来的话，迟早有人图省事从 typeset 里 import 装配器，那时两个域就焊死了。
+
+B5 在这座桥上落地：留白的**开关与高度**在 `options.answer_space`（题级 override 优先于卷级），
+**样式**恒取 `spec.answer_blank`；两者冲突时 options 赢，并且只补**一枚卷级 `Info`** 而不是每题一枚 ——
+警告要进 `X-Export-Warnings` 头，B3 的 8KB 截断线经不起逐题刷。教师讲义（`profile == Teacher`）整卷不留白，
+答案直接折进解析块。答案两条路各自独立：`answer_at_end` → `doc.answer_key`（卷末），否则题干后紧跟一块
+`LayoutBlock::Answer`；`include_answer` 只管答案、不管解析，这条在 markdown 里已经踩过，IR 层用断言钉住。
+
+选项栅格与 docx **共用同一个决策**：`choice_grid::decide` 的可用宽从 `spec.column_width_mm()` 换算，新增
+`MM_PER_EM = 3.7` 与 `em_from_mm()`（1em = 10.5pt ≈ 3.7mm），再减掉 hanging 缩进 2em（与 docx 的
+`INDENT_TWIPS = 420` 对齐）。同一份卷在 `a4_lecture` 排 4 列、在 `a3_tri_exam` 排 2 列 —— 两个出口各自
+判一次列数是迟早会漂的那种重复。测试 16 例（块形状 5 / spec 3 / 留白 4 / 答案 3 / 退化输入 1），
+`cargo test --lib --offline` = 587 passed / 0 failed / 4 ignored。
+
+偏离计划一处：`ExamRequest.spec` 的合并语义从「字段级覆盖」改成**整体替换**。字段级合并要把九个嵌套结构
+都写一遍 merge，而 M4 之前唯一的消费者是前端预览，它总是带整套 spec 过来；换成整体替换后 `resolve_spec`
+只有三行，代价是前端只能带完整对象 —— 反正所有结构都 `#[serde(default)]`，缺键即取默认值，不会 400。
+`model.rs` 字段注释与 `exam.ts` 同步更新（ts-rs 会把 Rust 文档注释原样抄进 `.ts`，改注释就得重跑绑定测试）。
+
+### 四、踩坑记录：`cargo fmt -- <file>` 在这个仓库会把全仓库格式化了
+
+想只格式化新增的两个文件，跑的是：
+
+```bash
+cargo fmt -- src/export/pdf.rs src/typeset/ir.rs src/typeset/mod.rs
+```
+
+结果 `git diff` 变成 **91 个文件 / +3894 / −2531**。`cargo fmt -- <args>` 是把 args 透传给 rustfmt 而不是
+限定范围，而本仓库**有意不是 rustfmt-clean 的**（已提交排版里有大量手工折行，`markdown.rs` 与
+`handlers/export.rs` 各有若干处 rustfmt 差异是既成口径），所以 rustfmt 一上来就把全仓库按默认风格重排了。
+
+先确认噪声是纯 reflow（抽查 `git diff src/config.rs` —— 只有换行没有语义变化），再
+`git checkout -- $(git diff --name-only | grep -v -E '^(src/export/mod\.rs|src/typeset/mod\.rs|src/typeset/blocks/choice_grid\.rs)$')`
+收回来，只留 3 处有意改动 + 2 个未跟踪新文件。**这个仓库里格式化单个文件请用**
+`rustfmt --edition 2024 <files>`（`--check` 用于验证），不要碰 `cargo fmt`。
+
