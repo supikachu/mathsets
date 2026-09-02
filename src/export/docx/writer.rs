@@ -1053,7 +1053,10 @@ fn extent(nat: (u32, u32), want_px: Option<u32>) -> (u32, u32) {
 }
 
 /// 分值表的大题列名：优先用标题里的「一、二、…」前缀，否则退化成序号
-fn section_key(title: &str, idx: usize) -> String {
+///
+/// PDF 侧的首页分值汇总表（`typeset::typst_gen`）共用这一份口径：同一张卷子的两种格式，
+/// 列名不许一边是「一」一边是「1」。
+pub(crate) fn section_key(title: &str, idx: usize) -> String {
     let head = title.trim().split(['、', '.', ' ']).next().unwrap_or("");
     let usable = head.chars().count() <= 4
         && !head.is_empty()

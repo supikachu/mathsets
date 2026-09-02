@@ -1112,14 +1112,17 @@ mod tests {
     /// 一张纸面上可观测的四件事
     ///
     /// `text` 只收文本帧：公式在帧树里是 mitex 画出来的形状，断言别指望 `$a_1$` 那样的原文能
-    /// 搜到。`rules` 只数通宽横线——目前全卷唯一会画它们的就是留白（卷头注意事项框的上下两条
-    /// 边也算，所以矩阵用例把注意事项清空了）。
+    /// 搜到。`rules` 只数通宽横线，且按粗细剔掉卷头表格与注意事项框的 0.4pt 边框 —— 纸上会画
+    /// 出 ≥0.5pt 通宽横线的只有留白与密封线，这条口径与 typst_gen 侧的 `RULE_MIN_MM` 同源。
     struct Paper {
         text: String,
         rules: usize,
         blanks: usize,
         key: usize,
     }
+
+    /// 0.5pt 的毫米数减去一点容差：0.4pt 的表格边框落不进来了
+    const RULE_MIN_MM: f64 = 0.5 * 25.4 / 72.0 - 0.01;
 
     /// 三个模式各自「前端会发出来的那一组开关」（§四，与 `ExportDialog.pickMode` 同源）
     fn mode_options(mode: ExportMode) -> ExportOptions {
@@ -1223,7 +1226,7 @@ mod tests {
             rules: placed_lines(&out)
                 .into_iter()
                 .flatten()
-                .filter(|l| l.dy_mm.abs() < 0.01 && l.dx_mm > 10.0)
+                .filter(|l| l.dy_mm.abs() < 0.01 && l.dx_mm > 10.0 && l.thickness_mm > RULE_MIN_MM)
                 .count(),
             blanks: doc
                 .sections

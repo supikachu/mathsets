@@ -42,6 +42,7 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
+use crate::export::docx::writer::section_key;
 use crate::export::model::{
     CalloutKind, ExamOption, ImageAlign, InlineImage, InlineNode, Issue, IssueField, IssueSeverity,
     TableAlign,
@@ -115,8 +116,8 @@ const PAGE_FURNITURE: &str = r#"
 /// 走 page `background` 而不是正文流：背景帧**每页一枚、与页面等大、按绝对坐标摆放**（实测
 /// typst-layout `pages/run.rs` 用 `full_size` 排 background、`pages/finalize.rs` 把它挂在
 /// `bleed_origin` = 页面左上角），于是一条 20mm 的带子既不占版心也不进分栏流动。想让带子不进栏，
-/// 除了背景没有第二条路：columns 容器里 `pagebreak` 会直接报错（见 `Gen::prologue` 里那段
-/// 「栏数走页级」的实测说明）。
+/// 除了背景没有第二条路：栏数自 R8 起走 columns 容器，而容器里 `#pagebreak` 直接报错，
+/// 正文流因此切不成「带子之前 / 之后」两段（实测说明见 `Gen::prologue`）。
 ///
 /// `rotate(90deg, origin: top + left)` 把整行转竖，读时头向右偏 —— 中文卷子密封线的常见朝向。
 /// 旋转原点必须是**文字框自己的左上角**：默认的 center 会把锚点甩到框中心，实测想放 (192, 18) 的
@@ -287,10 +288,37 @@ const FUNCTION_LIBRARY: &str = r#"
   paint: luma(150), thickness: dot, cap: "round", dash: ("dot", gap)))
 #let blank-space(h) = block(width: 100%, height: h, above: 0.7em, breakable: false)
 
-/// 卷头（简化版）：题名 + 副题 + 一行元信息 + 注意事项。
-/// 考卷的学校 / 班级 / 姓名 / 考号不占卷头，它们画在装订带上（`sealing-line`）；T4.9 补的是
-/// 完整卷头的排布（分值表、考号条码区）。
-#let masthead(title, subtitle: none, meta: none, instructions: ()) = block(
+/// 卷头用的等宽小表（考生信息栏 / 分值汇总表）：一行数组就是一行单元格。
+/// 边框、字号、居中口径与 docx 侧 `plain_table` 同一套 —— 同一张卷子的两种格式不该两张脸。
+/// 轨道全给 `1fr`：0.15 的 `table` **没有** `width` 参数（实测读 `model/table.rs`），默认的
+/// auto 轨道会按内容收缩成一小条（实测「合计」只排到 x=52），而 docx 那张表铺满版心宽。
+#let header-table(rows) = block(width: 100%, above: 5pt)[
+  #set text(size: 9.5pt)
+  #table(
+    columns: range(rows.at(0).len()).map(_ => 1fr),
+    inset: (x: 4pt, y: 2.5pt),
+    align: center,
+    stroke: 0.4pt + luma(170),
+    ..rows.flatten()
+  )
+]
+
+/// 首页大卷头（§6.3 / T4.9）：试卷名 / 元信息 / 考生信息栏 / 大题分值汇总表 / 考试说明。
+///
+/// 母版分离在 0.15 没有 `page(first:)`，所以「首页与后续页不同」靠的是**排在分栏容器之外**
+/// （见 `Gen::body` 与实施计划 R8）：容器之前的那一段拿的是页级单栏的整幅宽，容器之后才分栏。
+/// 折痕落在版心里（`CenterFold`）时卷头不许通栏 —— 那会压上每页都画的密封线，由 `Gen::body`
+/// 把这一段改塞进容器首栏，模板自己不判。
+#let masthead(
+  title,
+  subtitle: none,
+  meta: none,
+  info: (),
+  score-keys: (),
+  score-vals: (),
+  score-total: none,
+  instructions: (),
+) = block(
   width: 100%,
   below: 8pt,
 )[
@@ -298,6 +326,15 @@ const FUNCTION_LIBRARY: &str = r#"
   #align(center)[#text(font: heading-font, size: 16pt, weight: "bold")[#title]]
   #if subtitle != none { align(center)[#text(size: 10.5pt, fill: luma(70))[#subtitle]] }
   #if meta != none { align(center)[#text(size: 9.5pt)[#meta]] }
+  #if info.len() > 0 { header-table((info,)) }
+  #if score-keys.len() > 0 {
+    // 三行：题号 / 分值 / 得分。得分行恒空 —— 留给监考手填，与 docx 侧同一张表
+    header-table((
+      ("题号",) + score-keys + ("合计",),
+      ("分值",) + score-vals + (score-total,),
+      ("得分",) + range(score-keys.len() + 1).map(_ => ""),
+    ))
+  }
   #if instructions.len() > 0 {
     block(
       width: 100%,
@@ -386,16 +423,16 @@ impl Gen<'_> {
         s.push_str(&format!("#let accent = {accent}\n"));
         s.push_str(&format!("#let analysis-ink = {analysis}\n"));
 
-        // 页面：纸张 + 栏数 + 边距 + 页码。
+        // 页面：纸张 + 边距 + 页码。**栏数恒 1**（R8）：分栏下沉到正文外层的 `#columns(n)`
+        // 容器（见 `Gen::in_columns`），首页大卷头才能与同张纸上的多栏正文并存。
         //
-        // 栏数走**页级** `columns`（typst 在 `pages/run.rs` 里同时读 `PageElem::columns` 与
-        // `ColumnsElem::gutter`，后者就是一枚 `#set columns`）。不用 `#columns(2)[…]` 包壳：
-        // 那是一个布局容器，容器里 `#pagebreak` 直接报
-        // "pagebreaks are not allowed inside of containers"（实测）—— 卷末答案就没法另起一页，
-        // T4 的脚注与行号同样会在容器里失效。
+        // 两条实测挡在前面的路：0.15 的 `PageElem` 没有 `first` 字段（母版分离参数早在
+        // 0.14 就没了）；flow 中途 `#set page(columns:)` 的生效点是**下一页**。而
+        // `#columns(2)[…]` 容器里 `#pagebreak` 会直接报
+        // "pagebreaks are not allowed inside of containers"（实测），所以卷结构固定为
+        // 「通栏卷头 → 正文容器 → 页级 `#pagebreak` → 答案区容器」，分页符一律留在容器外。
         let mut page = format!(
-            "#set page(width: {w}mm, height: {h}mm, columns: {}, margin: (top: {}mm, right: {}mm, bottom: {}mm, left: {}mm)",
-            spec.columns.max(1),
+            "#set page(width: {w}mm, height: {h}mm, columns: 1, margin: (top: {}mm, right: {}mm, bottom: {}mm, left: {}mm)",
             mm(m.top_mm),
             mm(m.right_mm),
             mm(m.bottom_mm),
@@ -412,20 +449,16 @@ impl Gen<'_> {
             page.push_str(&self.footer());
         }
         if spec.header_footer.header_title {
-            // 静态近似：整份文档一个页眉（取卷名）。逐栏取当前大题名是 T4.10。
+            // 首页不出现页眉（T4.9）：大卷头就是那一页的页眉，再压一行卷名只剩拥挤。
+            // 条件页眉实测可行 —— `here().page()` 是**物理**张号，与卷头占的那一张同口径。
+            // 逐张取当前大题名（真·动态页眉）是 T4.10，届时换掉这里的静态卷名。
             page.push_str(&format!(
-                ", header: align(center)[#text(size: 9pt, fill: luma(120))[#({})]]",
+                ", header: context {{ if here().page() != 1 {{ align(center)[#text(size: 9pt, fill: luma(120))[#({})]] }} }}",
                 typst_str(&doc.title)
             ));
         }
         s.push_str(&page);
         s.push_str(")\n");
-        // 栏距与栏数同处一页级口径：`ColumnsElem::gutter` 就是 typst 读的那枚 set 规则，
-        // 单栏时 `column_gutter_mm()` 已经归零，写一条 0 的规则不改版面。
-        s.push_str(&format!(
-            "#set columns(gutter: {}mm)\n",
-            mm(spec.column_gutter_mm())
-        ));
 
         s.push_str(r#"#set text(font: body-font, size: 10.5pt, lang: "zh", region: "cn")"#);
         s.push('\n');
@@ -513,8 +546,8 @@ impl Gen<'_> {
     /// - `CenterFold`：虚线画在第 1、2 栏的分界上 = 对折后的折痕，文字带放在线的左侧；栏距由
     ///   `column_gutter_mm()` 兜到不低于带宽，线才不会压上左右两栏正文。
     ///
-    /// 每页都画：一张 A3 折成两页后每个对折面都得能认卷，这与真实考卷一致；首页母版分离是
-    /// T4.9 的事。
+    /// 每页都画：一张 A3 折成两页后每个对折面都得能认卷，这与真实考卷一致。带子与首页大卷头
+    /// 的相对位置由 [`Gen::seal_crosses_content`] 管 —— 折痕竖在版心里时卷头不许通栏。
     fn sealing(&self) -> Option<String> {
         let spec = self.spec;
         let binding = spec.binding?;
@@ -578,14 +611,24 @@ impl Gen<'_> {
     // ------------------------------------------------------------ 正文骨架
 
     fn body(&mut self, doc: &LayoutDoc) -> String {
-        let mut b = String::new();
-        b.push_str(&self.masthead(doc));
+        let masthead = self.masthead(doc);
+        let mut sections = String::new();
         for section in &doc.sections {
-            b.push_str(&self.section(section));
+            sections.push_str(&self.section(section));
+        }
+        let mut b = String::new();
+        if self.seal_crosses_content() {
+            // 折痕竖在版心正中，通栏卷头会横压上去（密封线每页都画）—— 卷头只能待在首栏里
+            b.push_str(&self.in_columns(format!("{masthead}{sections}")));
+        } else {
+            b.push_str(&masthead);
+            b.push_str(&self.in_columns(sections));
         }
         if doc.has_answer_key() {
+            // 分页符留在容器之外：`#columns(…)[ … #pagebreak … ]` 是编译错误（实测）
             b.push_str("#pagebreak(weak: true)\n");
-            b.push_str(&format!(
+            let mut key = String::new();
+            key.push_str(&format!(
                 "#section-header({}, {})\n",
                 typst_str("参考答案与解析"),
                 typst_str(&format!("共 {} 题", doc.question_count()))
@@ -593,10 +636,38 @@ impl Gen<'_> {
             for answer in &doc.answer_key {
                 self.number = Some(answer.number);
                 self.field = IssueField::Answer;
-                b.push_str(&self.answer(answer));
+                key.push_str(&self.answer(answer));
             }
+            b.push_str(&self.in_columns(key));
         }
         b
+    }
+
+    /// 折痕是否竖在版心里（T4.9）：`CenterFold` + 多栏时，中线那条装订带把整幅宽切开了
+    fn seal_crosses_content(&self) -> bool {
+        let spec = self.spec;
+        spec.columns.max(1) > 1
+            && spec
+                .binding
+                .is_some_and(|b| b.position == BindingPosition::CenterFold)
+    }
+
+    /// 分栏容器（R8）：页级母版恒单栏，栏数与栏距都在这一层落地
+    ///
+    /// 单栏不包壳：容器与页级单栏排出来一模一样，多一层壳只是给 `#pagebreak` 添一处雷。
+    /// 栏距取 [`column_gutter_mm`](LayoutSpec::column_gutter_mm)，与页脚切格同一个数 ——
+    /// 两处不同源的话，A3 对折的页码就会偏离自己那一栏的正下方。
+    fn in_columns(&self, inner: String) -> String {
+        let n = self.spec.columns.max(1);
+        if n <= 1 {
+            return inner;
+        }
+        format!(
+            "#columns({}, gutter: {}mm)[\n{}\n]\n",
+            n,
+            mm(self.spec.column_gutter_mm()),
+            inner
+        )
     }
 
     fn masthead(&mut self, doc: &LayoutDoc) -> String {
@@ -610,20 +681,73 @@ impl Gen<'_> {
         if !meta.is_empty() {
             s.push_str(&format!(", meta: {}", typst_str(&meta)));
         }
+        if let Some(info) = self.candidate_info(doc) {
+            s.push_str(&format!(", info: ({})", typst_array(&info)));
+        }
+        if let Some((keys, vals, total)) = self.score_summary(doc) {
+            s.push_str(&format!(
+                ", score-keys: ({}), score-vals: ({})",
+                typst_array(&keys),
+                typst_array(&vals)
+            ));
+            s.push_str(&format!(", score-total: {}", typst_str(&total)));
+        }
         let notes: Vec<String> = doc
             .meta
             .instructions
             .iter()
             .filter(|t| !t.trim().is_empty())
-            .map(|t| typst_str(t))
+            .cloned()
             .collect();
         if !notes.is_empty() {
-            // 单元素数组必须带尾逗号：typst 里 `("甲")` 只是括号，`("甲",)` 才是数组
-            let tail = if notes.len() == 1 { "," } else { "" };
-            s.push_str(&format!(", instructions: ({}{})", notes.join(", "), tail));
+            s.push_str(&format!(", instructions: ({})", typst_array(&notes)));
         }
         s.push_str(")\n");
         s
+    }
+
+    /// 考生信息填涂区（T4.9）：学校 / 班级 / 姓名 / 考号，学校已知就填、其余留空线
+    ///
+    /// `None` = 这一处不印。开了装订位时那四个字段本来就竖排在密封带上（[`Gen::sealing`]），
+    /// 首页再横排一遍就是同一张卷子上两个姓名栏。DOCX 没有密封线能力（实施计划「已仲裁
+    /// 分歧③」），退化的正是这一张表 —— 两边各自只出现一处。
+    fn candidate_info(&self, doc: &LayoutDoc) -> Option<Vec<String>> {
+        if self.spec.binding.is_some() {
+            return None;
+        }
+        let blank = "＿＿＿＿＿＿";
+        let school = doc
+            .meta
+            .school
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(blank);
+        Some(vec![
+            format!("学校：{school}"),
+            format!("班级：{blank}"),
+            format!("姓名：{blank}"),
+            format!("考号：{blank}"),
+        ])
+    }
+
+    /// 大题分值汇总表（T4.9）：`Some((题号键, 分值, 合计))`，空卷不排表
+    ///
+    /// 题号键与 docx 侧共用 [`section_key`]：同一份 IR 的两种格式，「一 / 二 / 合计」不许一边
+    /// 是汉字一边是阿拉伯数字。
+    fn score_summary(&self, doc: &LayoutDoc) -> Option<(Vec<String>, Vec<String>, String)> {
+        if doc.sections.is_empty() {
+            return None;
+        }
+        let mut keys = Vec::with_capacity(doc.sections.len());
+        let mut vals = Vec::with_capacity(doc.sections.len());
+        let mut sum = 0.0_f64;
+        for (i, section) in doc.sections.iter().enumerate() {
+            keys.push(section_key(&section.header.title, i));
+            sum += section.header.total_score;
+            vals.push(score(section.header.total_score));
+        }
+        Some((keys, vals, score(sum)))
     }
 
     /// 卷头元信息那一行：`xx中学 · 120 分钟 · 满分 150 分`
@@ -1261,6 +1385,22 @@ fn score(value: f64) -> String {
     }
 }
 
+/// typst 数组字面量：逐元素转义后逗号相连
+///
+/// 单元素必须补尾逗号 —— typst 里 `("甲")` 只是括号，`("甲",)` 才是长度为 1 的数组（实测）。
+fn typst_array(items: &[String]) -> String {
+    let body = items
+        .iter()
+        .map(|t| typst_str(t))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if items.len() == 1 {
+        format!("{body},")
+    } else {
+        body
+    }
+}
+
 // ═══════════════════════════════════ 测试 ═══════════════════════════════════
 
 #[cfg(test)]
@@ -1580,26 +1720,217 @@ mod tests {
             5,
             "4 个大题标题 + 1 个卷末答案区标题（函数库里的 #let 定义不算调用）"
         );
-        // 单栏：页级栏数 1，且不包容器
+        // 单栏（R8）：页级恒单栏，一栏时连容器都不包
         assert!(s.contains("#set page(width: 210mm, height: 297mm, columns: 1"));
         assert!(
             !s.contains("#columns("),
-            "栏只能页级设置，容器版会让 #pagebreak 失效"
+            "只有一栏时包壳不改版面，只是给 #pagebreak 多埋一处雷"
         );
         assert!(!s.contains("#pagebreak(here:"), "typst 0.15 没有 here 参数");
     }
 
+    /// 多栏（R8）：栏数与栏距不再走页级 `#set`，而是落在正文与卷末答案各自的容器上
     #[test]
-    fn multi_column_wraps_body_and_keeps_gutter() {
+    fn multi_column_wraps_body_and_answer_in_containers() {
         let spec = LayoutSpec::preset("a4_practice").unwrap();
         let s = generate(&sim_doc(spec), &images()).source;
-        assert!(s.contains("#set page(width: 210mm, height: 297mm, columns: 2"));
-        assert!(s.contains("#set columns(gutter: 8mm)"));
-        assert!(s.contains("width: 210mm, height: 297mm"));
-        // 容器版会把卷末答案的 #pagebreak 变成编译错误
+        assert!(s.contains("#set page(width: 210mm, height: 297mm, columns: 1"));
         assert!(
-            !s.contains("#columns("),
-            "栏必须页级设置，不许用 #columns() 容器"
+            !s.contains("#set columns("),
+            "页级 set 会把整张纸（含首页卷头）一起分栏，那是 R8 之前的形态"
+        );
+        assert_eq!(
+            s.matches("#columns(2, gutter: 8mm)[").count(),
+            2,
+            "正文与卷末答案各一枚容器"
+        );
+        // 分页符夹在两枚容器之间：容器里写 #pagebreak 是编译错误（实测）
+        assert!(
+            s.contains("]\n#pagebreak(weak: true)\n#columns(2, gutter: 8mm)["),
+            "卷末答案的分页符没留在容器之外"
+        );
+        assert!(s.contains("width: 210mm, height: 297mm"));
+    }
+
+    /// 首页大卷头（T4.9）：通栏排在容器之前，且只此一份
+    #[test]
+    fn masthead_is_a_full_width_band_above_the_columns() {
+        let spec = LayoutSpec::preset("a4_practice").unwrap();
+        let s = generate(&sim_doc(spec), &images()).source;
+        let masthead = s.find("#masthead(").expect("没有卷头");
+        let first_column = s.find("#columns(").expect("没有分栏容器");
+        assert!(
+            masthead < first_column,
+            "卷头排在容器之后就成了栏内内容，拿不到整幅宽"
+        );
+        assert_eq!(
+            s.matches("#masthead(").count(),
+            1,
+            "卷头是首页专有的，后续页只该有常规版心"
+        );
+    }
+
+    /// 折痕竖在版心正中时不许通栏：密封线每页都画，卷头横压上去就是一条线穿过题名
+    #[test]
+    fn fold_paper_keeps_its_masthead_inside_the_first_column() {
+        let spec = LayoutSpec::preset("a3_fold_exam").unwrap();
+        let s = generate(&sim_doc(spec), &images()).source;
+        assert!(
+            s.contains("#columns(2, gutter: 20mm)[\n#masthead("),
+            "对折卷的卷头塞不进首栏：{s}"
+        );
+        // 三栏卷的装订带在左边距里，版心无人阻挡 —— 卷头通栏
+        let tri = LayoutSpec::preset("a3_tri_exam").unwrap();
+        let t = generate(&sim_doc(tri), &images()).source;
+        let masthead = t.find("#masthead(").expect("三栏卷没有卷头");
+        let columns = t.find("#columns(").expect("三栏卷没有分栏容器");
+        assert!(masthead < columns, "折痕不在版心时卷头必须通栏");
+    }
+
+    /// 真上纸的几何（T4.9）：通栏卷头横跨过右栏左沿、只出现在第 1 张；
+    /// 折痕竖在版心里的对折卷反过来 —— 同一张表整幅都出不去第一栏
+    #[test]
+    fn masthead_spans_the_sheet_except_on_fold_papers() {
+        // 「合计」是分值汇总表的最右一格：它落在哪一栏，就把卷头到底有多宽说了出来
+        let sheet_one = |spec: LayoutSpec| {
+            let col_w = f64::from(spec.column_width_mm());
+            let columns = (0..spec.columns.max(1))
+                .map(|i| {
+                    f64::from(spec.margin_left_mm())
+                        + i as f64 * (col_w + f64::from(spec.column_gutter_mm()))
+                })
+                .collect::<Vec<_>>();
+            let pages = placed_pages(&compiled(&sim_doc(spec)));
+            assert!(
+                pages.len() >= 2,
+                "验不出「第 1 张 vs 后续张」：只排出 {} 张",
+                pages.len()
+            );
+            assert!(
+                pages[0].iter().any(|r| r.run.text.contains("合计")),
+                "首页没排出分值汇总表"
+            );
+            (col_w, columns, pages)
+        };
+        let marks = |page: &[PlacedRun]| {
+            page.iter()
+                .filter(|r| r.run.text.contains("合计"))
+                .map(|r| (r.x_mm, r.y_mm))
+                .collect::<Vec<_>>()
+        };
+
+        let (_, columns, pages) = sheet_one(LayoutSpec::preset("a4_practice").unwrap());
+        let right = columns[1];
+        let head = marks(&pages[0]);
+        assert!(
+            head.iter().map(|p| p.0).fold(f64::MIN, f64::max) > right,
+            "「合计」最远只到 x={:.1}，右栏左沿却是 {right:.1} —— 卷头没通栏",
+            head.iter().map(|p| p.0).fold(f64::MIN, f64::max)
+        );
+        let first = pages[0]
+            .iter()
+            .find(|r| r.run.text.contains("一、单项选择题"))
+            .expect("第 1 大题的标题没上纸");
+        assert!(
+            first.y_mm > head.iter().map(|p| p.1).fold(f64::MIN, f64::max),
+            "正文骑到了卷头上头"
+        );
+        assert!(
+            marks(&pages[1]).is_empty(),
+            "第 2 张又排了一遍卷头：母版没分开"
+        );
+
+        let (col_w, columns, pages) = sheet_one(LayoutSpec::preset("a3_fold_exam").unwrap());
+        assert!(
+            marks(&pages[0]).iter().all(|p| p.0 < columns[0] + col_w),
+            "对折卷的卷头压上了折痕上的密封线：最远 x={:.1}，首栏右沿 {:.1}",
+            marks(&pages[0])
+                .iter()
+                .map(|p| p.0)
+                .fold(f64::MIN, f64::max),
+            columns[0] + col_w
+        );
+    }
+
+    /// 卷头里的两张表（T4.9）：考生信息栏与分值汇总表，口径与 docx 首页一致
+    #[test]
+    fn masthead_carries_the_info_row_and_the_score_table() {
+        let s = generate(&sim_doc(LayoutSpec::default()), &images()).source;
+        assert!(
+            s.contains(
+                r#"info: ("学校：示例中学", "班级：＿＿＿＿＿＿", "姓名：＿＿＿＿＿＿", "考号：＿＿＿＿＿＿")"#
+            ),
+            "信息填涂区：{s}"
+        );
+        // 用例是 8+4+4 题各 5 分、4 题 12 分。题号键与 docx 的 `section_key` 同源
+        assert!(
+            s.contains(r#"score-keys: ("一", "二", "三", "四")"#),
+            "分值表题号行：{s}"
+        );
+        assert!(
+            s.contains(r#"score-vals: ("40", "20", "20", "48"), score-total: "128""#),
+            "分值表合计与 docx 不同源就会在这里红：{s}"
+        );
+    }
+
+    /// 开了装订位：那四个字段竖排在密封带上，首页不再横排一遍（DOCX 没有带子，退化的正是这张表）
+    #[test]
+    fn sealed_paper_prints_the_fields_once() {
+        let mut doc = sim_doc(LayoutSpec::preset("a3_fold_exam").unwrap());
+        doc.spec.binding = Some(Binding {
+            position: BindingPosition::CenterFold,
+            areas: BindingAreas {
+                school: true,
+                class_name: true,
+                name: true,
+                exam_no: true,
+            },
+        });
+        let s = generate(&doc, &images()).source;
+        assert!(
+            !s.contains(r#"info: (""#),
+            "密封带已经带上学校/班级/姓名/考号，首页不该再来一行"
+        );
+        assert!(s.contains("sealing-line("), "装订带没了：{s}");
+
+        // 反过来：不装订的卷子上，这四个字段只能靠首页那一行
+        let plain = generate(&sim_doc(LayoutSpec::default()), &images()).source;
+        assert!(
+            plain.contains(r#"info: ("学校：示例中学""#),
+            "无装订卷的首页信息栏没了"
+        );
+    }
+
+    /// 首页不出现页眉（T4.9）：大卷头就是首页的页眉。条件页眉按**物理张号**自己关掉第一张，
+    /// 从第二张起才顶到版心上方的页眉条里 —— 页眉在 margin 区，正文在版心，`y < margin.top`
+    /// 就是那道分界。
+    #[test]
+    fn first_sheet_has_no_running_header() {
+        let mut spec = LayoutSpec::default();
+        spec.header_footer.header_title = true;
+        let top = f64::from(spec.margins.top_mm);
+        let doc = sim_doc(spec);
+        let pages = placed_pages(&compiled(&doc));
+        assert!(
+            pages.len() >= 2,
+            "验不出张间差异：只排出 {} 张",
+            pages.len()
+        );
+        let strip = |page: &[PlacedRun]| -> Vec<f64> {
+            page.iter()
+                .filter(|r| r.run.text.contains("三角函数综合练习"))
+                .map(|r| r.y_mm)
+                .collect::<Vec<_>>()
+        };
+        let one = strip(&pages[0]);
+        assert!(
+            one.len() == 1 && one[0] >= top,
+            "第 1 张的卷头名只该在版心里排一次（大卷头即页眉）：{one:?}，版心上沿 y={top:.1}"
+        );
+        let two = strip(&pages[1]);
+        assert!(
+            two.iter().any(|y| *y < top),
+            "第 2 张没排页眉（版心上沿 y={top:.1}）：{two:?}"
         );
     }
 
@@ -1608,9 +1939,8 @@ mod tests {
         let spec = LayoutSpec::preset("a3_fold_exam").unwrap();
         let s = generate(&sim_doc(spec), &images()).source;
         assert!(s.contains("width: 420mm, height: 297mm"));
-        assert!(s.contains("columns: 2"));
-        // 折痕上要有 20mm 装订带：预设里 12mm 的栏距被 `column_gutter_mm()` 兜高
-        assert!(s.contains("#set columns(gutter: 20mm)"));
+        // 折痕上要有 20mm 装订带：预设里 12mm 的栏距被 `column_gutter_mm()` 兜高（R8：栏距在容器上）
+        assert!(s.contains("#columns(2, gutter: 20mm)["));
         // 逻辑页码（T4.7）：一张纸切两格，格宽与栏宽同值，于是每格落在自己那栏正下方
         assert!(s.contains("footer: context { let p = here().page();"));
         assert!(s.contains("grid(columns: (1fr, 1fr), gutter: (20mm, 0pt)"));
@@ -2585,7 +2915,7 @@ mod tests {
         let mut lines: Vec<PlacedLine> = placed_lines(&compiled(doc))
             .into_iter()
             .flatten()
-            .filter(|l| l.dy_mm.abs() < 0.01 && l.dx_mm > 10.0)
+            .filter(|l| l.dy_mm.abs() < 0.01 && l.dx_mm > 10.0 && l.thickness_mm > RULE_MIN_MM)
             .collect();
         lines.sort_by(|a, b| a.y_mm.total_cmp(&b.y_mm));
         lines
@@ -2599,6 +2929,13 @@ mod tests {
     fn near(a: f64, b: f64) -> bool {
         (a - b).abs() < 0.1
     }
+
+    /// pt → mm
+    const PT_MM: f64 = 25.4 / 72.0;
+    /// 「数线条」用例的笔宽门槛：留白横线与密封线最细的一笔是 0.5pt（0.176mm），而 T4.9
+    /// 首页卷头那两张表的边框是 0.4pt（0.141mm）。不留这道门槛，表格的十几条边框会被
+    /// 当成留白行数来数。
+    const RULE_MIN_MM: f64 = 0.5 * PT_MM - 0.01;
 
     /// 横线格：Rust 要几行，纸上就得有几行，而且行距就是 Rust 算出来的那个数
     #[test]
@@ -2879,7 +3216,7 @@ mod tests {
             );
             let rules: Vec<&PlacedLine> = lines[i]
                 .iter()
-                .filter(|l| l.dx_mm.abs() < 0.01 && l.dy_mm > 10.0)
+                .filter(|l| l.dx_mm.abs() < 0.01 && l.dy_mm > 10.0 && l.thickness_mm > RULE_MIN_MM)
                 .collect();
             assert_eq!(rules.len(), 1, "第 {} 张纸的竖线：{rules:?}", i + 1);
             let rule = rules[0];
@@ -2974,16 +3311,13 @@ mod tests {
         );
         // 对折的带子吃的是栏距，不是页边距
         assert!(s.contains("left: 16mm"));
-        assert!(s.contains("#set columns(gutter: 20mm)"));
+        assert!(s.contains("#columns(2, gutter: 20mm)"));
 
         // 三栏卷走左侧装订：带子加在左边距之外，栏距用不着兜高
         let tri = LayoutSpec::preset("a3_tri_exam").unwrap();
         let t = generate(&sim_doc(tri), &HashMap::new()).source;
         assert!(t.contains("left: 34mm"), "14mm 左边距 + 20mm 带子：{t}");
-        assert!(
-            t.contains("#set columns(gutter: 10mm)"),
-            "Left 装订不吃栏距"
-        );
+        assert!(t.contains("#columns(3, gutter: 10mm)"), "Left 装订不吃栏距");
         assert!(
             t.contains(", background: sealing-line(18mm, 18mm, 261mm, "),
             "左侧装订的线贴带子右沿"
@@ -3112,5 +3446,120 @@ mod tests {
                 println!("{}", path.display());
             }
         }
+    }
+
+    /// 临时探针（T4.9 设计前实测）：0.15 的 `#set page` 里 `first:` 已不存在，母版分离只剩
+    /// 「flow 中途 set page」与「`#page(...)[body]` 作用域」两种可能，再加上「页级单栏 +
+    /// `#columns(2)` 容器」这条能否让通栏卷头与双栏正文同页共存。跑法：
+    /// `cargo test --lib typeset::typst_gen::tests::masters_separation_probe -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn masters_separation_probe() {
+        let dirs = font_dirs();
+        let probe = |name: &str, src: &str| {
+            let req = request(src, &dirs, &[]);
+            match compile_paged(&req) {
+                Ok(out) => {
+                    let pages = placed_pages(&out.output);
+                    println!("[{name}] pages = {}", pages.len());
+                    for (i, p) in pages.iter().enumerate() {
+                        let mut xs: Vec<f64> =
+                            p.iter().map(|r| (r.x_mm * 5.0).round() / 5.0).collect();
+                        xs.sort_by(|a, b| a.total_cmp(b));
+                        xs.dedup();
+                        println!("  第 {} 张: n={} xs={:?}", i + 1, p.len(), xs);
+                    }
+                    for w in &out.warnings {
+                        println!("  warn: {w}");
+                    }
+                }
+                Err(e) => println!("[{name}] 编译失败 {:?}", e.diagnostics),
+            }
+        };
+
+        // E1：flow 中途 `#set page(columns: 2)` —— 生效点是本页还是下一页？
+        probe(
+            "E1 中途 set page",
+            r#"
+#set page(width: 120mm, height: 40mm, margin: 5mm)
+#set text(size: 7pt)
+#lorem(30)
+#set page(columns: 2)
+#lorem(150)
+"#,
+        );
+
+        // E2：`#page(...)[body]` 作用域 —— 是否另起一页、结束后是否回落到外层母版
+        probe(
+            "E2 page 作用域",
+            r#"
+#set page(width: 120mm, height: 40mm, margin: 5mm, columns: 2, header: [常规页眉])
+#set text(size: 7pt)
+#page(columns: 1, header: none)[#lorem(40)]
+#lorem(80)
+"#,
+        );
+
+        // E3：页级单栏 + 通栏卷头块 + `#columns(2)` 容器 —— 卷头能否与双栏正文同页共存，
+        // 且容器跨页时每一张是否都仍是双栏（0.15 的 ColumnsElem 只有 count / gutter / body，
+        // 没有 balance 参数）
+        probe(
+            "E3 容器分栏",
+            r#"
+#set page(width: 120mm, height: 40mm, margin: 5mm)
+#set text(size: 7pt)
+#block(width: 100%, fill: luma(230))[卷头通栏]
+#columns(2, gutter: 6mm)[#lorem(400)]
+#pagebreak(weak: true)
+#columns(2, gutter: 6mm)[答案区 #lorem(30)]
+"#,
+        );
+
+        // E4：负控 —— 容器里 pagebreak 是否仍报错（决定答案区能否塞进容器）
+        probe(
+            "E4 容器内 pagebreak",
+            r#"
+#set page(width: 120mm, height: 40mm, margin: 5mm)
+#columns(2)[#lorem(30) #pagebreak() #lorem(30)]
+"#,
+        );
+
+        // E5：条件页眉 —— `context` 里按物理页号自己关掉首页页眉是否可行（T4.10 的备选路）
+        {
+            let src = r#"
+#set page(width: 120mm, height: 30mm, margin: 5mm,
+  header: context { if here().page() != 1 { [大题名] } })
+#set text(size: 7pt)
+#lorem(120)
+"#;
+            let req = request(src, &dirs, &[]);
+            match compile_paged(&req) {
+                Ok(out) => {
+                    let pages = placed_pages(&out.output);
+                    println!("[E5 条件页眉] pages = {}", pages.len());
+                    for (i, p) in pages.iter().enumerate() {
+                        let hits: Vec<String> = p
+                            .iter()
+                            .filter(|r| r.run.text.contains("大题名"))
+                            .map(|r| format!("x={:.1} y={:.1}", r.x_mm, r.y_mm))
+                            .collect();
+                        println!("  第 {} 张: 大题名 {hits:?}", i + 1);
+                    }
+                }
+                Err(e) => println!("[E5] 编译失败 {:?}", e.diagnostics),
+            }
+        }
+
+        // E6：容器之后的通栏块还能不能拿回整幅宽（决定答案区之后若还有内容怎么排）
+        probe(
+            "E6 容器后通栏",
+            r#"
+#set page(width: 120mm, height: 40mm, margin: 5mm)
+#set text(size: 7pt)
+#columns(2, gutter: 6mm)[#lorem(120)]
+#block(width: 100%, fill: luma(230))[容器之后]
+#lorem(20)
+"#,
+        );
     }
 }
