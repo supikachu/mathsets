@@ -1,0 +1,2 @@
+<!-- latex: |\vec{a}|-|\vec{b}| -->
+<math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mo>|</mo><mover><mi>a</mi><mo accent="true">→</mo></mover><mo>|</mo><mo>-</mo><mo>|</mo><mover><mi>b</mi><mo accent="true">→</mo></mover><mo>|</mo></math>

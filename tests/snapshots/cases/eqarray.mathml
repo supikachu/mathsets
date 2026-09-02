@@ -1,0 +1,2 @@
+<!-- latex: \begin{array}{l}x+y=1\\x-y=3\end{array} -->
+<math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mtable><mtr><mtd><mi>x</mi><mo>+</mo><mi>y</mi><mo>=</mo><mn>1</mn></mtd></mtr><mtr><mtd><mi>x</mi><mo>-</mo><mi>y</mi><mo>=</mo><mn>3</mn></mtd></mtr></mtable></math>

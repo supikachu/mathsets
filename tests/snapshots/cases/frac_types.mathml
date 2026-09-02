@@ -1,0 +1,2 @@
+<!-- 手写用例：mfrac 的三种 m:type（bar / noBar / skw），bevelled 只在 XSL 的第二个分支里出现 -->
+<math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mfrac><mi>a</mi><mi>b</mi></mfrac><mfrac linethickness="0"><mi>c</mi><mi>d</mi></mfrac><mfrac bevelled="true"><mi>e</mi><mi>f</mi></mfrac></math>

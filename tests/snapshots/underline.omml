@@ -1,0 +1,12 @@
+<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:mml="http://www.w3.org/1998/Math/MathML">
+  <m:bar>
+    <m:barPr>
+      <m:pos m:val="bot"/>
+    </m:barPr>
+    <m:e>
+      <m:r>
+        <m:t>AB</m:t>
+      </m:r>
+    </m:e>
+  </m:bar>
+</m:oMath>

@@ -1,0 +1,2 @@
+<!-- latex: a<b<c -->
+<math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mi>a</mi><mo>&lt;</mo><mi>b</mi><mo>&lt;</mo><mi>c</mi></math>

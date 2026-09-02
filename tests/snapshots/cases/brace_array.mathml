@@ -1,0 +1,2 @@
+<!-- latex: \left\{\begin{array}{l}2x-y=0\\x+2y=5\end{array}\right. -->
+<math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><mo stretchy="true" form="prefix">{</mo><mtable><mtr><mtd><mn>2</mn><mi>x</mi><mo>-</mo><mi>y</mi><mo>=</mo><mn>0</mn></mtd></mtr><mtr><mtd><mi>x</mi><mo>+</mo><mn>2</mn><mi>y</mi><mo>=</mo><mn>5</mn></mtd></mtr></mtable><mo stretchy="true" form="postfix"></mo></mrow></math>

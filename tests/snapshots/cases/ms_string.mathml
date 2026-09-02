@@ -1,0 +1,2 @@
+<!-- 手写用例：ms 定界字符串（crate 不产，OutputMs 的 lquote/rquote 语义须锁住） -->
+<math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><ms>abc</ms><mo>+</mo><mn>1</mn><ms lquote="'" rquote="">q</ms></math>

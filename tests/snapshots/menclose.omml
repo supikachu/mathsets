@@ -1,0 +1,41 @@
+<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:mml="http://www.w3.org/1998/Math/MathML">
+  <m:borderBox>
+    <m:e>
+      <m:r>
+        <m:t>a</m:t>
+      </m:r>
+    </m:e>
+  </m:borderBox>
+  <m:borderBox>
+    <m:borderBoxPr>
+      <m:hideLeft m:val="on"/>
+      <m:hideRight m:val="on"/>
+    </m:borderBoxPr>
+    <m:e>
+      <m:r>
+        <m:t>b</m:t>
+      </m:r>
+    </m:e>
+  </m:borderBox>
+  <m:borderBox>
+    <m:borderBoxPr>
+      <m:hideTop m:val="on"/>
+      <m:hideBot m:val="on"/>
+      <m:hideLeft m:val="on"/>
+      <m:hideRight m:val="on"/>
+      <m:strikeBLTR m:val="on"/>
+    </m:borderBoxPr>
+    <m:e>
+      <m:r>
+        <m:t>c</m:t>
+      </m:r>
+    </m:e>
+  </m:borderBox>
+  <m:borderBox>
+    <m:e>
+      <m:r>
+        <m:t>e</m:t>
+      </m:r>
+    </m:e>
+  </m:borderBox>
+</m:oMath>

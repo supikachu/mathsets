@@ -696,3 +696,42 @@ crate 支持 `matrix`/`pmatrix`/`bmatrix`/`vmatrix`/`align`，但不支持 `case
 - 矩阵会生成完整 `m:mPr{baseJc,plcHide,mcs/mc{count,mcJc}}`，而 `pmatrix` / `cases` 的定界符落在 `<m:oMath>`
   的**首尾两个普通 `m:r`**（`(` `{`），官方实现也不给 `m:d` 包裹 —— 后果是括号不随矩阵高度伸缩。
   与 Word 自己粘贴 MathML 的结果一致，按固件为准，转换器不自作主张改形。
+
+### 五、T2.4 MathML→OMML 转换器（黄金快照全绿）
+
+`src/export/math/omml.rs`（roxmltree 读 + quick-xml 写，R3）。**55 个固件全部逐节点一致**，
+且 `gen_omml_snapshots.py --check` 退出码 0 —— 即「Rust 产物 ≡ 官方 XSL 产物」这条链的两端都验过。
+
+照抄 XSL 时最容易静默写错、写错了也不报错的几处（改本模块前先跑快照）：
+
+1. **run 合流的相容判定有两个 `$sFontCur='normal'` 分支**（XSL 670–689）。后一个的条件是「该节点没有任何
+   字体类属性」，正是它让相邻 `mtext` / `ms` 合成同一个 `m:t`；只抄第一个，「$-1$ 元」这类中英混排会被
+   拆成一串单字 run，Word 里字距与字体全乱。
+2. **XPath 的 `position()` 从 1 起算且把 base 算进节点集**：`cndSuperScript` 末尾那个 `- 1` 不是笔误；
+   `SplitScripts`（XSL 2578）的 `m:sub` 收第 1、3、5… 个 = 0 基偶数下标。两处任一写反都会把上标印进下标位。
+3. **`ancestor-or-self::mml:mstyle[@scriptlevel][1]` 是逆文档序** —— `[1]` 是**最近**的那个 mstyle，
+   不是最外层。写成「循环里覆盖变量」就变成取最外层（`scriptlevel.omml` 断言 `m:scrLvl m:val="2"`）。
+4. **`NaryHandleMrowMstyle` 会把 n-ary 紧跟的兄弟 `mrow`/`mstyle` 吞进 `m:e`**，同时 `mrow` 自己的模板靠
+   `FIsNaryArgument` 短路不再输出。所以 `mrow` 的主体（线性分数 / `m:func` / 普通合流）必须抽成 `row_body`
+   给两处共用，否则 `\int_0^1 f(x)dx` 的 `f(x)` 会掉到 `m:nary` 外面。
+5. **roxmltree 的 `prev_siblings()` / `next_siblings()` 包含自身**（它的 `prev_sibling_element()` 内部就是
+   `.skip(1)`）。`mpadded` 的「无元素兄弟」判定若写成轴迭代 + `any(is_element)`，永远为真。
+6. **quick-xml 0.42 的 writer 什么都不转义**：文本要 `escape::partial_escape`、属性值要 `escape::escape`，
+   否则公式里的 `<` 直接产出非法 XML（T2.2 补的 `escape_stray_markup` 是同一个坑的另一半）。
+7. `mfrac` 的 `skw`（`bevelled`）、`menclose` 的 `actuarial` / `longdiv`（XSL 里整条分支什么也不输出）这类
+   「看着像漏写」的分支一律照抄，不替 Word 补语义 —— 补了就对不上固件。
+
+三处与 XSL 的有据差异（`mglyph` 分支不可达、不处理 `maligngroup`/`malignmark`、`@foo` 与 `@mml:foo` 不区分）
+写在模块头注释里，对本管线的可达输入没有影响。
+
+警告口径：面向教师的降级警告仍只在 `to_omml` 返回 `Failed` 时给（`MathOutcome` 与 `to_mathml` 同一套约定）；
+未认出的节点走 XSL 的 catch-all（只递归元素子节点）+ `tracing::warn`，内容保住了就不打扰教师。
+
+固件补了 6 个手写用例，覆盖原先没有断言的分支：`menclose`（top bottom / updiagonalstrike / actuarial /
+circle right）、`table_labeled`（`mlabeledtr` + 变列数 → `m:m` 的 `mcs/count`，标签列被丢弃）、
+`multiscripts` 与 `multiscripts_none`（前后脚本同时存在、`none` 占位吃掉另一侧）、`frac_types`
+（bar / noBar / skw）、`scriptlevel`（嵌套 mstyle 取最近值）。
+
+测试：`export::math` 26 例（黄金对比 1 例遍历 55 个用例 + run 合流切分 / `OutputText` 控制字符 /
+n-ary 吸收后续 mrow / 未知节点不 panic 各 1 例 + T2.2 的 20 例）；`cargo test --lib` 510 passed / 0 failed；
+`cargo clippy --lib --tests` 与 `cargo doc --no-deps` 本模块无告警。

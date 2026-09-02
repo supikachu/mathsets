@@ -1,0 +1,2 @@
+<!-- latex: \begin{cases}x^2,&x\ge 0\end{cases} -->
+<math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><mo stretchy="true" form="prefix">{</mo><mtable><mtr><mtd><msup><mi>x</mi><mn>2</mn></msup><mo>,</mo></mtd><mtd><mi>x</mi><mo>≥</mo><mn>0</mn></mtd></mtr></mtable><mo stretchy="true" form="postfix"></mo></mrow></math>

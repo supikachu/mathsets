@@ -1,0 +1,2 @@
+<!-- 手写用例：accent="false" 的大括号（mover/munder → m:groupChr 分支，crate 不产） -->
+<math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mover accent="false"><mrow><mi>a</mi><mo>+</mo><mi>b</mi></mrow><mo>⏞</mo></mover><munder accent="false"><mo>⏟</mo><mrow><mi>x</mi></mrow></munder><mover accent="false"><mrow><mi>c</mi></mrow><mo>==</mo></mover></math>

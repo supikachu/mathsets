@@ -1,0 +1,2 @@
+<!-- 手写用例：嵌套 mstyle/@scriptlevel —— XSL 的 ancestor-or-self[…][1] 取「最近」那个，取值 2 而非 1 -->
+<math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mstyle scriptlevel="1"><mstyle scriptlevel="2"><mfrac><mi>a</mi><mrow><msup><mi>b</mi><mn>2</mn></msup></mrow></mfrac></mstyle></mstyle><mstyle scriptlevel="5"><mi>c</mi></mstyle></math>

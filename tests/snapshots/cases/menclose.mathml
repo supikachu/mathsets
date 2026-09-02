@@ -1,0 +1,2 @@
+<!-- 手写用例：menclose 的 notation → m:borderBox（XSL fBox / fTop… / fStrike* 组合判定） -->
+<math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><menclose notation="box"><mi>a</mi></menclose><menclose notation="top bottom"><mi>b</mi></menclose><menclose notation="updiagonalstrike"><mi>c</mi></menclose><menclose notation="actuarial"><mi>d</mi></menclose><menclose notation="circle right"><mi>e</mi></menclose></math>

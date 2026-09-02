@@ -74,7 +74,11 @@ zip = "2"
 
 # 导出引擎 IR 类型 → TypeScript 绑定生成（frontend/src/api/types/exam.ts）
 ts-rs = { version = "10", features = ["serde-json-impl", "uuid-impl"] }
+# 导出公式管线：LaTeX → Presentation MathML（src/export/math）
 latex2mathml = "0.2"
+# R3：MathML 只读解析用 roxmltree，OMML 片段写出用 quick-xml（不引入通用 XML 模型）
+roxmltree = "0.21.1"
+quick-xml = "0.42.0"
 
 [dev-dependencies]
 # Axum 测试工具（oneshot 调用 Router）

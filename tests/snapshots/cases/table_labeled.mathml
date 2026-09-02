@@ -1,0 +1,2 @@
+<!-- 手写用例：带标签行 + 每行列数不等的 mtable（非 eqArr → m:m，含 CountMaxElmtsInRow 与空单元格补齐） -->
+<math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mtable><mlabeledtr><mtd><mtext>(1)</mtext></mtd><mtd><mi>x</mi></mtd><mtd><mi>y</mi></mtd></mlabeledtr><mtr><mtd><mn>1</mn></mtd><mtd><mi>a</mi></mtd></mtr></mtable></math>

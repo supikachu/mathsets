@@ -1,0 +1,14 @@
+<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:mml="http://www.w3.org/1998/Math/MathML">
+  <m:eqArr>
+    <m:e>
+      <m:r>
+        <m:t>x+y=1</m:t>
+      </m:r>
+    </m:e>
+    <m:e>
+      <m:r>
+        <m:t>x-y=3</m:t>
+      </m:r>
+    </m:e>
+  </m:eqArr>
+</m:oMath>

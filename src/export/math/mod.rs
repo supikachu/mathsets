@@ -1,5 +1,7 @@
 //! LaTeX → Presentation MathML（T2.2）
 //!
+//! MathML → OMML 的下一级转换在 [`omml`] 子模块（T2.4）。
+//!
 //! 这一层的职责只有一个：让 `latex2mathml` 吃得下教辅里的实际写法。三件事都做在进库转换之前，
 //! 因此 Word / PDF 两条公式管线共享同一份归一结果。
 //!
@@ -21,6 +23,8 @@
 //! **降级判定必须看输出内容**：`latex2mathml` 对不认的命令不返回 `Err`，而是把
 //! `[PARSE ERROR: Undefined("Command(\"ge\")")]` 当成 `<mtext>` 塞进结果里 —— 只看 `Result`
 //! 会让这串文本直接印进教师的 Word。故 [`to_mathml`] 把含有该标记的输出判为失败。
+
+pub mod omml;
 
 use std::borrow::Cow;
 
@@ -162,9 +166,10 @@ const ARG_RULES: &[(&str, ArgRule)] = &[
 ///
 /// 失败不 panic、不往调用栈上层抛错：调用方（docx / markdown / typst 生成器）必须降级为
 /// 「原文 + 警告」，绝不让单题失败中断整卷（实施计划 §5.3 容错约定）。
+/// [`to_mathml`] 与 [`omml::to_omml`] 两级转换共用同一约定。
 #[derive(Debug, Clone, PartialEq)]
 pub enum MathOutcome {
-    /// Presentation MathML，形如 `<math xmlns="…" display="block">…</math>`
+    /// 转换产物：[`to_mathml`] 给 Presentation MathML，[`omml::to_omml`] 给 OMML 片段
     Ok(String),
     /// 降级原因（进 `X-Export-Warnings` 的 reason 字段）
     Failed(String),
@@ -198,22 +203,33 @@ pub fn to_mathml(latex: &str, display: bool) -> MathOutcome {
 
 /// 下游（官方 XSLT、roxmltree）都要求良构 XML，而 crate 会把公式里的裸 `<` / `&` 原样写进文本
 /// 节点（`x<0` → `<mo><</mo>`）。按 MathML 标签白名单判别：不是标签开头的 `<` 一律转义。
+///
+/// crate 还会把 `\langle` / `\rangle` 直接写成 HTML 实体 `&lang;` / `&rang;`（`token.rs` 里
+/// `Token::Paren("&lang;")`）—— 非 XML 预定义实体，严格解析器直接报错，故就地折成数字引用。
 fn escape_stray_markup(mathml: &str) -> Cow<'_, str> {
     let bytes = mathml.as_bytes();
     let mut out: Option<String> = None;
     let mut copied = 0usize;
-    for i in 0..bytes.len() {
-        let stray = match bytes[i] {
-            b'<' => !starts_known_tag(mathml, i),
-            b'&' => !starts_entity(mathml, i),
-            _ => false,
+    let mut i = 0usize;
+    while i < bytes.len() {
+        // （替换串, 消费的字节数）；None 表示该处本来就良构
+        let fix = match bytes[i] {
+            b'<' if !starts_known_tag(mathml, i) => Some(("&lt;", 1)),
+            b'&' if !starts_entity(mathml, i) => match crate_entity(mathml, i) {
+                Some((repl, len)) => Some((repl, len)),
+                None => Some(("&amp;", 1)),
+            },
+            _ => None,
         };
-        if stray {
-            let buf = out.insert(String::with_capacity(mathml.len() + 16));
-            buf.push_str(&mathml[copied..i]);
-            buf.push_str(if bytes[i] == b'<' { "&lt;" } else { "&amp;" });
-            copied = i + 1;
-        }
+        let Some((repl, consumed)) = fix else {
+            i += 1;
+            continue;
+        };
+        let buf = out.get_or_insert_with(|| String::with_capacity(mathml.len() + 16));
+        buf.push_str(&mathml[copied..i]);
+        buf.push_str(repl);
+        copied = i + consumed;
+        i = copied;
     }
     match out {
         Some(mut buf) => {
@@ -222,6 +238,18 @@ fn escape_stray_markup(mathml: &str) -> Cow<'_, str> {
         }
         None => Cow::Borrowed(mathml),
     }
+}
+
+/// crate 独有的 HTML 实体 → XML 数字引用（`（实体名不含 &，替换串, 消费字节数）`）
+const CRATE_HTML_ENTITIES: &[(&str, &str)] = &[("lang;", "&#x27E8;"), ("rang;", "&#x27E9;")];
+
+/// `at` 处（`&`）是否为 [`CRATE_HTML_ENTITIES`] 之一
+fn crate_entity(s: &str, at: usize) -> Option<(&'static str, usize)> {
+    let rest = &s[at + 1..];
+    CRATE_HTML_ENTITIES
+        .iter()
+        .find(|(name, _)| rest.starts_with(name))
+        .map(|(name, repl)| (*repl, name.len() + 1))
 }
 
 /// `at` 处是否为已知 MathML 标签的开头
@@ -256,13 +284,13 @@ fn starts_entity(s: &str, at: usize) -> bool {
             Some(d) => !d.is_empty() && d.bytes().all(|b| b.is_ascii_hexdigit()),
             None => !body[1..].is_empty() && body[1..].bytes().all(|b| b.is_ascii_digit()),
         },
-        None => {
-            let mut chars = body.chars();
-            matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
-                && chars.all(|c| c.is_ascii_alphanumeric())
-        }
+        None => XML_ENTITIES.contains(&body),
     }
 }
+
+/// XML 预定义实体：除此之外，`&name;` 在严格解析器里都是非法（crate 的 `&lang;` 由
+/// [`crate_entity`] 就地折成数字引用，其余按裸 `&` 转义成 `&amp;`）
+const XML_ENTITIES: &[&str] = &["amp", "lt", "gt", "quot", "apos"];
 
 /// crate 可能产出的 MathML 元素名（含它自带的错误包装 `merror`）
 const MATHML_TAGS: &[&str] = &[
@@ -790,18 +818,26 @@ mod tests {
 
     #[test]
     fn stray_markup_is_escaped_so_output_is_well_formed() {
-        // crate 的裸 `<`（x<0 在国内教辅极常见）会让整段 MathML 不是良构 XML，下游解析必炸
+        // crate 的裸 `<`（x<0 在国内教辅极常见）会让整段 MathML 不是良构 XML，下游解析必炸。
+        // 必须用真正的 XML 解析器断言，只看字符串会漏掉「转义时把前文吃掉」这类截断。
         for latex in [
             r"x<0",
             r"a<b\text{且}c>d",
             r"f(x)=\begin{cases}x^2,&x<0\\-x,&x\ge 0\end{cases}",
             r"\{x\mid x<1\}",
             r"\sqrt[3]{\frac{1}{2}}",
+            r"0 < p < q",
+            r"-b < -a < 1 - b",
+            r"\left\langle \vec{a},\vec{b}\right\rangle",
         ] {
             let mathml = mathml_of(latex);
             assert!(
                 !mathml.contains("<mo><") && !mathml.contains("< &"),
                 "{latex} 仍夹带裸标记: {mathml}"
+            );
+            assert!(
+                roxmltree::Document::parse(&mathml).is_ok(),
+                "{latex} 的输出不是良构 XML: {mathml}"
             );
             // 已良构的输出再跑一次不该有任何变化（幂等 = 没有裸标记残留）
             assert_eq!(
@@ -810,6 +846,17 @@ mod tests {
                 "{latex} 转义不幂等"
             );
         }
+        // 多处裸标记：第二个 `<` 之前的内容不能被丢掉
+        let mathml = mathml_of(r"0 < p < q");
+        assert!(mathml.starts_with("<math "), "{mathml}");
+        assert!(mathml.contains("<mn>0</mn>"), "{mathml}");
+        assert_eq!(mathml.matches("&lt;").count(), 2, "{mathml}");
+        // crate 的 HTML 实体必须折成 XML 数字引用
+        assert!(
+            !mathml_of(r"\left\langle x\right\rangle").contains("&lang;"),
+            "{}",
+            mathml_of(r"\left\langle x\right\rangle")
+        );
         assert!(mathml_of(r"x<0").contains("&lt;"));
         // 实体引用不得被二次转义
         assert_eq!(

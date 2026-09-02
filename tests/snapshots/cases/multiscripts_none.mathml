@@ -1,0 +1,2 @@
+<!-- 手写用例：mmultiscripts 里的 none 占位（XSL 计数排除 none，故只剩 base） -->
+<math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mmultiscripts><mi>y</mi><none/><mn>2</mn></mmultiscripts><mmultiscripts><mi>z</mi><mn>1</mn><none/></mmultiscripts></math>

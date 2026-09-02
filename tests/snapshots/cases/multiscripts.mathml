@@ -1,0 +1,2 @@
+<!-- 手写用例：mmultiscripts 同时有前后脚本（XSL 按 position() 计 sub/sup，sPre 包住 sSubSup） -->
+<math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mmultiscripts><mi>x</mi><mn>1</mn><mn>2</mn><mprescripts/><mn>3</mn><mn>4</mn></mmultiscripts></math>

@@ -1,0 +1,2 @@
+<!-- latex: \sqrt{\sqrt{x+1}} -->
+<math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><msqrt><msqrt><mrow><mi>x</mi><mo>+</mo><mn>1</mn></mrow></msqrt></msqrt></math>

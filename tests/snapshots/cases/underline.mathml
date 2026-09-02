@@ -1,0 +1,2 @@
+<!-- latex: \underline{AB} -->
+<math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><munder><mrow><mi>A</mi><mi>B</mi></mrow><mo accent="true">_</mo></munder></math>
