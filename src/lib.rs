@@ -6,6 +6,7 @@ pub mod export;
 pub mod handlers;
 pub mod models;
 pub mod testing;
+pub mod typeset;
 pub mod util;
 pub mod workers;
 

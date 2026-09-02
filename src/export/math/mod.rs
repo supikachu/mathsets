@@ -18,7 +18,7 @@
 //!
 //! 输出侧还有一道 **XML 修复**：crate 把公式里的裸 `<` 原样写进文本节点（`x<0` →
 //! `<mo><</mo>`），产出的串根本不是良构 XML，而官方 XSLT 与 roxmltree 都要求良构输入 ——
-//! [`escape_stray_markup`] 按 MathML 标签白名单把非标签的 `<` / `&` 转义掉。
+//! `escape_stray_markup` 按 MathML 标签白名单把非标签的 `<` / `&` 转义掉。
 //!
 //! **降级判定必须看输出内容**：`latex2mathml` 对不认的命令不返回 `Err`，而是把
 //! `[PARSE ERROR: Undefined("Command(\"ge\")")]` 当成 `<mtext>` 塞进结果里 —— 只看 `Result`

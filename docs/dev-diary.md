@@ -735,3 +735,39 @@ circle right）、`table_labeled`（`mlabeledtr` + 变列数 → `m:m` 的 `mcs/
 测试：`export::math` 26 例（黄金对比 1 例遍历 55 个用例 + run 合流切分 / `OutputText` 控制字符 /
 n-ary 吸收后续 mrow / 未知节点不 panic 各 1 例 + T2.2 的 20 例）；`cargo test --lib` 510 passed / 0 failed；
 `cargo clippy --lib --tests` 与 `cargo doc --no-deps` 本模块无告警。
+
+### 六、T2.5 选项估宽与栅格决策（R7 口径）
+
+`src/typeset/blocks/choice_grid.rs`（新增 `src/typeset/mod.rs` + `blocks/mod.rs`，`lib.rs` 注册）。
+放在 `typeset::` 而不是 `export::` 下，是因为这份判定要被 docx `w:tbl`（T2.7）与 typst `grid()`（M3）
+共用 —— 同一道卷子在两种格式里列数不同，比宽度估得粗更糟。纯函数、零 typst 依赖、不内置版面常量：
+调用方把可用栏宽换算成 em 传进 `decide(options, available_em)`，返回 `ChoiceGrid { columns, rows }`。
+换算基准统一按 1em = 10.5pt ≈ 3.7mm ≈ 14px（docx 默认样式正文字号），图片 px→em 与 `\hspace{}`
+的 pt/mm/cm/px 都走这一条。
+
+R7 的「按渲染字形数折算」实现成一个小扫描器（`Measurer`），几处不显然的取舍：
+
+1. **「剥命令名」不等于「命令名都不占宽」**。`\frac` 的名字是宏、不印字，`\log` 的名字就是要排出来的
+   三个字母 —— 所以有一张 `FUNCTION_WORDS` 表按 `名长 × 0.55em` 计，其余命令名一律计 0。
+   另外 `\begin{array}{cc}` 的列描述符、`\\[6pt]` 的行距参数、`\displaystyle` 一类纯排版指令都占 0。
+2. **竖排结构取 max 不取 sum**。分式/`binom`/`overset` 的两侧参数、`cases`/`matrix` 的多行，
+   渲染宽度都由较宽的一侧决定。旧口径把这些全部相加，才是「12 字符估 6.6em」的根源。
+3. **`\\` 只在自己那一层分行**。`1+\frac{\begin{cases}a\\b\end{cases}}{2}` 里内部分行只让内层取
+   `max(a,b)`，外层仍是一行；但 `multiline` 标志要冒泡上来，让整题选项退到单列。若分行是全局的，
+   这行的宽度会被算成 `a` 或 `b` 与 `2` 的组合，判错列数。
+4. **单列的三个触发条件**：宽度比 > 50%、选项含 `LineBreak`/块级公式/表格/图组、公式内部多行。
+   第三条哪怕很窄也单列 —— 一行里出现两个高矮不齐的公式块，比多占三行更难看。
+5. **未知命令按 1em 估**，即宁可少排一列也不把溢出留在纸上；这条与「`COLUMN_SPEC_ENVS` 两处各持一份」
+   是同一类保守选择：`export::math` 那份为了改写 matrix 要剥掉它，这份为了「这组花括号不占宽」要认出它，
+   语义相反，合并反而会把两边绑住。
+
+列数不超过选项数（3 个短选项 → 1×3，5 个 → 4 列 2 行），`available_em <= 0` 视为单列，
+非法/未闭合 LaTeX 只估宽不 panic（用例里塞了空串、`\`、`}{`、`\text{未闭合` 等）。
+
+顺带修掉 `export/math/mod.rs` 头注释里指向私有函数的 rustdoc 告警（`escape_stray_markup` 改普通代码标记）。
+
+测试：`typeset::blocks::choice_grid` 16 例（em 口径、分式/上下标/根号/`\text`/函数名/定界符折算、
+多行取最宽行、四档决策表 1×4 / 2×2 / 4×1 / 含公式、列数上限、长度单位、不 panic）；
+`cargo test --lib` 526 passed / 0 failed；新模块 clippy 与 rustdoc 无告警。
+真实题库的选项宽度分布留到 T2.8 手工验收时随卷核对（阈值按「最宽选项 ÷ 栏宽」单一指标，
+未按总宽均摊，真卷若出现「三个短选项 + 一个长选项」会整体降一列，这是决策表的既定行为）。
