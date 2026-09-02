@@ -10,6 +10,7 @@ use ts_rs::TS;
 use uuid::Uuid;
 
 use crate::models::question_structure::{AnalysisBlock, QuestionPart};
+use crate::typeset::spec::LayoutSpec;
 
 // ═══════════════════════════ 请求契约（ExamRequest） ═══════════════════════════
 
@@ -28,10 +29,10 @@ pub struct ExamRequest {
     pub sections: Vec<ExamSectionRequest>,
     #[serde(default)]
     pub options: ExportOptions,
-    /// 版面参数覆盖（完整 LayoutSpec 于 T3.2 定义，当前阶段透传 JSON）
+    /// 版面参数覆盖（T3.2）：`/export/pdf` 先按 mode 取默认 spec，再用这里的字段级覆盖合并
     #[serde(default)]
-    #[ts(optional, type = "Record<string, unknown>")]
-    pub spec: Option<serde_json::Value>,
+    #[ts(optional)]
+    pub spec: Option<LayoutSpec>,
 }
 
 /// 导出模式：student=学生卷 / teacher=讲义（内嵌 Callout）/ exam=考卷（卷末答案）

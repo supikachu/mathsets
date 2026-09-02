@@ -1,0 +1,146 @@
+[
+  {
+    "id": "a4_lecture",
+    "label": "A4 讲义 · 单栏",
+    "spec": {
+      "paper": "a4",
+      "columns": 1,
+      "margins": {
+        "top_mm": 22.0,
+        "right_mm": 18.0,
+        "bottom_mm": 22.0,
+        "left_mm": 18.0,
+        "gutter_mm": 0.0
+      },
+      "binding": null,
+      "header_footer": {
+        "header_title": false,
+        "page_number": true,
+        "odd_even_outer": false
+      },
+      "profile": "teacher",
+      "fonts": {
+        "body": "Source Han Serif SC",
+        "heading": "Source Han Sans SC",
+        "math": "New Computer Modern"
+      },
+      "answer_blank": {
+        "style": "lines",
+        "height_cm": 6.0
+      },
+      "color": "rich"
+    }
+  },
+  {
+    "id": "a4_practice",
+    "label": "A4 练习 · 双栏",
+    "spec": {
+      "paper": "a4",
+      "columns": 2,
+      "margins": {
+        "top_mm": 20.0,
+        "right_mm": 15.0,
+        "bottom_mm": 20.0,
+        "left_mm": 15.0,
+        "gutter_mm": 8.0
+      },
+      "binding": null,
+      "header_footer": {
+        "header_title": false,
+        "page_number": true,
+        "odd_even_outer": false
+      },
+      "profile": "student",
+      "fonts": {
+        "body": "Source Han Serif SC",
+        "heading": "Source Han Sans SC",
+        "math": "New Computer Modern"
+      },
+      "answer_blank": {
+        "style": "lines",
+        "height_cm": 6.0
+      },
+      "color": "rich"
+    }
+  },
+  {
+    "id": "a3_fold_exam",
+    "label": "A3 对折 · 双栏考卷",
+    "spec": {
+      "paper": "a3_fold",
+      "columns": 2,
+      "margins": {
+        "top_mm": 18.0,
+        "right_mm": 16.0,
+        "bottom_mm": 18.0,
+        "left_mm": 16.0,
+        "gutter_mm": 12.0
+      },
+      "binding": {
+        "position": "center_fold",
+        "areas": {
+          "school": true,
+          "class": true,
+          "name": true,
+          "exam_no": true
+        }
+      },
+      "header_footer": {
+        "header_title": false,
+        "page_number": true,
+        "odd_even_outer": true
+      },
+      "profile": "exam",
+      "fonts": {
+        "body": "Source Han Serif SC",
+        "heading": "Source Han Sans SC",
+        "math": "New Computer Modern"
+      },
+      "answer_blank": {
+        "style": "lines",
+        "height_cm": 6.0
+      },
+      "color": "rich"
+    }
+  },
+  {
+    "id": "a3_tri_exam",
+    "label": "A3 三栏考卷",
+    "spec": {
+      "paper": "a3_tri",
+      "columns": 3,
+      "margins": {
+        "top_mm": 18.0,
+        "right_mm": 14.0,
+        "bottom_mm": 18.0,
+        "left_mm": 14.0,
+        "gutter_mm": 10.0
+      },
+      "binding": {
+        "position": "left",
+        "areas": {
+          "school": true,
+          "class": true,
+          "name": true,
+          "exam_no": true
+        }
+      },
+      "header_footer": {
+        "header_title": false,
+        "page_number": true,
+        "odd_even_outer": false
+      },
+      "profile": "exam",
+      "fonts": {
+        "body": "Source Han Serif SC",
+        "heading": "Source Han Sans SC",
+        "math": "New Computer Modern"
+      },
+      "answer_blank": {
+        "style": "lines",
+        "height_cm": 6.0
+      },
+      "color": "rich"
+    }
+  }
+]
