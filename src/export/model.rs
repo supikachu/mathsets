@@ -29,7 +29,7 @@ pub struct ExamRequest {
     pub sections: Vec<ExamSectionRequest>,
     #[serde(default)]
     pub options: ExportOptions,
-    /// 版面参数覆盖（T3.2）：`/export/pdf` 先按 mode 取默认 spec，再用这里的字段级覆盖合并
+    /// 版面参数（T3.2）：缺省时 `/export/pdf` 按 mode 取内置预设，带了就整体替换（T3.3）
     #[serde(default)]
     #[ts(optional)]
     pub spec: Option<LayoutSpec>,

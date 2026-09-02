@@ -1,10 +1,10 @@
 //! 版面参数模型（实施计划 §6.1）— 任务 T3.2
 //!
-//! `LayoutSpec` 是排版域（模块 B）的唯一入参：`/export/pdf` 按 mode 取默认 spec，请求里的
-//! `spec` 字段做字段级覆盖。经 ts-rs 导出 `frontend/src/api/types/layout.ts`（B6），
-//! 前端 PDF 展开区的字段全部由它生成，不手写。
+//! `LayoutSpec` 是排版域（模块 B）的唯一入参：`/export/pdf` 按 mode 取内置预设，请求里带了
+//! `spec` 就整体替换它（`profile` 仍由 mode 回填 —— 见 `export::pdf::resolve_spec`）。经 ts-rs
+//! 导出 `frontend/src/api/types/layout.ts`（B6），前端 PDF 展开区的字段全部由它生成，不手写。
 //!
-//! 依赖方向：typeset **不** import export。`ExportMode → OutputProfile` 的翻译与
+//! 依赖方向：本文件一个 export 符号都不碰。`ExportMode → OutputProfile` 的翻译与
 //! `ExamQuestion.answer_space` 的取值都在适配器 `export::pdf` 里做；本模块只交出合并规则
 //! （B5：options 决定开关与高度，spec 决定样式）。
 

@@ -45,6 +45,8 @@ const THIN_EM: f64 = 0.17;
 const BACKSLASH_SPACE_EM: f64 = 0.3;
 /// 图片按 96dpi 折算：10.5pt 的 1em ≈ 14px
 const PX_PER_EM: f64 = 14.0;
+/// 版面尺寸换算：10.5pt 正文在 96dpi 下 1em ≈ 3.7mm（= 14px × 2.54/96）
+pub const MM_PER_EM: f64 = 3.7;
 /// 选项里的图片最小估宽（老数据没有 width 也不至于算成 0）
 const IMAGE_MIN_EM: f64 = 3.0;
 /// 表格里出现即单列，宽度不参与比较（给一个必然超阈值的常量）
@@ -92,6 +94,14 @@ const FUNCTION_WORDS: &[&str] = &[
 const MATH_OPS: &[char] = &['+', '-', '=', '<', '>', '*', '/', '|', ':'];
 
 // ═══════════════════════════════ 对外判定 ═══════════════════════════════
+
+/// 版面尺寸（mm）→ em：给 [`decide`] 喂可用栏宽用
+///
+/// `LayoutSpec::column_width_mm` 出来的是毫米，docx 那边算的是 twips，两边都必须先落到
+/// 本模块的 em 口径上，才谈得上「同一算法、两处渲染」。
+pub fn em_from_mm(mm: f64) -> f64 {
+    mm / MM_PER_EM
+}
 
 /// 选项栅格（供 typst `grid()` 与 docx `w:tbl` 共用；`rows` 由选项数与列数推出）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
