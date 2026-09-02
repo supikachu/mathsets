@@ -7,7 +7,7 @@ import type { LayoutSpec } from "./layout";
 export type AnalysisBlock = { id: string, title: string, content: string, };
 
 /**
- * 答题留白配置（高度由 options 管、样式细节由 spec 管，冲突以 options 为准 — B5）
+ * 答题留白配置（出现即整块表态：样式一律取这里，高度非正数才退回版面 `spec.answer_blank` — B5）
  */
 export type AnswerSpace = { style: BlankStyle, 
 /**
@@ -158,7 +158,8 @@ include_analysis: boolean,
  */
 answer_at_end: boolean, callouts: CalloutOptions, 
 /**
- * 答题留白（B5：管开关与高度；None = 不留白）
+ * 答题留白（B5：题级 → 本字段 → 版面 `spec.answer_blank` 三档取用，判据在
+ * `typeset::blocks::blank`）
  */
 answer_space?: AnswerSpace, };
 

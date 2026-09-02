@@ -27,6 +27,7 @@ use typst::layout::{Frame, FrameItem, Point};
 use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
 use typst::text::{Font, FontBook, FontInfo};
 use typst::utils::LazyHash;
+use typst::visualize::Geometry;
 use typst::{Library, LibraryExt, World, compile};
 use typst_layout::PagedDocument;
 
@@ -148,11 +149,27 @@ pub struct PlacedImage {
     pub h_mm: f64,
 }
 
-/// 一次帧树遍历的两类落点：[`placed_pages`] 与 [`placed_images`] 各取所需
+/// 一笔画在版面上的**直线**（typst 侧 `Geometry::Line` 那一种 Shape）：起点 + 相对位移 +
+/// 线宽 + 已折算成绝对长度的 dash 数组（`None` = 实线），全部毫米、原点 = 页面左上角。
+///
+/// 留白三样式（T4.4 的「编译视觉正确」）只能这样验：留白块是 `height: h, clip: true`，
+/// 源码里写了 n 条线不代表纸上画了 n 条 —— 溢出的一两条会被静静裁掉。
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlacedLine {
+    pub x_mm: f64,
+    pub y_mm: f64,
+    pub dx_mm: f64,
+    pub dy_mm: f64,
+    pub thickness_mm: f64,
+    pub dash_mm: Option<Vec<f64>>,
+}
+
+/// 一次帧树遍历的三类落点：[`placed_pages`]、[`placed_images`]、[`placed_lines`] 各取所需
 #[derive(Debug, Default)]
 struct Placed {
     runs: Vec<PlacedRun>,
     images: Vec<PlacedImage>,
+    lines: Vec<PlacedLine>,
 }
 
 /// 逐页收集版面文字（下标 = 物理页，从 0 起）。
@@ -181,7 +198,7 @@ pub fn rendered_pages(doc: &PagedDocument) -> Vec<Vec<RenderedRun>> {
 /// 没有 `rotate` / `scale`，而栅格与缩进给出的平移正是「第几列 / 第几行」的判据
 /// （T4.2 的选项栅格、T4.7 的答案分区都靠它）。
 ///
-/// 只走 `Group` 递归；文字与栅格图共用这一次遍历，`Shape` / `Tag` 与两者无关。
+/// 只走 `Group` 递归；文字与栅格图共用这一次遍历，`Link` / `Tag` 与三者无关。
 pub fn placed_pages(doc: &PagedDocument) -> Vec<Vec<PlacedRun>> {
     place_pages(doc).into_iter().map(|p| p.runs).collect()
 }
@@ -191,6 +208,14 @@ pub fn placed_pages(doc: &PagedDocument) -> Vec<Vec<PlacedRun>> {
 /// 「图列不失宽」只能这样验：图在纸上就是一个 `Size`，源码里的 `width:` 说了不算。
 pub fn placed_images(doc: &PagedDocument) -> Vec<Vec<PlacedImage>> {
     place_pages(doc).into_iter().map(|p| p.images).collect()
+}
+
+/// 逐页收集版面上画出的**直线**（下标 = 物理页，从 0 起）。
+///
+/// 留白三样式（T4.4）的行数、行距、点距全靠它：横线是实线 Shape、点阵是带 dash 的 Shape、
+/// 纯空白一个都不该有，而这三件事在源码字符串里根本区分不出来。
+pub fn placed_lines(doc: &PagedDocument) -> Vec<Vec<PlacedLine>> {
+    place_pages(doc).into_iter().map(|p| p.lines).collect()
 }
 
 fn place_pages(doc: &PagedDocument) -> Vec<Placed> {
@@ -225,6 +250,22 @@ fn walk_frame(frame: &Frame, at: Point, out: &mut Placed) {
             FrameItem::Group(group) => {
                 let t = &group.transform;
                 walk_frame(&group.frame, here + Point::new(t.tx, t.ty), out);
+            }
+            FrameItem::Shape(shape, _) => {
+                // 只认直线：矩形 / 曲线（圆、Bézier）在留白判据里用不上，收进来只会添噪
+                if let Geometry::Line(to) = shape.geometry {
+                    let stroke = shape.stroke.as_ref();
+                    out.lines.push(PlacedLine {
+                        x_mm: here.x.to_mm(),
+                        y_mm: here.y.to_mm(),
+                        dx_mm: to.x.to_mm(),
+                        dy_mm: to.y.to_mm(),
+                        thickness_mm: stroke.map_or(0.0, |s| s.thickness.to_mm()),
+                        dash_mm: stroke
+                            .and_then(|s| s.dash.as_ref())
+                            .map(|d| d.array.iter().map(|l| l.to_mm()).collect()),
+                    });
+                }
             }
             _ => {}
         }

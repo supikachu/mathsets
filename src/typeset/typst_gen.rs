@@ -104,11 +104,19 @@ const FUNCTION_LIBRARY: &str = r#"
 
 /// 题块：首行是「5. （3 分）」这类标号，续行按 indent 缩进（hanging indent）。
 /// label 为空则不占行首；indent 同时决定块缩进与首行回抽，两者不会各改一半。
-#let item(label, indent: 2.6em, above: 3pt, breakable: true, body) = block(
+///
+/// `lead` 是**块之间补回来的那一口气**。`par` 的 leading 只加在同一段相邻两行之间，块与块之间
+/// typst 取的是 `max(前块 below, 后块 above)`（实测：`below: 0.7em` 配 `above: 1pt` 相邻，间距
+/// 就是 0.7em 而不是两者之和），而单行块本身只有字框高 —— 10.5pt 下 7.65pt，比一个 em 还矮。
+/// 于是只写 `above: 1pt` 的两道题行距会塌成 3.07mm（CJK 字形占满 em 方框，直接压在一起），
+/// 同段两行却是 5.31mm。leading 必须由 above 自带一份，题块之间才与段内等距。
+/// 单位取 em：跟着正文字号走，改字号不必两头改。`figure-float` 里的 item 是网格单元、要与配图
+/// 顶对齐，那里显式 `lead: 0pt`。
+#let item(label, indent: 2.6em, above: 3pt, lead: 0.7em, breakable: true, body) = block(
   width: 100%,
   breakable: breakable,
   inset: (left: indent),
-  above: above,
+  above: above + lead,
 )[
   #set par(first-line-indent: (amount: 0em - indent, all: false))
   #if label != "" {
@@ -126,12 +134,14 @@ const FUNCTION_LIBRARY: &str = r#"
 /// 4 → 2 → 1。跳过 3 是故意的 —— 四枚选项排成 3+1 比排成 2+2 难看。
 /// 三处误差都由它兜：估宽对没见过的 LaTeX 命令偏乐观、图片宽要解码后才知道、
 /// 以及 docx 与 typst 的悬挂缩进口径差（2.0em vs 2.6em）。
+/// 行间距 0.7em 与 [`item`] 同一道理：栅格的每一行只有字框高，`par` 的 leading 不会管到栅格行，
+/// 2pt 的行距会让「一列四行」的选项在竖向上压在一起。
 /// 判定为单列时一个单元格都不量 —— 不是为省钱：20 题卷实测 113ms（开兜底）对 114ms（全单列），
 /// 500ms/卷的预算很宽（探针见 `cost_of_the_measure_fallback`），单列本来就装不下溢出这回事。
 #let choices(cols, ..cells) = {
   let gut = 10pt
   if cols <= 1 {
-    grid(columns: 1, gutter: (gut, 2pt), ..cells)
+    grid(columns: 1, gutter: (gut, 0.7em), ..cells)
   } else {
     layout(size => {
       let want = {
@@ -146,7 +156,7 @@ const FUNCTION_LIBRARY: &str = r#"
       }
       let fits(c) = want <= (size.width - (c - 1) * gut) / c
       let n = if fits(cols) { cols } else if cols >= 4 and fits(2) { 2 } else { 1 }
-      grid(columns: n, gutter: (gut, 2pt), ..cells)
+      grid(columns: n, gutter: (gut, 0.7em), ..cells)
     })
   }
 }
@@ -158,19 +168,19 @@ const FUNCTION_LIBRARY: &str = r#"
 /// 这就是「图不失宽」的机械成因。Rust 侧只放行「估宽装得进九成右栏」的尾部单图。
 /// 选项（`rest`）排在栅格**外面**通栏：四列栅格塞进 65% 的左栏必然挤成一列。
 /// 左格自己就是一个 `item` —— 悬挂缩进只在这一处出现，图格在缩进之外、享整栏宽。
-#let figure-float(label, figure, indent: 2.6em, above: 3pt, breakable: true, rest: none, body) = block(
+#let figure-float(label, figure, indent: 2.6em, above: 3pt, lead: 0.7em, breakable: true, rest: none, body) = block(
   width: 100%,
   breakable: breakable,
-  above: above,
+  above: above + lead,
 )[
   #grid(
     columns: (1fr, 35%),
     gutter: 6pt,
-    item(label, indent: indent, above: 0pt)[#body],
+    item(label, indent: indent, above: 0pt, lead: 0pt)[#body],
     align(right + top)[#figure],
   )
   #if rest != none {
-    block(width: 100%, inset: (left: indent))[#rest]
+    block(width: 100%, inset: (left: indent), above: lead)[#rest]
   }
 ]
 
@@ -178,8 +188,9 @@ const FUNCTION_LIBRARY: &str = r#"
 /// typst-layout 源码里搜不到 `keep_with_next`，`par` 也没有 `keep-lines-together`），
 /// 能把 N 个块钉在同一页的只有「包进一个 breakable: false 的 block」。
 /// 粘哪一段由 Rust 侧按估高决定：一条链再长也不许超过栏高，否则就是溢出裁切。
-/// `above` 是给整组补回的那口气 —— 壳内首块的前置间距在容器边界上会被吞掉。
-#let keep-together(body) = block(width: 100%, breakable: false, above: 3pt)[#body]
+/// `above` 是给整组补回的那口气 —— 壳内首块的前置间距在容器边界上会被吞掉，所以这一份里
+/// 必须自带一个 leading（同 [`item`]：块之间 typst 取 max，单行块的字框高比行距矮一截）。
+#let keep-together(body) = block(width: 100%, breakable: false, above: 3pt + 0.7em)[#body]
 
 /// 大题标题：灰底 + 左题名右「共 N 题 · X 分」
 #let section-header(title, meta) = block(
@@ -218,20 +229,22 @@ const FUNCTION_LIBRARY: &str = r#"
   body
 }
 
-// 答题留白三式：横线 / 点阵 / 纯空白。高度与行数都由 Rust 算好，模板不做算术。
-#let blank-lines(h, n) = block(width: 100%, height: h, clip: true, breakable: false)[
-  #for _ in range(n) {
-    line(length: 100%, stroke: 0.5pt + luma(120));
-    parbreak()
+// 答题留白三式：横线 / 点阵 / 纯空白。行数、行距、点距都由 Rust 算好，模板不做算术。
+//
+// 每一行都用 `place` 钉在 `dy = 行距 × i` 上，**不走段落流**：走流的话行距就成了「字号行高 +
+// par leading」，与 Rust 除出来的那个数无关，而块是固定高度 + clip 的 —— 多出来的一两条会被
+// 静默裁掉，画出的行数与行距都不再是卷面上说好的那一份。
+// `above` 与 [`item`] 同一个道理：块边界上没有 leading，不留这一口气第一条横线就贴着题干下沿。
+#let blank-rows(h, n, step, stroke) = block(width: 100%, height: h, clip: true, above: 0.7em, breakable: false)[
+  #for i in range(n) {
+    place(top + left, dy: step * i, line(length: 100%, stroke: stroke))
   }
 ]
-#let blank-dots(h, n) = block(width: 100%, height: h, clip: true, breakable: false)[
-  #for _ in range(n) {
-    line(length: 100%, stroke: (paint: luma(150), thickness: 0.5pt, dash: "dotted"));
-    parbreak()
-  }
-]
-#let blank-space(h) = block(width: 100%, height: h, breakable: false)
+#let blank-lines(h, n, step) = blank-rows(h, n, step, 0.5pt + luma(120))
+// 点阵 = 圆头线帽 + 「一点一空」的 dash：横向点距与纵向行距同为 step，才是二维点阵而不是虚线
+#let blank-dots(h, n, step, dot, gap) = blank-rows(h, n, step, (
+  paint: luma(150), thickness: dot, cap: "round", dash: ("dot", gap)))
+#let blank-space(h) = block(width: 100%, height: h, above: 0.7em, breakable: false)
 
 /// 卷头（简化版）：题名 + 副题 + 一行元信息 + 注意事项。
 /// 完整考卷卷头（学校/班级/姓名栏与密封线）在 T4.9。
@@ -266,10 +279,24 @@ const PX_MM: f32 = 25.4 / 96.0;
 const SUB_INDENT_EM: f32 = 1.2;
 /// 题号悬挂缩进宽度（em）
 const HANG_EM: f32 = 2.6;
-/// 留白区每行横线/点阵的间距（mm）
+/// 留白横线的目标行距（mm）；T4.5 的估高把一行文本也按这个口径算，两边同名字同数值
 const BLANK_LINE_MM: f32 = 8.0;
-/// 相邻两块之间的 `par.spacing: 0.55em`（10.5pt 下约 2mm）—— 只给 T4.5 的估高用
-const PAR_SPACING_MM: f64 = 2.0;
+/// 点阵的点距 = 行距（mm）：横竖同距才成阵
+const BLANK_DOT_MM: f32 = 4.0;
+/// 点阵里一枚点的直径（mm，约 1pt）：圆头线帽把这么长的「点划线」画成实心点
+const BLANK_DOT_SIZE_MM: f32 = 0.35;
+
+/// 留白的行数与实际行距：按目标间距取整，再把高度**精确铺满**
+///
+/// 行距用 `高度 / 行数` 而不是目标值，块底就不会剩下一条不足一行的空档；行数按目标间距
+/// round（至少 1），所以行距始终在目标值的一半到一倍之间。
+fn blank_rows(height_mm: f32, step_mm: f32) -> (i32, f32) {
+    let n = (height_mm / step_mm).round().max(1.0) as i32;
+    (n, height_mm / n as f32)
+}
+/// 相邻两块之间的最小间距：`par` 的 leading 只管段内，块与块的间距由题块自己补一份
+/// （见模板 `item` 的 `lead`），10.5pt 下 `0.7em` ≈ 2.6mm —— 只给 T4.5 的估高用
+const PAR_SPACING_MM: f64 = 2.6;
 
 // ═══════════════════════════════════ 生成器 ═══════════════════════════════════
 
@@ -519,11 +546,24 @@ impl Gen<'_> {
             LayoutBlock::Blank(blank) => {
                 self.number = Some(blank.number);
                 self.field = IssueField::Structure;
-                let h = format!("{}mm", mm(blank.height_mm.max(0.0)));
-                let lines = ((blank.height_mm / BLANK_LINE_MM).floor() as i32).max(1);
+                let height = blank.height_mm.max(0.0);
+                let h = format!("{}mm", mm(height));
                 match blank.style {
-                    BlankStyle::Lines => format!("#blank-lines({h}, {lines})\n"),
-                    BlankStyle::Dots => format!("#blank-dots({h}, {lines})\n"),
+                    BlankStyle::Lines => {
+                        let (n, step) = blank_rows(height, BLANK_LINE_MM);
+                        format!("#blank-lines({h}, {n}, {}mm)\n", mm(step))
+                    }
+                    BlankStyle::Dots => {
+                        // 一点 + 一空 = 一个点距，且点距 == 行距，横竖对齐成阵
+                        let (n, step) = blank_rows(height, BLANK_DOT_MM);
+                        let gap = (step - BLANK_DOT_SIZE_MM).max(BLANK_DOT_SIZE_MM);
+                        format!(
+                            "#blank-dots({h}, {n}, {}mm, {}mm, {}mm)\n",
+                            mm(step),
+                            mm(BLANK_DOT_SIZE_MM),
+                            mm(gap)
+                        )
+                    }
                     BlankStyle::Blank => format!("#blank-space({h})\n"),
                 }
             }
@@ -1053,8 +1093,8 @@ mod tests {
     use crate::typeset::blocks::choice_grid;
     use crate::typeset::blocks::figure_float::{self, FIGURE_SHARE};
     use crate::typeset::compiler::{
-        CompileRequest, PlacedImage, PlacedRun, compile_paged, compile_pdf, font_dirs,
-        placed_images, placed_pages, rendered_pages, rendered_runs,
+        CompileRequest, PlacedImage, PlacedLine, PlacedRun, compile_paged, compile_pdf, font_dirs,
+        placed_images, placed_lines, placed_pages, rendered_pages, rendered_runs,
     };
     use crate::typeset::ir::{
         AnalysisEntry, AnswerLine, BlankBlock, CalloutBlock, DocumentMeta, QuestionBlock, Section,
@@ -1336,6 +1376,7 @@ mod tests {
             "#let section-header(",
             "#let callout-box(",
             "#let analysis(",
+            "#let blank-rows(",
             "#let blank-lines(",
             "#let blank-dots(",
             "#let blank-space(",
@@ -2057,6 +2098,10 @@ mod tests {
     ///
     /// 对照组把所有题判成单列 —— 单列走 `cols <= 1` 分支，一个单元格都不量。两组的版面长度不同
     /// （单列多占行），所以把页数一起打出来，别把版面差异读成兜底的开销。
+    ///
+    /// 这里量的是**暖身之后**的逐请求成本，且暖身付掉的不止字体池解析：本机实测同一进程里前两编
+    /// 各 5–9s（把兜底整个关掉仍是 6.2s），之后才落到百毫秒级。别把打出来的数字读成服务启动后
+    /// 的第一次导出耗时。
     #[test]
     #[ignore]
     fn cost_of_the_measure_fallback() {
@@ -2314,5 +2359,243 @@ mod tests {
         }
         let flowed = flat(&compile_pages(&doc));
         assert_eq!(floated, flowed, "浮动把卷面文字改动了");
+    }
+
+    // ─────────────────────────────────────────── T4.4 留白三样式（编译几何）
+
+    /// 编译成帧树所在的分页产物：留白画没画、画了几条，只有这里说了才算
+    fn compiled(doc: &LayoutDoc) -> typst_layout::PagedDocument {
+        let generated = generate(doc, &HashMap::new());
+        let dirs = font_dirs();
+        let req = request(&generated.source, &dirs, &[]);
+        match compile_paged(&req) {
+            Ok(out) => out.output,
+            Err(err) => panic!(
+                "编译失败：{:?}\n---- 源码 ----\n{}",
+                err.diagnostics, generated.source
+            ),
+        }
+    }
+
+    /// 指定样式与高度的留白块
+    fn blank_styled(number: u32, height_mm: f32, style: BlankStyle) -> LayoutBlock {
+        LayoutBlock::Blank(BlankBlock {
+            meta: BlockMeta::solid(),
+            number,
+            height_mm,
+            style,
+        })
+    }
+
+    /// 一道题吊一块留白：卷面上除它之外不该再有通栏横线
+    fn blank_doc(style: BlankStyle, height_mm: f32) -> LayoutDoc {
+        let mut doc = pair_doc(
+            BlockMeta::flow(),
+            1,
+            vec![blank_styled(1, height_mm, style)],
+        );
+        // 卷头注意事项自带 top / bottom 两根通栏横线，会把「这些线是谁画的」这笔账搅浑
+        doc.meta.instructions.clear();
+        doc
+    }
+
+    /// 版面上画出的**通宽横线**（按 y 排序）：竖边、底色矩形、下划线一类都进不来
+    fn drawn_rules(doc: &LayoutDoc) -> Vec<PlacedLine> {
+        let mut lines: Vec<PlacedLine> = placed_lines(&compiled(doc))
+            .into_iter()
+            .flatten()
+            .filter(|l| l.dy_mm.abs() < 0.01 && l.dx_mm > 10.0)
+            .collect();
+        lines.sort_by(|a, b| a.y_mm.total_cmp(&b.y_mm));
+        lines
+    }
+
+    /// 相邻两行的间距（mm）
+    fn pitches(lines: &[PlacedLine]) -> Vec<f64> {
+        lines.windows(2).map(|w| w[1].y_mm - w[0].y_mm).collect()
+    }
+
+    fn near(a: f64, b: f64) -> bool {
+        (a - b).abs() < 0.1
+    }
+
+    /// 横线格：Rust 要几行，纸上就得有几行，而且行距就是 Rust 算出来的那个数
+    #[test]
+    fn ruled_blank_draws_every_row_at_the_computed_pitch() {
+        let doc = blank_doc(BlankStyle::Lines, 60.0);
+        let lines = drawn_rules(&doc);
+        let (asked, step) = blank_rows(60.0, BLANK_LINE_MM);
+        assert_eq!(lines.len() as i32, asked, "行数对不上：{lines:?}");
+        assert!(asked >= 3, "用例本身要能看出间距：{asked} 行");
+        for gap in pitches(&lines) {
+            assert!(
+                near(gap, f64::from(step)),
+                "行距漂了：{gap:.3}mm ≠ {step}mm"
+            );
+        }
+        assert!(
+            lines.iter().all(|l| l.dash_mm.is_none()),
+            "横线格里混进了虚线：{}",
+            lines[0].dx_mm
+        );
+        // 通栏：`place` 里的 100% 必须落在栏宽上，缩成 0 宽或胀出栏外都算失败
+        let column = f64::from(doc.spec.column_width_mm());
+        for line in &lines {
+            assert!(
+                near(line.dx_mm, column),
+                "横线宽 {:.1}mm ≠ 栏宽 {column:.1}mm",
+                line.dx_mm
+            );
+        }
+        // 首尾都不许越出这块留白
+        let top = lines[0].y_mm;
+        let span = lines.last().unwrap().y_mm - top;
+        assert!(span + 0.1 < 60.0, "末行越出块高：{span:.1}mm");
+    }
+
+    /// 点阵：横向点距与纵向行距同为 4mm，才是二维散点而不是一根根虚线
+    #[test]
+    fn dotted_blank_is_a_lattice_not_a_dashed_rule() {
+        let doc = blank_doc(BlankStyle::Dots, 60.0);
+        let lines = drawn_rules(&doc);
+        let (rows, step) = blank_rows(60.0, BLANK_DOT_MM);
+        assert_eq!(lines.len(), rows as usize, "点阵行数：{lines:?}");
+        for gap in pitches(&lines) {
+            assert!(near(gap, f64::from(step)), "行距 {gap:.3}mm ≠ {step}mm");
+        }
+        let period = lines
+            .iter()
+            .map(|l| {
+                let dash = l.dash_mm.clone().unwrap_or_default();
+                assert_eq!(dash.len(), 2, "点阵的 dash 应是「一点一空」：{dash:?}");
+                dash[0] + dash[1]
+            })
+            .collect::<Vec<_>>();
+        for p in &period {
+            assert!(
+                near(*p, f64::from(step)),
+                "点距 {p:.3}mm 与行距 {step}mm 不等，这不是点阵"
+            );
+        }
+        assert!(
+            lines
+                .iter()
+                .all(|l| near(l.thickness_mm, f64::from(BLANK_DOT_SIZE_MM))),
+            "点的直径该由 Rust 定：{:?}",
+            lines[0].thickness_mm
+        );
+    }
+
+    /// 纯空白：一根线都不画，但高度必须真的占住 —— 否则它就是个假样式
+    #[test]
+    fn plain_blank_reserves_its_height_without_drawing() {
+        let doc = blank_doc(BlankStyle::Blank, 60.0);
+        assert!(drawn_rules(&doc).is_empty(), "纯空白画出了东西");
+
+        // 同一份卷子只换留白高度：后一题的落点差就是这块留白占掉的高度
+        let y_of_q2 = |height: f32| {
+            let mut doc = pair_doc(BlockMeta::flow(), 1, Vec::new());
+            let mut blocks = std::mem::take(&mut doc.sections[0].blocks);
+            blocks.push(blank_styled(1, height, BlankStyle::Blank));
+            blocks.extend(closed(pair(2, BlockMeta::flow())));
+            doc.sections[0].blocks = blocks;
+            let pages = placed_pages(&compiled(&doc));
+            pages
+                .iter()
+                .flatten()
+                .find(|r| r.run.text.contains("第 2 题题干"))
+                .unwrap_or_else(|| panic!("第 2 题没出现在版面上：{height}mm"))
+                .y_mm
+        };
+        assert!(
+            near(y_of_q2(60.0) - y_of_q2(6.0), 54.0),
+            "60mm 与 6mm 的纯空白把后一题推开了 {}mm",
+            y_of_q2(60.0) - y_of_q2(6.0)
+        );
+    }
+
+    // ─────────────────────────────────────────── 块间行距
+
+    /// 两题、每题一行小问；题干里的 `linebreak` 造出「同段两行」，那就是这块版面的参照系
+    ///
+    /// `attach` 决定每题的题干是否粘住自己的小问：粘连壳是**流级块**，壳内首块的前置间距会在
+    /// 容器边界上被吞掉，所以补 leading 的位置和裸块不同 —— 两种形态都得量。
+    fn rhythm_doc(attach: bool) -> LayoutDoc {
+        let meta = if attach {
+            BlockMeta::attach()
+        } else {
+            BlockMeta::flow()
+        };
+        let ask = |number: u32, tag: &str, keep: bool| {
+            LayoutBlock::Question(QuestionBlock {
+                meta: if keep { meta } else { BlockMeta::flow() },
+                number,
+                score: 6.0,
+                kind: QuestionKind::Solution,
+                stem: vec![
+                    text(&format!("{tag}一")),
+                    InlineNode::LineBreak,
+                    text(&format!("{tag}二")),
+                ],
+                options: Vec::new(),
+                grid: choice_grid::ChoiceGrid {
+                    columns: 1,
+                    rows: 0,
+                },
+                figure: None,
+            })
+        };
+        let sub = |number: u32, tag: &str| {
+            LayoutBlock::SubQuestion(SubQuestionBlock {
+                meta: BlockMeta::flow(),
+                number,
+                depth: 0,
+                label: format!("({number}) "),
+                stem: vec![text(&format!("{tag}三"))],
+            })
+        };
+        let mut doc = pair_doc(BlockMeta::flow(), 2, Vec::new());
+        doc.sections[0].blocks = vec![
+            ask(1, "甲", attach),
+            sub(1, "甲"),
+            ask(2, "乙", attach),
+            sub(2, "乙"),
+        ];
+        doc
+    }
+
+    /// 相邻题块不许只隔一个字框高 —— 块与块之间必须补回一个 leading
+    ///
+    /// 单行 `block` 的高就是字框（10.5pt 下 7.65pt），`par` 的 leading 只加在同段两行之间，
+    /// 而 typst 对相邻块取 `max(below, above)`：模板只写 `above: 1pt` 时题块行距塌成 3.07mm，
+    /// 上一题的末行直接压在下一题的题干上（300dpi 目视 + 帧树 y 都量到过）。
+    /// 判据不许写成绝对毫米数：同一份产物里「同段两行」就是免费的行距基准。
+    #[test]
+    fn stacked_blocks_keep_the_paragraph_pitch() {
+        for attach in [false, true] {
+            let pages = placed_pages(&compiled(&rhythm_doc(attach)));
+            let y = |tag: &str| -> f64 {
+                pages
+                    .iter()
+                    .flatten()
+                    .find(|r| r.run.text.contains(tag))
+                    .unwrap_or_else(|| panic!("「{tag}」没出现在版面上：{attach}"))
+                    .y_mm
+            };
+            let form = if attach { "粘连壳" } else { "裸块" };
+            let ref_pitch = y("甲二") - y("甲一");
+            assert!(
+                ref_pitch > 4.0,
+                "{form}：参照系本身就不对，同段两行只隔 {ref_pitch:.2}mm"
+            );
+            // 题干末行→小问（above 1pt）、小问→下一题题干（3pt）、末题题干末行→小问
+            for (from, to) in [("甲二", "甲三"), ("甲三", "乙一"), ("乙二", "乙三")] {
+                let gap = y(to) - y(from);
+                assert!(
+                    (ref_pitch - 0.2..ref_pitch + 1.6).contains(&gap),
+                    "{form}：{from}→{to} 块间距 {gap:.2}mm 与段内行距 {ref_pitch:.2}mm 不等高"
+                );
+            }
+        }
     }
 }

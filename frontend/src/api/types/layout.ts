@@ -20,7 +20,7 @@ class: boolean, name: boolean, exam_no: boolean, };
 export type BindingPosition = "left" | "center_fold";
 
 /**
- * 留白样式与默认高度。**是否留白与最终高度由 `options.answer_space` 裁决**（B5）
+ * 留白样式与默认高度。是否留白与最终样式按「题级 → 卷级 options → 本字段」取用（B5）
  */
 export type BlankSpec = { style: BlankStyle, 
 /**

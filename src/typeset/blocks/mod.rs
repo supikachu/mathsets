@@ -24,17 +24,15 @@
 //! [`crate::export::content::split_content`]），否则排版系统就反向依赖了导出引擎的生成器。
 //! `QuestionPart` 随 `ExamQuestion` 进来 —— 它是 models 里的纯数据类型，不带装配逻辑。
 
+pub mod blank;
 pub mod choice_grid;
 pub mod figure_float;
 
-use crate::export::model::{
-    AnswerSpace, BlankStyle as WireBlankStyle, ExamOption, ExamQuestion, ExportOptions, InlineNode,
-    QuestionKind,
-};
+use crate::export::model::{ExamOption, ExamQuestion, ExportOptions, InlineNode, QuestionKind};
 use crate::models::question_structure::QuestionPart;
 use crate::typeset::blocks::choice_grid::{ChoiceGrid, decide, requires_single_column};
-use crate::typeset::ir::{BlankBlock, BlockMeta, LayoutBlock, QuestionBlock, SubQuestionBlock};
-use crate::typeset::spec::{BlankStyle, LayoutSpec, OutputProfile, ResolvedBlank};
+use crate::typeset::ir::{BlockMeta, LayoutBlock, QuestionBlock, SubQuestionBlock};
+use crate::typeset::spec::{LayoutSpec, OutputProfile};
 
 /// 文本切分器：原始字符串 → InlineNode 序列（见模块头「依赖方向」）
 pub type Splitter = dyn Fn(&str) -> Vec<InlineNode>;
@@ -44,7 +42,7 @@ pub type Splitter = dyn Fn(&str) -> Vec<InlineNode>;
 pub struct Policy {
     /// 展开问树（解答题 / 综合题的 `(1)(2)` 小问）
     pub expands_parts: bool,
-    /// 需要作答留白（讲义模式另外排除，见 [`blank_block`]）
+    /// 需要作答留白（讲义模式另外排除，见 [`blank::plan`]）
     pub wants_blank: bool,
     /// 题干短到可以整块不跨页（还要求题干与选项里都没有表格 / 块级公式）
     pub compact_stem: bool,
@@ -86,7 +84,7 @@ pub trait BlockBuilder {
         if policy.expands_parts {
             push_parts(&q.structure_parts, 0, q.number, split, &mut out);
         }
-        if let Some(blank) = blank_block(q, ctx, &policy) {
+        if let Some(blank) = blank::plan(q, ctx, &policy) {
             out.push(LayoutBlock::Blank(blank));
         }
         out
@@ -302,32 +300,6 @@ fn push_part(
     }
 }
 
-/// 本题留白块（`None` = 不留）：教师讲义不留白（答案即解析），其余按 B5 合并
-pub fn blank_block(q: &ExamQuestion, ctx: &BlockCtx, policy: &Policy) -> Option<BlankBlock> {
-    if !policy.wants_blank || ctx.profile == OutputProfile::Teacher {
-        return None;
-    }
-    let space = q.answer_space.or(ctx.options.answer_space)?;
-    let resolved = resolved_blank(space, ctx.spec)?;
-    Some(BlankBlock::new(q.number, &resolved))
-}
-
-/// B5 合并：开关与高度在 options，样式在 spec；options 自带样式时以它为准
-fn resolved_blank(space: AnswerSpace, spec: &LayoutSpec) -> Option<ResolvedBlank> {
-    let mut resolved = spec.resolve_blank(Some(space.height_cm as f32))?;
-    resolved.style = style_of(space.style);
-    Some(resolved)
-}
-
-/// 内容侧样式 → 版面侧样式（两套枚举各自服务各自的 wire 契约，在桥上相遇）
-fn style_of(s: WireBlankStyle) -> BlankStyle {
-    match s {
-        WireBlankStyle::Lines => BlankStyle::Lines,
-        WireBlankStyle::Dots => BlankStyle::Dots,
-        WireBlankStyle::Blank => BlankStyle::Blank,
-    }
-}
-
 /// 选项栅格（docx `w:tbl` 与 typst `grid()` 共用的那一次判定）
 pub fn choice_grid(options: &[ExamOption], available_em: f64) -> ChoiceGrid {
     decide(options, available_em)
@@ -338,7 +310,8 @@ pub fn choice_grid(options: &[ExamOption], available_em: f64) -> ChoiceGrid {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::typeset::spec::LayoutSpec;
+    use crate::export::model::{AnswerSpace, BlankStyle as WireBlankStyle};
+    use crate::typeset::spec::{BlankStyle, LayoutSpec};
 
     fn split(s: &str) -> Vec<InlineNode> {
         vec![InlineNode::Text { text: s.into() }]
@@ -624,7 +597,7 @@ mod tests {
                     wants_blank: true,
                     ..Policy::default()
                 };
-                if let Some(b) = blank_block(q, ctx, &policy) {
+                if let Some(b) = blank::plan(q, ctx, &policy) {
                     out.push(LayoutBlock::Blank(b));
                 }
                 out

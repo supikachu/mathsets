@@ -104,7 +104,8 @@ pub struct ExportOptions {
     pub answer_at_end: bool,
     #[serde(default)]
     pub callouts: CalloutOptions,
-    /// 答题留白（B5：管开关与高度；None = 不留白）
+    /// 答题留白（B5：题级 → 本字段 → 版面 `spec.answer_blank` 三档取用，判据在
+    /// `typeset::blocks::blank`）
     #[serde(default)]
     #[ts(optional)]
     pub answer_space: Option<AnswerSpace>,
@@ -144,7 +145,7 @@ impl Default for CalloutOptions {
     }
 }
 
-/// 答题留白配置（高度由 options 管、样式细节由 spec 管，冲突以 options 为准 — B5）
+/// 答题留白配置（出现即整块表态：样式一律取这里，高度非正数才退回版面 `spec.answer_blank` — B5）
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../frontend/src/api/types/exam.ts")]
 pub struct AnswerSpace {

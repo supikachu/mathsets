@@ -1516,4 +1516,128 @@ assert!(s.contains(&format!("columns: (1fr, {}%)", FIGURE_SHARE * 100.0)));
 - 浮动题干**跨页**时左右两格各自怎么断没有专门用例 —— 现有覆盖都是「单页内装得下」的情形。Rust 侧
   只把 `q.meta.breakable` 透传给外壳，图格本身没有独立的不许断声明。
 
+## 2026-09-02 导出引擎 M4 批次③（答题留白与三模式）
+
+### 一、留白在真实卷子上一次都没出现过：三档优先级缺了第三档
+
+`blocks/mod.rs::blank_block` 在 HEAD 上只有两档：
+
+```rust
+let space = q.answer_space.or(ctx.options.answer_space)?;   // None = 不留白
+```
+
+`?` 就是那个洞。wire 侧 `AnswerSpace` 是**整块 `Option`**（`#[ts(optional)]`），前端只在导出面板里
+写 `spec.answer_blank.style`，从不填 `options.answer_space` —— 于是「学生卷 = 题干 + 选项 + 留白」
+这条 T4.6 的默认口径在版面上根本立不起来，面板里那个留白下拉是个死控件。抽出来的
+`blocks/blank.rs::plan` 补上第三档，优先级在这一处定死：
+
+1. 逐题 `q.answer_space`（试题篮里单独设过）
+2. 全卷 `options.answer_space`（请求级开关，B5 说的「开关在 options 手里」）
+3. 版面 `spec.answer_blank`（样式 + 默认高度）
+
+**这是一次行为改动，不是重构**：改完之后「谁都没表态」的学生卷会开始长出留白。定它是对的，因为
+§6.2 与 T4.6 的 DoD 都写着学生模式 = 题干 + 选项 + 留白，而旧行为让这条永远不成立。仍然保留唯一
+的「明确关掉」出口：`spec.answer_blank.height_cm <= 0`。样式冲突按 B5 以 options 为准，卷级冲突由
+`pdf.rs::blank_conflicts` 记**一条** info（`question_no: None`），不逐题刷屏。
+
+### 二、教师（讲义）模式一律不留白 —— §6.2 那句话在排版侧只需要「不出」
+
+`plan` 的第一行就是 `ctx.profile == OutputProfile::Teacher → None`。讲义上的作答区不是给学生写的，
+它在教师侧的正确形态是解析：四类 Callout 由 `assembler::derive_callouts` 按 `options.callouts`
+挂到题块上，答案与全解全析按 `answer_at_end` 决定内嵌题末还是走卷末答案区。所以「教师版折叠为解析
+Callout」在排版侧只是**不出留白** —— 再补一块等于把解析印两遍。
+
+### 三、`place(dy:)` 而不是段落流：行距与点阵都得由 Rust 说了算
+
+留白的行数与行距是 Rust 除出来的（`blank_rows`：按目标间距 round 行数，再用 `高度 / 行数` 精确铺满
+块高，块底就不剩空档）。模板里每一行用 `place(top + left, dy: step * i, line(...))` 钉住，**不走
+段落流**：走流的话行距就成了「字号行高 + par leading」，与 Rust 那个数无关，而块是固定高度 + `clip`
+的 —— 多出来的一两条会被静默裁掉，画出的行数与行距都不再是卷面上说好的那一份。
+
+点阵不是「很多小圆」，是一根虚线：`stroke: (cap: "round", dash: ("dot", gap))`，且 `gap` 与纵向
+`step` 同值才是二维散点，否则就是一排排虚线。断言读的是帧树里的 `PlacedLine`（本批次新增
+`placed_lines()`，只收 `Geometry::Line`）：行数、行距、点距（`dash[0] + dash[1]`）、点径、通栏宽
+五项全等，纯空白则一根线都不许有 —— 但它的 `height_mm` 得真的占住地方，用「换留白高度 ⇒ 后一题
+落点差 == 高度差」反证它不是假样式。
+
+### 四、⚠ 块边界上没有 leading：整份 PDF 的题块都在压字
+
+出三模式样卷时目视发现教师讲义上「第 1 题的答案」印在「第 2 题的题干」上。量下来：
+
+| 情形 | 实测行距 |
+| --- | --- |
+| 同段两行（`par` 内） | 5.31mm（字框 7.65pt + leading 0.7em 7.35pt） |
+| 相邻两个 `#item`（`above: 1pt`） | **3.07mm** |
+
+原因不在批次③的代码里，是 T3.6 模板带出来的：**单行 `block` 的高度就是字框**，`par` 的 leading
+只加在同一段相邻两行之间，永远不管块与块。而 typst 对相邻块的间距取的是 `max(前块 below, 后块
+above)` 而不是两者之和（最小实验实测：`below: 0.7em` 配 `above: 1pt` 与配 `above: 0pt` 得到同一个
+5.31mm）。CJK 字形占满 em 方框（10.5pt ≈ 3.7mm），3.07mm 的行距就是上下两行互相压进对方的字身。
+
+修在模板，一处根参数：
+
+```typst
+#let item(label, indent: 2.6em, above: 3pt, lead: 0.7em, breakable: true, body) = block(
+  above: above + lead, ...)
+```
+
+`lead` 用 em 而不是 pt，跟着正文字号走。四个「自己是流级块」的入口各自补同一口气：粘连壳
+（`keep-together`，壳内首块的 `above` 在容器边界被吞掉，所以这份间距必须由壳来带）、`figure-float`
+及其通栏的选项 `rest`、留白块（否则第一条横线贴着题干下沿）、以及选项栅格的**行** gutter
+（`2pt → 0.7em`：栅格每一行也只有字框高，leading 同样管不到）。`figure-float` 里那枚左格是网格
+单元、要与配图顶对齐，那里显式 `lead: 0pt`。
+
+回归口径刻意不写绝对毫米数：同一份编译产物里「同段两行」就是免费的行距基准，块间距只许比它多
+0～1.6mm（`stacked_blocks_keep_the_paragraph_pitch`，裸块与粘连壳两种形态各量一遍）。负控验过：
+把 `lead` 改回 `0pt`，用例立刻红并打出 `3.05mm vs 5.29mm`。
+
+顺带把 T4.5 估高里的 `PAR_SPACING_MM` 从 2.0 改成 2.6 —— 它原先注释成「`par.spacing: 0.55em`」，
+而那个属性从来管不到块边界，现在块间下限就是一个 leading。
+
+### 五、T4.6 的验收：差异要在纸上有账，不在 IR 里
+
+任务分解写的是「三模式各出一份样卷，模式间内容差异符合 §四 options 开关语义」。样卷是 `#[ignore]`
+的手工用例（`writes_one_sample_pdf_per_mode`，产出在 `<temp>/mathset-t46-samples`），CI 跑不到，
+所以差异矩阵单独做成常驻用例 `the_three_modes_differ_exactly_as_the_switches_say`，读的是**编译
+产物**而不是 IR：
+
+```rust
+struct Paper { text: String, rules: usize, blanks: usize, key: usize }
+```
+
+`text` = 全卷帧树明文拼接（公式是 mitex 画出的形状，别指望 `$a_1$` 那样的原文能搜到），`rules` =
+通宽横线数（目前全卷唯一会画它们的就是留白，卷头注意事项框自带上下两条边，所以矩阵用例把注意事项
+清空了），再加 IR 里的 `Blank` 块数与 `answer_key` 长度。三卷各断一组：
+
+- 学生：`blanks=1, rules>0, key=0`，答案/解析/四类 Callout 标题一律**不许出现**；
+- 讲义：`blanks=0, rules=0, key=0`，四色 Callout 标题与正文齐备，答案与解析内嵌题末，
+  「参考答案与解析」这个卷末标题不许出现；
+- 考卷：`blanks=1, key=2`，`rules` 与学生卷**逐条相等**（换成考卷模式不多画一根线），卷末汇总带
+  全解全析与小问答案，Callout 标题不出现。
+
+Callout 只在讲义那份喂进题目：`assembler::derive_callouts` 的门控那边已有单测，矩阵测的是模式开关
+的净效果，不重复测派生本身。`callout()` 在模板里的实际名字是 `callout-box(bar, bg, title, body)`，
+配色由 Rust 侧给（`callout_colors`）—— 印前纯黑时它只能拿到黑与白。
+
+### 六、5–9s 不是首次导出耗时：冷启动的账要写清楚
+
+`#[ignore]` 探针跑三模式样卷时打印的是每卷 8.6–10.2s，而 `cost_of_the_measure_fallback` 量到
+的逐请求成本只有 131ms。差在哪：**同一进程里前两编各 5–9s**，把 measure 兜底整个关掉仍是 6.2s
+⇒ 不是兜底，是进程级初始化（字体池解析 + 首次走通布局代码路径）。暖身后 190–350ms/卷。
+这个数字关系 M5 的「20 题卷预览 ≤1s」预算怎么花，所以写进了两处 doc 注释，别让 131ms 被读成
+首次导出耗时。
+
+### 七、本批次已知边界
+
+- 留白三档只作用于 **PDF 出口**：docx writer 不读 `answer_space`（Word 里作答区本来就该是空白页
+  或稿纸，不是画出来的横线），markdown 只把字段编译进 `BlankStyle` 占位。两个出口的版面可以不同，
+  内容仍一字不差 —— 与 M2 定下的口径一致。
+- `above` 小于一个 leading 的题块（小问 1pt、题块 3pt）在 typst 的 max 语义下已被 leading 吃掉，
+  只剩「相对次序」有意义。真要拉开题间距，加的量应该写在 `lead` 之上而不是替换它。
+- 9.5pt 的 Callout / 解析行距由同一条 em 规则跟着字号走，没单独量过；`analysis` 与答案同段续排
+  （软换行），所以卷面上是「1. A；C 先画出数轴再比较端点」这样一行，不是另起一行。
+- 三模式样卷不进 CI：一次 24s，且要落盘 PDF。常驻的是上面那条读帧树的差异矩阵。
+- 卷头仍是简化版（题名 + 副题 + 元信息 + 注意事项），学校/班级/姓名栏与密封线在 T4.9/T4.8。
+
+
 

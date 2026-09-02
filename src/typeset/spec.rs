@@ -167,7 +167,7 @@ pub enum BlankStyle {
     Blank,
 }
 
-/// 留白样式与默认高度。**是否留白与最终高度由 `options.answer_space` 裁决**（B5）
+/// 留白样式与默认高度。是否留白与最终样式按「题级 → 卷级 options → 本字段」取用（B5）
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
 #[serde(default)]
 #[ts(export, export_to = "../frontend/src/api/types/layout.ts")]
@@ -258,9 +258,12 @@ impl LayoutSpec {
         }
     }
 
-    /// 留白合并（B5）：**开关在 options 手里** —— `None` 表示这一题不留白，`spec.answer_blank`
-    /// 完全不参与；`Some(height)` 表示留白，高度优先取 options，非正数视为「没填高度」退回
-    /// spec 的兜底值，样式恒取 spec（options 侧的样式字段不参与）。
+    /// 版面侧的留白折算：`None` = 高度没给 → `None`；`Some(非正数)` 视为「没填」退回本 spec 的
+    /// 兜底高度；样式恒取 spec。
+    ///
+    /// 这里只是**单位折算 + 兜底**，最终要不要留白、用哪套样式归
+    /// [`crate::typeset::blocks::blank`]：那里才有「题级 > 卷级 options > 版面」的三级优先级，
+    /// options 侧的样式按 B5 盖过本函数的返回。
     pub fn resolve_blank(&self, options_height_cm: Option<f32>) -> Option<ResolvedBlank> {
         let height_cm = match options_height_cm {
             None => return None,

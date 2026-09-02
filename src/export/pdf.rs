@@ -4,12 +4,13 @@
 //! 的 `LayoutDoc` + 定稿 `LayoutSpec`，`typeset::typst_gen` 只认后者。Markdown 与 DOCX 完全不
 //! 经过排版系统，排版系统也不认得 `ExamBundle`。
 //!
-//! 适配器负责的四件事：
+//! 适配器负责的五件事：
 //! 1. **模式翻译**：`ExportMode → OutputProfile`，并按 profile 取内置版面预设；
 //! 2. **选项栅格**：把 `LayoutSpec` 的栏宽（mm）换算成 em 后交给
 //!    [`choice_grid::decide`]，与 docx `w:tbl` 共用同一份判定；
-//! 3. **留白合并**（B5）：开关与高度在 `options.answer_space`（或题级覆盖）手里，样式在
-//!    `spec.answer_blank` 手里，两者冲突以 options 为准并记一条 info；
+//! 3. **留白三档**（B5）：题级 `answer_space` → 卷级 `options.answer_space` → 版面
+//!    `spec.answer_blank`，判据在 [`crate::typeset::blocks::blank`]；本文件只负责把卷级冲突
+//!    记成一条 info（[`blank_conflicts`]）；
 //! 4. **文本切分**：问树 `stem` 与解析 `content` 在 bundle 里仍是原始文本，出口前一律过
 //!    [`split_content`]，让 IR 只剩 `InlineNode`（见 [`crate::typeset::ir`] 的不变式 1）；
 //! 5. **题型出块**（T4.1）：「这一题该出哪些块」在 [`crate::typeset::blocks`] 的注册表里，
@@ -919,11 +920,14 @@ mod tests {
     }
 
     #[test]
-    fn options_decide_switch_and_height_spec_decides_style() {
-        // 开关：options 没给 answer_space → 整卷不留白，spec 的兜底高度不许自己生效
+    fn layout_blank_is_the_default_and_options_override_it() {
+        // 谁都没表态 → 版面侧的样式与默认高度就是结果。修前这一档不存在：wire 的 AnswerSpace
+        // 是整块 Option，前端只写 spec.answer_blank，于是学生卷一道留白也没有。
         let doc = blank_case(ExportMode::Student, &ExportOptions::default());
-        assert!(blank_of(&doc).is_none());
-        assert!(doc.issues.is_empty());
+        let blank = blank_of(&doc).expect("解答题默认留作答区");
+        assert_eq!(blank.style, BlankStyle::Lines);
+        assert!((blank.height_mm - 60.0).abs() < 1e-4);
+        assert!(doc.issues.is_empty(), "没有冲突就不许多嘴");
 
         // 高度：options 说了算（4cm → 40mm）
         let options = ExportOptions {
@@ -941,7 +945,7 @@ mod tests {
         let doc = blank_case(ExportMode::Student, &options);
         assert!((blank_of(&doc).unwrap().height_mm - 60.0).abs() < 1e-4);
 
-        // 样式：spec 决定，且 options 与之相符时不必多嘴
+        // 样式：两边相符时不必多嘴
         let dotted = LayoutSpec {
             answer_blank: BlankSpec {
                 style: BlankStyle::Dots,
@@ -1033,7 +1037,8 @@ mod tests {
         let doc = one(ExportMode::Exam, tree_question(), &options);
         assert_eq!(
             shape(&doc.sections[0].blocks),
-            vec!["question", "sub", "sub"]
+            vec!["question", "sub", "sub", "blank"],
+            "解答题默认带作答区，本用例只关心答案落点"
         );
         assert!(doc.has_answer_key());
         assert_eq!(doc.answer_key.len(), 1);
@@ -1102,6 +1107,273 @@ mod tests {
         assert!(!doc.has_answer_key());
     }
 
+    // ── 三模式内容差异矩阵（T4.6） ──
+
+    /// 一张纸面上可观测的四件事
+    ///
+    /// `text` 只收文本帧：公式在帧树里是 mitex 画出来的形状，断言别指望 `$a_1$` 那样的原文能
+    /// 搜到。`rules` 只数通宽横线——目前全卷唯一会画它们的就是留白（卷头注意事项框的上下两条
+    /// 边也算，所以矩阵用例把注意事项清空了）。
+    struct Paper {
+        text: String,
+        rules: usize,
+        blanks: usize,
+        key: usize,
+    }
+
+    /// 三个模式各自「前端会发出来的那一组开关」（§四，与 `ExportDialog.pickMode` 同源）
+    fn mode_options(mode: ExportMode) -> ExportOptions {
+        match mode {
+            ExportMode::Student => ExportOptions {
+                include_answer: false,
+                include_analysis: false,
+                answer_at_end: false,
+                ..ExportOptions::default()
+            },
+            ExportMode::Teacher => ExportOptions {
+                include_analysis: true,
+                answer_at_end: false,
+                ..ExportOptions::default()
+            },
+            ExportMode::Exam => ExportOptions {
+                include_analysis: true,
+                ..ExportOptions::default()
+            },
+        }
+    }
+
+    fn analysis(content: &str) -> AnalysisBlock {
+        AnalysisBlock {
+            id: "analysis".into(),
+            title: String::new(),
+            content: content.into(),
+        }
+    }
+
+    /// 四类 Callout —— `assembler::derive_callouts` 的产物形态（那边的门控已有单测）
+    fn four_callouts() -> Vec<Callout> {
+        [
+            (CalloutKind::Knowledge, "考点清单", "集合的基本运算"),
+            (CalloutKind::ErrorProne, "易错警示", "忽视空集这一情形"),
+            (CalloutKind::Tip, "名师点拨", "数轴法一步到位"),
+            (CalloutKind::Approach, "思路拆解", "先定范围再筛端点"),
+        ]
+        .into_iter()
+        .map(|(kind, title, body)| Callout {
+            kind,
+            title: title.into(),
+            nodes: vec![text(body)],
+        })
+        .collect()
+    }
+
+    /// 三卷共用的内容：单选 + 两小问解答，答案与解析齐备
+    fn mode_questions(mode: ExportMode) -> Vec<ExamQuestion> {
+        let mut first = choice(1, &["A", "C"]);
+        first.analyses = vec![analysis("先画出数轴再比较端点")];
+        let mut second = written(2, QuestionKind::Solution);
+        second.structure_parts = vec![
+            part("a", "(1)", "求首项。", "首项等于七"),
+            part("b", "(2)", "求公差。", "公差等于二"),
+        ];
+        second.analyses = vec![analysis("用通项公式列出方程组")];
+        if mode == ExportMode::Teacher {
+            first.callouts = four_callouts();
+        }
+        vec![first, second]
+    }
+
+    fn mode_doc(mode: ExportMode) -> LayoutDoc {
+        let mut b = bundle(mode, mode_questions(mode));
+        b.exam_meta.instructions.clear();
+        build_layout_doc(&b, &mode_options(mode), None)
+    }
+
+    /// IR → typst 源码 → 分帧产物：纸面上说了才算
+    fn paper_of(doc: &LayoutDoc) -> Paper {
+        use crate::typeset::compiler::{compile_paged, placed_lines, placed_pages};
+
+        let generated = typst_gen::generate(doc, &HashMap::new());
+        assert!(
+            generated.issues.is_empty(),
+            "渲染侧不该报问题：{:?}",
+            generated.issues
+        );
+        let dirs = font_dirs();
+        let request = CompileRequest {
+            source: &generated.source,
+            upload_dir: Path::new("uploads"),
+            font_dirs: &dirs,
+            injected: &[],
+        };
+        let out = match compile_paged(&request) {
+            Ok(out) => out.output,
+            Err(err) => panic!(
+                "编译失败：{:?}\n---- 源码 ----\n{}",
+                err.diagnostics, generated.source
+            ),
+        };
+        Paper {
+            text: placed_pages(&out)
+                .into_iter()
+                .flatten()
+                .map(|r| r.run.text)
+                .collect::<Vec<_>>()
+                .concat(),
+            rules: placed_lines(&out)
+                .into_iter()
+                .flatten()
+                .filter(|l| l.dy_mm.abs() < 0.01 && l.dx_mm > 10.0)
+                .count(),
+            blanks: doc
+                .sections
+                .iter()
+                .flat_map(|s| &s.blocks)
+                .filter(|b| matches!(b, LayoutBlock::Blank(_)))
+                .count(),
+            key: doc.answer_key.len(),
+        }
+    }
+
+    fn mode_paper(mode: ExportMode) -> Paper {
+        paper_of(&mode_doc(mode))
+    }
+
+    /// 模式只换版面孔径，题面三卷一个字都不许多丢或少丢
+    #[test]
+    fn the_three_modes_differ_exactly_as_the_switches_say() {
+        let student = mode_paper(ExportMode::Student);
+        let teacher = mode_paper(ExportMode::Teacher);
+        let exam = mode_paper(ExportMode::Exam);
+        for (mode, paper) in [("学生", &student), ("讲义", &teacher), ("考卷", &exam)] {
+            assert!(paper.text.contains("设集合"), "{mode}卷丢了题干");
+            assert!(
+                paper.text.contains("求下列函数的值域"),
+                "{mode}卷丢了解答题题干"
+            );
+            assert!(paper.text.contains("一、单选题"), "{mode}卷丢了分部标题");
+        }
+
+        // 学生：题面 + 选项 + 留白，其余一律不许出现在纸上
+        assert_eq!(
+            (student.blanks, student.key),
+            (1, 0),
+            "只有解答题该垫出作答区",
+        );
+        assert!(student.rules > 0, "留白要在纸上真画出横线");
+        for needle in [
+            "参考答案与解析",
+            "考点清单",
+            "易错警示",
+            "名师点拨",
+            "思路拆解",
+            "先画出数轴再比较端点",
+            "用通项公式列出方程组",
+            "首项等于七",
+            "公差等于二",
+        ] {
+            assert!(!student.text.contains(needle), "学生卷漏了「{needle}」");
+        }
+
+        // 讲义：四色 Callout + 内嵌答案与全解全析，一张作答区都不画
+        assert_eq!(
+            (teacher.blanks, teacher.rules, teacher.key),
+            (0, 0, 0),
+            "讲义不留白、答案也不卷末汇总",
+        );
+        for (title, body) in [
+            ("考点清单", "集合的基本运算"),
+            ("易错警示", "忽视空集这一情形"),
+            ("名师点拨", "数轴法一步到位"),
+            ("思路拆解", "先定范围再筛端点"),
+        ] {
+            assert!(teacher.text.contains(title), "讲义卷缺「{title}」");
+            assert!(teacher.text.contains(body), "「{title}」正文没排出来");
+        }
+        for needle in [
+            "先画出数轴再比较端点",
+            "用通项公式列出方程组",
+            "首项等于七",
+            "公差等于二",
+        ] {
+            assert!(teacher.text.contains(needle), "讲义卷缺「{needle}」");
+        }
+        assert!(
+            !teacher.text.contains("参考答案与解析"),
+            "内嵌答案不该再多出卷末区",
+        );
+
+        // 考卷：题面 + 留白，答案与全解全析整个收到卷末
+        assert_eq!((exam.blanks, exam.key), (1, 2), "考卷逐题进卷末答案区");
+        assert_eq!(
+            exam.rules, student.rules,
+            "留白只看开关与版面，不看这是练习卷还是考卷",
+        );
+        assert!(exam.text.contains("参考答案与解析"), "考卷缺卷末答案区");
+        assert!(exam.text.contains("用通项公式列出方程组"), "卷末缺全解全析");
+        assert!(exam.text.contains("公差等于二"), "卷末缺小问答案");
+        for needle in ["考点清单", "易错警示", "名师点拨", "思路拆解"] {
+            assert!(
+                !exam.text.contains(needle),
+                "考卷不该挂 Callout（讲义专属）"
+            );
+        }
+    }
+
+    /// 三模式各出一份真 PDF 供目视（T4.6 验收的「样卷」那一半）
+    ///
+    /// `cargo test --lib export::pdf -- --ignored --nocapture`
+    ///
+    /// 打印的毫秒数**含进程冷启动**，别读成导出耗时：本机同一进程里前两编各 5–9s（把 measure
+    /// 兜底整个关掉仍是 6.2s，所以那几秒不是兜底的钱），之后才落到 190–350ms。逐请求成本看
+    /// [`crate::typeset::typst_gen`] 的 `cost_of_the_measure_fallback`。
+    #[tokio::test]
+    #[ignore]
+    async fn writes_one_sample_pdf_per_mode() {
+        use std::time::Instant;
+
+        let dir = uploads_with(&[]);
+        let out_dir = std::env::temp_dir().join("mathset-t46-samples");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        for (mode, name) in [
+            (ExportMode::Student, "学生练习"),
+            (ExportMode::Teacher, "教师讲义"),
+            (ExportMode::Exam, "标准考卷"),
+        ] {
+            let mut questions = mode_questions(mode);
+            let solution = ExamQuestion {
+                number: 6,
+                ..questions.pop().expect("共用内容里最后一题是解答题")
+            };
+            let mut b = bundle(mode, questions);
+            b.sections[0].questions.extend((2..=5).map(medium_choice));
+            b.exam_meta.instructions = vec!["答题前请将自己的姓名、准考证号填写清楚".into()];
+            b.sections.push(ExamSection {
+                title: "二、解答题".into(),
+                instruction: Some("解答应写出必要的文字说明、证明过程或演算步骤".into()),
+                questions: vec![solution],
+            });
+            let doc = build_layout_doc(&b, &mode_options(mode), None);
+            let started = Instant::now();
+            let pdf = generate_pdf(&doc, &dir)
+                .await
+                .unwrap_or_else(|e| panic!("{name} 样卷编译失败：{}", e.summary()));
+            let path = out_dir.join(format!("样卷-{name}.pdf"));
+            std::fs::write(&path, &pdf.bytes).unwrap();
+            println!(
+                "{name}：{}（{} KB，{}ms，{} 条 issue）",
+                path.display(),
+                pdf.bytes.len() / 1024,
+                started.elapsed().as_millis(),
+                pdf.issues.len(),
+            );
+            for issue in &pdf.issues {
+                println!("  {:?}", issue);
+            }
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     // ── 稳健性 ──
 
     #[test]
@@ -1134,7 +1406,11 @@ mod tests {
         let doc = build_layout_doc(&empty, &ExportOptions::default(), None);
         assert_eq!(doc.question_count(), 1, "空大题不计题");
         assert!(doc.sections[0].blocks.is_empty());
-        assert_eq!(shape(&doc.sections[1].blocks), vec!["question", "sub"]);
+        assert_eq!(
+            shape(&doc.sections[1].blocks),
+            vec!["question", "sub", "blank"],
+            "空题干与无标号小问不造块，默认作答区仍然在"
+        );
         assert_eq!(doc.meta.total_score, 10.0, "总分按各题求和兜底");
 
         // 零宽栏（荒谬边距）也不许把栅格算崩
