@@ -100,7 +100,7 @@ const calloutErrorProne = ref(true)
 const calloutAnalysis = ref(false)
 const bundle = ref(false)
 
-// ── PDF 版面（T3.8）：预设是整套 spec 的起点，微调只改本地这份副本
+// ── 版面（T3.8；T4.12 起 PDF 与 Word 共用）：预设是整套 spec 的起点，微调只改本地这份副本
 const presets = ref<ProfilePreset[]>([])
 const presetId = ref('')
 const layout = ref<LayoutSpec | null>(null)
@@ -114,8 +114,11 @@ const detailsOpen = ref(false)
 
 const isTeacher = computed(() => mode.value === 'teacher')
 const isPdf = computed(() => format.value === 'pdf')
+const isDocx = computed(() => format.value === 'docx')
+/** 版面区块与 `spec` 实参的作用域：PDF 与 Word 共用同一份纸张口径（T4.12） */
+const hasLayout = computed(() => isPdf.value || isDocx.value)
 
-/// 预设清单只在第一次选到 PDF 时拉；拉不到就带着 `spec: undefined` 发出去，
+/// 预设清单只在第一次选到 PDF / Word 时拉；拉不到就带着 `spec: undefined` 发出去，
 /// 由后端按 mode 取默认预设 —— 版面下拉空着，导出本身不该被打断。
 async function loadPresets() {
   if (presets.value.length) return
@@ -138,8 +141,9 @@ function applyPreset(id: string) {
 
 function pickFormat(next: ExportFormat) {
   format.value = next
-  if (next === 'pdf') {
-    applyPreset(MODE_PRESET[mode.value])
+  if (next === 'pdf' || next === 'docx') {
+    // 已经有一份版面（可能刚在另一种格式上调过）就沿用，别用模式预设把微调洗掉
+    if (!layout.value) applyPreset(MODE_PRESET[mode.value])
     void loadPresets()
   }
 }
@@ -203,7 +207,7 @@ function buildRequest(): ExamRequest {
         analysis: isTeacher.value && calloutAnalysis.value,
       },
     },
-    spec: isPdf.value ? layout.value ?? undefined : undefined,
+    spec: hasLayout.value ? layout.value ?? undefined : undefined,
   }
 }
 
@@ -357,7 +361,7 @@ function warningText(w: ExportWarning): string {
         </div>
       </div>
 
-      <div v-if="isPdf && layout" class="ex-field">
+      <div v-if="hasLayout && layout" class="ex-field">
         <span class="ex-label">
           版面
           <span class="ex-note">先选预设，再微调；微调只作用于本次导出</span>
@@ -387,7 +391,7 @@ function warningText(w: ExportWarning): string {
               @update:model-value="onColumnsChange"
             />
           </div>
-          <div class="ex-select-row">
+          <div v-if="isPdf" class="ex-select-row">
             <span class="ex-select-caption">留白样式</span>
             <AppSelect
               :model-value="layout.answer_blank.style"
@@ -396,8 +400,11 @@ function warningText(w: ExportWarning): string {
             />
           </div>
         </div>
-        <p class="ex-layout-note">
+        <p v-if="isPdf" class="ex-layout-note">
           密封线：{{ layout.binding ? '居中折叠（M4 起排版）' : '不装订' }}
+        </p>
+        <p v-else class="ex-layout-note">
+          Word 只同步纸张、边距与栏数；留白样式与密封线是 PDF 排版专属
         </p>
       </div>
 

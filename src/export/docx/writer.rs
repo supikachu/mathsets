@@ -20,7 +20,9 @@ use std::path::Path;
 
 use quick_xml::escape::escape;
 
-use super::{CT_FOOTER, ExtraPart, ExtraRel, NS_PIC, NS_W, Package, a4_sect_pr, build, ns_decl};
+use super::mm_to_twips;
+use super::sect_pr;
+use super::{CT_FOOTER, ExtraPart, ExtraRel, NS_PIC, NS_W, Package, build, ns_decl};
 use crate::export::assets::{FetchedImage, fetch_image};
 use crate::export::content::split_content;
 use crate::export::markdown::{collect_bundle_images, fmt_score};
@@ -30,19 +32,17 @@ use crate::export::model::{
     ImageAlign, InlineImage, InlineNode, Issue, IssueField, IssueSeverity, QuestionKind,
     TableAlign,
 };
+use crate::export::pdf::{profile_of, resolve_spec};
 use crate::models::question_structure::{QuestionPart, walk_leaves};
 use crate::typeset::blocks::choice_grid;
+use crate::typeset::spec::LayoutSpec;
 
 // ── 版面常量（twips：1pt = 20tw）──
 
-/// A4 正文可用宽度：页宽 11906 − 左右边距 1418×2，与 [`super::A4_SECT_PR`] 同源
-const TEXT_TWIPS: f64 = 9070.0;
 /// 题号悬挂缩进 = 选项表格缩进，与 styles.xml 的 `QuestionNo` 一致
 const INDENT_TWIPS: f64 = 420.0;
 /// 1em：正文 10.5pt 的方块字宽
 const EM_TWIPS: f64 = 210.0;
-/// 选项栅格的可用栏宽（em）—— 交给 [`choice_grid::decide`]，与它的 em 口径同源
-const GRID_EM: f64 = (TEXT_TWIPS - INDENT_TWIPS) / EM_TWIPS;
 /// 问树每深一层多缩进的量
 const PART_STEP_TWIPS: i64 = 280;
 
@@ -52,8 +52,6 @@ const PART_STEP_TWIPS: i64 = 280;
 const CM_EMU: f64 = 360_000.0;
 /// 96dpi 下 1px 的厘米数（编辑器给的 `width` 按屏幕像素理解）
 const PX_CM: f64 = 2.54 / 96.0;
-/// 图片宽度上限（cm）
-const MAX_IMAGE_CM: f64 = 14.0;
 /// 图片高度上限（cm）：约等于一页正文高，长图按比例整体缩
 const MAX_IMAGE_H_CM: f64 = 24.0;
 /// docx 能直嵌的格式（`[Content_Types].xml` 只 Default 了这几种扩展名）
@@ -123,12 +121,16 @@ pub struct DocxResult {
 }
 
 /// 生成 docx。图片抓取失败与公式转换失败都只记警告，不中断整卷。
+///
+/// `request_spec` 是请求里的版面覆盖，与 `/export/pdf` 走同一个 [`resolve_spec`]：给了就按字段级
+/// 覆盖 mode 预设，没给就用预设。纸张、边距、装订位与栏数因此两边同源（T4.12）。
 pub async fn generate_docx(
     bundle: &ExamBundle,
     options: &ExportOptions,
+    request_spec: Option<&LayoutSpec>,
     upload_dir: &Path,
 ) -> DocxResult {
-    let mut w = Writer::new(bundle, options);
+    let mut w = Writer::new(bundle, options, request_spec);
     w.prefetch(upload_dir).await;
     w.render();
     w.finish()
@@ -161,6 +163,8 @@ struct ImagePart {
 struct Writer<'a> {
     bundle: &'a ExamBundle,
     options: &'a ExportOptions,
+    /// 定稿版面：纸张 / 边距 / 装订位 / 栏数，与 `sectPr` 和正文宽度同源于这一份（T4.12）
+    spec: LayoutSpec,
     body: String,
     issues: Vec<Issue>,
     /// URL → 部件（`None` = 抓到了但不能嵌 / 抓取失败，已记 Issue；不再重试）
@@ -174,8 +178,13 @@ struct Writer<'a> {
 }
 
 impl<'a> Writer<'a> {
-    fn new(bundle: &'a ExamBundle, options: &'a ExportOptions) -> Self {
+    fn new(
+        bundle: &'a ExamBundle,
+        options: &'a ExportOptions,
+        request_spec: Option<&LayoutSpec>,
+    ) -> Self {
         Self {
+            spec: resolve_spec(profile_of(bundle.mode), request_spec),
             bundle,
             options,
             body: String::new(),
@@ -186,6 +195,27 @@ impl<'a> Writer<'a> {
             next_rid: 3,
             next_draw: 0,
         }
+    }
+
+    /// 一栏的可用宽（twips）：Word 的表格定宽是绝对值，分栏时必须按栏而不是按整幅版心
+    ///
+    /// 走 [`LayoutSpec::column_width_mm`] 而不是在这里重算一遍边距账 —— 那条算式同时管着 PDF 的
+    /// 母版、选项栅格与配图裁宽，两处各写一份就一定会漂。
+    fn col_twips(&self) -> i64 {
+        mm_to_twips(self.spec.column_width_mm())
+    }
+
+    /// 选项栅格的可用栏宽（em）—— 交给 [`choice_grid::decide`]，与它的 em 口径同源
+    ///
+    /// 扣掉的是题号那一格悬挂缩进（`INDENT_TWIPS`），与 PDF 侧 `available_em` 减的 `HANGING_EM`
+    /// 是同一件事的两种单位。
+    fn grid_em(&self) -> f64 {
+        ((self.col_twips() as f64) - INDENT_TWIPS).max(EM_TWIPS) / EM_TWIPS
+    }
+
+    /// 一栏的可用宽（cm）：配图的上限，与 PDF 侧「图不许宽过所在栏」同口径
+    fn col_cm(&self) -> f64 {
+        f64::from(self.spec.column_width_mm()) / 10.0
     }
 
     // ── 图片预取 ──
@@ -296,7 +326,7 @@ impl<'a> Writer<'a> {
         let pkg = Package {
             title: self.bundle.title.clone(),
             body,
-            sect_pr: a4_sect_pr(Some(&footer_rid)),
+            sect_pr: sect_pr(&self.spec, Some(&footer_rid)),
             extra_parts: vec![ExtraPart {
                 name: "word/footer1.xml".into(),
                 content_type: CT_FOOTER.into(),
@@ -351,7 +381,7 @@ impl<'a> Writer<'a> {
             format!("姓名：{blank}"),
             format!("考号：{blank}"),
         ];
-        self.push(&plain_table(&[row], &split_twips(TEXT_TWIPS as i64, 4)));
+        self.push(&plain_table(&[row], &split_twips(self.col_twips(), 4)));
         self.push(SPACER);
 
         // 分值汇总表：一列一大题，末列合计；第三行留给监考评分
@@ -374,7 +404,7 @@ impl<'a> Writer<'a> {
             let cols = keys.len();
             self.push(&plain_table(
                 &[keys, scores, blanks],
-                &split_twips(TEXT_TWIPS as i64, cols),
+                &split_twips(self.col_twips(), cols),
             ));
             self.push(SPACER);
         }
@@ -465,8 +495,10 @@ impl<'a> Writer<'a> {
         if q.options.is_empty() {
             return;
         }
-        let cols = choice_grid::decide(&q.options, GRID_EM).columns.max(1);
-        let row_twips = (TEXT_TWIPS - INDENT_TWIPS) as i64;
+        let cols = choice_grid::decide(&q.options, self.grid_em())
+            .columns
+            .max(1);
+        let row_twips = self.col_twips() - INDENT_TWIPS as i64;
         let widths = split_twips(row_twips, cols);
         let slot = Slot::new(Some(q.number), IssueField::Choice);
 
@@ -742,7 +774,7 @@ impl<'a> Writer<'a> {
             Some(Some(p)) => p.clone(),
             _ => return None,
         };
-        let (cx, cy) = extent(part.nat, width);
+        let (cx, cy) = extent(part.nat, width, self.col_cm());
         self.next_draw += 1;
         let id = self.next_draw;
         let name = format!("图片 {id}");
@@ -784,7 +816,7 @@ impl<'a> Writer<'a> {
         slot: Slot,
     ) -> String {
         let cols = header.len().max(1);
-        let widths = split_twips(TEXT_TWIPS as i64, cols);
+        let widths = split_twips(self.col_twips(), cols);
         let mut s = open_table(&widths);
         let mut head_row = String::new();
         for (i, cell) in header.iter().enumerate() {
@@ -1032,15 +1064,18 @@ fn missing_image_run(url: &str, alt: Option<&str>) -> String {
 }
 
 /// 目标尺寸（EMU）：`width` 按 96dpi 折算，超出宽/高上限时等比缩到框内
-fn extent(nat: (u32, u32), want_px: Option<u32>) -> (u32, u32) {
+///
+/// 宽度上限由调用方给（[`Writer::col_cm`] = 所在栏宽），与 PDF 侧同一条口径：图不许宽过它排的
+/// 那一栏。高度上限仍按页高，长图整体缩。
+fn extent(nat: (u32, u32), want_px: Option<u32>, max_w_cm: f64) -> (u32, u32) {
     let (nw, nh) = (f64::from(nat.0.max(1)), f64::from(nat.1.max(1)));
     let mut w = want_px.unwrap_or(nat.0.max(1)) as f64 * PX_CM;
     if !w.is_finite() || w <= 0.0 {
         w = nw * PX_CM;
     }
     let mut h = w * nh / nw;
-    if w > MAX_IMAGE_CM {
-        let k = MAX_IMAGE_CM / w;
+    if w > max_w_cm {
+        let k = max_w_cm / w;
         w *= k;
         h *= k;
     }
@@ -1246,7 +1281,7 @@ fn jpeg_size(b: &[u8]) -> Option<(u32, u32)> {
 mod tests {
     use super::*;
     use crate::export::docx::test_support::{
-        Parts, assert_opc_invariants, parse, part, text_of, unzip,
+        Parts, assert_opc_invariants, attr_val, parse, part, text_of, unzip,
     };
     use crate::export::docx::{NS_A, NS_M};
     use crate::export::model::{ExamMeta, ExportMode};
@@ -1331,10 +1366,26 @@ mod tests {
         render_in(b, o, Path::new("target/no-such-upload-dir")).await
     }
     async fn render_in(b: &ExamBundle, o: &ExportOptions, dir: &Path) -> (DocxResult, Parts) {
-        let r = generate_docx(b, o, dir).await;
+        render_spec_in(b, o, None, dir).await
+    }
+    /// 带版面覆盖的那一层：spec 走的是与 `/export/pdf` 同一个 `resolve_spec`
+    async fn render_spec_in(
+        b: &ExamBundle,
+        o: &ExportOptions,
+        spec: Option<&LayoutSpec>,
+        dir: &Path,
+    ) -> (DocxResult, Parts) {
+        let r = generate_docx(b, o, spec, dir).await;
         let parts = unzip(&r.bytes);
         assert_opc_invariants(&parts);
         (r, parts)
+    }
+    async fn render_spec(
+        b: &ExamBundle,
+        o: &ExportOptions,
+        spec: &LayoutSpec,
+    ) -> (DocxResult, Parts) {
+        render_spec_in(b, o, Some(spec), Path::new("target/no-such-upload-dir")).await
     }
 
     fn document(parts: &Parts) -> roxmltree::Document<'static> {
@@ -1557,20 +1608,75 @@ mod tests {
     #[test]
     fn extent_converts_px_and_caps_both_axes() {
         let cm = |emu: u32| emu as f64 / CM_EMU;
-        let (cx, cy) = extent((800, 600), Some(400));
+        let (cx, cy) = extent((800, 600), Some(400), 14.0);
         assert!((cm(cx) - 10.5833).abs() < 1e-3 && (cm(cy) - 7.9375).abs() < 1e-3);
-        let (cx, cy) = extent((800, 600), Some(2000));
+        let (cx, cy) = extent((800, 600), Some(2000), 14.0);
         assert!((cm(cx) - 14.0).abs() < 1e-3, "宽度上限 14cm");
         assert!((cm(cy) - 10.5).abs() < 1e-3, "缩放不得改变纵横比");
-        let (cx, cy) = extent((100, 1000), None);
+        let (cx, cy) = extent((100, 1000), None, 14.0);
         assert!((cm(cy) - 24.0).abs() < 1e-3, "长图按高度上限整体缩");
         assert!((cm(cx) - 2.4).abs() < 1e-3);
         assert_eq!(
-            extent((200, 100), None),
+            extent((200, 100), None, 14.0),
             (1_905_000, 952_500),
             "无 width 用固有像素"
         );
-        assert!(extent((0, 0), Some(0)).0 > 0, "零尺寸也不能出 0 extent");
+        assert!(
+            extent((0, 0), Some(0), 14.0).0 > 0,
+            "零尺寸也不能出 0 extent"
+        );
+    }
+
+    /// 上限是**所在栏宽**不是常量（T4.12）：三栏卷上宽过一栏的图会压住相邻栏的文字
+    #[test]
+    fn image_width_cap_is_the_column_width() {
+        let cm = |emu: u32| emu as f64 / CM_EMU;
+        let (cx, cy) = extent((800, 600), Some(2000), 8.0);
+        assert!((cm(cx) - 8.0).abs() < 1e-3, "宽度缩到栏宽 8cm");
+        assert!((cm(cy) - 6.0).abs() < 1e-3, "缩宽同时等比缩高");
+    }
+
+    /// 每张表的总宽（`w:tblPr/w:tblW/@w:w`，twips）
+    fn table_widths(doc: &roxmltree::Document) -> Vec<i64> {
+        doc.descendants()
+            .filter(|n| n.has_tag_name((NS_W, "tblW")))
+            .filter_map(|n| n.attribute("w").and_then(|v| v.parse().ok()))
+            .collect()
+    }
+
+    /// 纸张同步（T4.12）：同一份 IR 换版面，表格宽度与 `sectPr` 必须跟着同一份 spec 走
+    ///
+    /// 从前 `TEXT_TWIPS = 9070` 与 `A4_SECT_PR` 之间只有一句「同源」的注释，分栏卷上表格按整幅
+    /// 版心定宽会被 Word 顶出栏外 —— 所以这里断言的是「栏宽」而不是某个常数。
+    #[tokio::test]
+    async fn tables_follow_the_column_width() {
+        let b = bundle(vec![question(
+            1,
+            vec![t("已知集合 A = {1, 2}，B = {2, 3}。")],
+        )]);
+        // 1mm = 1440/25.4 ≈ 56.69tw：A4 单栏 210−18−18 = 174mm → 9865；
+        // A3 对折双栏 (420−16−16−20)/2 = 184mm → 10431
+        for (id, col_tw, page_w) in [
+            ("a4_lecture", 9_865_i64, "11906"),
+            ("a3_fold_exam", 10_431, "23811"),
+        ] {
+            let spec = LayoutSpec::preset(id).unwrap();
+            let (_r, parts) = render_spec(&b, &ExportOptions::default(), &spec).await;
+            let doc = document(&parts);
+            let widths = table_widths(&doc);
+            assert!(!widths.is_empty(), "{id}：卷里一张表都没有，断言无从谈起");
+            assert_eq!(widths[0], col_tw, "{id}：卷头信息表 = 整栏宽");
+            assert!(
+                widths.iter().all(|w| *w <= col_tw),
+                "{id}：有表格宽过所在栏 → {widths:?}"
+            );
+            assert_eq!(attr_val(&doc, "pgSz", "w").as_deref(), Some(page_w));
+            assert_eq!(
+                attr_val(&doc, "cols", "num").as_deref(),
+                Some(spec.columns.to_string().as_str()),
+                "{id}：sectPr 的栏数与算栏宽的 spec 不是同一份"
+            );
+        }
     }
 
     #[test]
@@ -1856,12 +1962,51 @@ mod tests {
             })
             .collect();
         let b = bundle(questions);
-        let r = generate_docx(&b, &ExportOptions::default(), Path::new("./uploads")).await;
+        let r = generate_docx(&b, &ExportOptions::default(), None, Path::new("./uploads")).await;
         assert_opc_invariants(&unzip(&r.bytes));
         std::fs::write(&path, &r.bytes).expect("探针 docx 可写入");
         println!(
             "keepnext_probe={path} lines={lines} bytes={}",
             r.bytes.len()
         );
+    }
+
+    /// T4.12 DoD 探针：四套预设各出一份 docx，交给 `scripts/check_docx_opens.ps1` 读回页面尺寸
+    ///
+    /// 单测断到的是 XML 属性，Word 认不认这份 `sectPr`（尤其 A3 的 `w:orient` 与分栏下的表格定宽）
+    /// 只能问 Word —— 与 M2 那两枚探针同一条路。
+    ///
+    /// 跑法：`cargo test --lib export::docx -- --ignored`，再逐个
+    /// `powershell -File scripts/check_docx_opens.ps1 target/t412_a3_fold_exam.docx -ExpectPageMm 420x297 -ExpectColumns 2`
+    #[tokio::test]
+    #[ignore = "需要本机 Word / WPS，验收时显式跑"]
+    async fn writes_paper_probe_docx_per_preset() {
+        let questions = (1..=12u32)
+            .map(|n| {
+                question(
+                    n,
+                    vec![t("已知集合 A = {1, 2}，B = {2, 3}，则 A ∩ B = （  ）")],
+                )
+            })
+            .collect();
+        let b = bundle(questions);
+        for p in crate::typeset::spec::presets() {
+            let path = format!("target/t412_{}.docx", p.id);
+            let r = generate_docx(
+                &b,
+                &ExportOptions::default(),
+                Some(&p.spec),
+                Path::new("./uploads"),
+            )
+            .await;
+            assert_opc_invariants(&unzip(&r.bytes));
+            std::fs::write(&path, &r.bytes).expect("探针 docx 可写入");
+            println!(
+                "paper_probe={path} page={:?} columns={} bytes={}",
+                p.spec.paper,
+                p.spec.columns,
+                r.bytes.len()
+            );
+        }
     }
 }

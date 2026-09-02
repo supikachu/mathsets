@@ -2116,7 +2116,7 @@ export const exportApi = {
   markdown(req: ExamRequest, opts?: { bundle?: boolean }) {
     return download('/export/markdown', req, opts?.bundle ? { bundle: true } : undefined)
   },
-  /// Word（公式为可编辑 OMML）— 端点于 M2 交付
+  /// Word（公式为可编辑 OMML）— 端点于 M2 交付；`spec` 同样决定纸张/边距/栏数（T4.12）
   docx(req: ExamRequest) {
     return download('/export/docx', req)
   },

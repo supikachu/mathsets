@@ -69,9 +69,13 @@ pub fn to_typst(latex: &str, display: bool) -> Result<String, String> {
 ///
 /// 字体名写 `DejaVu Sans Mono`（typst-assets 内嵌）；缺该字体时 typst 自行回退，
 /// 颜色仍是判定「这一处是原文而非公式」的视觉锚点。
+///
+/// 颜色外面套一层 `ink(…)`（T4.12 / R11，函数由 `typst_gen` 的调色板常量定义）：红字是给人眼
+/// 与警告清单看的信号，而 `#B00000` 在 K 版分离下近乎 0% 黑 —— 单色卷上不套这层就等于把那道公式
+/// 印成一片空白。套上之后它在纯黑卷里是黑字，信号仍然在。
 pub fn degraded(latex: &str) -> String {
     format!(
-        "#text(fill: rgb(\"#B00000\"), font: \"DejaVu Sans Mono\", size: 0.9em)[#({})]",
+        "#text(fill: ink(rgb(\"#B00000\")), font: \"DejaVu Sans Mono\", size: 0.9em)[#({})]",
         typst_str(latex)
     )
 }

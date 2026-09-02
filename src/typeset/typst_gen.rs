@@ -85,6 +85,7 @@ pub fn generate(doc: &LayoutDoc, images: &HashMap<String, Option<String>>) -> Ge
     let mut source = String::with_capacity(MITEX_PREAMBLE.len() + body.len() + 2048);
     source.push_str(MITEX_PREAMBLE);
     source.push('\n');
+    source.push_str(if g.black { PALETTE_MONO } else { PALETTE_COLOR });
     source.push_str(PAGE_FURNITURE);
     source.push_str(&g.prologue(doc));
     source.push_str(FUNCTION_LIBRARY);
@@ -98,20 +99,45 @@ pub fn generate(doc: &LayoutDoc, images: &HashMap<String, Option<String>>) -> Ge
 
 // ═══════════════════════════════════ 母版 ═══════════════════════════════════
 
+/// 印前调色板（T4.12 / R11）：`ink` 收前景，`tint` 收底纹
+///
+/// **为什么排在全篇最前**（连 [`PAGE_FURNITURE`] 都在它后面）：`#set page(header:, footer:)` 的
+/// 参数在写下那一刻就求值，页眉页脚看不见其后任何 `#let` —— 把调色板挪到母版之后就报
+/// `unknown variable: ink`。而最需要门控的三处灰恰恰全在那儿：页脚格、装订带、动态页眉。所以
+/// 门控只能开在这条链的最前面。
+///
+/// 口径是**分治**而不是「全文涂黑」（R11）：`PrintBlackOnly` 字面执行会把大题条的 `luma(236)` 底
+/// 纹也变黑，黑底黑字等于那段内容消失。前景（文字 / 线 / 点阵 / 公式编号 / 降级原文）转 K100 黑，
+/// 底纹退成白 —— 与 T4.6 已有的 callout 纯黑处理同一条。
+///
+/// 灰阶写进 `ink(luma(110))` 而不是直接删掉：彩色模式下这两个函数是恒等的，模板里的色值仍然是
+/// 「这一处本来长什么样」的唯一记录，两边共用一套模板。
+const PALETTE_COLOR: &str = r#"
+#let ink(c) = c
+#let tint(c) = c
+"#;
+
+/// 同上，`PrintBlackOnly` 版
+const PALETTE_MONO: &str = r#"
+#let ink(c) = luma(0%)
+#let tint(c) = luma(100%)
+"#;
+
 /// 页脚与密封线（T4.7 / T4.8）：只给母版 `#set page` 用的两枚小函数。
 ///
 /// **为什么不进 [`FUNCTION_LIBRARY`]**：`#set page(…)` 的参数在写它的那一刻就求值，而函数库整段
 /// 排在母版之后（正文要用它）。实测让母版的 `footer: context { … }` 去调库里的函数，直接报
 /// `unknown variable: page-cell` —— 顺序上只能挑一头，页脚与装订带必须赶在母版前落地。
 ///
-/// 代价是这两枚不许引用母版变量（`accent` / `body-font` 那四个此刻还不存在），颜色与字号只能写死
-/// —— 页脚与装订带本来就是全卷一套，不跟着 spec 漂。
+/// 代价是这三枚不许引用母版变量（`accent` / `body-font` 那四个此刻还不存在），字号与颜色只能写死
+/// —— 页脚与装订带本来就是全卷一套，不跟着 spec 漂。唯一的例外是 [`PALETTE_MONO`] 那两枚：它们
+/// 排在最前，就是为了让「印前纯黑」能把这里的灰阶一起收掉（T4.12）。
 const PAGE_FURNITURE: &str = r#"
 // ─────────────────────── 页脚与密封线（T4.7 / T4.8）──────────────────────
 
 /// 页脚一格：`第 X 页 / 共 Y 页`。号由母版算好传进来（见 `Gen::footer`）：对折卷一张纸上的两格
 /// 只差这两个数与对齐，模板不自己数页。
-#let page-cell(x, total) = text(size: 9pt, fill: luma(110))[第 #x 页 / 共 #total 页]
+#let page-cell(x, total) = text(size: 9pt, fill: ink(luma(110)))[第 #x 页 / 共 #total 页]
 
 /// 密封装订带：一枚竖虚线 + 一整行旋转 90° 的填涂信息（学校 / 班级 / 姓名 / 考号 + 提示语）。
 ///
@@ -130,9 +156,9 @@ const PAGE_FURNITURE: &str = r#"
   #place(top + left, dx: x, dy: y0, line(
     length: span,
     angle: 90deg,
-    stroke: (thickness: 0.5pt, paint: luma(140), dash: "dashed")))
+    stroke: (thickness: 0.5pt, paint: ink(luma(140)), dash: "dashed")))
   #place(top + left, dx: x - 2mm, dy: y0,
-    rotate(90deg, origin: top + left)[#text(size: 8pt, fill: luma(90))[#label]])
+    rotate(90deg, origin: top + left)[#text(size: 8pt, fill: ink(luma(90)))[#label]])
 ]
 
 /// 动态页眉（T4.10 / R9）：一栏一格，格里是「这一栏正在排哪个大题」
@@ -192,7 +218,7 @@ const PAGE_FURNITURE: &str = r#"
         for s in spans { if s.at(1) > best.at(1) { best = s } }
         best.at(0)
       }
-      align(center + horizon, text(size: 9pt, fill: luma(120), label))
+      align(center + horizon, text(size: 9pt, fill: ink(luma(120)), label))
     }))
 }
 "#;
@@ -200,7 +226,8 @@ const PAGE_FURNITURE: &str = r#"
 /// 函数库 v1：整段是常量，不进 `format!` —— 花括号不必转义，版式漂了就是在改这个常量。
 ///
 /// 只依赖母版里的四个变量（`accent` / `analysis-ink` / `body-font` / `heading-font`），
-/// 它们由 `Gen::prologue` 按 `LayoutSpec` 生成。
+/// 它们由 `Gen::prologue` 按 `LayoutSpec` 生成；外加排在最前的 [`ink`/`tint`](PALETTE_MONO)
+/// 两枚调色板函数 —— 全篇灰阶都从那里过一道印前门控（T4.12）。
 const FUNCTION_LIBRARY: &str = r#"
 // ─────────────────────────── 函数库 v1（T3.6）───────────────────────────
 // 题块 / 大题标题 / 选项栅格 / 提示框 / 解析 / 留白 / 卷头。
@@ -309,7 +336,7 @@ const FUNCTION_LIBRARY: &str = r#"
   gutter: 4pt,
   [],
   align(center)[#body],
-  align(right + horizon)[#text(size: 9pt, fill: luma(110))[#no]],
+  align(right + horizon)[#text(size: 9pt, fill: ink(luma(110)))[#no]],
 )
 
 /// 大题标题：灰底 + 左题名右「共 N 题 · X 分」
@@ -319,7 +346,7 @@ const FUNCTION_LIBRARY: &str = r#"
 /// 犯不着为它赌上行距。
 #let section-header(title, meta) = block(
   width: 100%,
-  fill: luma(236),
+  fill: tint(luma(236)),
   stroke: (left: 2.4pt + accent),
   radius: 2pt,
   inset: (x: 6pt, y: 3pt),
@@ -327,7 +354,7 @@ const FUNCTION_LIBRARY: &str = r#"
   below: 4pt,
   breakable: false,
 )[
-  #grid(columns: (1fr, auto), gutter: 6pt, align(left + horizon)[#metadata(title)#text(font: heading-font, weight: "bold")[#title]], align(right + horizon)[#text(size: 9pt, fill: luma(70))[#meta]])
+  #grid(columns: (1fr, auto), gutter: 6pt, align(left + horizon)[#metadata(title)#text(font: heading-font, weight: "bold")[#title]], align(right + horizon)[#text(size: 9pt, fill: ink(luma(70)))[#meta]])
 ]
 
 /// 提示框（教师模式四类）：色条与底色由 Rust 侧给 —— 印前纯黑时它们只能是黑白
@@ -364,10 +391,10 @@ const FUNCTION_LIBRARY: &str = r#"
     place(top + left, dy: step * i, line(length: 100%, stroke: stroke))
   }
 ]
-#let blank-lines(h, n, step) = blank-rows(h, n, step, 0.5pt + luma(120))
+#let blank-lines(h, n, step) = blank-rows(h, n, step, 0.5pt + ink(luma(120)))
 // 点阵 = 圆头线帽 + 「一点一空」的 dash：横向点距与纵向行距同为 step，才是二维点阵而不是虚线
 #let blank-dots(h, n, step, dot, gap) = blank-rows(h, n, step, (
-  paint: luma(150), thickness: dot, cap: "round", dash: ("dot", gap)))
+  paint: ink(luma(150)), thickness: dot, cap: "round", dash: ("dot", gap)))
 #let blank-space(h) = block(width: 100%, height: h, above: 0.7em, breakable: false)
 
 /// 卷头用的等宽小表（考生信息栏 / 分值汇总表）：一行数组就是一行单元格。
@@ -380,7 +407,7 @@ const FUNCTION_LIBRARY: &str = r#"
     columns: range(rows.at(0).len()).map(_ => 1fr),
     inset: (x: 4pt, y: 2.5pt),
     align: center,
-    stroke: 0.4pt + luma(170),
+    stroke: 0.4pt + ink(luma(170)),
     ..rows.flatten()
   )
 ]
@@ -406,7 +433,7 @@ const FUNCTION_LIBRARY: &str = r#"
 )[
   #set par(justify: false)
   #align(center)[#text(font: heading-font, size: 16pt, weight: "bold")[#title]]
-  #if subtitle != none { align(center)[#text(size: 10.5pt, fill: luma(70))[#subtitle]] }
+  #if subtitle != none { align(center)[#text(size: 10.5pt, fill: ink(luma(70)))[#subtitle]] }
   #if meta != none { align(center)[#text(size: 9.5pt)[#meta]] }
   #if info.len() > 0 { header-table((info,)) }
   #if score-keys.len() > 0 {
@@ -420,7 +447,7 @@ const FUNCTION_LIBRARY: &str = r#"
   #if instructions.len() > 0 {
     block(
       width: 100%,
-      stroke: (top: 0.4pt + luma(180), bottom: 0.4pt + luma(180)),
+      stroke: (top: 0.4pt + ink(luma(180)), bottom: 0.4pt + ink(luma(180))),
       inset: (x: 4pt, y: 3pt),
       above: 5pt,
     )[
@@ -1169,7 +1196,7 @@ impl Gen<'_> {
                     out.push_str(&self.align(align, &row));
                     if let Some(caption) = caption.as_deref().filter(|t| !t.trim().is_empty()) {
                         out.push_str(&format!(
-                            "\n#text(size: 9pt, fill: luma(80))[#({})]",
+                            "\n#text(size: 9pt, fill: ink(luma(80)))[#({})]",
                             typst_str(caption)
                         ));
                     }
@@ -1282,7 +1309,7 @@ impl Gen<'_> {
             args.push(cells(row, cols, false));
         }
         format!(
-            "#table(columns: {}, gutter: 4pt, inset: (x: 3pt, y: 1pt), stroke: 0.4pt + luma(170), align: ({}), {})",
+            "#table(columns: {}, gutter: 4pt, inset: (x: 3pt, y: 1pt), stroke: 0.4pt + ink(luma(170)), align: ({}), {})",
             cols,
             aligns_for(aligns, cols),
             args.join(", ")
@@ -2378,6 +2405,86 @@ mod tests {
         assert!(!s.contains("rgb(\"#1F4E79\")"), "纯黑模式不许留彩色强调色");
         assert!(!s.contains("rgb(\"#FCECEA\")"), "提示框底色也得退成白");
         assert!(s.contains("#callout-box(luma(0%), luma(100%)"));
+        // 灰阶的门控函数：单色卷上 ink 恒黑、tint 恒白（前景转黑 / 底纹退白，见 R11）
+        assert!(
+            s.contains("#let ink(c) = luma(0%)"),
+            "单色卷没换调色板：{s}"
+        );
+        assert!(
+            s.contains("#let tint(c) = luma(100%)"),
+            "底纹没退成白 —— 黑底黑字会让整段消失"
+        );
+        assert!(
+            s.find("#let ink(c)").unwrap() < s.find("#let page-cell").unwrap(),
+            "调色板必须排在页脚模板之前：`#set page` 的参数在写下那一刻求值，晚一步就看不见"
+        );
+    }
+
+    /// 把 SVG 里出现的 `fill="#rrggbb"` / `stroke="#rrggbb"` 收成一个集合
+    ///
+    /// `stroke=` 匹配不到 `stroke-width` 那类复合属性；`none` 与非十六进制的值一律不收。
+    fn svg_inks(pages: &[String]) -> std::collections::BTreeSet<String> {
+        let mut out = std::collections::BTreeSet::new();
+        for svg in pages {
+            for attr in ["fill=", "stroke="] {
+                for (at, _) in svg.match_indices(attr) {
+                    let value = &svg[at + attr.len()..];
+                    if let Some(rest) = value.strip_prefix('"')
+                        && let Some(end) = rest.find('"')
+                    {
+                        let v = &rest[..end];
+                        if v.starts_with('#') {
+                            out.insert(v.to_lowercase());
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// 同一份仿真卷按给定版面排出来，落到纸上的颜色有哪些
+    fn paper_inks(spec: LayoutSpec) -> std::collections::BTreeSet<String> {
+        let generated = generate(&sim_doc(spec), &HashMap::new());
+        let dirs = font_dirs();
+        let req = request(&generated.source, &dirs, &[]);
+        match compile_svg_pages(&req) {
+            Ok(out) => svg_inks(&out.output),
+            Err(err) => panic!("编译失败：{:?}", err.diagnostics),
+        }
+    }
+
+    /// 印前门控的**产物级**凭据（T4.12 / R11）：断的是上纸的颜色，不是源码里的字符串
+    ///
+    /// 灰阶现在写在 `ink(luma(110))` 里，源码级断言会漏（那串灰仍然在源码里，只是不再上纸）。
+    /// typst 把颜色落成小写十六进制（实测彩卷对折样张出现 `#5a5a5a` / `#6e6e6e` / `#787878` /
+    /// `#b26a00` / `#fff5e6`），所以黑白之外任何一枚现身就是漏收口。
+    #[test]
+    fn monochrome_plate_carries_only_black_and_white() {
+        // 挑灰最多的一张：装订带 + 分栏 + 卷头表格 + 动态页眉，哪一处没门控都会现形
+        let mut spec = LayoutSpec::preset("a3_fold_exam").unwrap();
+        spec.header_footer.header_title = true;
+        let color = paper_inks(spec.clone());
+        spec.color = ColorMode::PrintBlackOnly;
+        let mono = paper_inks(spec);
+        // 非黑即非白：单色卷上出现任何一枚都是漏收口的杂色
+        fn is_stray(c: &str) -> bool {
+            c != "#000000" && c != "#ffffff"
+        }
+        let left: Vec<&String> = mono.iter().filter(|c| is_stray(c)).collect();
+        assert!(left.is_empty(), "单色卷上纸出现了非黑白的颜色：{left:?}");
+        assert!(
+            mono.contains("#000000"),
+            "单色卷连黑字都没有，八成整页排空了：{mono:?}"
+        );
+        assert!(
+            color.iter().any(|c| is_stray(c)),
+            "对照组（彩色卷）自己就只有黑白，这条门等于没断：{color:?}"
+        );
+        assert!(
+            color.iter().any(|c| is_stray(c) && !mono.contains(c)),
+            "彩色卷比单色卷多出来的颜色为空 —— 门控没生效：彩 {color:?} 单 {mono:?}"
+        );
     }
 
     #[test]
@@ -3826,7 +3933,7 @@ mod tests {
         );
     }
 
-    /// 样张（人眼验收）：两种 A3 装订版式各出 SVG 逐张 + 一份 PDF 到临时目录
+    /// 样张（人眼验收）：两种 A3 装订版式 + 一张对折卷的 K100 单色版，各出 SVG 逐张与一份 PDF
     ///
     /// 帧树断言证得了「线在哪、字在哪」，证不了「看着对不对」。要看真东西：
     /// `cargo test --lib typeset::typst_gen::tests::writes_fold_and_seal_samples -- --ignored --nocapture`
@@ -3837,9 +3944,17 @@ mod tests {
     fn writes_fold_and_seal_samples() {
         let dir = std::env::temp_dir().join("mathset-t47-samples");
         std::fs::create_dir_all(&dir).unwrap();
-        for (name, id) in [("对折", "a3_fold_exam"), ("三栏左装订", "a3_tri_exam")] {
+        for (name, id, mono) in [
+            ("对折", "a3_fold_exam", false),
+            ("三栏左装订", "a3_tri_exam", false),
+            // 同一张对折卷的单色版：K100 要能一眼看出没漏灰
+            ("对折纯黑", "a3_fold_exam", true),
+        ] {
             let mut spec = LayoutSpec::preset(id).unwrap();
             spec.header_footer.header_title = true;
+            if mono {
+                spec.color = ColorMode::PrintBlackOnly;
+            }
             let doc = sim_doc(spec);
             let generated = generate(&doc, &HashMap::new());
             let dirs = font_dirs();

@@ -113,7 +113,7 @@ pub struct Binding {
 pub const SEALING_BAND_MM: f32 = 20.0;
 
 /// 页眉页脚开关。页码按**逻辑页**计（T4.7 / R4：A3 对折的一张纸报两页号），奇偶外侧对齐同期
-/// 落地；只剩动态页眉取当前大题名（T4.10）还没接
+/// 落地；`header_title` 开的是逐栏取当前大题名的动态页眉（T4.10）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(default)]
 #[ts(export, export_to = "../frontend/src/api/types/layout.ts")]
@@ -293,6 +293,16 @@ impl LayoutSpec {
             }
             _ => self.margins.left_mm,
         }
+    }
+
+    /// 装订带吃掉的左边距（mm）：[`margin_left_mm`](Self::margin_left_mm) 与声明值之差
+    ///
+    /// 存在的理由是 docx 侧的映射（T4.12）：Word 的生效左边距 = `w:left` + `w:gutter`，正对着
+    /// PDF 那条「左边距 + 带子」的算式，`Left` 装订位因此能原样搬过去。让 docx 自己抄
+    /// [`SEALING_BAND_MM`] 就等于把同一个数放进两个模块 —— 而 `CenterFold` 在这里恒为 0：
+    /// Word 没有「折痕带」这个概念，那条带子在 docx 里无处安放（实施计划 R11）。
+    pub fn binding_gutter_mm(&self) -> f32 {
+        self.margin_left_mm() - self.margins.left_mm
     }
 
     /// 生效的栏间距（mm）：单栏恒为 0，避免母版里写出没有意义的 `column-gutter`；

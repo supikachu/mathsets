@@ -84,6 +84,9 @@ pub async fn export_markdown(
 ///
 /// 与 `export_markdown` 同骨架（装配 → 生成 → 合并警告 → 文件响应）。图片一律内嵌进
 /// OPC 包，因此没有 `?bundle=` 开关。
+///
+/// 纸张、边距、装订位与栏数取自 `req.spec`，缺省时按 mode 取内置预设 —— 与 `/export/pdf`
+/// 同一个 `resolve_spec`（T4.12），同一份请求的两种格式不会再排出两种纸。
 pub async fn export_docx(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthUser>,
@@ -97,6 +100,7 @@ pub async fn export_docx(
     let result = generate_docx(
         &assembled.bundle,
         &req.options,
+        req.spec.as_ref(),
         Path::new(&state.upload_dir),
     )
     .await;

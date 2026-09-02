@@ -25,6 +25,8 @@ use std::io::Write;
 use zip::CompressionMethod;
 use zip::write::SimpleFileOptions;
 
+use crate::typeset::spec::LayoutSpec;
+
 /// 主命名空间（WordprocessingML）
 pub const NS_W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 /// 关系命名空间（`r:id`、`r:embed`）
@@ -55,34 +57,68 @@ fn ns_decl(prefix: &str, uri: &str) -> String {
     format!(r#"xmlns:{prefix}="{uri}""#)
 }
 
-/// A4 纵向页面设置（twips：210×297mm，四边 2.5cm，页眉 1.5cm / 页脚 1.75cm，单栏）
-///
-/// 2.5cm = 1417.3tw 取 1418。DOCX 不做竖排密封线（计划边界：纯 XML 生成下文本框旋转不稳），
-/// 装订侧只留 `w:gutter`，由调用方按需换掉本常量。
-pub const A4_SECT_PR: &str = concat!(
-    r#"<w:sectPr>"#,
-    r#"<w:pgSz w:w="11906" w:h="16838"/>"#,
-    r#"<w:pgMar w:top="1418" w:right="1418" w:bottom="1418" w:left="1418" "#,
-    r#"w:header="851" w:footer="992" w:gutter="0"/>"#,
-    r#"<w:cols w:space="425"/><w:docGrid w:type="lines" w:linePitch="312"/>"#,
-    r#"</w:sectPr>"#,
-);
+/// mm → twips（1in = 25.4mm = 1440tw，四舍五入）
+pub fn mm_to_twips(mm: f32) -> i64 {
+    (f64::from(mm) * 1440.0 / 25.4).round() as i64
+}
 
-/// 页面设置（可选页脚引用）
+/// 页眉 / 页脚距纸边的距离（mm）：`LayoutSpec` 里没有这两个字段，沿用 Word 的常用口径
+const HEADER_MM: f32 = 15.0;
+const FOOTER_MM: f32 = 17.5;
+/// CJK 行网格：与纸张无关，保持 M2 的取值
+const DOC_GRID: &str = r#"<w:docGrid w:type="lines" w:linePitch="312"/>"#;
+
+/// 页面设置（T4.12 / R11）：纸张、边距、装订位、栏数全部由 `LayoutSpec` 现算
+///
+/// 与 PDF 同源的三处映射：`w:pgSz` 取 `paper.size_mm()`（宽>高时补 `w:orient="landscape"`，
+/// Word 不会自己转方向）；`w:pgMar` 的**生效**左边距 = `w:left` + `w:gutter`，正好对上
+/// `LayoutSpec::margin_left_mm()`，所以 `Left` 装订带能原样搬过来；`w:cols/@w:space` 取
+/// `column_gutter_mm()`。正文与表格的宽度不在这里，由 writer 侧按 `column_width_mm()` 现算。
+///
+/// 三处对不上是 Word 的模型里没有这些东西，不是漏做（R11）：`w:cols` 是平衡栏且页码按**张**计，
+/// 与 R4「A3 对折半张 = 一页」差一倍；`CenterFold` 的折痕带无处安放（`w:gutter` 只认装订侧），
+/// 退成普通栏距；竖排密封线不做（纯 XML 生成下文本框旋转不稳）。
 ///
 /// `w:footerReference` **不能追加在末尾**：`sectPr` 的子元素顺序里 headerReference /
 /// footerReference 排在 `pgSz` 之前（schema 顺序），排在后面时 Word 容忍、WPS 会整个忽略页脚。
-pub fn a4_sect_pr(footer_rid: Option<&str>) -> String {
-    match footer_rid {
-        None => A4_SECT_PR.to_string(),
-        Some(rid) => A4_SECT_PR.replace(
-            r#"<w:sectPr>"#,
-            &format!(
-                r#"<w:sectPr><w:footerReference w:type="default" r:id="{}"/>"#,
-                escape(rid)
-            ),
+pub fn sect_pr(spec: &LayoutSpec, footer_rid: Option<&str>) -> String {
+    let (w, h) = spec.paper.size_mm();
+    let (pw, ph) = (mm_to_twips(w as f32), mm_to_twips(h as f32));
+    let orient = if pw > ph {
+        r#" w:orient="landscape""#
+    } else {
+        ""
+    };
+    let refs = match footer_rid {
+        None => String::new(),
+        Some(rid) => format!(
+            r#"<w:footerReference w:type="default" r:id="{}"/>"#,
+            escape(rid)
         ),
-    }
+    };
+    format!(
+        concat!(
+            r#"<w:sectPr>{}<w:pgSz w:w="{}" w:h="{}"{}/>"#,
+            r#"<w:pgMar w:top="{}" w:right="{}" w:bottom="{}" w:left="{}" "#,
+            r#"w:header="{}" w:footer="{}" w:gutter="{}"/>"#,
+            r#"<w:cols w:num="{}" w:space="{}"/>{}</w:sectPr>"#
+        ),
+        refs,
+        pw,
+        ph,
+        orient,
+        mm_to_twips(spec.margins.top_mm),
+        mm_to_twips(spec.margins.right_mm),
+        mm_to_twips(spec.margins.bottom_mm),
+        // 声明值：装订带另记在 w:gutter，两者相加才是 PDF 侧那个生效左边距
+        mm_to_twips(spec.margins.left_mm),
+        mm_to_twips(HEADER_MM),
+        mm_to_twips(FOOTER_MM),
+        mm_to_twips(spec.binding_gutter_mm()),
+        spec.columns.max(1),
+        mm_to_twips(spec.column_gutter_mm()),
+        DOC_GRID,
+    )
 }
 
 /// 额外 XML 部件（页脚等）：路径、Content-Type Override、正文
@@ -117,7 +153,7 @@ pub struct Package {
     pub title: String,
     /// `<w:body>` 内的全部内容（不含 `sectPr`）
     pub body: String,
-    /// 页面设置，一般传 [`A4_SECT_PR`] 或 [`a4_sect_pr`]
+    /// 页面设置，一般传 [`sect_pr`]（纸张、边距、装订、栏数由 `LayoutSpec` 现算）
     pub sect_pr: String,
     /// 额外 XML 部件及其 Content-Type 声明
     pub extra_parts: Vec<ExtraPart>,
@@ -130,12 +166,14 @@ pub struct Package {
 }
 
 impl Package {
-    /// 纯文字与公式的包：A4 版面、无额外部件（页脚、图片由调用方追加字段）
+    /// 纯文字与公式的包：[`LayoutSpec::default()`]（A4 单栏）版面、无额外部件
+    ///
+    /// 页脚与图片由调用方追加字段。
     pub fn new(title: impl Into<String>, body: impl Into<String>) -> Self {
         Self {
             title: title.into(),
             body: body.into(),
-            sect_pr: A4_SECT_PR.into(),
+            sect_pr: sect_pr(&LayoutSpec::default(), None),
             extra_parts: Vec::new(),
             extra_rels: Vec::new(),
             media: Vec::new(),
@@ -554,6 +592,13 @@ mod tests {
         )
     }
 
+    /// 用给定版面打一份最小包，解出 `document.xml`：版面映射只断言真部件里的属性
+    fn doc_with_sect(spec: &LayoutSpec) -> roxmltree::Document<'static> {
+        let mut pkg = minimal_package();
+        pkg.sect_pr = sect_pr(spec, None);
+        parse(&unzip(&build(&pkg)), "word/document.xml")
+    }
+
     fn omml_of(latex: &str) -> String {
         let MathOutcome::Ok(mathml) = to_mathml(latex, false) else {
             panic!("用例公式必须能转换: {latex}");
@@ -694,7 +739,7 @@ mod tests {
                 r#"</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"#,
             )
             .to_string(),
-            sect_pr: A4_SECT_PR.into(),
+            sect_pr: sect_pr(&LayoutSpec::default(), None),
             extra_parts: vec![],
             extra_rels: vec![ExtraRel {
                 id: "rId100".into(),
@@ -735,7 +780,39 @@ mod tests {
         let doc = parse(&parts, "word/document.xml");
         assert_eq!(attr_val(&doc, "pgSz", "w").as_deref(), Some("11906"));
         assert_eq!(attr_val(&doc, "pgSz", "h").as_deref(), Some("16838"));
-        assert_eq!(attr_val(&doc, "pgMar", "left").as_deref(), Some("1418"));
+        // 纵向纸不许带 w:orient：Word 只在宽>高时才靠它转方向
+        assert_eq!(attr_val(&doc, "pgSz", "orient").as_deref(), None);
+        // 边距取自 LayoutSpec::default()（上下 22mm、左右 18mm），不再是从前那套四边 2.5cm
+        assert_eq!(attr_val(&doc, "pgMar", "top").as_deref(), Some("1247"));
+        assert_eq!(attr_val(&doc, "pgMar", "left").as_deref(), Some("1020"));
+        assert_eq!(attr_val(&doc, "pgMar", "gutter").as_deref(), Some("0"));
+        assert_eq!(attr_val(&doc, "cols", "num").as_deref(), Some("1"));
+    }
+
+    /// 版面 → `sectPr` 的映射（T4.12）：两枚 A3 预设各代表一种 docx 从前根本没有的形状
+    #[test]
+    fn sect_pr_follows_the_layout_spec() {
+        let fold = doc_with_sect(&LayoutSpec::preset("a3_fold_exam").unwrap());
+        // 420×297：宽>高必须显式 landscape，Word 不会自己把页面转过来
+        assert_eq!(attr_val(&fold, "pgSz", "w").as_deref(), Some("23811"));
+        assert_eq!(attr_val(&fold, "pgSz", "h").as_deref(), Some("16838"));
+        assert_eq!(
+            attr_val(&fold, "pgSz", "orient").as_deref(),
+            Some("landscape")
+        );
+        assert_eq!(attr_val(&fold, "cols", "num").as_deref(), Some("2"));
+        // CenterFold 那 20mm 是**栏间**折痕，w:gutter 只认装订侧 ⇒ 折痕退成栏距、gutter 归 0
+        assert_eq!(attr_val(&fold, "pgMar", "gutter").as_deref(), Some("0"));
+        assert_eq!(attr_val(&fold, "cols", "space").as_deref(), Some("1134"));
+        // pgMar 的左值始终是**声明**边距：生效左边距 = left + gutter，装订带不许在两边各扣一次
+        assert_eq!(attr_val(&fold, "pgMar", "left").as_deref(), Some("907"));
+
+        let tri = doc_with_sect(&LayoutSpec::preset("a3_tri_exam").unwrap());
+        assert_eq!(attr_val(&tri, "cols", "num").as_deref(), Some("3"));
+        assert_eq!(attr_val(&tri, "cols", "space").as_deref(), Some("567"));
+        // Left 装订带映射成 w:gutter：14mm 边距 + 20mm 带 = PDF 侧那个 34mm 生效左边距
+        assert_eq!(attr_val(&tri, "pgMar", "left").as_deref(), Some("794"));
+        assert_eq!(attr_val(&tri, "pgMar", "gutter").as_deref(), Some("1134"));
     }
 
     /// 调用方追加的 XML 部件（页脚）：Override、关系、sectPr 引用三者必须齐备，
@@ -748,7 +825,7 @@ mod tests {
             "<w:p><w:r><w:t>1</w:t></w:r></w:p></w:ftr>",
         );
         let mut pkg = minimal_package();
-        pkg.sect_pr = a4_sect_pr(Some("rId3"));
+        pkg.sect_pr = sect_pr(&LayoutSpec::default(), Some("rId3"));
         pkg.extra_parts.push(ExtraPart {
             name: "word/footer1.xml".into(),
             content_type: CT_FOOTER.into(),
