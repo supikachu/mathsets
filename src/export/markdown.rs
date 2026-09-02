@@ -110,7 +110,9 @@ fn build_zip(markdown: &str, images: &[(String, Vec<u8>)]) -> Vec<u8> {
 ///
 /// 收集范围与 `render_markdown` 的门控保持一致：解析配图仅在 include_analysis 时打包，
 /// 否则学生用卷的 zip 会夹带仅教师可见的解析图片。
-fn collect_bundle_images(
+///
+/// `pub(crate)`：docx writer 复用同一份门控，两种格式不得打包出不同的图片集合。
+pub(crate) fn collect_bundle_images(
     bundle: &ExamBundle,
     options: &ExportOptions,
 ) -> Vec<(Option<u32>, String)> {
@@ -576,8 +578,8 @@ fn mode_str(m: ExportMode) -> &'static str {
     }
 }
 
-/// 分数显示：整数不带小数点
-fn fmt_score(v: f64) -> String {
+/// 分数显示：整数不带小数点（docx writer 共用，两种格式的分值口径必须一致）
+pub(crate) fn fmt_score(v: f64) -> String {
     if v.fract() == 0.0 {
         format!("{}", v as i64)
     } else {

@@ -771,3 +771,127 @@ R7 的「按渲染字形数折算」实现成一个小扫描器（`Measurer`）�
 `cargo test --lib` 526 passed / 0 failed；新模块 clippy 与 rustdoc 无告警。
 真实题库的选项宽度分布留到 T2.8 手工验收时随卷核对（阈值按「最宽选项 ÷ 栏宽」单一指标，
 未按总宽均摊，真卷若出现「三个短选项 + 一个长选项」会整体降一列，这是决策表的既定行为）。
+
+### 七、T2.6 DOCX 打包器骨架（OPC 容器与静态部件）
+
+`src/export/docx/mod.rs` 只管**容器与静态部件**：`[Content_Types].xml`、`_rels/.rels`、
+`word/_rels/document.xml.rels`、`styles.xml`、`settings.xml`、`docProps/*`，以及 `document.xml`
+的外壳（根元素命名空间 + 末尾 `sectPr`）。往里灌内容的是 T2.7 的 `docx/writer.rs`，接口就是
+`Package { title, body, sect_pr, extra_rels, media }` + `build()`。
+
+**单测不断言 XML 字符串，而是把产物重新解压校三条不变量**：①每个 XML 部件良构；
+②`[Content_Types].xml` 的 Default(扩展名) / Override(部件路径)覆盖包里**每一个**部件；
+③每条 `Relationship/@Target` 解析到包里真实存在的部件（基准目录取 `_rels` 的上一级 ——
+`word/_rels/document.xml.rels` 的目标相对 `word/`，按字符串前缀算是错的）。
+理由：这三条坏掉的表现是「Word 说文件已损坏」，不是少显示一块内容，比对字符串更贴近故障形态。
+
+但**结构合法不等于 Word 认**，所以补了真机探针：`#[ignore]` 用例把最小包写到 `target/t26_probe.docx`，
+`scripts/check_docx_opens.ps1` 用 COM 分别以 `Word.Application` 与 `KWPS.Application` 只读打开
+（`AddToRecentFiles=false`，关闭不保存）。本机实测**两端都 PASS**：`pages=1`、`omaths=1`、正文 21 字。
+`OMaths.Count == 1` 是这一节最硬的证据 —— 它说明公式是被识别成可编辑的 Office Math 对象，而不是图片。
+探针标 `#[ignore]` 是因为 CI 没装 Office，跑它只会假失败；脚本对未注册的 ProgID 打 `SKIP` 并以退出码 2
+收场，把「没装」与「通过」区分开。
+
+首次编译暴露的坑（这模块写完一直没进过编译器，攒了一批）：
+
+1. **`concat!` 只接受字面量，不接受 `const` 路径** —— 8 处 `XML_DECL` 与 6 处 xmlns 拼接全报错。
+   改法是把这些拼接挪到 `format!` 的命名参数上（`{d}` / `{w}` / `{m}`）。命名空间声明走
+   `ns_decl(prefix, uri)` 运行时拼，而不是把 URI 抄第二份进字面量：抄了就有两份真相，
+   而单测判定文档根元素用的正是 `NS_*` 常量。
+2. **`r#"…"#` 里 `"#` 就是终止符** —— `r#"<w:styles "##` 在 `"#` 处结束，剩下一个裸 `#` 成语法错误。
+3. **raw string 不认行尾 `\` 续行** —— 测试里两处多行 XML 用了 `\` 续行，反斜杠与缩进会原样进
+   `document.xml`，Word 里表现为正文多出一个 `\`。改成把整段拆成 `concat!` 的多个字面量分段。
+4. `roxmltree::Namespace::uri` 是私有字段，要调 `n.uri()`。
+5. 媒体部件是二进制，不能当 XML 解析 —— `parse()` 里加了 `is_xml_part` 前置断言，
+   含图的用例（T2.7 会真加图）不会再被「良构」循环误伤。
+
+静态部件的属性与子元素顺序按 Word 自身产出照抄：`w:pPr` 是 `keepNext → pBdr → shd → spacing → ind → jc`，
+`w:settings` 是 `zoom → defaultTabStop → characterSpacingControl → m:mathPr → themeFontLang → clrSchemeMapping`。
+Word 对顺序宽容，WPS 与严格校验器不容 —— 而 DoD 要求两端都能打开，所以按严格的来。
+`m:mathPr`（`mathFont` = Cambria Math）落 `settings.xml`；`brkBinSub m:val="--"` 那两个连字符是 Word
+自己写出的字面量，不是没填完的占位符。
+
+测试：`export::docx` 9 例（部件齐全且入口最先、每个 XML 部件良构、两条不变量、文字与真实管线产出的
+`m:oMath`、样式与 `m:mathPr` 缺省值、`pStyle` 引用全部有定义、媒体与关系同包同进同出、标题转义、A4 页面），
+另 1 例 `#[ignore]` 探针；`cargo test --lib` 534 passed / 0 failed；本模块 clippy 与 rustdoc 无告警，
+`rustfmt --check` 退出码 0。页脚部件与 `m:oMathPara` 都留给 T2.7，`extra_rels` 已为其留出接口
+（自定义 rId 需从 `rId3` 起，`rId1/rId2` 被 styles/settings 占了）。
+
+### 八、T2.7 docx writer 与 ⛔R5 决策门（keepNext 实测）
+
+`src/export/docx/writer.rs`：`generate_docx(bundle, options, upload_dir) -> DocxResult { bytes, issues }`。
+IR → OOXML 字符串全在这里，`mod.rs` 只当容器。图片抓取必须先做、渲染必须是同步的 —— 题目树递归
+里没法 `await`，所以 `prefetch()` 先按 URL 去重把字节读进 `HashMap`（**不重试**，读不到就是缺图），
+再同步渲染。产物 `issues` 与 Markdown 侧同一套 `Issue` 口径，坏公式只降级不失败整卷。
+
+#### ⛔ R5：`w:keepNext` + 紧随其后的 `w:tbl`，Word / WPS 到底分不分页
+
+这条决定选项栅格留 `w:tbl` 还是退回 `w:tabs`，**只能实测**。判据设计成**对照实验**而不是单文件读数：
+`scripts/strip_keepnext.py` 从 writer 产物里剥掉全部 `w:keepNext` 得到同结构的负对照，
+`scripts/check_keepnext.ps1` 用 COM 只读打开两份，逐对「题号段 → 选项表」量
+`violation = 题号段页码 != 首行起始页码`。2026-09-02 本机实测（24 道题、A4、10.5pt、17 页）：
+
+| 编辑器 | 探针（带 keepNext） | 负对照（剥掉） |
+| --- | --- | --- |
+| Word 2016 (`Word.Application`) | **0 / 24** 违例 | **8 / 24** 违例 |
+| WPS (`KWPS.Application`) | **0 / 24** 违例 | **8 / 24** 违例 |
+
+对照组里被孤立的题号段停在页尾（`stemY≈717`，可用底部 771），它的首行选项搬到下一页 —— 失效形态
+真实存在且可测。同一份内容加上 `keepNext`，两端 24 对全部不分离，且总页数与字符数逐字不变
+（`pages=17 chars=9122` 两端一致）。**结论：keepNext 在 `w:tbl` 之前确实生效且两端一致 → 选项栅格
+保留 `w:tbl`，不退回 `w:tabs`。**
+
+探针标量之外，脚本还要求「对照组必须违例」：单看探针 0 违例是可以作假的 —— 第一版夹具每题一张 40 行的
+表，每道题独占一页，16 对里 15 对根本没到过分页边界，`violations=0` 是白给的。改成「1 行题号 + 22 行选项」
+让一页装两道，边界才落在题目中间。**夹具没压力时判 INCONCLUSIVE 而不是 PASS**，这条已经写进脚本的判据。
+
+#### 几处不显然的实现口径
+
+- **`m:oMathPara` 由 writer 负责**（R2 的分工）：`to_omml` 永远只返回根 `m:oMath`，块级公式要单独成段时
+  才由 writer 套 `m:oMathPara`。用例断言「两个 `m:oMath` 里恰好一个被包进 `m:oMathPara`」。
+- **只嵌 png/jpg/jpeg/gif**：`[Content_Types].xml` 的 Default 就只有这四个扩展名，塞一个 webp 部件进去会让
+  不变量②（每个部件都要有 content type）失效 —— 表现不是「图不显示」而是**整个文件被判损坏**。其余格式
+  与读不到的图一样降级成 `[图片缺失 …]` 占位段 + Image 警告。尺寸从 PNG/GIF/JPEG 头部自己解析（不引 image
+  crate 到这条路径），按 96dpi 折 EMU，宽 14cm / 高 24cm 双上限。
+- **单位换算只有一套**：1em = 10.5pt = 210 twips，A4 可用宽 = 11906 − 1418×2 = **9070 twips**，选项可用宽
+  再减 420 缩进 → `GRID_EM=(9070-420)/210≈41.19`，正好对上 T2.5 的 25% / 50% 阈值。`choice_grid` 里的
+  `PX_PER_EM` 是私有的，writer 自己持一份常量而不是把它挪成 pub —— 两边换算口径若漂了，用例（1×4/2×2/4×1
+  三档）会先炸。
+- **页脚三件套**：`[Content_Types].xml` 的 Override + `word/_rels/document.xml.rels` 里
+  `Type="…/relationships/footer"` 的关系 + `sectPr` 里 `footerReference`（**必须在 `pgSz` 之前**，schema 顺序），
+  rId 从 `rId3` 起接。`PAGE` 域写成 `<w:instrText xml:space="preserve"> PAGE </w:instrText>`，少那对空格
+  Word 会把域名连成一串解析不了。
+- **答案/解析的开关门控与 `markdown.rs` 逐字节一致**：只按 `options.answer_at_end` 决定就地还是卷末，
+  模式过滤在上游 `assembler.rs`。图片收集直接复用 `markdown::collect_bundle_images`（为此改 `pub(crate)`）——
+  学生用卷的包里不能夹带只有教师该看到的解析配图，两种格式打包出的图片集合必须同一份真相。
+  顺带记一笔：`ExportOptions.answer_space` 两个生成器都没用到，是计划里挂着、实现里没有的字段。
+
+#### 踩过的坑
+
+1. **相邻两张 `w:tbl` 会被 Word 合成一张表** —— 表后紧跟表必须在中间垫一个 `w:p`（`SPACER`），卷末与
+   单元格里也是；同理每个 `w:tc` 的最后一个块级元素必须是 `w:p`（ECMA-376 §17.4.5.7），否则严格校验器与
+   WPS 会丢整格 —— 富文本用例遍历每个 `w:tc`，断言它的最后一个元素就是 `w:p`。
+2. **`cargo check --lib` 看不见 `#[cfg(test)]` 里的错**。T2.6 抽出来的 `test_support` 一直没进过编译器，
+   `part()` 返回 `Vec<u8>` 而调用处要 `&[u8]`，`check` 全绿而 `cargo test --lib` 才报 E0308。之后一律用
+   `--no-run` / `test` 而不是 `check` 来判「测试代码编不编得过」。
+3. **roxmltree 0.21 没有 `prev_element_sibling`** —— 判「选项表前一个块是题号段」只能用 `prev_sibling()`
+   + `is_element()` 自己走。
+4. **PowerShell 5.1 按 GBK 读无 BOM 脚本**：注释里的中文字节可能被解成多余的引号/花括号，整个脚本
+   报「Try statement is missing its Catch」这种莫名其妙的位置错误。两个 `*.ps1` 现在都带 UTF-8 BOM 存，
+   脚本头部注明这条约束（改完文件要确认 BOM 还在）。控制台输出同理一律 ASCII，中文只在注释里。
+5. **`-not $comObject` 判不出「还没找到」**：Word COM 对象的布尔转换不随引用变化，反向遍历段落找题号段
+   的 `while (-not $stem)` 一路退到文档第 1 段，于是 16 对全被「题号以数字开头」的过滤器丢掉，
+   脚本安静地报 `pairs=0` 还顺带给了个 PASS。改成 `$null -eq $stem`，并且 pairs=0 一律判 INCONCLUSIVE。
+6. **几何推算压力这条路是死的**：Word 对 auto 行高返回 `Rows.Item(1).Height = 9999999`，行尾标记的
+   `Range.End-1` 被报回**该行起始页**的纵坐标，据此算出的「受压对」恒为 0。改用对照实验后同一份夹具
+   立刻暴露出 8 处真实分离 —— 排版行为要问排版器本身，别问它的度量 API。
+
+测试：`export::docx` 19 例（三档栅格、表跟随题号段、`oMathPara` 唯一、坏公式降级不失败整卷、图片只嵌
+可读格式且字节完好、px↔EMU 双上限、三种图片头解析、答案/解析两开关、卷头信息与分值表、页脚域与关系、
+富文本卷的 `w:tc`/样式不变量），另 2 例 `#[ignore]` 探针（T2.6 最小包 + R5 夹具）；
+`cargo test --lib` 545 passed / 0 failed / 3 ignored；`cargo clippy --lib --tests` 本模块仅测试代码里
+`field_reassign_with_default` 一类与既有 `markdown.rs` 同形的告警；`cargo doc --no-deps` 3 条告警全在
+`ai/ocr` 与 `models` 的旧文件里，新模块为 0；`rustfmt --edition 2024 --check` 对新增的 `docx/mod.rs` 与
+`docx/writer.rs` 退出码 0。`markdown.rs` **刻意保持原排版**：对它跑 rustfmt 会顺手改到 200 行已提交代码
+（import 顺序、let 链、结构体字面量折行），把两个可见性改动埋进格式噪声里 —— 本仓库整体不是
+rustfmt-clean，格式统一该单独一刀，不混进功能提交。
