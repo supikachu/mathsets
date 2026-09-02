@@ -24,8 +24,11 @@
 //! 1. 公式在这里才转换（[`to_typst`]）：转换失败**只降级这一处**并记 [`Issue`]，绝不向上传错
 //!    —— 一枚公式不许弄坏一张卷子，字段口径与 docx 侧一致。
 //! 2. `BlockMeta::breakable` 忠实落到 `block(breakable:)`；`keep_with_next` 在 typst 0.15
-//!    **没有对应原语**（docx 侧是 `w:keepNext`），M3 只能放弃粘连，留到 M4 用
-//!    `breakable: false` 包壳补，这里不假装有实现。
+//!    **没有对应原语**（实测：typst-library / typst-layout 源码里搜不到 `keep_with_next`，
+//!    `par` 也没有 `keep-lines-together`），M4 的落法是 [`plan_groups`] 把一条 `keep` 链
+//!    折成一枚 `block(breakable: false)` 壳。链能粘多长由估高决定：图 / 表格 / 块级公式 /
+//!    Callout / 答案区这些**估不准高**的块一律不粘 —— 造出一块超过一页的整块，代价是版面
+//!    溢出裁切，比原来的腰斩难看得多。docx 侧走的是 `w:keepNext`，两边同一份 IR 语义。
 //! 3. 图片只认调用方给的路径表：`images` 由 `export::pdf` 抓好后按「原始 URL → 可用素材」
 //!    传进来。`None` = 上游已经记过原因（抓取失败、超限、非图片），这里静默跳图；表里
 //!    压根没有这个 URL 才由本模块补一条 Issue。两种情况都不许弄坏整卷。
@@ -37,10 +40,12 @@
 //! 宽度上限只能在 Rust 侧按 [`column_width_mm`](LayoutSpec::column_width_mm) 裁。
 
 use std::collections::HashMap;
+use std::ops::Range;
 
 use crate::export::model::{
     CalloutKind, ImageAlign, InlineImage, InlineNode, Issue, IssueField, IssueSeverity, TableAlign,
 };
+use crate::typeset::blocks::choice_grid;
 use crate::typeset::ir::{AnswerBlock, BlockMeta, LayoutBlock, LayoutDoc, Section};
 use crate::typeset::math::{MITEX_PREAMBLE, degraded, to_typst, typst_str};
 use crate::typeset::spec::{BlankStyle, ColorMode, LayoutSpec};
@@ -113,6 +118,13 @@ const FUNCTION_LIBRARY: &str = r#"
 
 /// 选项栅格：列数与 docx 同源（typeset::blocks::choice_grid），不各排各的
 #let choices(cols, ..cells) = grid(columns: cols, gutter: (10pt, 2pt), ..cells)
+
+/// 粘连壳（T4.5）：typst 0.15 **没有** keep-with-next 原语（实测：typst-library /
+/// typst-layout 源码里搜不到 `keep_with_next`，`par` 也没有 `keep-lines-together`），
+/// 能把 N 个块钉在同一页的只有「包进一个 breakable: false 的 block」。
+/// 粘哪一段由 Rust 侧按估高决定：一条链再长也不许超过栏高，否则就是溢出裁切。
+/// `above` 是给整组补回的那口气 —— 壳内首块的前置间距在容器边界上会被吞掉。
+#let keep-together(body) = block(width: 100%, breakable: false, above: 3pt)[#body]
 
 /// 大题标题：灰底 + 左题名右「共 N 题 · X 分」
 #let section-header(title, meta) = block(
@@ -201,6 +213,8 @@ const SUB_INDENT_EM: f32 = 1.2;
 const HANG_EM: f32 = 2.6;
 /// 留白区每行横线/点阵的间距（mm）
 const BLANK_LINE_MM: f32 = 8.0;
+/// 相邻两块之间的 `par.spacing: 0.55em`（10.5pt 下约 2mm）—— 只给 T4.5 的估高用
+const PAR_SPACING_MM: f64 = 2.0;
 
 // ═══════════════════════════════════ 生成器 ═══════════════════════════════════
 
@@ -392,8 +406,13 @@ impl Gen<'_> {
                 typst_str(instruction)
             ));
         }
-        for block in &section.blocks {
-            s.push_str(&self.block(block));
+        for group in plan_groups(&section.blocks, self.spec) {
+            let slice = &section.blocks[group];
+            if slice.len() > 1 {
+                s.push_str(&self.keep_together(slice));
+            } else {
+                s.push_str(&self.block(&slice[0]));
+            }
         }
         s
     }
@@ -492,6 +511,15 @@ impl Gen<'_> {
             meta.breakable,
             content
         )
+    }
+
+    /// 粘连壳：把已经生成好的 N 个块整体钉在同一页（T4.5）
+    fn keep_together(&mut self, blocks: &[LayoutBlock]) -> String {
+        let mut inner = String::new();
+        for b in blocks {
+            inner.push_str(&self.block(b));
+        }
+        format!("#keep-together[\n{inner}]\n")
     }
 
     /// 答案块：`5. B` + 逐段解析；既无答案又无解析的块直接跳过
@@ -757,6 +785,154 @@ fn aligns_for(aligns: &[TableAlign], cols: usize) -> String {
         .join(", ")
 }
 
+/// 这段内容的高估得准吗：只能按「宽 ÷ 栏宽 = 行数」折行估的内容才算准。
+///
+/// 硬换行 / 表格 / 并排图组 / 块级公式由 [`choice_grid::requires_single_column`] 认（与栅格
+/// 决策同一判据，不各写一套），图片另外单独排除 —— 只知道像素宽、不知道宽高比，
+/// 等比缩放后的毫米高在 Rust 侧无从得知。
+fn measurable(nodes: &[InlineNode]) -> bool {
+    !choice_grid::requires_single_column(nodes)
+        && !nodes
+            .iter()
+            .any(|n| matches!(n, InlineNode::Image { .. } | InlineNode::ImgRow { .. }))
+}
+
+/// 把块序列切成「一次出的连续段」（返回 `Range<usize>`，长度 1 = 照常单出）
+///
+/// 规则：`keep_with_next` 链一直粘到它的终结块（第一个不再往前粘的块），但**只粘预算装得下的
+/// 那段后缀**。从链尾往回吞而不是从链头往后吞，是因为最要命的孤立场景就在链尾 ——「最后一个小问
+/// 的标号留在页脚，一整块作答区跑到下一页去」。预算吞不下时前面的块照旧各自可跨页：
+/// 长题干本来就允许腰斩，为了粘它做出一块超过一页的整块，代价是版面溢出，比腰斩难看得多。
+fn plan_groups(blocks: &[LayoutBlock], spec: &LayoutSpec) -> Vec<Range<usize>> {
+    let budget = budget_mm(spec);
+    let mut out: Vec<Range<usize>> = Vec::new();
+    let mut i = 0;
+    while i < blocks.len() {
+        if !blocks[i].meta().keep_with_next {
+            out.push(i..i + 1);
+            i += 1;
+            continue;
+        }
+        // term = 这条链要粘到的终结块下标（链尾自己带 keep 时粘到序列末尾）
+        let mut term = i;
+        while term + 1 < blocks.len() && blocks[term].meta().keep_with_next {
+            term += 1;
+        }
+        // 先试粘到终结块；终结块估不准（提示框、内嵌答案）就退一格，只粘链内的题面块。
+        // 退让丢的是「与终结块那一环」的粘连，不是整条链。
+        let mut glue: Option<Range<usize>> = None;
+        for end in [term, term.saturating_sub(1)] {
+            if end <= i {
+                continue;
+            }
+            if let Some(start) = suffix_start(blocks, i, end, budget, spec) {
+                glue = Some(start..end + 1);
+                break;
+            }
+        }
+        match glue {
+            Some(range) => {
+                // 壳前面的块照旧各自可跨页
+                for idx in i..range.start {
+                    out.push(idx..idx + 1);
+                }
+                // 回跳到壳尾而不是链尾：退让丢下的那些块（估不准的终结块）仍然要出
+                i = range.end;
+                out.push(range);
+            }
+            None => {
+                for idx in i..=term {
+                    out.push(idx..idx + 1);
+                }
+                i = term + 1;
+            }
+        }
+    }
+    out
+}
+
+/// 从 `end` 往回吞到预算边界，返回可合并段的最左下标（吞不满两块算失败）
+///
+/// 任何一块估不准就整段放弃：合并段的壳里混进一张高度未知的图，等于赌一次溢出裁切。
+fn suffix_start(
+    blocks: &[LayoutBlock],
+    from: usize,
+    end: usize,
+    budget: f64,
+    spec: &LayoutSpec,
+) -> Option<usize> {
+    let mut used = 0.0_f64;
+    let mut start = end + 1;
+    let mut k = end + 1;
+    while k > from {
+        k -= 1;
+        let h = block_height_mm(&blocks[k], spec)?;
+        if used + h > budget {
+            break;
+        }
+        used += h;
+        start = k;
+    }
+    (end + 1 - start >= 2).then_some(start)
+}
+
+/// 一块的保守估高（mm）。`None` = 估不准（图、表格、显式换行、块级公式、Callout、答案区）
+///
+/// `None` 的口径永远是「那就别粘」，不是「照粘」。
+fn block_height_mm(block: &LayoutBlock, spec: &LayoutSpec) -> Option<f64> {
+    let avail = est_avail_em(spec);
+    // 一行放不下就折行：宽度（em，含标号占位）÷ 可用栏宽
+    let lines_of = |nodes: &[InlineNode], slack_em: f64| -> Option<f64> {
+        if !measurable(nodes) {
+            return None;
+        }
+        Some(
+            ((choice_grid::inline_width(nodes) + slack_em) / avail)
+                .ceil()
+                .max(1.0),
+        )
+    };
+    let lines = match block {
+        // 留白的高是确定的：它就是 `BlankBlock::height_mm`
+        LayoutBlock::Blank(b) => return Some(f64::from(b.height_mm.max(0.0))),
+        LayoutBlock::Question(q) => {
+            // 首行被「12. （5 分）」占掉一截，题号宽度按悬挂缩进计
+            let mut lines = lines_of(&q.stem, HANG_EM as f64)?;
+            if !q.options.is_empty() {
+                let col_em = (avail / q.grid.columns.max(1) as f64).max(1.0);
+                let mut per_row = 1.0_f64;
+                for o in &q.options {
+                    if !measurable(&o.content) {
+                        return None;
+                    }
+                    let w = choice_grid::inline_width(&o.content) + HANG_EM as f64;
+                    per_row = per_row.max((w / col_em).ceil().max(1.0));
+                }
+                // 每行都按最宽那条算：宁可估高、少粘一块，也不许估低做出超页整块
+                lines += per_row * q.grid.rows.max(1) as f64;
+            }
+            lines
+        }
+        LayoutBlock::SubQuestion(s) => lines_of(&s.stem, HANG_EM as f64)?,
+        // Callout 与答案块自带底色 / 内衬 / 多段解析，版面高度不在估得准的范围里
+        LayoutBlock::Callout(_) | LayoutBlock::Answer(_) => return None,
+    };
+    // 行高 8mm 与留白横线同口径（BLANK_LINE_MM），块间再留 par spacing
+    Some(lines * f64::from(BLANK_LINE_MM) + PAR_SPACING_MM)
+}
+
+/// 一组的预算：版心高（纸高 − 上下边距）的 3/4。留 1/4 是给估高误差和首页大卷头的余量
+fn budget_mm(spec: &LayoutSpec) -> f64 {
+    let (_, h) = spec.paper.size_mm();
+    let text = f64::from(h) - f64::from(spec.margins.top_mm + spec.margins.bottom_mm);
+    text * 0.75
+}
+
+/// 估高用的可用栏宽（em）：栏宽减题号悬挂缩进，与适配器 `export::pdf` 同一口径
+fn est_avail_em(spec: &LayoutSpec) -> f64 {
+    (choice_grid::em_from_mm(f64::from(spec.column_width_mm())) - HANG_EM as f64).max(1.0)
+}
+
 /// 长度落地：Rust 的 Display 对浮点会省掉无用的零（`22.0` → `22`，`8.5` → `8.5`）
 fn mm(value: f32) -> String {
     format!("{}", (value * 100.0).round() / 100.0)
@@ -779,7 +955,7 @@ mod tests {
     use crate::export::model::{Callout, ExamOption, QuestionKind};
     use crate::typeset::blocks::choice_grid;
     use crate::typeset::compiler::{
-        CompileRequest, compile_paged, compile_pdf, font_dirs, rendered_runs,
+        CompileRequest, compile_paged, compile_pdf, font_dirs, rendered_pages, rendered_runs,
     };
     use crate::typeset::ir::{
         AnalysisEntry, AnswerLine, BlankBlock, CalloutBlock, DocumentMeta, QuestionBlock, Section,
@@ -1310,5 +1486,271 @@ mod tests {
         assert!(!g.source.contains("参考答案与解析"));
         assert!(!g.source.contains("#analysis("));
         assert!(g.source.contains("#blank-lines("));
+    }
+
+    // ---------------------------------------------------- T4.5 防跨页与粘连
+
+    /// 题干文字：1~4 句，随题号变化
+    ///
+    /// 必须有多行，单行块永远不会被页界劈开 —— 边界卷就造不出来，用例沦为空断言。
+    fn stem_text(i: usize) -> String {
+        let mut s =
+            format!("第 {i} 题题干：已知函数由下面的条件给出，请据此求出它的解析式与最小正周期。");
+        for _ in 0..i % 4 {
+            s.push_str("进一步地，设新函数为原函数与余弦函数之和，求它在给定闭区间上的最值，并说明参数取值对结果的影响。");
+        }
+        s
+    }
+
+    /// 一题的题面块：题干与小问都往前粘（`BlockMeta::attach()` 的语义就是「粘住下一块」）
+    fn pair(i: usize, stem_meta: BlockMeta) -> Vec<LayoutBlock> {
+        vec![
+            LayoutBlock::Question(QuestionBlock {
+                meta: stem_meta,
+                number: i as u32,
+                score: 6.0,
+                kind: QuestionKind::Solution,
+                stem: vec![text(&stem_text(i))],
+                options: Vec::new(),
+                grid: choice_grid::ChoiceGrid {
+                    columns: 1,
+                    rows: 0,
+                },
+            }),
+            LayoutBlock::SubQuestion(SubQuestionBlock {
+                meta: stem_meta,
+                number: i as u32,
+                depth: 0,
+                label: format!("({i}) "),
+                stem: vec![text(&format!("第 {i} 小问：写出 f 的单调区间。"))],
+            }),
+        ]
+    }
+
+    /// 一题的链收尾：清掉最后一块的 `keep_with_next`
+    ///
+    /// 与适配器 `export::pdf::question_blocks` 同一条规则 —— 粘连只在一题之内。模板给最后一块
+    /// 置位是「粘住它后面的小问 / 留白」的意思，传到序列末尾就会把两道题焊成一枚整块。
+    fn closed(mut run: Vec<LayoutBlock>) -> Vec<LayoutBlock> {
+        if let Some(last) = run.last_mut() {
+            last.meta_mut().keep_with_next = false;
+        }
+        run
+    }
+
+    /// 单大题、N 道同构小题；`tail` 是第 N 题自己的后续块（留白、提示框），仍属该题的 run
+    fn pair_doc(stem_meta: BlockMeta, n: usize, tail: Vec<LayoutBlock>) -> LayoutDoc {
+        let mut doc = sim_doc(LayoutSpec::for_profile(OutputProfile::Student));
+        doc.answer_key.clear();
+        doc.sections.truncate(1);
+        doc.sections[0].header.instruction = None;
+        doc.sections[0].header.question_count = n;
+        // 页脚逐页画一遍，正文跨页时它的明文会插在题干中间，把「粘连没改内容」这条断言带偏
+        doc.spec.header_footer.page_number = false;
+        let mut blocks: Vec<LayoutBlock> =
+            (1..n).flat_map(|i| closed(pair(i, stem_meta))).collect();
+        let mut last = pair(n, stem_meta);
+        last.extend(tail);
+        blocks.extend(closed(last));
+        doc.sections[0].blocks = blocks;
+        doc
+    }
+
+    fn blank(number: u32, height_mm: f32) -> LayoutBlock {
+        LayoutBlock::Blank(BlankBlock {
+            meta: BlockMeta::solid(),
+            number,
+            height_mm,
+            style: BlankStyle::Lines,
+        })
+    }
+
+    fn callout_block(number: u32) -> LayoutBlock {
+        LayoutBlock::Callout(callout(number as usize, CalloutKind::Approach, "思路拆解"))
+    }
+
+    /// `plan_groups` 的通用不变式，任何块序列都得守住，返回分段供用例比对自己的期望
+    ///
+    /// 1. 分段不重不漏地覆盖整条序列 —— 退让路径曾把没进壳的终结块直接跳过，留白就此消失；
+    /// 2. 一枚壳里不许出现模板没要求的粘连：非末位块必须本来就 `keep_with_next`。
+    fn planned(blocks: &[LayoutBlock], spec: &LayoutSpec) -> Vec<Range<usize>> {
+        let groups = plan_groups(blocks, spec);
+        let mut next = 0;
+        for r in &groups {
+            assert_eq!(r.start, next, "分段之间有缺口或重叠：{groups:?}");
+            for idx in r.start..r.end - 1 {
+                assert!(
+                    blocks[idx].meta().keep_with_next,
+                    "组 {r:?} 里的块 {idx} 没要求粘住下一块，不该被粘上"
+                );
+            }
+            next = r.end;
+        }
+        assert_eq!(next, blocks.len(), "有块被漏掉：{groups:?}");
+        groups
+    }
+
+    /// 编译到「每页一段明文」
+    fn compile_pages(doc: &LayoutDoc) -> Vec<Vec<crate::typeset::compiler::RenderedRun>> {
+        let generated = generate(doc, &HashMap::new());
+        let dirs = font_dirs();
+        let req = request(&generated.source, &dirs, &[]);
+        match compile_paged(&req) {
+            Ok(out) => rendered_pages(&out.output),
+            Err(err) => panic!(
+                "编译失败：{:?}\n---- 源码 ----\n{}",
+                err.diagnostics, generated.source
+            ),
+        }
+    }
+
+    fn flat(pages: &[Vec<crate::typeset::compiler::RenderedRun>]) -> String {
+        pages.iter().map(|p| glue(p)).collect()
+    }
+
+    /// 某段文字第一次出现在哪一页
+    fn page_of(
+        pages: &[Vec<crate::typeset::compiler::RenderedRun>],
+        needle: &str,
+    ) -> Option<usize> {
+        pages.iter().position(|p| glue(p).contains(needle))
+    }
+
+    /// 题干与小问被页界劈开的题数
+    fn straddling(pages: &[Vec<crate::typeset::compiler::RenderedRun>], n: usize) -> usize {
+        (1..=n)
+            .filter(|i| {
+                let stem = page_of(pages, &format!("第 {i} 题题干"));
+                let sub = page_of(pages, &format!("第 {i} 小问"));
+                stem.is_some() && stem != sub
+            })
+            .count()
+    }
+
+    #[test]
+    fn keep_chain_becomes_one_unbreakable_shell() {
+        let doc = pair_doc(BlockMeta::attach(), 3, vec![blank(3, 60.0)]);
+        let blocks = &doc.sections[0].blocks;
+        // 每道短题一枚整块，第三题的留白算在本题的壳里
+        assert_eq!(
+            planned(blocks, &doc.spec),
+            vec![0..2, 2..4, 4..7],
+            "题干 → 小问 → 留白应各自粘成一枚整块"
+        );
+        let g = generate(&doc, &HashMap::new());
+        assert_eq!(g.source.matches("#keep-together[").count(), 3);
+        // 壳只改分页，不改内容：一个字都没少
+        for needle in ["第 1 题题干", "第 3 小问"] {
+            assert!(g.source.contains(needle), "粘连把 {needle} 弄丢了");
+        }
+        assert!(g.source.contains("#blank-lines("), "留白仍然要画出来");
+    }
+
+    #[test]
+    fn two_questions_are_never_glued_into_one_shell() {
+        // 收尾规则不在这里就守不住：每块都置 keep 时，整段会变成一枚超过一页的整块
+        let doc = pair_doc(BlockMeta::attach(), 2, Vec::new());
+        assert_eq!(
+            planned(&doc.sections[0].blocks, &doc.spec),
+            vec![0..2, 2..4],
+            "跨题不许粘"
+        );
+    }
+
+    #[test]
+    fn unestimatable_terminator_only_costs_the_last_link() {
+        // 链尾接的是提示框（高度估不准）：退一格，只粘链内的题干与小问
+        let doc = pair_doc(BlockMeta::attach(), 1, vec![callout_block(1)]);
+        assert_eq!(
+            planned(&doc.sections[0].blocks, &doc.spec),
+            vec![0..2, 2..3],
+            "估不准高的终结块应留在壳外"
+        );
+        let g = generate(&doc, &HashMap::new());
+        assert_eq!(g.source.matches("#keep-together[").count(), 1);
+        assert!(g.source.contains("#callout-box("), "提示框本身仍要出");
+    }
+
+    #[test]
+    fn oversized_blank_is_never_wrapped_into_a_group() {
+        // 240mm 的留白比整页版心还高（预算 189.75mm）：绝不允许成为壳的一员，那会溢出裁切
+        let doc = pair_doc(BlockMeta::attach(), 1, vec![blank(1, 240.0)]);
+        assert_eq!(
+            planned(&doc.sections[0].blocks, &doc.spec),
+            vec![0..2, 2..3],
+            "超预算的留白必须留在壳外"
+        );
+        let g = generate(&doc, &HashMap::new());
+        assert_eq!(
+            g.source.matches("#keep-together[").count(),
+            1,
+            "题干与小问仍然互粘"
+        );
+        assert!(g.source.contains("#blank-lines("), "留白仍然要画出来");
+    }
+
+    #[test]
+    fn long_stem_may_break_but_its_subquestion_and_answer_space_stay_together() {
+        // 链头高过预算时不硬粘：腰斩的是题干，小问标号和它的作答区不能分家（T4.5 验收口径）
+        let mut doc = pair_doc(BlockMeta::attach(), 1, vec![blank(1, 60.0)]);
+        let LayoutBlock::Question(q) = &mut doc.sections[0].blocks[0] else {
+            unreachable!()
+        };
+        // 25 行 ≈ 202mm，已经高过预算 189.75mm：把它粘进壳就是拿版面溢出换整齐
+        q.stem = vec![text(
+            &"请逐步推导并写出必要的文字说明、方程和演算步骤，注意单位与取值范围。".repeat(25),
+        )];
+        assert_eq!(
+            planned(&doc.sections[0].blocks, &doc.spec),
+            vec![0..1, 1..3],
+            "题干照旧可跨页，小问与留白粘成一枚整块"
+        );
+        let g = generate(&doc, &HashMap::new());
+        assert_eq!(g.source.matches("#keep-together[").count(), 1);
+        assert!(g.source.contains("#blank-lines("), "留白仍然要画出来");
+    }
+
+    #[test]
+    fn inline_image_question_stays_splitable() {
+        // 图片的高度要等比缩放后才知道，Rust 侧估不准 → 整题不粘
+        let mut doc = pair_doc(BlockMeta::attach(), 1, Vec::new());
+        let LayoutBlock::Question(q) = &mut doc.sections[0].blocks[0] else {
+            unreachable!()
+        };
+        q.stem.push(InlineNode::Image {
+            alt: Some("图象".into()),
+            url: REMOTE.into(),
+            width: Some(200),
+            align: None,
+        });
+        assert_eq!(
+            planned(&doc.sections[0].blocks, &doc.spec),
+            vec![0..1, 1..2],
+            "一块估不准，整条链都不该粘"
+        );
+        let g = generate(&doc, &images());
+        assert_eq!(
+            g.source.matches("#keep-together[").count(),
+            0,
+            "估不准高的块不许进壳"
+        );
+    }
+
+    #[test]
+    fn gluing_moves_questions_off_the_page_boundary() {
+        let n = 30;
+        let loose = compile_pages(&pair_doc(BlockMeta::flow(), n, Vec::new()));
+        let glued = compile_pages(&pair_doc(BlockMeta::attach(), n, Vec::new()));
+        assert!(
+            straddling(&loose, n) > 0,
+            "边界卷没造出来：{n} 道题全落在页内，本用例就成了空断言"
+        );
+        assert_eq!(
+            straddling(&glued, n),
+            0,
+            "带 keep_with_next 的题干与小问必须同页"
+        );
+        // 粘连只改分页，不许改内容
+        assert_eq!(flat(&glued), flat(&loose), "粘连把版面文字改了");
     }
 }

@@ -33,7 +33,9 @@ use crate::typeset::spec::{BlankStyle, LayoutSpec, OutputProfile, ResolvedBlank}
 pub struct BlockMeta {
     /// false → typst `#block(breakable: false)` / docx `keepLines`：整块不许跨页
     pub breakable: bool,
-    /// true → 与下一块同页：typst `#block(above: ..)` 前置粘连 / docx `keepNext`
+    /// true → 与下一块同页：typst 侧由 `typst_gen` 把整条链折成一枚 `block(breakable: false)`
+    /// 壳（0.15 无 keep-with-next 原语），docx 侧是 `w:keepNext`。
+    /// 粘连只在一题之内 —— 适配器会把每题最后一块的这个位清掉，否则两道题会被焊成一块。
     pub keep_with_next: bool,
 }
 
@@ -152,6 +154,18 @@ impl LayoutBlock {
             Self::Callout(b) => b.meta,
             Self::Blank(b) => b.meta,
             Self::Answer(b) => b.meta,
+        }
+    }
+
+    /// 同一个访问器的可写版本：`keep_with_next` 的链尾收尾（一道题不许粘到下一题）
+    /// 由装配侧调用，免得调用方自己把五种块 match 一遍
+    pub fn meta_mut(&mut self) -> &mut BlockMeta {
+        match self {
+            Self::Question(b) => &mut b.meta,
+            Self::SubQuestion(b) => &mut b.meta,
+            Self::Callout(b) => &mut b.meta,
+            Self::Blank(b) => &mut b.meta,
+            Self::Answer(b) => &mut b.meta,
         }
     }
 

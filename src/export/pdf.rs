@@ -11,7 +11,9 @@
 //! 3. **留白合并**（B5）：开关与高度在 `options.answer_space`（或题级覆盖）手里，样式在
 //!    `spec.answer_blank` 手里，两者冲突以 options 为准并记一条 info；
 //! 4. **文本切分**：问树 `stem` 与解析 `content` 在 bundle 里仍是原始文本，出口前一律过
-//!    [`split_content`]，让 IR 只剩 `InlineNode`（见 [`crate::typeset::ir`] 的不变式 1）。
+//!    [`split_content`]，让 IR 只剩 `InlineNode`（见 [`crate::typeset::ir`] 的不变式 1）；
+//! 5. **题型出块**（T4.1）：「这一题该出哪些块」在 [`crate::typeset::blocks`] 的注册表里，
+//!    本文件只查表，然后把模式差异（Callout、内嵌答案）续在题面后面。
 //!
 //! T3.7 起本模块兼任 **PDF 渲染出口**（[`generate_pdf`]：预取素材 → `typst_gen` → `compiler`）。
 //! 放在桥上而不是 handler 里，是因为「这张卷子要哪些图」只有排版域自己说得清，而 R1 已经把
@@ -23,19 +25,20 @@ use std::path::Path;
 use crate::export::assets::{FetchedImage, fetch_image};
 use crate::export::content::split_content;
 use crate::export::model::{
-    AnswerSpace, BlankStyle as WireBlankStyle, ExamBundle, ExamQuestion, ExamSection, ExportMode,
-    ExportOptions, InlineNode, Issue, IssueField, IssueSeverity, QuestionKind,
+    BlankStyle as WireBlankStyle, ExamBundle, ExamQuestion, ExamSection, ExportMode, ExportOptions,
+    InlineNode, Issue, IssueField, IssueSeverity,
 };
-use crate::models::question_structure::{QuestionPart, walk_leaves};
-use crate::typeset::blocks::choice_grid::{self, requires_single_column};
+use crate::models::question_structure::walk_leaves;
+use crate::typeset::blocks::choice_grid;
+use crate::typeset::blocks::{BlockCtx, Registry};
 use crate::typeset::compiler::{
     CompileError, CompileRequest, compile_pdf, font_dirs, missing_cjk_fonts,
 };
 use crate::typeset::ir::{
-    AnalysisEntry, AnswerBlock, AnswerLine, BlankBlock, BlockMeta, CalloutBlock, DocumentMeta,
-    LayoutBlock, LayoutDoc, QuestionBlock, Section, SectionHeader, SubQuestionBlock,
+    AnalysisEntry, AnswerBlock, AnswerLine, BlockMeta, CalloutBlock, DocumentMeta, LayoutBlock,
+    LayoutDoc, Section, SectionHeader,
 };
-use crate::typeset::spec::{BlankStyle, LayoutSpec, OutputProfile, ResolvedBlank};
+use crate::typeset::spec::{BlankStyle, LayoutSpec, OutputProfile};
 use crate::typeset::typst_gen;
 
 /// 题号「3.」的悬挂缩进占宽（em）—— docx 侧是 420tw = 2em，两处必须一致
@@ -47,14 +50,25 @@ pub fn build_layout_doc(
     options: &ExportOptions,
     request_spec: Option<&LayoutSpec>,
 ) -> LayoutDoc {
+    layout_doc(bundle, options, request_spec, &Registry::standard())
+}
+
+/// 同上，但题型模板表由调用方给（T4.1 的扩展性入口；`build_layout_doc` 用内置五题型）
+fn layout_doc(
+    bundle: &ExamBundle,
+    options: &ExportOptions,
+    request_spec: Option<&LayoutSpec>,
+    registry: &Registry,
+) -> LayoutDoc {
     let profile = profile_of(bundle.mode);
     let spec = resolve_spec(profile, request_spec);
     let issues = blank_conflicts(options, &spec);
-    let ctx = Ctx {
+    let ctx = BlockCtx {
         options,
         spec: &spec,
         profile,
         available_em: available_em(&spec),
+        registry,
     };
 
     let sections: Vec<Section> = bundle
@@ -84,15 +98,6 @@ pub fn build_layout_doc(
         answer_key,
         issues,
     }
-}
-
-/// 渲染一份卷子需要知道的上下文（省掉满屏的参数接力）
-struct Ctx<'a> {
-    options: &'a ExportOptions,
-    spec: &'a LayoutSpec,
-    profile: OutputProfile,
-    /// 选项栅格的可用栏宽（em，已扣掉题号悬挂缩进）
-    available_em: f64,
 }
 
 // ═══════════════════════════ 模式与版面 ═══════════════════════════
@@ -144,7 +149,7 @@ fn document_meta(bundle: &ExamBundle) -> DocumentMeta {
 
 // ═══════════════════════════ 大题与题块 ═══════════════════════════
 
-fn section(sec: &ExamSection, ctx: &Ctx) -> Section {
+fn section(sec: &ExamSection, ctx: &BlockCtx) -> Section {
     Section {
         header: SectionHeader {
             // 大题标题落在页尾就是废行，永远粘住下一块
@@ -162,27 +167,13 @@ fn section(sec: &ExamSection, ctx: &Ctx) -> Section {
     }
 }
 
-/// 单题 → 线性块序列：题干 →（小问）→（留白）→（Callout）→（内嵌答案）
-fn question_blocks(q: &ExamQuestion, ctx: &Ctx) -> Vec<LayoutBlock> {
-    let mut out = Vec::new();
-
-    out.push(LayoutBlock::Question(QuestionBlock {
-        meta: question_meta(q),
-        number: q.number,
-        score: q.score,
-        kind: q.kind,
-        stem: q.stem.clone(),
-        options: q.options.clone(),
-        grid: choice_grid::decide(&q.options, ctx.available_em),
-    }));
-
-    if is_written(q.kind) {
-        parts(q, 0, &mut out);
-    }
-
-    if let Some(blank) = blank_block(q, ctx) {
-        out.push(LayoutBlock::Blank(blank));
-    }
+/// 单题 → 线性块序列：题面（题干 →（小问）→（留白））由题型模板出，
+/// 其后才是模式差异（Callout → 内嵌答案）
+///
+/// 收尾清掉本题最后一块的 `keep_with_next`：粘连只在一题之内。模板给题干块（乃至最后一个小问）
+/// 置了这个位，那是「题干粘住它自己的小问/留白」的意思，一路传到序列末尾就会把两道题焊成一块。
+fn question_blocks(q: &ExamQuestion, ctx: &BlockCtx) -> Vec<LayoutBlock> {
+    let mut out = ctx.registry.expand(q, ctx, &split_content);
     for callout in &q.callouts {
         out.push(LayoutBlock::Callout(CalloutBlock {
             meta: BlockMeta::flow(),
@@ -194,76 +185,10 @@ fn question_blocks(q: &ExamQuestion, ctx: &Ctx) -> Vec<LayoutBlock> {
     if !ctx.options.answer_at_end {
         out.extend(answer_block(q, ctx, BlockMeta::flow()).map(LayoutBlock::Answer));
     }
+    if let Some(last) = out.last_mut() {
+        last.meta_mut().keep_with_next = false;
+    }
     out
-}
-
-/// 题干块的分页元数据
-///
-/// `keep_with_next` 恒真：题干与它下面的选项/小问/留白必须同页起头。
-/// `breakable` 只在「短小题」关掉 —— 选择题、填空题在没有留白且不含多行结构（表格、图组、
-/// 块级公式、显式换行）时整块高度可控，关掉才拿得到「整题不跨页」；解答题与综合题动辄半页，
-/// 强行不跨页只会在 typst 里溢出一页纸。
-fn question_meta(q: &ExamQuestion) -> BlockMeta {
-    let compact = matches!(
-        q.kind,
-        QuestionKind::SingleChoice | QuestionKind::MultiChoice | QuestionKind::Fill
-    ) && !requires_single_column(&q.stem)
-        && !q.options.iter().any(|o| requires_single_column(&o.content));
-    if compact {
-        BlockMeta::glued()
-    } else {
-        BlockMeta::attach()
-    }
-}
-
-/// 问树展开（含分支节点：只存局部题干的那层也要排出来）
-fn parts(q: &ExamQuestion, depth: u8, out: &mut Vec<LayoutBlock>) {
-    for p in &q.structure_parts {
-        push_part(p, depth, q.number, out);
-    }
-}
-
-fn push_part(p: &QuestionPart, depth: u8, number: u32, out: &mut Vec<LayoutBlock>) {
-    let nodes = split_content(&p.stem);
-    // 题干为空的分支节点：不占版面，只把子节点抬上来
-    if !nodes.is_empty() {
-        out.push(LayoutBlock::SubQuestion(SubQuestionBlock {
-            meta: BlockMeta::attach(),
-            number,
-            depth,
-            label: p.label.clone(),
-            stem: nodes,
-        }));
-    }
-    for c in &p.children {
-        push_part(c, depth.saturating_add(1), number, out);
-    }
-}
-
-// ═══════════════════════════ 留白（B5） ═══════════════════════════
-
-/// 需要作答区的题型：解答题与综合题。
-/// 选择题点在选项上，填空题的作答位是题干里的行内下划线（B2 已由装配器挖好），
-/// 再垫一块 6cm 横线只会把卷子撑成空白墙。
-fn is_written(kind: QuestionKind) -> bool {
-    matches!(kind, QuestionKind::Solution | QuestionKind::Composite)
-}
-
-/// 本题留白块（`None` = 不留）：教师讲义不留白（答案即解析），其余按 B5 合并
-fn blank_block(q: &ExamQuestion, ctx: &Ctx) -> Option<BlankBlock> {
-    if !is_written(q.kind) || ctx.profile == OutputProfile::Teacher {
-        return None;
-    }
-    let space = q.answer_space.or(ctx.options.answer_space)?;
-    let resolved = resolved_blank(space, ctx.spec)?;
-    Some(BlankBlock::new(q.number, &resolved))
-}
-
-/// B5 合并：开关与高度在 options，样式在 spec；options 自带样式时以它为准
-fn resolved_blank(space: AnswerSpace, spec: &LayoutSpec) -> Option<ResolvedBlank> {
-    let mut resolved = spec.resolve_blank(Some(space.height_cm as f32))?;
-    resolved.style = style_of(space.style);
-    Some(resolved)
 }
 
 /// 卷级样式冲突只报一条（逐题报会把 `X-Export-Warnings` 头撑爆，B3）
@@ -285,15 +210,6 @@ fn blank_conflicts(options: &ExportOptions, spec: &LayoutSpec) -> Vec<Issue> {
             style_name(spec.answer_blank.style)
         ),
     }]
-}
-
-/// 内容侧样式 → 版面侧样式（两套枚举各自服务各自的 wire 契约，在桥上相遇）
-fn style_of(s: WireBlankStyle) -> BlankStyle {
-    match s {
-        WireBlankStyle::Lines => BlankStyle::Lines,
-        WireBlankStyle::Dots => BlankStyle::Dots,
-        WireBlankStyle::Blank => BlankStyle::Blank,
-    }
 }
 
 fn to_wire_style(s: BlankStyle) -> WireBlankStyle {
@@ -322,8 +238,8 @@ fn style_name(s: BlankStyle) -> &'static str {
 
 // ═══════════════════════════ 答案与解析 ═══════════════════════════
 
-fn answer_block(q: &ExamQuestion, ctx: &Ctx, meta: BlockMeta) -> Option<AnswerBlock> {
-    let lines = answer_lines(q, ctx.options);
+fn answer_block(q: &ExamQuestion, ctx: &BlockCtx, meta: BlockMeta) -> Option<AnswerBlock> {
+    let lines = answer_lines(q, ctx);
     let analyses = analyses(q, ctx.options);
     if lines.is_empty() && analyses.is_empty() {
         return None;
@@ -338,11 +254,15 @@ fn answer_block(q: &ExamQuestion, ctx: &Ctx, meta: BlockMeta) -> Option<AnswerBl
 }
 
 /// 答案行：解答题逐小问（带小问号），其余题型一条（多空用「；」串起来）
-fn answer_lines(q: &ExamQuestion, options: &ExportOptions) -> Vec<AnswerLine> {
-    if !options.include_answer {
+///
+/// 「逐小问」的判据与出块侧同源（`policy.expands_parts`）—— 排了小问却不逐小问给答案，
+/// 或反过来，都是同一处漏改。
+fn answer_lines(q: &ExamQuestion, ctx: &BlockCtx) -> Vec<AnswerLine> {
+    if !ctx.options.include_answer {
         return Vec::new();
     }
-    if is_written(q.kind) && !q.structure_parts.is_empty() {
+    let written = ctx.registry.builder(q.kind).policy().expands_parts;
+    if written && !q.structure_parts.is_empty() {
         return walk_leaves(&q.structure_parts)
             .into_iter()
             .filter_map(|p| {
@@ -578,8 +498,12 @@ fn push_nodes(nodes: &[InlineNode], qno: Option<u32>, out: &mut Vec<(Option<u32>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::export::model::{Callout, CalloutKind, ExamMeta, ExamOption, ExamSection};
-    use crate::models::question_structure::AnalysisBlock;
+    use crate::export::model::{
+        AnswerSpace, Callout, CalloutKind, ExamMeta, ExamOption, ExamSection, QuestionKind,
+    };
+    use crate::models::question_structure::{AnalysisBlock, QuestionPart};
+    use crate::typeset::blocks::{BlockBuilder, Policy, Registry};
+    use crate::typeset::ir::{BlankBlock, QuestionBlock};
     use crate::typeset::spec::{BlankSpec, Margins};
 
     fn text(s: &str) -> InlineNode {
@@ -755,9 +679,35 @@ mod tests {
             (4, 1),
             "短选项 A4 双栏排 4 列"
         );
-        // 短题整块不跨页，也不许与它后面的答案离婚
+        // 短题整块不跨页；它是本题最后一块，链已收尾（不许把下一题焊进来）
         assert!(!q.meta.breakable);
-        assert!(q.meta.keep_with_next);
+        assert!(!q.meta.keep_with_next);
+    }
+
+    #[test]
+    fn keep_chain_is_closed_inside_its_own_question() {
+        let mut q1 = written(1, QuestionKind::Solution);
+        q1.structure_parts = vec![part("(1)", "第一问", "求 f 的解析式。", "f(x) = x^2。")];
+        let q2 = written(2, QuestionKind::Solution);
+        let options = ExportOptions {
+            answer_space: Some(space(WireBlankStyle::Lines, 6.0)),
+            ..ExportOptions::default()
+        };
+        let doc = build_layout_doc(&bundle(ExportMode::Student, vec![q1, q2]), &options, None);
+        let blocks = &doc.sections[0].blocks;
+        assert_eq!(
+            shape(blocks),
+            ["question", "sub", "blank", "question", "blank"]
+        );
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|b| b.meta().keep_with_next)
+                .collect::<Vec<_>>(),
+            // 题面粘住小问、小问粘住自己的作答区，但链不许跨过题界
+            vec![true, true, false, true, false],
+            "粘连只在一题之内"
+        );
     }
 
     #[test]
@@ -1355,5 +1305,63 @@ mod tests {
             "素材齐了就不该有图片警告：{image_issues:?}"
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn one_builder_plus_one_register_reaches_the_rendered_source() {
+        // T4.1 的验收口径：新模板 = 一个 builder 实现 + 一行注册。
+        // ir / typst_gen / 适配器分派处一行都不改，换的只是查表结果。
+        struct FillBlankBuilder;
+        impl BlockBuilder for FillBlankBuilder {
+            fn kinds(&self) -> &'static [QuestionKind] {
+                &[QuestionKind::Fill]
+            }
+            fn policy(&self) -> Policy {
+                Policy {
+                    wants_blank: true,
+                    compact_stem: true,
+                    ..Default::default()
+                }
+            }
+        }
+        static CUSTOM: FillBlankBuilder = FillBlankBuilder;
+
+        let options = ExportOptions {
+            answer_space: Some(AnswerSpace {
+                height_cm: 3.0,
+                style: WireBlankStyle::Lines,
+            }),
+            ..ExportOptions::default()
+        };
+        let b = bundle(ExportMode::Student, vec![written(1, QuestionKind::Fill)]);
+
+        let default_doc = build_layout_doc(&b, &options, None);
+        assert_eq!(shape(&default_doc.sections[0].blocks), ["question"]);
+
+        let registry = Registry::standard().register(&CUSTOM);
+        let custom_doc = layout_doc(&b, &options, None, &registry);
+        assert_eq!(
+            shape(&custom_doc.sections[0].blocks),
+            ["question", "blank"],
+            "后注册的模板应接管填空题"
+        );
+        let blank = blank_of(&custom_doc).expect("自定义模板应垫出留白");
+        assert_eq!(
+            (blank.height_mm, blank.style),
+            (30.0, BlankStyle::Lines),
+            "留白参数仍按 options × spec 合并"
+        );
+
+        // 换表之后的 IR 依旧被渲染层原样吃下
+        let rendered = typst_gen::generate(&custom_doc, &HashMap::new());
+        assert!(
+            rendered.issues.is_empty(),
+            "渲染侧不该报问题：{:?}",
+            rendered.issues
+        );
+        assert!(
+            rendered.source.contains("#blank-lines("),
+            "新块序列没进排版源码"
+        );
     }
 }

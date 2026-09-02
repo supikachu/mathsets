@@ -128,6 +128,24 @@ pub struct RenderedRun {
     pub family: String,
 }
 
+/// 逐页收集版面文字（下标 = 物理页，从 0 起）。
+///
+/// 防跨页（T4.5）的断言口径是「这两段字在同一页」，扁平列表表达不了，所以页归属留在这里。
+/// 粒度是**物理页**：A3 双栏时两栏同属一个条目，这对「不许腰斩」正好，对 T4.7 的
+/// 「逻辑页 / 左右栏」还得更细的坐标判定。
+/// 一段 `TextItem` 不会横跨两页 —— typst 只在行与行之间断页，帧树里的文字段总是完整落在
+/// 某一页内，因此「按页分组」不需要任何近似。
+pub fn rendered_pages(doc: &PagedDocument) -> Vec<Vec<RenderedRun>> {
+    doc.pages()
+        .iter()
+        .map(|page| {
+            let mut out = Vec::new();
+            walk_frame(&page.frame, &mut out);
+            out
+        })
+        .collect()
+}
+
 /// 深度优先走帧树，收集所有落到版面的文字段。
 ///
 /// 为什么要走帧树而不是搜 SVG/PDF 字节：typst 的 SVG 与 PDF 都把汉字画成**矢量轮廓**，
@@ -137,11 +155,7 @@ pub struct RenderedRun {
 ///
 /// 只走 `Group` 递归；`Shape` / `Image` / `Tag` 与文字无关。
 pub fn rendered_runs(doc: &PagedDocument) -> Vec<RenderedRun> {
-    let mut out = Vec::new();
-    for page in doc.pages() {
-        walk_frame(&page.frame, &mut out);
-    }
-    out
+    rendered_pages(doc).into_iter().flatten().collect()
 }
 
 fn walk_frame(frame: &Frame, out: &mut Vec<RenderedRun>) {

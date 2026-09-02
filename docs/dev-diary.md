@@ -1236,3 +1236,135 @@ columns:1}`、MediaBox 595.28；预设换 A3 三栏 → 纸张与栏数两个下
 再把栏数手动调回双栏、留白样式调成纯空白 → 两个字段都进了请求体，体积 36.4KB→39.7KB（6cm 留白
 真被画出来了）。换预设时留白样式被重置回横线，正是整体替换该有的样子。
 
+## 2026-09-02 导出引擎 M4 批次①（题型注册表与防跨页）
+
+### 一、T4.1 `typeset/blocks`：把出块逻辑从桥上搬进排版侧
+
+`export/pdf.rs` 里那套「题干 → 小问 → 留白」的出块代码搬到 `src/typeset/blocks/mod.rs`，拆成
+`BlockBuilder`（一个题型模板）+ `Registry`（注册表）+ 五个 builder（choice / multiple / fill /
+solution / composite）。搬家的理由是分页策略：哪块能跨页、哪块要粘住下一块，是**题型模板**该说的
+话，不是适配器该猜的话 —— T4.5 之前适配器只能靠 `q.kind` 现编 if-else，新题型进来就得改桥。
+
+方向不变式仍然是硬的：`export → typeset` 单向。切分行内内容是 `export` 的能力（`split_content`
+认 markdown 与公式），`blocks` 不许 `use` 它，于是它以参数的形态注入：
+
+```rust
+pub type Splitter = dyn Fn(&str) -> Vec<InlineNode>;
+fn build(&self, q: &ExamQuestion, ctx: &BlockCtx, split: &Splitter) -> Vec<LayoutBlock>;
+```
+
+三条设计值得记：
+
+- **`builder(kind)` 用 `.rev()` 扫描**，所以后注册者覆盖先注册者。这是「仅需注册即可接管一个题型」
+  的机制本体，不是顺手写的。
+- **未命中的 kind 落到 `FALLBACK`（`WRITTEN` 策略）**。兜底不是摆设：注册表为空 = 「新题型刚进枚举、
+  还没注册」，此时仍要出题干 + 小问 + 留白，而不是静默出一张空白卷。用例就照这个口径写。
+- **`Policy` 三轴**：`expands_parts`（要不要展开问树）/ `wants_blank`（给不给作答区）/
+  `compact_stem`（题干能不能整块不跨页）。trait 的默认实现就是这三轴的乘积，五个内置 builder
+  **全都只声明 `kinds()` 与 `policy()`**，一处 `build` 也没覆写 —— 题型差异能被这三轴表达完，
+  说明抽象选对了。表达不完的仍然可以覆写 `build`，`blocks/mod.rs` 里那枚假想 `ProveBuilder`
+  （题干整块不跨页 + 一块大留白、不排小问）走的就是这条路。填空题不给整块留白（B2：作答位在行内
+  下划线上）由 `wants_blank=false` 表达，不再是一枚特判。
+
+扩展性验收做在**两层**：`blocks/mod.rs` 里假想 `ProveBuilder` 接管 `Solution` 的注册表单测，加上
+`export/pdf.rs` 里假想 `FillBlankBuilder` 接管 `Fill` 后 `#blank-lines(` 出现在 typst 源码里的端到端
+单测。只测注册表会漏掉「IR 出了块但排版器不认」这一类断链 —— 而 T4.1 承诺的恰恰是「一行不改地接到
+版面上」。
+
+### 二、⛔ typst 0.15 里没有 keep-with-next 这个原语
+
+任务分解写的是「小问标题 `keep with next`」，先去 typst 源码找对应物，结果是没有：
+
+```
+grep -rn "keep.with.next\|KeepWithNext\|keep_lines_together" \
+  typst-library-0.15.1/src typst-layout-0.15.1/src   # 空
+```
+
+`par` 也没有 `keep-lines-together`。所以 0.15 上做粘连只有一条路：**把一串块折进一枚
+`block(breakable: false)` 壳**。落法即 `FUNCTION_LIBRARY` 里的 `#keep-together(body)` +
+Rust 侧 `plan_groups` 决定哪些块进同一个壳。docx 侧走的是真 `w:keepNext`（⛔R5 已实测它对表格
+有效），两边共用同一份 IR 语义，各自的实现细节留在自己那侧。
+
+### 三、为什么必须自己算高度：超过一页的 `breakable: false` 会溢出而不是自动断开
+
+`typst-layout-0.15.1/src/flow/distribute.rs::single()`（整块不可断的分支）：先在当前区里量，
+
+```rust
+if !self.regions.size.y.fits(frame.height()) && self.regions.may_progress() {
+    return Err(Stop::Finish(false));   // 换一页再来
+}
+```
+
+而 `regions.rs::may_progress()` = `!backlog.is_empty() || last.is_some_and(|h| self.size.y != h)`。
+换页后重试时尺寸已变，`may_progress()` 转 false → **照排**。净效果是一枚比版心高的整块被塞进新页，
+溢出部分裁掉，不是「退回可断」。所以预算只能在 Rust 侧算：
+
+- `budget_mm` = 版心高 × 0.75（A4 学生版 `(297 − 22 − 22) × 0.75 = 189.75mm`）。留的 1/4 是给估高
+  误差和首页大卷头的余量。
+- 估得准才算数：`Blank` 用它的 `height_mm`（确定值），题干/小问按「(文字宽 + 悬挂缩进) ÷ 栏宽 = 行数
+  × 8mm + 2mm」估，选择题再按**最宽那条选项** × 行数加成（宁可估高少粘一块，不许估低做出超页整块）。
+- 估不准的一律不粘：图片（只知道像素宽，等比缩放后的毫米高无从得知）、表格、显式换行、块级公式、
+  `Callout`、内嵌 `Answer`。判据复用 `choice_grid::requires_single_column`，不另写一套。
+- 链**从尾往回吞**，不是从头往后吞：最要命的孤立场景就在链尾 ——「最后一个小问的标号留在页脚，一整块
+  作答区跑到下一页去」。
+- 终结块估不准时**退一格**：丢的只是「与终结块那一环」的粘连，链内题面块照旧粘住。
+
+### 四、自己刚写的用例抓到一个真 bug：退让路径会把块整个丢掉
+
+`plan_groups` 第一版收尾写的是 `i = term + 1`。可退让时壳只覆盖到 `end`（`end < term`），`end+1 ..= term`
+这些没进壳的块就被游标跨过去了 —— 用例表现为 `planned()` 返回 `[0..2]`，而序列有三块，第三块（那枚
+240mm 留白）**整个从版面上消失**。改成 `i = range.end`（没粘成才跳回链尾）。
+
+顺手把这层不变式做成所有 T4.5 用例的公共前置：`planned()` 包一层断言「分段不重不漏覆盖整条序列」+
+「壳里不许出现模板没要求的粘连」（非末位块必须本来就 `keep_with_next`）。这类通用不变式写成 helper
+比在每个用例里重复期望值更耐改。
+
+### 五、粘连只在一题之内：收尾规则住在适配器，不住在模板
+
+模板给题干块（乃至最后一个小问）置 `keep_with_next` 是「粘住它**自己的**小问 / 留白」的意思，这个位
+一路传到序列末尾就会把下一道短题焊进同一枚壳 —— 恰好踩进第三节那条溢出路径。于是桥上加一条：
+
+```rust
+if let Some(last) = out.last_mut() { last.meta_mut().keep_with_next = false; }
+```
+
+`LayoutBlock::meta_mut()` 是为此加的可写访问器（`meta()` 一直是只读的）。
+
+代价要说清楚：`single_choice_becomes_one_glued_question_block` 从 T3.3 起断言
+`assert!(q.meta.keep_with_next)`，现在**必须反过来**。单选题只出一块，那块就是链尾，它的 keep 没有
+意义 —— 粘不动也不该粘。断言改成 `!keep_with_next`，并补一枚 `keep_chain_is_closed_inside_its_own_question`：
+两解答题带小问与卷面留白，keep 序列应是 `[true, true, false, true, false]`。
+
+### 六、帧树回读第一次有了「页」这一维，边界卷差点成为空断言
+
+T3.5 的 `rendered_runs` 是全卷一根明文；防跨页的断言口径是「这两段字在**同一页**」，所以需要逐页。
+新增 `rendered_pages(doc) -> Vec<Vec<RenderedRun>>`，`rendered_runs` 退化成它的 flatten。一个 `TextItem`
+不会跨页 —— typst 只在行间断页，所以按页切分不会把一段字劈成两半记两次。
+
+两个坑：
+
+- **单行题干永远不会被页界劈开**，于是「对照组确实有腰斩」这条非空断言一开始就是失败的（30 题全落
+  页内）。改 `stem_text(i)` 让题干 1~4 句随题号变化，边界卷才真造出来。用例留了守卫：
+  `assert!(straddling(&loose, n) > 0, "边界卷没造出来…本用例就成了空断言")` —— 没有这条，
+  「glued 后 0 题腰斩」可以只是因为压根没题腰斩。
+- **页脚逐页画一遍**：`第 N 页 / 共 M 页` 的明文会插在跨页题干的中间，把「粘连只改分页、不改内容」
+  那根 `flat(glued) == flat(loose)` 断言带偏（第一次失败就是这个原因）。该 fixture 关掉
+  `spec.header_footer.page_number`，页码不归 T4.5 管。
+
+最后落在 6 枚用例上：短链折成一枚壳（含留白）、跨题不许粘、估不准的终结块只丢最后一环、超预算留白
+留在壳外、长题干腰斩但小问与它的作答区同页、带图的题整题不粘；再加一枚编译级边界卷 ——
+`loose` 30 题里有题腰斩、`glued` 0 题、两边正文明文逐字相等。
+
+### 七、`gen` 是 edition 2024 的保留关键字
+
+`let gen = generate(&doc, …)` 直接编不过：`expected identifier, found reserved keyword 'gen'`。
+改名 `rendered`。这个 crate 里想给「生成结果」起短名的下次注意。
+
+### 八、本批次已知边界
+
+- 选项栅格的可用宽仍按 `HANGING_EM = 2.0` 决策（`export::pdf` 与 typst_gen 用例的 `available_em`），
+  而 typst 实际画的是 `HANG_EM = 2.6em` 缩进 —— T2.5 遗留的口径差，M4 后续批次统一，本批次不动它以免
+  把栅格决策的用例全洗一遍。
+- `rendered_pages` 的粒度是**物理页**：A3 折叠/三栏下「一栏」不是一页。T4.5 只需判断同页，够用；
+  T4.7 要断言逻辑页与栏序时，得从帧树里把 `pos` 一起读出来。
+
