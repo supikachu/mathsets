@@ -4,9 +4,12 @@
 //! export → typeset，**两个模块之间的唯一桥是适配器 `export::pdf`**（T3.3）：本模块不调装配器、
 //! 不碰生成器、不看 handler，只借用 `export::model` 里的纯数据类型（`InlineNode` 等内容词汇表）。
 //! 已落地：`blocks::choice_grid`（T2.5 选项栅格决策）、`spec`（T3.2 版面参数与预设）、
-//! `ir`（T3.3 排版域 IR）。
-//! M3 待落地：`math` / `compiler` / `typst_gen`；M4：`blocks` 全量与母版分离。
+//! `ir`（T3.3 排版域 IR）、`math`（T3.4 LaTeX → Typst 数学源码与降级）、
+//! `compiler`（T3.5 World 实现与 PDF/SVG 编译）。
+//! M3 待落地：`typst_gen`；M4：`blocks` 全量与母版分离。
 
 pub mod blocks;
+pub mod compiler;
 pub mod ir;
+pub mod math;
 pub mod spec;

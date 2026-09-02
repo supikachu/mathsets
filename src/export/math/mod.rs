@@ -284,9 +284,10 @@ fn starts_entity(s: &str, at: usize) -> bool {
         return false;
     }
     match body.strip_prefix('#') {
-        Some(hex) => match hex.strip_prefix(['x', 'X'].as_ref()) {
+        // 不写 `['x','X'].as_ref()`：palette 给 `[T; N]` 补了多个 AsRef 实现，类型推不出来
+        Some(hex) => match hex.strip_prefix("x").or_else(|| hex.strip_prefix("X")) {
             Some(d) => !d.is_empty() && d.bytes().all(|b| b.is_ascii_hexdigit()),
-            None => !body[1..].is_empty() && body[1..].bytes().all(|b| b.is_ascii_digit()),
+            None => !hex.is_empty() && hex.bytes().all(|b| b.is_ascii_digit()),
         },
         None => XML_ENTITIES.contains(&body),
     }

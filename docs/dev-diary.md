@@ -1027,7 +1027,92 @@ B5 在这座桥上落地：留白的**开关与高度**在 `options.answer_space
 只有三行，代价是前端只能带完整对象 —— 反正所有结构都 `#[serde(default)]`，缺键即取默认值，不会 400。
 `model.rs` 字段注释与 `exam.ts` 同步更新（ts-rs 会把 Rust 文档注释原样抄进 `.ts`，改注释就得重跑绑定测试）。
 
-### 四、踩坑记录：`cargo fmt -- <file>` 在这个仓库会把全仓库格式化了
+### 四、T3.4 mitex 管线：把「一枚坏公式炸掉整卷」挡住
+
+`src/typeset/math.rs`。公开面只有三样：`to_typst(latex, display) -> Result<String, String>`、`degraded(latex)`、
+`MITEX_PREAMBLE`（随生成源码注入一次的定义块）。**typst 里一个解析不出来的标识符是 `unknown variable`，
+那是整卷编译失败**，比少排一个公式严重一个量级 —— 所以这一节真正的产出不是转换器，是那道降级闸门。
+
+mitex 0.2.4 的实际契约（读 `mitex-0.2.4/src/`，不是读 README）：
+
+- 公开 API 只有 `convert_text` / `convert_math` / `convert_math_no_macro(input, Option<CommandSpec>)`。
+- **传进去的 `spec` 只作用于 parse 阶段**，convert 阶段仍取 `mitex_spec_gen::DEFAULT_SPEC`（`converter.rs` 尾部）。
+  所以「给 mitex 一张自定义命令表」这条路是无效的；扩展覆盖只能事后补 —— 输出是纯文本，缺什么名字就在
+  preamble 里定义什么名字。
+- `convert_math` 交出的是**裸数学体**，不含 `$…$`。typst 的块级/行级判据是「开引号后紧跟空白」，所以
+  `display` 走 `$ … $`、行内走 `$x$`，包装留给我们做。
+- 对不配平括号是**宽容**的（`\frac{1}{` 实测 `Ok`）。所以语料守的不是「非法输入报错」，而是「任意输入只能
+  Ok 或 Err，不许 panic」—— panic 会打断整卷，这才是真风险。
+- 两处会静默改变语义的输出：`\%` 原样写成裸 `%`（typst 里是行注释，方程尾巴整段没了）→ 出口 `escape_percent`；
+  `\text{}` 转成 `#textmath[…]` → 这个名字必须我们自己定义。
+
+**守卫 `unresolved_name` 只看四种「名字位置」**，其余字母串在数学模式里只是普通文本（`$abc$` 合法）：
+`#name`（查全局作用域）、裸 `name(`、裸 `name.`（查数学作用域）、以及第 4 条 —— 裸 `name` 但它出自 mitex
+词表。第 4 条是 75 枚语料逼出来的：`A\cap B` 转成 `$A sect  B$`，`sect` 后面既没 `(` 也没 `.`，前三条整条
+放过，typst 却报 unknown variable。**typst 0.15 把 `\cap` 的符号名从 `sect` 改成了 `inter`，mitex 0.2.4 还在
+写旧名**，preamble 里补 `#let sect = math.inter`。
+
+三张名单一律不手抄，全部运行时现读：mitex 会吐哪些词 ← `DEFAULT_SPEC` 的 `alias.unwrap_or(key)` 取根段；
+typst 认哪些名字 ← `Library::default()` 的 `math.scope()` / `global.scope()`；我们定义了哪些 ← 从
+`MITEX_PREAMBLE` 文本里扫 `#let`。理由很实在：**改一边忘一边就是整卷编译失败**，而 typst/mitex 升级会同时
+改名与新增。代价是 `mitex-spec-gen` 得从 dev-dependencies 提到 dependencies —— 它本就是 mitex 的非 dev 依赖，
+已经在二进制里，不增加体积。`preamble_names()` 与模板同源之后，T3.6 只要保证把这块原样输出一次即可。
+
+两个方向相反的坑：**`zws`（零宽空格）与 `space.nobreak`（LaTeX 的 `~`）都是 typst 原生数学符号**，preamble
+里原先各写了一行 `#let`，实测等于把原生行为盖掉。于是加了一枚 `preamble_never_shadows_a_typst_definition`
+断言 —— 现在 preamble 只允许定义「typst 两个作用域里都查不到」的名字。同类判例：间距命令里 `\,` `\;` `\:`
+正好落在原生 `thin` / `med` / `thick` 上，而 `\!` 是 mitex 自造的 `negthinspace`，typst 0.15 无此名，只能降级。
+`math.root` 的 index 是**可选位置参数**，`root(x)` 报 `missing argument: radicand`（实测），所以 `mitexsqrt`
+必须按参数个数分流到 `math.sqrt` / `math.root`。数学函数（`mat` / `frac` / `display` …）只活在数学作用域，
+顶层 `#let` 的函数体按代码作用域解析看不见它们，必须写 `math.mat(..)`。
+
+测试：math.rs 16 例（4 枚 `#[ignore]` 探针负责把 mitex 词表、未解析名字、typst 符号修饰符打出来核对）。
+语料常量 `CORPUS`（75 条，覆盖分式/根式/嵌套上下标/集合逻辑/向量几何/矩阵数组分段/中文与百分号/大括号标注）
+与 `UNSUPPORTED`（5 条已知「mitex 转得动但 typst 不认」）**同时**喂给 T3.5 的编译测试 —— 守卫说能过的必须真
+编译得动，两边交叉验证，否则守卫会悄悄变严（无谓降级）或变松（整卷失败）。
+
+一处小坑记在这：`MITEX_PREAMBLE` 是普通字符串字面量，**里面的 `//` 注释也受转义规则管**，写 `\cap` 会让
+rustc 报 `unknown character escape`，得写 `\\cap`。
+
+### 五、T3.5 typst 编译器：手写 World、进程级字体池、两个出口
+
+`src/typeset/compiler.rs`。公开面：`CompileRequest` / `compile_pdf` / `compile_svg_pages` / `Compiled<T>` /
+`CompileError` / `CJK_FAMILIES` / `missing_cjk_families`。typst 0.15 的 `World` 是 7 个方法，手写即可，
+不需要 `typst-eval` 之类的内部 crate。几处只在编译时才浮出来的事实：`PagedDocument` / `Page` 定义在
+`typst-layout` crate，`typst` 门面没有把它导成 `typst::layout`；`Library::default()` 要把 `LibraryExt` 引进
+作用域才看得见；`ecow` 必须跟 typst 的传递依赖同主版本（钉 0.3 会编进两份 ecow，`Sm` 变成两个不同类型，
+`World` 实现直接对不上）。
+
+字体走 R6：**运行时读目录，禁 `include_bytes!`**。`typst_assets::fonts()` 要 `fonts` feature —— 它不在
+typst-assets 的 default 里，依赖树里也没人打开，漏开就拿到空迭代器、任何文档一个字体都没有（一枚断言盯着）。
+整个进程按「目录集」记忆化字体池：83MB 的思源 OTF 逐请求解析，单卷 500ms 的目标当场破产。同一份字体可能在
+两个目录各一份，用「长度 + 首尾 64 字节」指纹粗去重。
+
+**缺中文字体 typst 一声不吭**：`#set text(font: "unknown family")` 连告警都不发，直接回退成豆腐块。所以
+只能主动查 `FontBook::contains_family` —— 而它的族名索引是**小写键**，传 `"Source Han Serif SC"` 原样去查
+恒为「缺」（实测，第一版就被这个坑到 `cjk_fonts_actually_load_from_assets_dir` 红）。查询侧统一 `to_lowercase()`。
+
+素材两条路径分开：`/uploads/**` 映射 `config.upload_dir`，经 `VirtualPath::realize` 逐段校验拒绝任何能逃出
+root 的写法（Windows 的 `\` 与盘符也算）—— 文件名来自库里存的 URL，不能当可信路径直接 join。外链图片由调用方
+抓成字节后按 `/ext/<n>.<ext>` **序号**注入，不用 URL 哈希名：typst 的 `FileId` 走全局 interner，上限 65535 且
+**永不回收**，哈希名会让它随请求单调增长。`today()` 一律 `None`（源码不写 `datetime`，卷面日期由 Rust 侧
+格式化后注入）。`Compiled<T>` 手写 `Debug`：derive 出来的一行日志就是几十万字节的 PDF 原文。
+
+诊断口径：typst 遇错即中止求值，一次编译通常只有一条诊断，`CompileError::summary()` 仍把总数带上（多条是我
+们自己追加的情况）。`flatten_one` 只取消息 + 首条提示，**不带行列** —— 源码是生成的，行号对教师无意义。
+「一枚坏公式不失败整卷」在这层的落点是：预防靠 T3.4 的守卫（编译后补救来不及），编译层的 `diagnostics`
+只用于记 Issue 与日志。
+
+测试：compiler.rs 10 例（1 枚探针）。hello-world 出 `%PDF` 开头且 >800 字节的非空产物；中文 + 注入图片 +
+mitex 公式混合源编译成功且无字体告警；75 条语料整批编译（失败时逐条定位并打印 `summary()`）；诊断可枚举；
+字体池的注册/去重/复用/`fonts` feature 四枚断言；SVG 逐页。**整个 typeset 测试集 63 例 1.03s 跑完**，
+typst 编译的耗时余量比 M3 预估更宽松。全量 `cargo test --lib --offline` = 608 passed / 0 failed / 9 ignored。
+
+顺手修一处被新依赖暴露的 M2 断裂：`export/math/mod.rs` 里 `hex.strip_prefix(['x','X'].as_ref())` 现在推不出
+类型（typst 依赖闭包带进来的 `palette` 给 `[T; N]` 补了多个 `AsRef` 实现 → E0283），改成
+`strip_prefix("x").or_else(|| strip_prefix("X"))`。语义等价，但这类「加依赖把老代码编坏了」的账值得记下来。
+
+### 六、踩坑记录：`cargo fmt -- <file>` 在这个仓库会把全仓库格式化了
 
 想只格式化新增的两个文件，跑的是：
 
