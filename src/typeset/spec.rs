@@ -272,6 +272,19 @@ impl LayoutSpec {
         ((w as f32) - self.margin_left_mm() - self.margins.right_mm - gutters) / n
     }
 
+    /// 各栏左沿的绝对 x（mm，从**纸**的左边缘量）
+    ///
+    /// 与 [`column_width_mm`](Self::column_width_mm) 同一条算式，只是把逐栏累加写出来。取这个
+    /// 原点是有意的：typst 的 `Location.position().x` 与帧树的 `x_mm` 都从纸边量起（实测标记落在
+    /// x = 生效左边距、栏内正文帧的 x 与栏左沿同值），页眉要靠它把绝对 x 反推成栏号（T4.10），
+    /// 差一个左边距就把每一栏都算到左边那一栏去。
+    pub fn column_lefts_mm(&self) -> Vec<f32> {
+        let step = self.column_width_mm() + self.column_gutter_mm();
+        (0..self.columns.max(1))
+            .map(|i| self.margin_left_mm() + step * i as f32)
+            .collect()
+    }
+
     /// 生效的左边距（mm）：`Left` 装订带不是装饰，它真的吃掉版面前这条带子，正文整块右移
     pub fn margin_left_mm(&self) -> f32 {
         match self.binding {

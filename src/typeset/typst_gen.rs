@@ -75,6 +75,8 @@ pub fn generate(doc: &LayoutDoc, images: &HashMap<String, Option<String>>) -> Ge
         issues: Vec::new(),
         number: None,
         field: IssueField::Structure,
+        formula_section: None,
+        formula_no: 0,
         black: spec.color == ColorMode::PrintBlackOnly,
     };
     g.warn_page_conflicts();
@@ -132,6 +134,67 @@ const PAGE_FURNITURE: &str = r#"
   #place(top + left, dx: x - 2mm, dy: y0,
     rotate(90deg, origin: top + left)[#text(size: 8pt, fill: luma(90))[#label]])
 ]
+
+/// 动态页眉（T4.10 / R9）：一栏一格，格里是「这一栏正在排哪个大题」
+///
+/// 不能用 `state`：`state.at(here())` 读到的是**页眉自身位置之前**的值，大题正好起于栏顶时那一格
+/// 慢一栏（实测 无 / 甲 / 乙 / 乙 —— 第 2 张顶端就是新大题，页眉还挂着旧题名），而「翻页处页眉随
+/// 大题切换」要的正是那一格。脚本层问不到「现在是第几栏」（R4），但 `query(metadata)` 能拿到每个
+/// 标记的 `Location.position()` = 页内**绝对** `{page, x, y}`（实测 A 落在 x=5mm=左边距、
+/// 栏内正文帧的 x 与 `columns` 容器栏左沿同值），栏号因此可以从 x 反推 —— 前提是 `xs` 与各栏左沿
+/// 同源，这个数是 Rust 侧从 margin_left_mm / column_width_mm / column_gutter_mm 算的。
+/// 另两条实测口径：x/y 是 `length`，没有 `.round()`（只能与 `1mm` / `1pt` 比较或除以 `1pt`）；
+/// 页眉里的 query 看得见**后面页**的标记，所以整条算式不必管「取不到未来」。
+///
+/// 归属规则是「本栏覆盖最长」：上一条标记管到本栏首条标记（本栏没有标记就管到栏底），本栏每条标记
+/// 管到下一条标记或栏底。大题起于栏顶时它独占整栏，切换因此落在正确的那一格；一栏被上一个大题的
+/// 尾巴占住时保持旧题名，也不会「还没讲到就先挂上题名」。一格都归不出来才落回 `fallback`（卷名）。
+///
+/// 栏沿与轨道都在函数里现造（`range(n).map()`），不从 Rust 侧递列表：typst 的 `array(1mm)` 是
+/// **类型转换**而不是构造器（实测报 `expected array, bytes, or version, found length`），单栏写成
+/// `(18mm)` 又只是一个 length 而不是元组，而 `repeat(2, 1fr)` 连参数都不对味（第一枚位置参数要
+/// content，实测报 `expected content, found integer`）—— 三条路都在某一栏卷上崩，只有 `range(n).map()`
+/// 两种栏数都给 Array。
+///
+/// 格的切法与页脚同一套（轨道等分、`gutter` 与容器栏距同值），所以每格正好压在自己那一栏上方。
+/// 但栏数取 `spec.columns`（内容口径）而非 `logical_slots()`（页码口径）：A3 三栏那张纸只有一个
+/// 页码格，却有三个题名格。
+#let running-head(p, n, left, step, gutter, top, bottom, fallback) = {
+  // 一遍收集：`position()` 是 optional，filter + map 两段式会在 map 里再解一次引用 —— 循环里
+  // 判一次就够，顺便省掉第二次取位置
+  let xs = range(n).map(i => left + step * i)
+  let marks = ()
+  for m in query(metadata) {
+    let q = m.location().position()
+    if q != none {
+      marks.push((q.page, xs.filter(v => q.x + 1pt >= v).len() - 1, q.y, m.value))
+    }
+  }
+  grid(columns: range(n).map(_ => 1fr), gutter: (gutter, 0pt),
+    ..range(n).map(i => {
+      // `query` 返回文档序，所以「本栏之前」取最后一个即可；`before` 与 `own` 的划分只看落点，
+      // 不依赖文档序里谁在前 —— 同一栏内标记的 y 递增，跨栏则是左栏先排完
+      let before = marks.filter(m => m.at(0) < p or (m.at(0) == p and m.at(1) < i))
+      let own = marks.filter(m => m.at(0) == p and m.at(1) == i)
+      let spans = ()
+      if before.len() > 0 {
+        let tail = if own.len() > 0 { own.at(0).at(2) } else { bottom }
+        spans.push((before.last().at(3), tail - top))
+      }
+      for k in range(own.len()) {
+        let next = if k + 1 < own.len() { own.at(k + 1).at(2) } else { bottom }
+        spans.push((own.at(k).at(3), next - own.at(k).at(2)))
+      }
+      let label = if spans.len() == 0 {
+        fallback
+      } else {
+        let best = spans.at(0)
+        for s in spans { if s.at(1) > best.at(1) { best = s } }
+        best.at(0)
+      }
+      align(center + horizon, text(size: 9pt, fill: luma(120), label))
+    }))
+}
 "#;
 
 /// 函数库 v1：整段是常量，不进 `format!` —— 花括号不必转义，版式漂了就是在改这个常量。
@@ -234,7 +297,26 @@ const FUNCTION_LIBRARY: &str = r#"
 /// 必须自带一个 leading（同 [`item`]：块之间 typst 取 max，单行块的字框高比行距矮一截）。
 #let keep-together(body) = block(width: 100%, breakable: false, above: 3pt + 0.7em)[#body]
 
+/// 带编号的块级公式（T4.11）：式子按所在内容盒居中，`(大题.序号)` 贴本栏右沿
+///
+/// 三轨网格：式子与号不能挤在同一轨里（要么号跟着式子跑、要么式子被推到边上），中间轨 `auto`
+/// 只吃掉式子自己的宽度，两边各一枚 `1fr` 才把号推到栏边。式子随它所在的内容盒居中，题目里就是
+/// 悬挂缩进后那一盒（实测中心 110 而非栏中心 105）—— 与题干同宽，读起来才是「这一题的式子」。
+/// `$…$` 落进网格单元仍是行间口径（实测：求和号的上限悬在正上方 103.5/106.5，不是右上角）；
+/// 式子长过栏宽时中间轨自己撑开、号被顶出右边界 —— 宁可撞版也不裁式子。
+#let equation(no, body) = grid(
+  columns: (1fr, auto, 1fr),
+  gutter: 4pt,
+  [],
+  align(center)[#body],
+  align(right + horizon)[#text(size: 9pt, fill: luma(110))[#no]],
+)
+
 /// 大题标题：灰底 + 左题名右「共 N 题 · X 分」
+///
+/// `#metadata(title)` 是 T4.10 动态页眉的落点标记（零尺寸惰性元素）。放在左格的题名**之前**而不是
+/// 块首：块首那一级会另起一个只含零尺寸元素的空段，页眉要的只是「这一栏这个位置属于哪个大题」，
+/// 犯不着为它赌上行距。
 #let section-header(title, meta) = block(
   width: 100%,
   fill: luma(236),
@@ -245,7 +327,7 @@ const FUNCTION_LIBRARY: &str = r#"
   below: 4pt,
   breakable: false,
 )[
-  #grid(columns: (1fr, auto), gutter: 6pt, align(left + horizon)[#text(font: heading-font, weight: "bold")[#title]], align(right + horizon)[#text(size: 9pt, fill: luma(70))[#meta]])
+  #grid(columns: (1fr, auto), gutter: 6pt, align(left + horizon)[#metadata(title)#text(font: heading-font, weight: "bold")[#title]], align(right + horizon)[#text(size: 9pt, fill: luma(70))[#meta]])
 ]
 
 /// 提示框（教师模式四类）：色条与底色由 Rust 侧给 —— 印前纯黑时它们只能是黑白
@@ -387,6 +469,10 @@ struct Gen<'a> {
     number: Option<u32>,
     /// 当前正在渲染的字段：公式降级时记进 Issue.field
     field: IssueField,
+    /// 正在渲染的是第几个大题（T4.11 公式编号的前半）：`None` = 这一段不归任何大题管
+    formula_section: Option<u32>,
+    /// 本大题已经排出几枚块级公式，进大题时归零
+    formula_no: u32,
     /// 印前纯黑（K100）：彩色装饰一律退成黑白
     black: bool,
 }
@@ -449,13 +535,7 @@ impl Gen<'_> {
             page.push_str(&self.footer());
         }
         if spec.header_footer.header_title {
-            // 首页不出现页眉（T4.9）：大卷头就是那一页的页眉，再压一行卷名只剩拥挤。
-            // 条件页眉实测可行 —— `here().page()` 是**物理**张号，与卷头占的那一张同口径。
-            // 逐张取当前大题名（真·动态页眉）是 T4.10，届时换掉这里的静态卷名。
-            page.push_str(&format!(
-                ", header: context {{ if here().page() != 1 {{ align(center)[#text(size: 9pt, fill: luma(120))[#({})]] }} }}",
-                typst_str(&doc.title)
-            ));
+            page.push_str(&self.running_head(doc));
         }
         s.push_str(&page);
         s.push_str(")\n");
@@ -538,6 +618,36 @@ impl Gen<'_> {
         s
     }
 
+    /// 页眉（T4.10 / R9）：逐栏一格的动态大题名
+    ///
+    /// 三个数只能由 Rust 侧递下去，因为它们全在母版写下的那一刻就定死、而 typst 脚本层问不到：
+    /// `left` / `step`（生效左边距与「栏宽 + 栏距」）让页眉把 `Location.position().x` 反推成栏号，
+    /// `top` / `bottom` 是版心上下沿 —— 判「本栏栏顶到第一个标记之间还归上一个大题」要有整栏高度。
+    /// 原点口径与帧树一致：都从**纸**的左/上边缘量（实测标记落在 x = 生效左边距）。
+    ///
+    /// 栏数取 `spec.columns`（内容口径），页脚取 `logical_slots()`（页码口径）：A3 三栏那张纸只有
+    /// 一个页码格却有三个题名格，两边共用一个数必有一格对不上自己的栏。
+    ///
+    /// 栏沿不在这里列成字符串：typst 的 `array(...)` 是类型转换不是构造器，单栏的 `(18mm)` 又只是
+    /// 一个 length（两条实测雷记在 `running-head` 的 doc 里），所以只递 `n` + `left` + `step`。
+    ///
+    /// 第 1 张仍不给页眉（T4.9）：大卷头就是那一页的页眉。`here().page()` 是**物理**张号，与卷头
+    /// 占的那一张同口径。
+    fn running_head(&self, doc: &LayoutDoc) -> String {
+        let spec = self.spec;
+        let (_, h) = spec.paper.size_mm();
+        format!(
+            ", header: context {{ if here().page() != 1 {{ running-head(here().page(), {}, {}mm, {}mm, {}mm, {}mm, {}mm, {}) }} }}",
+            spec.columns.max(1),
+            mm(spec.margin_left_mm()),
+            mm(spec.column_width_mm() + spec.column_gutter_mm()),
+            mm(spec.column_gutter_mm()),
+            mm(spec.margins.top_mm),
+            mm(h as f32 - spec.margins.bottom_mm),
+            typst_str(&doc.title),
+        )
+    }
+
     /// 密封装订带（T4.8）：`None` = 这张纸不装订
     ///
     /// 两种装订位共用同一枚模板函数，几何在这里算完：
@@ -613,9 +723,13 @@ impl Gen<'_> {
     fn body(&mut self, doc: &LayoutDoc) -> String {
         let masthead = self.masthead(doc);
         let mut sections = String::new();
-        for section in &doc.sections {
+        for (i, section) in doc.sections.iter().enumerate() {
+            // 公式编号（T4.11）：号的前半是**大题为第几题**，后半在本大题内连续，跨大题重头数
+            self.formula_section = Some(i as u32 + 1);
+            self.formula_no = 0;
             sections.push_str(&self.section(section));
         }
+        self.formula_section = None;
         let mut b = String::new();
         if self.seal_crosses_content() {
             // 折痕竖在版心正中，通栏卷头会横压上去（密封线每页都画）—— 卷头只能待在首栏里
@@ -1081,8 +1195,11 @@ impl Gen<'_> {
     /// 一枚公式：转不动就降级 + 记 Issue，绝不向上传错
     fn math(&mut self, latex: &str, display: bool, field: IssueField) -> String {
         match to_typst(latex, display) {
-            // 块级公式独立成段：两边各留一个空行，段内 `$…$` 会自己占一行
-            Ok(code) if display => format!("\n{code}\n"),
+            // 块级公式独立成段：外面那层 `#equation` 自带整幅宽，段内 `$…$` 仍自己占一行
+            Ok(code) if display => match self.formula_tag() {
+                Some(tag) => format!("\n#equation({tag})[{code}]\n"),
+                None => format!("\n{code}\n"),
+            },
             Ok(code) => code,
             Err(reason) => {
                 self.issue(
@@ -1094,6 +1211,17 @@ impl Gen<'_> {
                 degraded(latex)
             }
         }
+    }
+
+    /// 下一枚块级公式的号（T4.11）：`None` = 这段内容不属于任何大题，不编号
+    ///
+    /// 号在**这里**数而不是交给 typst 的 `counter`，是因为「降级的那枚不占号」这条规则只有转换
+    /// 那一刻知道答案 —— typst 侧只看得见已经落地的那一枚，追不回没落地的。typst 侧要的只是
+    /// 「第几栏 / 第几张」那类位置，号本身不需要位置。
+    fn formula_tag(&mut self) -> Option<String> {
+        let section = self.formula_section?;
+        self.formula_no += 1;
+        Some(typst_str(&format!("({section}.{})", self.formula_no)))
     }
 
     fn image(&mut self, url: &str, alt: Option<&str>, width: Option<u32>) -> Option<String> {
@@ -1901,36 +2029,312 @@ mod tests {
         );
     }
 
-    /// 首页不出现页眉（T4.9）：大卷头就是首页的页眉。条件页眉按**物理张号**自己关掉第一张，
-    /// 从第二张起才顶到版心上方的页眉条里 —— 页眉在 margin 区，正文在版心，`y < margin.top`
+    /// 一张纸上**页眉条**里的文字（版心上方的 margin 区），按 x 从左到右
+    ///
+    /// 动态页眉一栏一格，格序就是栏序：`y < margin.top` 那道分界把页眉与正文分开（T4.9 同一条），
+    /// x 再与 [`LayoutSpec::column_lefts_mm`] 比就能认回它是第几栏 —— 页眉与正文本来就同一套纸张坐标。
+    fn head_cells(page: &[PlacedRun], top: f64) -> Vec<(f64, String)> {
+        let mut cells: Vec<(f64, String)> = page
+            .iter()
+            .filter(|r| r.y_mm < top)
+            .map(|r| (r.x_mm, r.run.text.clone()))
+            .collect();
+        cells.sort_by(|a, b| a.0.total_cmp(&b.0));
+        cells
+    }
+
+    /// 首页不出现页眉（T4.9）：大卷头就是首页的页眉，条件页眉按**物理张号**自己关掉第一张，
+    /// 从第二张起才有东西顶到版心上方的页眉条里 —— 页眉在 margin 区，正文在版心，`y < margin.top`
     /// 就是那道分界。
+    ///
+    /// 断言不认卷名只认「版心上方有没有字」：T4.10 起那一行排的是当张各栏的大题名，卷名退化成了兜底。
     #[test]
     fn first_sheet_has_no_running_header() {
         let mut spec = LayoutSpec::default();
         spec.header_footer.header_title = true;
         let top = f64::from(spec.margins.top_mm);
-        let doc = sim_doc(spec);
-        let pages = placed_pages(&compiled(&doc));
+        let pages = placed_pages(&compiled(&sim_doc(spec)));
         assert!(
             pages.len() >= 2,
             "验不出张间差异：只排出 {} 张",
             pages.len()
         );
-        let strip = |page: &[PlacedRun]| -> Vec<f64> {
-            page.iter()
-                .filter(|r| r.run.text.contains("三角函数综合练习"))
-                .map(|r| r.y_mm)
-                .collect::<Vec<_>>()
-        };
-        let one = strip(&pages[0]);
         assert!(
-            one.len() == 1 && one[0] >= top,
-            "第 1 张的卷头名只该在版心里排一次（大卷头即页眉）：{one:?}，版心上沿 y={top:.1}"
+            head_cells(&pages[0], top).is_empty(),
+            "第 1 张的页眉条里不许有字（大卷头即页眉），版心上沿 y={top:.1}"
         );
-        let two = strip(&pages[1]);
         assert!(
-            two.iter().any(|y| *y < top),
-            "第 2 张没排页眉（版心上沿 y={top:.1}）：{two:?}"
+            !head_cells(&pages[1], top).is_empty(),
+            "第 2 张没排页眉（版心上沿 y={top:.1}）"
+        );
+    }
+
+    /// 一栏一个大题：超高留白把每段钉成「标题 + 题 + 留白」一整栏，栏里再挤进第二个大题就装不下了
+    fn one_per_column_doc(spec: &LayoutSpec, count: usize) -> LayoutDoc {
+        let mut doc = sim_doc(spec.clone());
+        doc.answer_key.clear();
+        let avail = available_em(spec);
+        let numerals = ["一", "二", "三", "四", "五", "六", "七", "八"];
+        doc.sections = (0..count)
+            .map(|i| Section {
+                header: SectionHeader {
+                    meta: BlockMeta::glued(),
+                    title: format!("{}、大题名", numerals[i]),
+                    instruction: None,
+                    question_count: 1,
+                    total_score: 10.0,
+                },
+                blocks: vec![
+                    LayoutBlock::Question(question(i + 1, QuestionKind::Fill, 10.0, avail)),
+                    blank(i as u32 + 1, 200.0),
+                ],
+            })
+            .collect();
+        doc
+    }
+
+    /// 动态页眉一栏一格（T4.10）：每格挂的是**自己那一栏**正在排的大题
+    ///
+    /// 期望值是实测读数（A3 对折双栏、一栏正好装下一个大题）：第 2 张左格「二」右格「三」，第 3 张
+    /// 「四」「五」。左右两格不同名是这条链路唯一能证明「x → 栏号 反推对了」的形态 —— 反推一旦塌了，
+    /// 每格都会落到同一栏上，整张退化成一句题名（`query` 给的文档序不再被位置区分）。
+    #[test]
+    fn running_head_labels_each_column_separately() {
+        let mut spec = LayoutSpec::preset("a3_fold_exam").unwrap();
+        spec.header_footer.header_title = true;
+        let top = f64::from(spec.margins.top_mm);
+        let lefts: Vec<f64> = spec
+            .column_lefts_mm()
+            .iter()
+            .map(|v| f64::from(*v))
+            .collect();
+        let pages = placed_pages(&compiled(&one_per_column_doc(&spec, 6)));
+        // 第 1 张按 T4.9 不排页眉，从第 2 张起一格一个大题沿 (张, 栏) 递进
+        let expected = [
+            ["二、大题名", "三、大题名"],
+            ["四、大题名", "五、大题名"],
+            ["六、大题名", "六、大题名"],
+        ];
+        assert_eq!(
+            pages.len(),
+            expected.len() + 1,
+            "一栏一大题排出了 {} 张，与实测的 4 张不符：栏宽或留白高度变了，期望表要跟着重测",
+            pages.len()
+        );
+        for (n, (row, page)) in expected.iter().zip(&pages[1..]).enumerate() {
+            let sheet = n + 2;
+            let cells = head_cells(page, top);
+            assert_eq!(
+                cells.len(),
+                row.len(),
+                "第 {sheet} 张的页眉格数与栏数不符（版心上沿 y={top:.1}）：{cells:?}"
+            );
+            for (i, (x, text)) in cells.iter().enumerate() {
+                assert_eq!(
+                    lefts.iter().rposition(|l| *x >= *l),
+                    Some(i),
+                    "第 {sheet} 张第 {} 格没压在自己那栏上方：x={x:.1}，栏沿 {lefts:?}",
+                    i + 1
+                );
+                assert_eq!(
+                    text,
+                    row[i],
+                    "第 {sheet} 张第 {} 格页眉读错（全页页眉 {cells:?}）",
+                    i + 1
+                );
+            }
+        }
+    }
+
+    /// 页眉不许慢一张（T4.10 的 DoD）：答案区自己起于栏顶，那一格就得当场切过去
+    ///
+    /// `state.at(here())` 的路线在这里会挂住上一个大题（实测慢一张），因为它读的是页眉自身位置
+    /// **之前**的状态；`query + position()` 看得见后面页的标记，切换因此落在正文真正开始的那一张。
+    #[test]
+    fn running_head_switches_on_the_sheet_its_section_starts() {
+        let mut spec = LayoutSpec::default();
+        spec.header_footer.header_title = true;
+        let top = f64::from(spec.margins.top_mm);
+        let pages = placed_pages(&compiled(&sim_doc(spec)));
+        let needle = "参考答案与解析";
+        let has = |sheet: &Vec<PlacedRun>, in_margin: bool| {
+            sheet
+                .iter()
+                .any(|r| r.run.text.contains(needle) && (r.y_mm < top) == in_margin)
+        };
+        let body = pages.iter().position(|p| has(p, false));
+        let head = pages.iter().position(|p| has(p, true));
+        assert!(body.is_some(), "这张卷子压根没排出答案区");
+        assert_eq!(
+            head,
+            body,
+            "页眉与它归属的大题不同张（正文在第 {} 张、页眉在第 {:?} 张）：切换慢了一张",
+            body.unwrap() + 1,
+            head.map(|v| v + 1)
+        );
+    }
+
+    /// 块级公式的号（T4.11）：本大题内连续、跨大题重置、降级那枚不占号、卷末答案区整段不编号
+    #[test]
+    fn formula_numbers_run_per_section_and_skip_degraded_ones() {
+        let spec = LayoutSpec::default();
+        let avail = available_em(&spec);
+        let dm = |latex: &str| InlineNode::Math {
+            latex: latex.into(),
+            display: true,
+        };
+        let fill = |no: usize, latexs: &[&str]| -> LayoutBlock {
+            let mut q = question(no, QuestionKind::Fill, 5.0, avail);
+            let mut stem: Vec<InlineNode> = Vec::new();
+            for l in latexs {
+                if !stem.is_empty() {
+                    stem.push(text("，"));
+                }
+                stem.push(dm(l));
+            }
+            q.stem = stem;
+            LayoutBlock::Question(q)
+        };
+        let section = |title: &str, blocks: Vec<LayoutBlock>| Section {
+            header: SectionHeader {
+                meta: BlockMeta::glued(),
+                title: title.into(),
+                instruction: None,
+                question_count: blocks.len(),
+                total_score: 10.0,
+            },
+            blocks,
+        };
+        let mut doc = sim_doc(spec.clone());
+        // 第 1 题中间那枚 `\argmax_x` 是 UNSUPPORTED 名单上的：转不动 → 降级 → 不许占号
+        doc.sections = vec![
+            section(
+                "一、填空题",
+                vec![
+                    fill(1, &[r"a^2+b^2", r"\argmax_x f", r"c=\sqrt{2}"]),
+                    fill(2, &[r"e^{i\pi}+1"]),
+                ],
+            ),
+            section("二、填空题", vec![fill(3, &[r"x^2=4"])]),
+        ];
+        doc.answer_key = vec![AnswerBlock {
+            meta: BlockMeta::flow(),
+            number: 1,
+            kind: QuestionKind::Fill,
+            lines: vec![AnswerLine {
+                label: String::new(),
+                nodes: vec![text("由 "), dm(r"b^2-4ac"), text(" 得解")],
+            }],
+            analyses: vec![],
+        }];
+        let s = generate(&doc, &images()).source;
+        assert_eq!(
+            s.matches("#equation(").count(),
+            4,
+            "编号个数不对（降级那枚与答案区那枚都不该在此列）：{s}"
+        );
+        for tag in ["(1.1)", "(1.2)", "(1.3)", "(2.1)"] {
+            assert!(
+                s.contains(&format!(r#"#equation("{tag}")["#)),
+                "缺号 {tag}：{s}"
+            );
+        }
+        // 卷末答案区整段不编号：那一页不属于任何大题
+        let tail = s.find("#pagebreak(weak").unwrap();
+        assert!(
+            !s[tail..].contains("#equation("),
+            "答案区排出了编号公式：{}",
+            &s[tail..]
+        );
+    }
+
+    /// 编号公式的真编译形状（T4.11）：号贴本栏右沿、与式子同一行，式子仍是行间口径
+    ///
+    /// 三轨网格把 `$…$` 塞进了网格单元，所以「有没有退成行内」必须实测：判据是求和号的上限走
+    /// **正上方**（行间）还是**右上角**（行内）。读数为 ∑@101.7/110.8、𝑛@103.5/106.5、
+    /// `(1.1)`@185.4/111.2，版心右侧 192 —— 号距右沿只剩自己的字宽。
+    #[test]
+    fn numbered_formula_hugs_the_column_edge_and_stays_display_style() {
+        let spec = LayoutSpec::default();
+        let mut doc = sim_doc(spec.clone());
+        let mut q = question(1, QuestionKind::Fill, 5.0, available_em(&spec));
+        q.stem = vec![text("又 ")];
+        q.stem.push(InlineNode::Math {
+            latex: r"\sum_{i=1}^{n} x_i = 0".into(),
+            display: true,
+        });
+        doc.sections[0].blocks[0] = LayoutBlock::Question(q);
+        let pages = placed_pages(&compiled(&doc));
+        let flat: Vec<&PlacedRun> = pages.iter().flatten().collect();
+        let right = f64::from(spec.margin_left_mm() + spec.column_width_mm());
+        let at = |needle: &str| -> &PlacedRun {
+            flat.iter()
+                .copied()
+                .find(|r| r.run.text.contains(needle))
+                .unwrap_or_else(|| panic!("「{needle}」压根没上图"))
+        };
+        let tag = at("(1.1)");
+        let sigma = at("∑");
+        assert!(
+            tag.x_mm <= right + 0.5 && tag.x_mm > right - 10.0,
+            "号没贴到栏边：x={:.1}，版心右沿 {right:.1}",
+            tag.x_mm
+        );
+        assert!(
+            (tag.y_mm - sigma.y_mm).abs() < 2.0,
+            "号与式子不同行：号 y={:.1}、式子 y={:.1}",
+            tag.y_mm,
+            sigma.y_mm
+        );
+        // 同一行里最高的那一枚数学 run 就是上限：它必须悬在 ∑ 的正上方
+        let top = flat
+            .iter()
+            .filter(|r| r.run.family.contains("Math") && (r.y_mm - sigma.y_mm).abs() < 6.0)
+            .min_by(|a, b| a.y_mm.total_cmp(&b.y_mm))
+            .expect("同一行里一枚数学 run 都没有");
+        assert!(
+            top.y_mm < sigma.y_mm - 1.0 && (top.x_mm - sigma.x_mm).abs() < 3.5,
+            "上限没走成正上方（式子退成了行内口径）：上限 {:.1}/{:.1}、∑ {:.1}/{:.1}",
+            top.x_mm,
+            top.y_mm,
+            sigma.x_mm,
+            sigma.y_mm
+        );
+    }
+
+    /// 页眉的几何全是 Rust 侧算好的实参（T4.10）：母版在写入时求值，typst 侧问不到 `LayoutSpec`
+    ///
+    /// 六个实参依次是栏数、栏左沿、栏步长（栏宽 + 栏距）、栏距、版心上沿、版心下沿（页高 − 下边距），
+    /// 末尾是「一栏里一个标记都没有」时的兜底卷名。单栏也走同一条式子：栏步长退成栏宽、栏距 0。
+    #[test]
+    fn running_head_arguments_come_from_the_spec() {
+        let mut fold = LayoutSpec::preset("a3_fold_exam").unwrap();
+        let off = generate(&sim_doc(fold.clone()), &images()).source;
+        assert!(
+            !off.contains("running-head(here().page()"),
+            "预设 header_title=false 却排了动态页眉（模板里的定义恒在，只认调用）"
+        );
+
+        // 对折双栏：装订带把 12mm 栏距兜到 20mm，栏宽因此是 184 → 步长 204
+        fold.header_footer.header_title = true;
+        let s = generate(&sim_doc(fold), &images()).source;
+        assert!(
+            s.contains(
+                r#"header: context { if here().page() != 1 { running-head(here().page(), 2, 16mm, 204mm, 20mm, 18mm, 279mm, "三角函数综合练习") } }"#
+            ),
+            "A3 对折卷的页眉实参：{s}"
+        );
+        assert!(
+            s.contains("#metadata(title)"),
+            "大题标题里没有落点标记：{s}"
+        );
+
+        let mut spec = LayoutSpec::default();
+        spec.header_footer.header_title = true;
+        let a4 = generate(&sim_doc(spec), &images()).source;
+        assert!(
+            a4.contains(r#"running-head(here().page(), 1, 18mm, 174mm, 0mm, 22mm, 275mm, "#),
+            "A4 单栏的页眉实参：{a4}"
         );
     }
 
@@ -3422,17 +3826,21 @@ mod tests {
         );
     }
 
-    /// 样张（人眼验收）：两种 A3 装订版式各出一张 SVG 到临时目录
+    /// 样张（人眼验收）：两种 A3 装订版式各出 SVG 逐张 + 一份 PDF 到临时目录
     ///
     /// 帧树断言证得了「线在哪、字在哪」，证不了「看着对不对」。要看真东西：
     /// `cargo test --lib typeset::typst_gen::tests::writes_fold_and_seal_samples -- --ignored --nocapture`
+    ///
+    /// 页眉是开着出的：T4.10 的逐栏题名只有真卷子能看出对不对。
     #[test]
     #[ignore = "往临时目录写样张，不参与常规回归"]
     fn writes_fold_and_seal_samples() {
         let dir = std::env::temp_dir().join("mathset-t47-samples");
         std::fs::create_dir_all(&dir).unwrap();
         for (name, id) in [("对折", "a3_fold_exam"), ("三栏左装订", "a3_tri_exam")] {
-            let doc = sim_doc(LayoutSpec::preset(id).unwrap());
+            let mut spec = LayoutSpec::preset(id).unwrap();
+            spec.header_footer.header_title = true;
+            let doc = sim_doc(spec);
             let generated = generate(&doc, &HashMap::new());
             let dirs = font_dirs();
             let req = request(&generated.source, &dirs, &[]);
@@ -3445,6 +3853,12 @@ mod tests {
                 std::fs::write(&path, svg).unwrap();
                 println!("{}", path.display());
             }
+            let pdf = match compile_pdf(&req) {
+                Ok(out) => out.output,
+                Err(err) => panic!("{name} PDF 编译失败：{:?}", err.diagnostics),
+            };
+            println!("{}", dir.join(format!("{name}.pdf")).display());
+            std::fs::write(dir.join(format!("{name}.pdf")), pdf).unwrap();
         }
     }
 
@@ -3559,6 +3973,96 @@ mod tests {
 #columns(2, gutter: 6mm)[#lorem(120)]
 #block(width: 100%, fill: luma(230))[容器之后]
 #lorem(20)
+"#,
+        );
+    }
+
+    /// T4.10 探针：页眉能不能按**栏**取当前大题名
+    ///
+    /// `cargo test --lib typeset::typst_gen::tests::header_introspection_probe -- --ignored --nocapture`
+    ///
+    /// R4 要求动态页眉走逻辑页（左栏 / 右栏各一套），而 T4.7 已证脚本层问不到「现在是第几栏」。
+    /// 这里试的是另一条出口：`Location.position()` 给的是页内绝对 x/y，栏的 x 由 Rust 算得，
+    /// 于是「标记落在哪一栏」可以从 x 反推。
+    #[test]
+    #[ignore = "读 typst 内省能力，结论进实施计划 R9；不参与常规回归"]
+    fn header_introspection_probe() {
+        let dirs = font_dirs();
+        let probe = |name: &str, src: &str| {
+            let req = request(src, &dirs, &[]);
+            match compile_paged(&req) {
+                Ok(out) => {
+                    let pages = placed_pages(&out.output);
+                    println!("[{name}] pages = {}", pages.len());
+                    for (i, p) in pages.iter().enumerate() {
+                        // 页眉那一行的原文就是探针读数，取 y 最小的几帧
+                        let mut head: Vec<&PlacedRun> = p.iter().collect();
+                        head.sort_by(|a, b| a.y_mm.total_cmp(&b.y_mm));
+                        let line: String = head
+                            .iter()
+                            .take(8)
+                            .map(|r| format!("{}@{:.1}/{:.1}", r.run.text, r.x_mm, r.y_mm))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        println!("  第 {} 张: {line}", i + 1);
+                    }
+                }
+                Err(e) => println!("[{name}] 编译失败 {:?}", e.diagnostics),
+            }
+        };
+
+        // H1：query(metadata) + position() —— 标记的页号与页内 x 能不能分辨栏
+        probe(
+            "H1 metadata position",
+            r##"
+#set page(width: 120mm, height: 60mm, margin: 5mm,
+  header: context {
+    let ps = query(metadata).map(m => (m.value, m.location().position()))
+    align(center)[#text(size: 7pt)[页#str(here().page()) ｜ #ps.map(q => q.at(0) + ":" + str(q.at(1).page) + "/" + str(q.at(1).x / 1pt) + "/" + str(q.at(1).y / 1pt)).join(" ")]]
+  })
+#set text(size: 7pt)
+#columns(2, gutter: 6mm)[
+  #metadata("A") #lorem(120)
+  #metadata("B") #lorem(120)
+  #metadata("C") #lorem(120)
+]
+"##,
+        );
+
+        // H2：标记埋在多层 block 里（section-header 的真实形状）还能不能查到、位置还是不是它自己
+        probe(
+            "H2 块内标记",
+            r##"
+#set page(width: 120mm, height: 60mm, margin: 5mm,
+  header: context {
+    let ps = query(metadata).map(m => (m.value, m.location().position()))
+    align(center)[#text(size: 7pt)[#ps.map(q => q.at(0) + ":" + str(q.at(1).page) + "/" + str(q.at(1).x / 1pt) + "/" + str(q.at(1).y / 1pt)).join(" ")]]
+  })
+#set text(size: 7pt)
+#columns(2, gutter: 6mm)[
+  #block(width: 100%, breakable: false)[
+    #block(width: 100%)[#metadata("甲") 一、大题名]
+    #lorem(40)
+  ]
+  #lorem(120)
+  #block(width: 100%, breakable: false)[#metadata("乙") 二、大题名 #lorem(40)]
+]
+"##,
+        );
+
+        // H3：对照 —— state.at(here()) 在「大题正好起于某张纸顶端」时慢不慢一张
+        probe(
+            "H3 state 对照",
+            r#"
+#let sec = state("sec", "无")
+#set page(width: 120mm, height: 40mm, margin: 5mm,
+  header: context { align(center)[#text(size: 7pt)[页眉=#(sec.at(here()).first())]] })
+#set text(size: 7pt)
+#lorem(60)
+#sec.update("甲")
+#lorem(200)
+#sec.update("乙")
+#lorem(200)
 "#,
         );
     }
