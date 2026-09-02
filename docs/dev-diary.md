@@ -1206,3 +1206,33 @@ rustfmt --edition 2024 src/typeset/typst_gen.rs ... src/lib.rs tests/export_pdf_
 **纯 reflow 的 hunk** 手工还原（本次 `handlers/export.rs` 三处：import 排序、`sanitize_filename` 的超宽
 `filter` 闭包、一枚单行 `assert!`）。还原后重跑 `cargo test --lib` 与两个端点集成套件确认没改坏。
 
+### 九、T3.8 导出面板的 PDF 版面区：四个下拉与一条只读密封线
+
+`ExportDialog.vue` 里 PDF 从 M1 起的占位（灰、写着「M3 交付」）转成正常格式项，选到 PDF 才展开
+「版面」区块：预设 / 纸张 / 栏数 / 留白样式四个 `AppSelect`，字段全部来自 ts-rs 生成的
+`api/types/layout.ts`（前端不另手写一份 spec 形状）。取值口径照 T3.3 定下的**整体替换**：
+选预设 = 深拷贝整份 `spec` 覆盖当前值（`JSON.parse(JSON.stringify())` 断开引用，否则微调会写花
+预设本体），之后四个下拉只改自己那一个字段。
+
+三处值得记的决定：
+
+- **预设清单懒加载 + 可失败**：第一次点 PDF 才 `GET /typeset/profiles`；拉不到只 toast，
+  `layout` 留 null → 请求体不带 `spec` → 后端按 mode 取默认预设。版面下拉空着不该拦住一次导出。
+- **密封线只做展示，不做开关**：`grep binding src/typeset/typst_gen.rs` 是空的 —— 排版器今天
+  根本不读 `spec.binding`。放一个能点但什么都不发生的开关，比没有更糟，所以渲染成一行只读说明
+  「居中折叠（M4 起排版）/ 不装订」，值由 `layout.binding` 推出来，M4 接上后这行自动变准。
+- **`spec` 只在 PDF 分支带上**：`buildRequest()` 里 `spec: isPdf ? layout : undefined`。
+  markdown / docx 看见 `spec` 会一脸茫然，把它们一起发出去等于给另两个出口埋无谓的分支。
+
+**「spec 到底生效没有」第一次有了机器判据**：PDF 里的中文是矢量轮廓（搜关键词恒为 false），
+但 typst 把页面字典**明文**写进 PDF —— 第一个 `/MediaBox [0 0 W H]` 直接读得到。于是
+`tests/export_pdf_api.rs` 加了一枚 `media_box(bytes)` helper，同一份卷导两次：不带 `spec` 时
+A4 纸宽 595.28pt，回传 `a3_tri_exam` 后是 1190.55pt（高度与 A4 相同）。纸宽这一个数就足够钉住
+「前端微调回传」这条链路，不必肉眼开文件。
+
+浏览器验收（`npm --prefix frontend run dev` + `cargo run --bin mathset`，探针账号 3 题）四次导出
+全部 200 + `%PDF-1.7`：teacher 默认 → 面板显示「A4 讲义 · 单栏」、请求体 `spec={paper:"a4",
+columns:1}`、MediaBox 595.28；预设换 A3 三栏 → 纸张与栏数两个下拉**同步跟着变**、MediaBox 1190.55；
+再把栏数手动调回双栏、留白样式调成纯空白 → 两个字段都进了请求体，体积 36.4KB→39.7KB（6cm 留白
+真被画出来了）。换预设时留白样式被重置回横线，正是整体替换该有的样子。
+

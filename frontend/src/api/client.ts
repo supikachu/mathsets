@@ -1,6 +1,7 @@
 import axios from 'axios'
 import { useToast } from '@/composables/useToast'
 import type { ExamRequest, IssueField } from './types/exam'
+import type { ProfilePreset } from './types/layout'
 
 // ===========================================================================
 // Axios 实例 & 拦截器（保持不变）
@@ -2004,6 +2005,7 @@ export const notificationApi = {
 // ===========================================================================
 
 export type { ExamRequest, ExamSectionRequest, ExamQuestionRequest, ExportMode, ExportOptions } from './types/exam'
+export type { BlankStyle, LayoutSpec, Paper, ProfilePreset } from './types/layout'
 
 /// 导出类请求超时（B4：全局 10s 对百页大卷 + 大 blob 下载会触顶）
 const EXPORT_TIMEOUT_MS = 60000
@@ -2118,8 +2120,19 @@ export const exportApi = {
   docx(req: ExamRequest) {
     return download('/export/docx', req)
   },
-  /// PDF（委托排版系统）— 端点于 M3 交付
+  /// PDF（typst 排版）— 带 `spec` 即整体替换 mode 的默认预设（T3.3 口径）
   pdf(req: ExamRequest) {
     return download('/export/pdf', req)
+  },
+}
+
+// ===========================================================================
+// 排版参数（T3.7）— 只读预设。R1：PDF 出口唯一化在 /export/pdf，不另开渲染通道
+// ===========================================================================
+
+export const typesetApi = {
+  /// 内置版面预设（四套，每套带完整 spec），导出面板「先选预设再微调」的数据源
+  profiles() {
+    return client.get<ProfilePreset[]>('/typeset/profiles')
   },
 }

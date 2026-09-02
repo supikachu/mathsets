@@ -137,6 +137,28 @@ fn warnings(headers: &HeaderMap) -> Vec<Value> {
     arr.as_array().unwrap().clone()
 }
 
+/// 页面尺寸（pt）：第一个 `/MediaBox [0 0 W H]` 的宽高
+///
+/// typst 把页面字典明文写进 PDF，所以「spec 到底生效没有」不必肉眼开文件，
+/// 纸宽这一个数就能判。
+fn media_box(bytes: &[u8]) -> (f32, f32) {
+    let s = String::from_utf8_lossy(bytes);
+    let at = s.find("/MediaBox").unwrap_or_else(|| {
+        panic!(
+            "PDF 里没有明文 MediaBox，前 200 字节 {:?}",
+            &bytes[..bytes.len().min(200)]
+        )
+    });
+    let nums: Vec<f32> = s[at + "/MediaBox".len()..]
+        .split(|c: char| c != '.' && !c.is_ascii_digit())
+        .filter(|t| !t.is_empty() && *t != ".")
+        .take(4)
+        .filter_map(|t| t.parse().ok())
+        .collect();
+    assert_eq!(nums.len(), 4, "MediaBox 读数异常：{}", &s[at..at + 40]);
+    (nums[2], nums[3])
+}
+
 /// 是 PDF 就得是个能收口的 PDF：文件头、文件尾与体积
 fn assert_pdf(bytes: &[u8]) {
     assert!(
@@ -366,6 +388,37 @@ async fn pdf_export_accepts_a_preset_spec_round_tripped_from_profiles() {
         headers.get("X-Export-Warnings").is_none(),
         "{:?}",
         header_str(&headers, "X-Export-Warnings")
+    );
+
+    // 覆盖确实生效：同一份卷不带 spec 时后端按 mode 取默认预设（student → A4 双栏），
+    // 两次导出的纸宽差一倍 —— 这是「前端微调回传」这条链路唯一的机器判据
+    let (w_a3, h_a3) = media_box(&bytes);
+    let plain = exam_body(
+        fill_id,
+        choice_id,
+        json!({ "include_answer": true, "include_analysis": true, "answer_at_end": true }),
+    );
+    let (status_a4, _, bytes_a4) = request_raw(
+        &mut app,
+        Method::POST,
+        "/api/v1/export/pdf",
+        Some(plain),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status_a4, StatusCode::OK);
+    let (w_a4, h_a4) = media_box(&bytes_a4);
+    assert!(
+        (w_a4 - 595.28).abs() < 1.0,
+        "A4 纸宽应约 595pt，实为 {w_a4}"
+    );
+    assert!(
+        (w_a3 - 1190.55).abs() < 2.0,
+        "回传的 A3 三栏 spec 没生效：纸宽 {w_a3}（A4 是 {w_a4}）"
+    );
+    assert!(
+        (h_a3 - h_a4).abs() < 1.0,
+        "A3 对开与 A4 同高，{h_a3} vs {h_a4}"
     );
 }
 

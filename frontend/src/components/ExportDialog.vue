@@ -2,12 +2,18 @@
 import { computed, ref } from 'vue'
 import {
   exportApi,
+  typesetApi,
+  type BlankStyle,
   type ExamRequest,
   type ExamSectionRequest,
   type ExportMode,
+  type ExportResult,
   type ExportWarning,
+  type LayoutSpec,
+  type Paper,
+  type ProfilePreset,
 } from '@/api/client'
-import { AppButton, AppIcon, AppModal } from '@/components/ui'
+import { AppButton, AppIcon, AppModal, AppSelect } from '@/components/ui'
 import { useToast } from '@/composables/useToast'
 
 type ExportFormat = 'docx' | 'pdf' | 'markdown'
@@ -17,8 +23,6 @@ interface FormatOption {
   label: string
   hint: string
   icon: string
-  enabled: boolean
-  milestone?: string
 }
 
 interface ModeOption {
@@ -49,15 +53,40 @@ const emit = defineEmits<{
 const toast = useToast()
 
 const FORMATS: FormatOption[] = [
-  { value: 'docx', label: 'Word', hint: '公式可编辑', icon: 'file-text', enabled: true },
-  { value: 'pdf', label: 'PDF', hint: '标准排版', icon: 'document', enabled: false, milestone: 'M3 交付' },
-  { value: 'markdown', label: 'Markdown', hint: '纯文本 · 可移植', icon: 'download', enabled: true },
+  { value: 'docx', label: 'Word', hint: '公式可编辑', icon: 'file-text' },
+  { value: 'pdf', label: 'PDF', hint: '版面可控', icon: 'document' },
+  { value: 'markdown', label: 'Markdown', hint: '纯文本 · 可移植', icon: 'download' },
 ]
 
 const MODES: ModeOption[] = [
   { value: 'student', label: '学生练习', hint: '仅题目，无答案无解析' },
   { value: 'teacher', label: '教师讲义', hint: '内嵌答案解析与考点提示' },
   { value: 'exam', label: '标准考卷', hint: '题目成卷，卷末汇总答案' },
+]
+
+/** 与后端 `LayoutSpec::for_profile` 同一口径：模式决定默认预设 */
+const MODE_PRESET: Record<ExportMode, string> = {
+  student: 'a4_practice',
+  teacher: 'a4_lecture',
+  exam: 'a3_fold_exam',
+}
+
+const PAPERS = [
+  { value: 'a4', label: 'A4（210×297）' },
+  { value: 'a3_fold', label: 'A3 对折（420×297）' },
+  { value: 'a3_tri', label: 'A3 三栏（420×297）' },
+]
+
+const COLUMNS = [
+  { value: '1', label: '单栏' },
+  { value: '2', label: '双栏' },
+  { value: '3', label: '三栏' },
+]
+
+const BLANK_STYLES = [
+  { value: 'lines', label: '横线' },
+  { value: 'dots', label: '点阵' },
+  { value: 'blank', label: '纯空白' },
 ]
 
 const format = ref<ExportFormat>('markdown')
@@ -71,16 +100,78 @@ const calloutErrorProne = ref(true)
 const calloutAnalysis = ref(false)
 const bundle = ref(false)
 
+// ── PDF 版面（T3.8）：预设是整套 spec 的起点，微调只改本地这份副本
+const presets = ref<ProfilePreset[]>([])
+const presetId = ref('')
+const layout = ref<LayoutSpec | null>(null)
+/** 手动选过预设后，切模式不再回头覆盖用户调好的版面 */
+const presetTouched = ref(false)
+
 const busy = ref(false)
 const warnings = ref<ExportWarning[]>([])
 const truncated = ref(false)
 const detailsOpen = ref(false)
 
 const isTeacher = computed(() => mode.value === 'teacher')
+const isPdf = computed(() => format.value === 'pdf')
+
+/// 预设清单只在第一次选到 PDF 时拉；拉不到就带着 `spec: undefined` 发出去，
+/// 由后端按 mode 取默认预设 —— 版面下拉空着，导出本身不该被打断。
+async function loadPresets() {
+  if (presets.value.length) return
+  try {
+    const { data } = await typesetApi.profiles()
+    presets.value = data
+    applyPreset(presetId.value || MODE_PRESET[mode.value])
+  } catch (e) {
+    toast.error((e as Error).message || '版面预设加载失败，将按输出模式默认排版')
+  }
+}
+
+/// 整体替换（T3.3 口径）：改过的字段整套回传，所以副本要断开与预设的引用
+function applyPreset(id: string) {
+  const hit = presets.value.find((p) => p.id === id)
+  if (!hit) return
+  presetId.value = hit.id
+  layout.value = JSON.parse(JSON.stringify(hit.spec)) as LayoutSpec
+}
+
+function pickFormat(next: ExportFormat) {
+  format.value = next
+  if (next === 'pdf') {
+    applyPreset(MODE_PRESET[mode.value])
+    void loadPresets()
+  }
+}
+
+const presetOptions = computed(() =>
+  presets.value.map((p) => ({ value: p.id, label: p.label })),
+)
+
+function onPresetChange(value?: string) {
+  if (!value) return
+  presetTouched.value = true
+  applyPreset(value)
+}
+
+function onPaperChange(value?: string) {
+  if (layout.value && value) layout.value.paper = value as Paper
+}
+
+function onColumnsChange(value?: string) {
+  if (layout.value && value) layout.value.columns = Number(value)
+}
+
+function onBlankChange(value?: string) {
+  if (layout.value && value) {
+    layout.value.answer_blank.style = value as BlankStyle
+  }
+}
 
 /** 模式决定答案/解析/卷末汇总默认值，用户仍可在此之后手动微调 */
 function pickMode(next: ExportMode) {
   mode.value = next
+  if (!presetTouched.value) applyPreset(MODE_PRESET[next])
   if (next === 'student') {
     includeAnswer.value = false
     includeAnalysis.value = false
@@ -112,6 +203,7 @@ function buildRequest(): ExamRequest {
         analysis: isTeacher.value && calloutAnalysis.value,
       },
     },
+    spec: isPdf.value ? layout.value ?? undefined : undefined,
   }
 }
 
@@ -135,15 +227,18 @@ async function runExport() {
   detailsOpen.value = false
   try {
     const req = buildRequest()
-    const isDocx = format.value === 'docx'
-    const res = isDocx
-      ? await exportApi.docx(req)
-      : await exportApi.markdown(req, { bundle: bundle.value })
-    const ext = isDocx
-      ? 'docx'
-      : res.blob.type.includes('zip')
-        ? 'zip'
-        : 'md'
+    let res: ExportResult
+    let ext: string
+    if (format.value === 'docx') {
+      res = await exportApi.docx(req)
+      ext = 'docx'
+    } else if (format.value === 'pdf') {
+      res = await exportApi.pdf(req)
+      ext = 'pdf'
+    } else {
+      res = await exportApi.markdown(req, { bundle: bundle.value })
+      ext = res.blob.type.includes('zip') ? 'zip' : 'md'
+    }
     const fallback = `${req.title}.${ext}`
     saveBlob(res.blob, res.filename || fallback)
     warnings.value = res.warnings
@@ -195,14 +290,13 @@ function warningText(w: ExportWarning): string {
             :key="opt.value"
             type="button"
             class="ex-seg-btn"
-            :class="{ 'is-active': format === opt.value, 'is-disabled': !opt.enabled }"
-            :disabled="!opt.enabled"
-            :title="opt.enabled ? opt.hint : `${opt.label} ${opt.milestone}`"
-            @click="opt.enabled && (format = opt.value)"
+            :class="{ 'is-active': format === opt.value }"
+            :title="opt.hint"
+            @click="pickFormat(opt.value)"
           >
             <AppIcon :name="opt.icon" :size="15" />
             <span class="ex-seg-label">{{ opt.label }}</span>
-            <span class="ex-seg-hint">{{ opt.enabled ? opt.hint : opt.milestone }}</span>
+            <span class="ex-seg-hint">{{ opt.hint }}</span>
           </button>
         </div>
       </div>
@@ -261,6 +355,50 @@ function warningText(w: ExportWarning): string {
             <span>思路点拨</span>
           </label>
         </div>
+      </div>
+
+      <div v-if="isPdf && layout" class="ex-field">
+        <span class="ex-label">
+          版面
+          <span class="ex-note">先选预设，再微调；微调只作用于本次导出</span>
+        </span>
+        <div class="ex-layout-grid">
+          <div class="ex-select-row">
+            <span class="ex-select-caption">预设</span>
+            <AppSelect
+              :model-value="presetId"
+              :options="presetOptions"
+              @update:model-value="onPresetChange"
+            />
+          </div>
+          <div class="ex-select-row">
+            <span class="ex-select-caption">纸张</span>
+            <AppSelect
+              :model-value="layout.paper"
+              :options="PAPERS"
+              @update:model-value="onPaperChange"
+            />
+          </div>
+          <div class="ex-select-row">
+            <span class="ex-select-caption">栏数</span>
+            <AppSelect
+              :model-value="String(layout.columns)"
+              :options="COLUMNS"
+              @update:model-value="onColumnsChange"
+            />
+          </div>
+          <div class="ex-select-row">
+            <span class="ex-select-caption">留白样式</span>
+            <AppSelect
+              :model-value="layout.answer_blank.style"
+              :options="BLANK_STYLES"
+              @update:model-value="onBlankChange"
+            />
+          </div>
+        </div>
+        <p class="ex-layout-note">
+          密封线：{{ layout.binding ? '居中折叠（M4 起排版）' : '不装订' }}
+        </p>
       </div>
 
       <div v-if="format === 'markdown'" class="ex-field">
@@ -389,11 +527,6 @@ function warningText(w: ExportWarning): string {
   border-color: var(--accent);
 }
 
-.ex-seg-btn.is-disabled {
-  cursor: not-allowed;
-  opacity: 0.55;
-}
-
 .ex-seg-label {
   font-size: 13px;
   font-weight: 600;
@@ -467,6 +600,29 @@ function warningText(w: ExportWarning): string {
   width: 15px;
   height: 15px;
   accent-color: var(--accent);
+}
+
+.ex-layout-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 14px;
+}
+
+.ex-select-row {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.ex-select-caption {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.ex-layout-note {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-muted);
 }
 
 .ex-warnings {
