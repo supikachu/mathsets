@@ -25,6 +25,7 @@
 //! `QuestionPart` 随 `ExamQuestion` 进来 —— 它是 models 里的纯数据类型，不带装配逻辑。
 
 pub mod choice_grid;
+pub mod figure_float;
 
 use crate::export::model::{
     AnswerSpace, BlankStyle as WireBlankStyle, ExamOption, ExamQuestion, ExportOptions, InlineNode,
@@ -240,6 +241,11 @@ fn question_block(q: &ExamQuestion, ctx: &BlockCtx, policy: &Policy) -> Question
         stem: q.stem.clone(),
         options: q.options.clone(),
         grid: decide(&q.options, ctx.available_em),
+        // 图列在 `item` 的悬挂缩进之外，所以按整栏宽判（与 available_em 差一个 indent）
+        figure: figure_float::plan(
+            &q.stem,
+            choice_grid::em_from_mm(f64::from(ctx.spec.column_width_mm())),
+        ),
     }
 }
 
@@ -521,6 +527,52 @@ mod tests {
         );
     }
 
+    fn image(px: u32) -> InlineNode {
+        InlineNode::Image {
+            alt: None,
+            url: "/uploads/a.png".into(),
+            width: Some(px),
+            align: None,
+        }
+    }
+
+    #[test]
+    fn question_block_plans_the_figure_against_the_whole_column() {
+        // T4.3 的接线处。判据吃的是**整栏宽**，不是选项栅格那套 `available_em`：
+        // 图格在 `item` 的悬挂缩进之外、享整栏 174mm ⇒ 图列 60.9mm，200px ≈ 52.9mm 放行；
+        // 换成 ctx.available_em（30em ≈ 111mm）就只有 38.9mm，同一张图会被否决。
+        // 所以「这一张浮起了」本身就是口径证据，而不只是「plan 被调过」。
+        let options = ExportOptions::default();
+        let spec = LayoutSpec::default();
+        let reg = Registry::standard();
+        let ctx = block_ctx(&options, &spec, &reg, OutputProfile::Student);
+        let mut qn = q(
+            QuestionKind::SingleChoice,
+            vec![option("A", "1"), option("B", "2")],
+        );
+        qn.stem = vec![
+            InlineNode::Text {
+                text: "如图，".into(),
+            },
+            image(200),
+        ];
+        assert_eq!(
+            stem_of(&reg.expand(&qn, &ctx, &split)).figure,
+            Some(figure_float::Split {
+                text_end: 1,
+                figure_start: 1,
+            })
+        );
+        // 400px ≈ 105mm 连整栏的图列都装不下 → 照旧独占整行
+        qn.stem = vec![
+            InlineNode::Text {
+                text: "如图，".into(),
+            },
+            image(400),
+        ];
+        assert_eq!(stem_of(&reg.expand(&qn, &ctx, &split)).figure, None);
+    }
+
     #[test]
     fn unregistered_kind_falls_back_without_losing_content() {
         // 兜底不是摆设：注册表为空 = 「新题型刚进枚举、还没注册」，
@@ -566,6 +618,7 @@ mod tests {
                         columns: 1,
                         rows: 0,
                     },
+                    figure: None,
                 }));
                 let policy = Policy {
                     wants_blank: true,

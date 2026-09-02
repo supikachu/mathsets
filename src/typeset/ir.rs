@@ -26,6 +26,7 @@
 
 use crate::export::model::{Callout, ExamOption, InlineNode, Issue, QuestionKind};
 use crate::typeset::blocks::choice_grid::ChoiceGrid;
+use crate::typeset::blocks::figure_float::Split;
 use crate::typeset::spec::{BlankStyle, LayoutSpec, OutputProfile, ResolvedBlank};
 
 /// 分页元数据（§6.2：每种块都带）
@@ -193,6 +194,10 @@ pub struct QuestionBlock {
     pub options: Vec<ExamOption>,
     /// 选项栅格：与 docx `w:tbl` 同一次 [`crate::typeset::blocks::choice_grid::decide`]
     pub grid: ChoiceGrid,
+    /// 左文右图（T4.3）：`Some` = 题干按这两个下标切成「左栏文字 + 右栏配图」，
+    /// `None` = 配图照旧独占整行。只记下标 —— [`QuestionBlock::stem`] 一字不改，
+    /// 浮动与否不改变卷面文字，也不改变 docx 侧读到的内容。
+    pub figure: Option<Split>,
 }
 
 /// 小问块（解答题问树展开；`depth` 供渲染器逐层缩进）

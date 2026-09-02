@@ -23,7 +23,7 @@ use ecow::{EcoVec, eco_format};
 use typst::Library as TypstLibrary;
 use typst::diag::{FileError, FileResult, SourceDiagnostic};
 use typst::foundations::{Bytes, Datetime, Duration};
-use typst::layout::{Frame, FrameItem};
+use typst::layout::{Frame, FrameItem, Point};
 use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
 use typst::text::{Font, FontBook, FontInfo};
 use typst::utils::LazyHash;
@@ -128,47 +128,112 @@ pub struct RenderedRun {
     pub family: String,
 }
 
+/// 一段字连同它在**页内**的落点（毫米，原点 = 页面左上角）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlacedRun {
+    pub x_mm: f64,
+    pub y_mm: f64,
+    pub run: RenderedRun,
+}
+
+/// 一枚画在版面上的图片：等比缩放后的实际尺寸 + 页内落点（毫米，原点 = 页面左上角）。
+///
+/// 只有**栅格**图会在这里现身 —— SVG 在 typst 里被转成矢量 `Group`，帧树中没有 `Image` 项
+/// （实测）。要断言图片几何，测试得喂 PNG。
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlacedImage {
+    pub x_mm: f64,
+    pub y_mm: f64,
+    pub w_mm: f64,
+    pub h_mm: f64,
+}
+
+/// 一次帧树遍历的两类落点：[`placed_pages`] 与 [`placed_images`] 各取所需
+#[derive(Debug, Default)]
+struct Placed {
+    runs: Vec<PlacedRun>,
+    images: Vec<PlacedImage>,
+}
+
 /// 逐页收集版面文字（下标 = 物理页，从 0 起）。
 ///
 /// 防跨页（T4.5）的断言口径是「这两段字在同一页」，扁平列表表达不了，所以页归属留在这里。
 /// 粒度是**物理页**：A3 双栏时两栏同属一个条目，这对「不许腰斩」正好，对 T4.7 的
-/// 「逻辑页 / 左右栏」还得更细的坐标判定。
+/// 「逻辑页 / 左右栏」还得更细的坐标判定（用 [`placed_pages`]）。
 /// 一段 `TextItem` 不会横跨两页 —— typst 只在行与行之间断页，帧树里的文字段总是完整落在
 /// 某一页内，因此「按页分组」不需要任何近似。
 pub fn rendered_pages(doc: &PagedDocument) -> Vec<Vec<RenderedRun>> {
-    doc.pages()
-        .iter()
-        .map(|page| {
-            let mut out = Vec::new();
-            walk_frame(&page.frame, &mut out);
-            out
-        })
+    placed_pages(doc)
+        .into_iter()
+        .map(|page| page.into_iter().map(|placed| placed.run).collect())
         .collect()
 }
 
-/// 深度优先走帧树，收集所有落到版面的文字段。
+/// 逐页收集版面文字**及其落点**（下标 = 物理页，从 0 起）。
 ///
 /// 为什么要走帧树而不是搜 SVG/PDF 字节：typst 的 SVG 与 PDF 都把汉字画成**矢量轮廓**，
 /// 文件里根本没有「中文字」这三个字的明文，搜关键词恒为 false（实测踩过）。帧树里的
 /// `TextItem.text` 才是明文，而且同时带 `font` —— 于是「这段字到底出没出现」和
 /// 「这个字是哪个字体画的（豆腐块判定）」两件事共用一次遍历。
 ///
-/// 只走 `Group` 递归；`Shape` / `Image` / `Tag` 与文字无关。
-pub fn rendered_runs(doc: &PagedDocument) -> Vec<RenderedRun> {
-    rendered_pages(doc).into_iter().flatten().collect()
+/// 坐标口径：`Frame::items()` 本来就是 `(Point, FrameItem)`，段的位置 = 自身 Point +
+/// 各层 `GroupItem::transform` 的平移量累加。只累加平移、不乘缩放与斜切 —— 生成的源码里
+/// 没有 `rotate` / `scale`，而栅格与缩进给出的平移正是「第几列 / 第几行」的判据
+/// （T4.2 的选项栅格、T4.7 的答案分区都靠它）。
+///
+/// 只走 `Group` 递归；文字与栅格图共用这一次遍历，`Shape` / `Tag` 与两者无关。
+pub fn placed_pages(doc: &PagedDocument) -> Vec<Vec<PlacedRun>> {
+    place_pages(doc).into_iter().map(|p| p.runs).collect()
 }
 
-fn walk_frame(frame: &Frame, out: &mut Vec<RenderedRun>) {
-    for (_, item) in frame.items() {
+/// 逐页收集版面上的图片**及其实际画出的尺寸与落点**（下标 = 物理页，从 0 起）。
+///
+/// 「图列不失宽」只能这样验：图在纸上就是一个 `Size`，源码里的 `width:` 说了不算。
+pub fn placed_images(doc: &PagedDocument) -> Vec<Vec<PlacedImage>> {
+    place_pages(doc).into_iter().map(|p| p.images).collect()
+}
+
+fn place_pages(doc: &PagedDocument) -> Vec<Placed> {
+    doc.pages()
+        .iter()
+        .map(|page| {
+            let mut out = Placed::default();
+            walk_frame(&page.frame, Point::zero(), &mut out);
+            out
+        })
+        .collect()
+}
+
+fn walk_frame(frame: &Frame, at: Point, out: &mut Placed) {
+    for (pos, item) in frame.items() {
+        let here = *pos + at;
         match item {
-            FrameItem::Text(text) => out.push(RenderedRun {
-                text: text.text.to_string(),
-                family: text.font.info().family.clone(),
+            FrameItem::Text(text) => out.runs.push(PlacedRun {
+                x_mm: here.x.to_mm(),
+                y_mm: here.y.to_mm(),
+                run: RenderedRun {
+                    text: text.text.to_string(),
+                    family: text.font.info().family.clone(),
+                },
             }),
-            FrameItem::Group(group) => walk_frame(&group.frame, out),
+            FrameItem::Image(_, size, _) => out.images.push(PlacedImage {
+                x_mm: here.x.to_mm(),
+                y_mm: here.y.to_mm(),
+                w_mm: size.x.to_mm(),
+                h_mm: size.y.to_mm(),
+            }),
+            FrameItem::Group(group) => {
+                let t = &group.transform;
+                walk_frame(&group.frame, here + Point::new(t.tx, t.ty), out);
+            }
             _ => {}
         }
     }
+}
+
+/// 深度优先走帧树，收集所有落到版面的文字段。
+pub fn rendered_runs(doc: &PagedDocument) -> Vec<RenderedRun> {
+    rendered_pages(doc).into_iter().flatten().collect()
 }
 
 /// 模板里要用的中文字体族名（`CJK_FAMILIES[0]` 正文、`[1]` 标题），缺一即回退 + 告警

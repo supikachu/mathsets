@@ -43,10 +43,12 @@ use std::collections::HashMap;
 use std::ops::Range;
 
 use crate::export::model::{
-    CalloutKind, ImageAlign, InlineImage, InlineNode, Issue, IssueField, IssueSeverity, TableAlign,
+    CalloutKind, ExamOption, ImageAlign, InlineImage, InlineNode, Issue, IssueField, IssueSeverity,
+    TableAlign,
 };
 use crate::typeset::blocks::choice_grid;
-use crate::typeset::ir::{AnswerBlock, BlockMeta, LayoutBlock, LayoutDoc, Section};
+use crate::typeset::blocks::figure_float::Split;
+use crate::typeset::ir::{AnswerBlock, BlockMeta, LayoutBlock, LayoutDoc, QuestionBlock, Section};
 use crate::typeset::math::{MITEX_PREAMBLE, degraded, to_typst, typst_str};
 use crate::typeset::spec::{BlankStyle, ColorMode, LayoutSpec};
 
@@ -116,8 +118,61 @@ const FUNCTION_LIBRARY: &str = r#"
   #body
 ]
 
-/// 选项栅格：列数与 docx 同源（typeset::blocks::choice_grid），不各排各的
-#let choices(cols, ..cells) = grid(columns: cols, gutter: (10pt, 2pt), ..cells)
+/// 选项栅格：列数与 docx 同源（typeset::blocks::choice_grid），不各排各的。
+///
+/// **R7 兜底**：Rust 侧的估宽是先验，只有 typst 这边能拿到渲染后的真实宽度。所以多列时用
+/// `layout` 取「这一栏实际分给栅格的宽度」（`inset` 已经扣掉了题号悬挂缩进，T4.3 的左文右图
+/// 之后也会自动变小），用 `measure` 量每个单元格**不折行**的自然宽，装不下就降列：
+/// 4 → 2 → 1。跳过 3 是故意的 —— 四枚选项排成 3+1 比排成 2+2 难看。
+/// 三处误差都由它兜：估宽对没见过的 LaTeX 命令偏乐观、图片宽要解码后才知道、
+/// 以及 docx 与 typst 的悬挂缩进口径差（2.0em vs 2.6em）。
+/// 判定为单列时一个单元格都不量 —— 不是为省钱：20 题卷实测 113ms（开兜底）对 114ms（全单列），
+/// 500ms/卷的预算很宽（探针见 `cost_of_the_measure_fallback`），单列本来就装不下溢出这回事。
+#let choices(cols, ..cells) = {
+  let gut = 10pt
+  if cols <= 1 {
+    grid(columns: 1, gutter: (gut, 2pt), ..cells)
+  } else {
+    layout(size => {
+      let want = {
+        let w = 0pt
+        // `..cells` 收来的是 arguments 不是数组，循环得先 `.pos()`（实测：直接 loop 报
+        // "cannot loop over arguments"）；下面的 `..cells` 展开传参仍然照旧可用
+        for cell in cells.pos() {
+          let natural = measure(cell).width
+          if natural > w { w = natural }
+        }
+        w
+      }
+      let fits(c) = want <= (size.width - (c - 1) * gut) / c
+      let n = if fits(cols) { cols } else if cols >= 4 and fits(2) { 2 } else { 1 }
+      grid(columns: n, gutter: (gut, 2pt), ..cells)
+    })
+  }
+}
+
+/// 左文右图（T4.3）：题干尾部的配图并排进右栏，文字仍在左栏的悬挂缩进里。
+///
+/// 右栏恒为 `35%` —— 与 `typeset::blocks::figure_float::FIGURE_SHARE` 同值，漂了有测试会红。
+/// typst 先按父容器宽折算**相对**轨道、再把余额分给 `1fr`，所以左栏文字长短挤不动图列，
+/// 这就是「图不失宽」的机械成因。Rust 侧只放行「估宽装得进九成右栏」的尾部单图。
+/// 选项（`rest`）排在栅格**外面**通栏：四列栅格塞进 65% 的左栏必然挤成一列。
+/// 左格自己就是一个 `item` —— 悬挂缩进只在这一处出现，图格在缩进之外、享整栏宽。
+#let figure-float(label, figure, indent: 2.6em, above: 3pt, breakable: true, rest: none, body) = block(
+  width: 100%,
+  breakable: breakable,
+  above: above,
+)[
+  #grid(
+    columns: (1fr, 35%),
+    gutter: 6pt,
+    item(label, indent: indent, above: 0pt)[#body],
+    align(right + top)[#figure],
+  )
+  #if rest != none {
+    block(width: 100%, inset: (left: indent))[#rest]
+  }
+]
 
 /// 粘连壳（T4.5）：typst 0.15 **没有** keep-with-next 原语（实测：typst-library /
 /// typst-layout 源码里搜不到 `keep_with_next`，`par` 也没有 `keep-lines-together`），
@@ -288,7 +343,7 @@ impl Gen<'_> {
         if spec.header_footer.header_title {
             // 静态近似：整份文档一个页眉（取卷名）。逐栏取当前大题名是 T4.10。
             page.push_str(&format!(
-                ", header: align(center)[#text(size: 9pt, fill: luma(120))[{}]]",
+                ", header: align(center)[#text(size: 9pt, fill: luma(120))[#({})]]",
                 typst_str(&doc.title)
             ));
         }
@@ -402,7 +457,7 @@ impl Gen<'_> {
             .filter(|t| !t.trim().is_empty())
         {
             s.push_str(&format!(
-                "#item(\"\", indent: 0em, above: 1pt, breakable: false)[{}]\n",
+                "#item(\"\", indent: 0em, above: 1pt, breakable: false)[#({})]\n",
                 typst_str(instruction)
             ));
         }
@@ -423,33 +478,19 @@ impl Gen<'_> {
                 self.number = Some(q.number);
                 self.field = IssueField::Stem;
                 let label = format!("{}. （{} 分）", q.number, score(q.score));
-                let mut content = self.nodes(&q.stem);
-                if !q.options.is_empty() {
-                    let cells: Vec<String> = q
-                        .options
-                        .iter()
-                        .map(|o| {
-                            let prefix = if o.label.is_empty() {
-                                String::new()
-                            } else {
-                                format!("{}. ", o.label)
-                            };
-                            format!(
-                                "[{}{}]",
-                                typst_str(&prefix),
-                                self.nodes_with(&o.content, IssueField::Choice)
-                            )
-                        })
-                        .collect();
-                    content.push_str("\n\n");
-                    content.push_str(&format!(
-                        "#choices({},{})",
-                        q.grid.columns.max(1),
-                        cells.join(", ")
-                    ));
-                    content.push('\n');
+                let choices = self.choices(&q.options, q.grid.columns);
+                match q.figure {
+                    Some(split) => self.float_figure(&label, split, q, choices.as_deref()),
+                    None => {
+                        let mut content = self.nodes(&q.stem);
+                        if let Some(choices) = &choices {
+                            content.push_str("\n\n");
+                            content.push_str(choices);
+                            content.push('\n');
+                        }
+                        self.item(&label, HANG_EM, 3.0, q.meta, &content)
+                    }
                 }
-                self.item(&label, HANG_EM, 3.0, q.meta, &content)
             }
             LayoutBlock::SubQuestion(sub) => {
                 self.number = Some(sub.number);
@@ -513,6 +554,62 @@ impl Gen<'_> {
         )
     }
 
+    /// 选项栅格调用（`None` = 这道题没有选项）：`#choices(列数, [A. …], [B. …])`
+    fn choices(&mut self, options: &[ExamOption], columns: usize) -> Option<String> {
+        if options.is_empty() {
+            return None;
+        }
+        let cells: Vec<String> = options
+            .iter()
+            .map(|o| {
+                let prefix = if o.label.is_empty() {
+                    String::new()
+                } else {
+                    format!("{}. ", o.label)
+                };
+                format!(
+                    "[#({}){}]",
+                    typst_str(&prefix),
+                    self.nodes_with(&o.content, IssueField::Choice)
+                )
+            })
+            .collect();
+        Some(format!("#choices({},{})", columns.max(1), cells.join(", ")))
+    }
+
+    /// 左文右图（T4.3）：题干按 `split` 切成左右两格，配图并排进右栏
+    ///
+    /// `label` 与 `figure` 只能**按位置**传，两处实测：写 `figure:` 直接报
+    /// "the argument `figure` is positional"；行尾的 `[body]` 填的是**下一个未填的位置参数**，
+    /// 所以模板里连 `item(label: …)` 都不能写成具名 —— 那样 body 会落到 label 上，报
+    /// "missing argument: body"。
+    /// 粘连（T4.5）走不到这一块：题干含图时 [`block_height_mm`] 恒为 `None`，浮动题永远不会
+    /// 被裹进 `keep-together` 壳 —— 也就不会出现「壳里套一枚不许跨页的图」这种溢出裁切。
+    fn float_figure(
+        &mut self,
+        label: &str,
+        split: Split,
+        q: &QuestionBlock,
+        choices: Option<&str>,
+    ) -> String {
+        let (left, right) = split.parts(&q.stem);
+        let body = self.nodes(left);
+        let figure = self.nodes(right);
+        let rest = match choices {
+            Some(choices) => format!(", rest: [{}]", choices),
+            None => String::new(),
+        };
+        format!(
+            "#figure-float({}, [{}], indent: {}em, above: 3pt, breakable: {}{})[{}]\n",
+            typst_str(label),
+            figure.trim(),
+            mm(HANG_EM),
+            q.meta.breakable,
+            rest,
+            body.trim()
+        )
+    }
+
     /// 粘连壳：把已经生成好的 N 个块整体钉在同一页（T4.5）
     fn keep_together(&mut self, blocks: &[LayoutBlock]) -> String {
         let mut inner = String::new();
@@ -533,7 +630,7 @@ impl Gen<'_> {
                 content.push_str("#linebreak()");
             }
             if !line.label.is_empty() {
-                content.push_str(&typst_str(&format!("{} ", line.label)));
+                content.push_str(&format!("#({})", typst_str(&format!("{} ", line.label))));
             }
             self.field = IssueField::Answer;
             content.push_str(&self.nodes_with(&line.nodes, IssueField::Answer));
@@ -617,7 +714,7 @@ impl Gen<'_> {
                     out.push_str(&self.align(align, &row));
                     if let Some(caption) = caption.as_deref().filter(|t| !t.trim().is_empty()) {
                         out.push_str(&format!(
-                            "\n#text(size: 9pt, fill: luma(80))[{}]",
+                            "\n#text(size: 9pt, fill: luma(80))[#({})]",
                             typst_str(caption)
                         ));
                     }
@@ -760,11 +857,11 @@ impl Gen<'_> {
 fn cells(row: &[String], cols: usize, bold: bool) -> String {
     (0..cols)
         .map(|i| {
-            let lit = typst_str(row.get(i).map(String::as_str).unwrap_or(""));
+            let text = typst_str(row.get(i).map(String::as_str).unwrap_or(""));
             if bold {
-                format!("[#text(weight: \"bold\")[{lit}]]")
+                format!("[#text(weight: \"bold\")[#({text})]]")
             } else {
-                format!("[{lit}]")
+                format!("[#({text})]")
             }
         })
         .collect::<Vec<_>>()
@@ -954,8 +1051,10 @@ mod tests {
     use super::*;
     use crate::export::model::{Callout, ExamOption, QuestionKind};
     use crate::typeset::blocks::choice_grid;
+    use crate::typeset::blocks::figure_float::{self, FIGURE_SHARE};
     use crate::typeset::compiler::{
-        CompileRequest, compile_paged, compile_pdf, font_dirs, rendered_pages, rendered_runs,
+        CompileRequest, PlacedImage, PlacedRun, compile_paged, compile_pdf, font_dirs,
+        placed_images, placed_pages, rendered_pages, rendered_runs,
     };
     use crate::typeset::ir::{
         AnalysisEntry, AnswerLine, BlankBlock, CalloutBlock, DocumentMeta, QuestionBlock, Section,
@@ -1016,6 +1115,7 @@ mod tests {
             stem: stem(i),
             options,
             grid,
+            figure: None,
         }
     }
 
@@ -1452,6 +1552,12 @@ mod tests {
             text("1. 第一种 // 注释样"),
             InlineNode::LineBreak,
             text("2. 第二种 *粗* 与 ] 和 [ 与 $5"),
+            InlineNode::LineBreak,
+            InlineNode::Table {
+                header: vec!["表头".into(), "- 甲".into()],
+                aligns: vec![],
+                rows: vec![vec!["\"引号\"".into(), "= 乙".into()]],
+            },
         ];
         let g = generate(&doc, &images());
         let dirs = font_dirs();
@@ -1464,10 +1570,24 @@ mod tests {
         assert!(text.contains("1. 第一种 // 注释样"), "{text}");
         assert!(text.contains("2. 第二种 *粗* 与 ] 和 [ 与 $5"), "{text}");
         assert!(text.contains("= 标题（一）"), "页眉里的 = 也不许变成标题");
+        assert!(text.contains("- 甲"), "表格单元格里的 - 变成了列表");
+        assert!(text.contains("\"引号\""), "表格单元格里的引号被改写了");
         // 列表与标题的特征产物：项目符号与标题字体
         assert!(
             !runs.iter().any(|r| r.text.trim() == "•"),
             "行首 - 变成了列表项目符号"
+        );
+        // 外部文本进 markup 必须包成 `#("…")`：裸字面量 `["…"]` 会被 typst 当成引号文本
+        // 智能配对，实测把选项标签排成了 “A. “（选项 / 表格格 / 图注 / 答题标签四处同罪）
+        assert!(text.contains("A. "), "选项标签没按明文上图");
+        let smart: Vec<&str> = runs
+            .iter()
+            .map(|r| r.text.as_str())
+            .filter(|t| t.contains('“') || t.contains('”'))
+            .collect();
+        assert!(
+            smart.is_empty(),
+            "版面出现了智能引号（字符串漏了 `#(…)`）：{smart:?}"
         );
     }
 
@@ -1516,6 +1636,7 @@ mod tests {
                     columns: 1,
                     rows: 0,
                 },
+                figure: None,
             }),
             LayoutBlock::SubQuestion(SubQuestionBlock {
                 meta: stem_meta,
@@ -1752,5 +1873,446 @@ mod tests {
         );
         // 粘连只改分页，不许改内容
         assert_eq!(flat(&glued), flat(&loose), "粘连把版面文字改了");
+    }
+
+    // ------------------------------------------------------ T4.2 选项栅格与降列
+
+    /// 短选项：连标签 ≈ 10mm，四列单元格（16.4mm）装得下
+    const SHORT: &str = "12";
+    /// 中选项：连标签 ≈ 27mm，四列装不下、半栏装得下
+    const MEDIUM: &str = "甲乙丙丁戊己庚";
+    /// 长选项：连标签 ≈ 98mm，半栏（36.4mm）也装不下
+    const LONG: &str = "一个超过半栏宽很多的选项内容，例如把整句话都塞进选项里";
+
+    /// 一道四选项的题：`columns` 由调用方**直接给定**，故意给错才能验 R7 的运行时兜底
+    fn choice_doc(columns: usize, options: [&str; 4]) -> LayoutDoc {
+        let mut doc = sim_doc(LayoutSpec::for_profile(OutputProfile::Student));
+        doc.answer_key.clear();
+        doc.sections.truncate(1);
+        doc.sections[0].header.instruction = None;
+        doc.sections[0].header.question_count = 1;
+        doc.spec.header_footer.page_number = false;
+        doc.sections[0].blocks = vec![LayoutBlock::Question(QuestionBlock {
+            meta: BlockMeta::flow(),
+            number: 1,
+            score: 5.0,
+            kind: QuestionKind::SingleChoice,
+            stem: vec![text("已知甲、乙两数满足下列条件，则甲数为（　）")],
+            options: ('A'..='D')
+                .zip(options)
+                .map(|(label, content)| ExamOption {
+                    label: label.to_string(),
+                    content: vec![text(content)],
+                })
+                .collect(),
+            grid: choice_grid::ChoiceGrid {
+                columns,
+                rows: 4usize.div_ceil(columns.max(1)),
+            },
+            figure: None,
+        })];
+        doc
+    }
+
+    /// 四枚选项标签在版面上的落点（毫米），下标 0..4 即 A..D
+    ///
+    /// 锚点选标签而不是选项正文：`A. ` 是每枚选项**单元格行首**的唯一明文，它的 x 就是该列的
+    /// 左边界、y 就是该行的基线，且不会与题干里出现的字母撞车。
+    fn option_positions(doc: &LayoutDoc) -> Vec<(f64, f64)> {
+        let generated = generate(doc, &HashMap::new());
+        let dirs = font_dirs();
+        let req = request(&generated.source, &dirs, &[]);
+        let out = match compile_paged(&req) {
+            Ok(out) => out,
+            Err(err) => panic!(
+                "编译失败：{:?}\n---- 源码 ----\n{}",
+                err.diagnostics, generated.source
+            ),
+        };
+        let mut hits = [(0.0_f64, 0.0_f64); 4];
+        let mut seen = [0_usize; 4];
+        let mut all: Vec<String> = Vec::new();
+        for placed in placed_pages(&out.output).into_iter().flatten() {
+            all.push(placed.run.text.clone());
+            let matched = ('A'..='D').position(|c| placed.run.text.starts_with(&format!("{c}. ")));
+            let Some(index) = matched else {
+                continue;
+            };
+            seen[index] += 1;
+            hits[index] = (placed.x_mm, placed.y_mm);
+        }
+        assert_eq!(
+            seen, [1; 4],
+            "选项标签在版面上不是各出现一次：{seen:?}\n版面文字段：{all:?}"
+        );
+        hits.to_vec()
+    }
+
+    /// 按容差把坐标归并成「档」：落在同一档 = 同一行（或同一列）
+    fn lanes(values: &[f64], tol: f64) -> usize {
+        let mut sorted = values.to_vec();
+        sorted.sort_by(f64::total_cmp);
+        let mut count = 0_usize;
+        let mut prev = f64::MIN;
+        for v in sorted {
+            if v - prev > tol {
+                count += 1;
+            }
+            prev = v;
+        }
+        count
+    }
+
+    /// 实测栅格 `(行数, 列数)`：同一行（列）的标签坐标差在 0.01mm 量级，跨行（列）则分别是
+    /// 行高（≥ 3.4mm）与 1/4 栏宽（≥ 16mm），3mm 容差足以把两者分开。
+    fn measured_grid(positions: &[(f64, f64)]) -> (usize, usize) {
+        let xs: Vec<f64> = positions.iter().map(|p| p.0).collect();
+        let ys: Vec<f64> = positions.iter().map(|p| p.1).collect();
+        (lanes(&ys, 3.0), lanes(&xs, 3.0))
+    }
+
+    #[test]
+    fn short_options_render_one_row_of_four() {
+        let positions = option_positions(&choice_doc(4, [SHORT; 4]));
+        assert_eq!(measured_grid(&positions), (1, 4), "{positions:?}");
+        // 列序 = 选项序：A 在最左、D 在最右，靠栅格本身的排布而不是别的技巧
+        let xs: Vec<f64> = positions.iter().map(|p| p.0).collect();
+        assert!(
+            xs.windows(2).all(|w| w[0] < w[1]),
+            "四列未按 A→D 从左到右：{xs:?}"
+        );
+    }
+
+    #[test]
+    fn medium_options_render_two_by_two() {
+        let positions = option_positions(&choice_doc(2, [MEDIUM; 4]));
+        assert_eq!(measured_grid(&positions), (2, 2), "{positions:?}");
+        // 行优先填充：A B 占第一行、C D 占第二行。typst grid 默认就是这样，但「先横后竖」
+        // 是卷面语义（教师按 A B / C D 念答案），不能只靠默认行为不写断言。
+        let same_row = |p: (f64, f64), q: (f64, f64)| (p.1 - q.1).abs() < 0.5;
+        assert!(
+            same_row(positions[0], positions[1]),
+            "A B 不在同一行：{positions:?}"
+        );
+        assert!(
+            same_row(positions[2], positions[3]),
+            "C D 不在同一行：{positions:?}"
+        );
+        assert!(
+            positions[0].1 < positions[2].1,
+            "第一行不在第二行之上：{positions:?}"
+        );
+        assert!(positions[0].0 < positions[1].0, "第一行 A 不在 B 左边");
+        assert!(positions[2].0 < positions[3].0, "第二行 C 不在 D 左边");
+    }
+
+    #[test]
+    fn long_options_render_four_rows_of_one() {
+        let positions = option_positions(&choice_doc(1, [LONG; 4]));
+        assert_eq!(measured_grid(&positions), (4, 1), "{positions:?}");
+    }
+
+    #[test]
+    fn measure_fallback_drops_a_column_when_rust_over_decided() {
+        // R7：估宽判定 4 列、实测装不下 → 运行时降到 2 列，而不是把溢出留在纸上
+        let by_two = option_positions(&choice_doc(4, [MEDIUM; 4]));
+        assert_eq!(measured_grid(&by_two), (2, 2), "{by_two:?}");
+        // 降到 2 列仍装不下 → 再降到 1 列（4 → 1 中间不必在 2 列上停留）
+        let by_one = option_positions(&choice_doc(4, [LONG; 4]));
+        assert_eq!(measured_grid(&by_one), (4, 1), "{by_one:?}");
+        // 只有 2 列的判定没有「降 2」可降，直接落到 1 列
+        let two_to_one = option_positions(&choice_doc(2, [LONG; 4]));
+        assert_eq!(measured_grid(&two_to_one), (4, 1), "{two_to_one:?}");
+    }
+
+    #[test]
+    fn dropping_columns_never_loses_option_text() {
+        // 兜底只改版面，不改内容：同一个决定过 4 列与老实给 2 列，明文必须一字不差
+        let wide = compile_pages(&choice_doc(4, [MEDIUM; 4]));
+        let fitted = compile_pages(&choice_doc(2, [MEDIUM; 4]));
+        assert_eq!(flat(&wide), flat(&fitted), "降列把选项文字改动了");
+    }
+
+    #[test]
+    fn grid_source_wires_the_rust_decision_and_the_measure_ladder() {
+        let doc = choice_doc(2, [MEDIUM; 4]);
+        let s = generate(&doc, &HashMap::new()).source;
+        // Rust 的列数决策忠实传进模板（改的是模板参数，不是模板里的常量）
+        assert!(s.contains("#choices(2,"), "Rust 的列数决策没传进模板：{s}");
+        // 兜底逻辑在函数库里：取实际栏宽 + 量自然宽 + 逐级降列
+        for needle in [
+            "#let choices(cols, ..cells)",
+            "layout(size =>",
+            "measure(cell).width",
+            "let fits(c) = want <= (size.width - (c - 1) * gut) / c",
+            "cols >= 4 and fits(2)",
+        ] {
+            assert!(s.contains(needle), "函数库缺 {needle}");
+        }
+    }
+
+    /// R7 兜底的成本：整卷编译一次多少毫秒（预算 500ms/卷）
+    ///
+    /// `cargo test --lib typeset::typst_gen::tests::cost_of_the_measure_fallback -- --ignored --nocapture`
+    ///
+    /// 对照组把所有题判成单列 —— 单列走 `cols <= 1` 分支，一个单元格都不量。两组的版面长度不同
+    /// （单列多占行），所以把页数一起打出来，别把版面差异读成兜底的开销。
+    #[test]
+    #[ignore]
+    fn cost_of_the_measure_fallback() {
+        use std::time::{Duration, Instant};
+
+        let compile = |doc: &LayoutDoc| -> (Duration, usize) {
+            let generated = generate(doc, &HashMap::new());
+            let dirs = font_dirs();
+            let started = Instant::now();
+            let out = compile_paged(&request(&generated.source, &dirs, &[]))
+                .unwrap_or_else(|e| panic!("{}", e.summary()));
+            (started.elapsed(), out.output.pages().len())
+        };
+
+        let measured = sim_doc(LayoutSpec::preset("a4_practice").unwrap());
+        let mut unmeasured = sim_doc(LayoutSpec::preset("a4_practice").unwrap());
+        for block in unmeasured.sections.iter_mut().flat_map(|s| &mut s.blocks) {
+            if let LayoutBlock::Question(q) = block {
+                q.grid.columns = 1;
+                q.grid.rows = q.options.len().max(1);
+            }
+        }
+
+        // 第一次编译付掉字体池解析（进程级记忆化），之后才是逐请求成本
+        let best = |doc: &LayoutDoc| -> (Duration, usize) {
+            let warm = compile(doc);
+            (0..3)
+                .map(|_| compile(doc))
+                .fold(warm, |a, b| if b.0 < a.0 { b } else { a })
+        };
+        let (with_measure, pages_m) = best(&measured);
+        let (skip, pages_s) = best(&unmeasured);
+        println!(
+            "兜底开：{}ms / {pages_m} 页；全单列（不量）：{}ms / {pages_s} 页；差 {}ms",
+            with_measure.as_millis(),
+            skip.as_millis(),
+            with_measure.as_millis() as i64 - skip.as_millis() as i64
+        );
+    }
+
+    // ───────────────────────────────────────────────────── T4.3 左文右图
+
+    /// 1×1 像素 PNG。帧树里的 `FrameItem::Image` 只认**栅格**图，SVG 会被转成矢量 group
+    /// （实测），所以「图到底画成了多宽」这类断言必须喂 PNG，不能沿用 `DOT_SVG`
+    fn dot_png() -> Vec<u8> {
+        use ::image::ExtendedColorType;
+        use ::image::ImageEncoder as _;
+        let mut buf = Vec::new();
+        ::image::codecs::png::PngEncoder::new(&mut buf)
+            .write_image(&[255, 0, 0, 255], 1, 1, ExtendedColorType::Rgba8)
+            .expect("1×1 PNG 编码不会失败");
+        buf
+    }
+
+    /// 题干尾部那一枚配图（`px` = 编辑器口径的像素宽）
+    fn figure_px(px: u32) -> InlineNode {
+        InlineNode::Image {
+            alt: None,
+            url: REMOTE.into(),
+            width: Some(px),
+            align: None,
+        }
+    }
+
+    /// 一道配图题。`figure` 由 `figure_float::plan` **现场判定**，口径与
+    /// `blocks::question_block` 一致：整栏宽，不是扣掉悬挂缩进的 `available_em`
+    fn figure_doc(stem: Vec<InlineNode>, options: usize) -> LayoutDoc {
+        let mut doc = sim_doc(LayoutSpec::for_profile(OutputProfile::Student));
+        doc.answer_key.clear();
+        doc.sections.truncate(1);
+        doc.sections[0].header.instruction = None;
+        doc.sections[0].header.question_count = 1;
+        doc.spec.header_footer.page_number = false;
+        let column_em = choice_grid::em_from_mm(f64::from(doc.spec.column_width_mm()));
+        let figure = figure_float::plan(&stem, column_em);
+        let grid = choice_grid::ChoiceGrid {
+            columns: options.max(1),
+            rows: options.div_ceil(options.max(1)),
+        };
+        doc.sections[0].blocks = vec![LayoutBlock::Question(QuestionBlock {
+            meta: BlockMeta::flow(),
+            number: 1,
+            score: 5.0,
+            kind: QuestionKind::SingleChoice,
+            stem,
+            options: ('A'..='D')
+                .take(options)
+                .map(|label| ExamOption {
+                    label: label.to_string(),
+                    content: vec![text(SHORT)],
+                })
+                .collect(),
+            grid,
+            figure,
+        })];
+        doc
+    }
+
+    /// 编译一道配图题：回读画出来的图片与按页分组的文字段。
+    ///
+    /// `width:` 参数只是我方的意图，`FrameItem::Image` 里的 `Size` 才是纸上的事实。
+    fn compile_figure(doc: &LayoutDoc) -> (Vec<PlacedImage>, Vec<Vec<PlacedRun>>) {
+        let path = "/ext/0.png".to_string();
+        let generated = generate(doc, &HashMap::from([(REMOTE.to_string(), Some(path))]));
+        let dirs = font_dirs();
+        let injected = vec![("/ext/0.png".to_string(), dot_png())];
+        let req = request(&generated.source, &dirs, &injected);
+        let out = match compile_paged(&req) {
+            Ok(out) => out,
+            Err(err) => panic!(
+                "编译失败：{:?}\n---- 源码 ----\n{}",
+                err.diagnostics, generated.source
+            ),
+        };
+        let images: Vec<PlacedImage> = placed_images(&out.output).into_iter().flatten().collect();
+        assert_eq!(images.len(), 1, "版面上应该恰好一张配图：{images:?}");
+        (images, placed_pages(&out.output))
+    }
+
+    /// 版面上那张图画出来的（宽, 左边界），毫米
+    fn drawn_figure(doc: &LayoutDoc) -> (f64, f64) {
+        let (images, _) = compile_figure(doc);
+        (images[0].w_mm, images[0].x_mm)
+    }
+
+    /// 这道题在 IR 里判成浮动了没有
+    fn floated(doc: &LayoutDoc) -> bool {
+        let LayoutBlock::Question(q) = &doc.sections[0].blocks[0] else {
+            unreachable!()
+        };
+        q.figure.is_some()
+    }
+
+    /// 长题干在版面上实际占了几行（每行一枚文字段）
+    fn wrapped_lines(pages: &[Vec<PlacedRun>]) -> usize {
+        pages
+            .iter()
+            .flatten()
+            .filter(|r| !r.run.text.is_empty() && r.run.text.chars().all(|c| STEM.contains(c)))
+            .count()
+    }
+
+    /// a4_practice 的图列宽（毫米）：86mm 栏 × 35%
+    fn figure_cell_mm() -> f64 {
+        f64::from(LayoutSpec::for_profile(OutputProfile::Student).column_width_mm()) * FIGURE_SHARE
+    }
+
+    /// 只由这十个汉字组成的长题干：折行成几行都能靠字符集认出来
+    const STEM: &str = "甲乙丙丁戊己庚辛壬癸";
+
+    #[test]
+    fn figure_column_width_is_the_same_for_short_and_long_text() {
+        // 验收口径「图列宽度恒定不失宽」：左栏从一行写到十行，右栏那枚图的宽度不许动
+        let cell = figure_cell_mm();
+        let short = figure_doc(vec![text("如图，求阴影部分面积。"), figure_px(90)], 0);
+        let long = figure_doc(vec![text(&STEM.repeat(12)), figure_px(90)], 0);
+        assert!(
+            floated(&short) && floated(&long),
+            "两份都该浮动，否则宽度相等是废话"
+        );
+        let (short_text, _) = compile_figure(&short);
+        let (long_text, long_pages) = compile_figure(&long);
+        assert!(
+            (short_text[0].w_mm - long_text[0].w_mm).abs() < 0.2,
+            "图宽随文字长短漂了：短文 {:?} vs 长文 {:?}",
+            short_text[0],
+            long_text[0]
+        );
+        assert!(
+            (short_text[0].x_mm - long_text[0].x_mm).abs() < 0.2,
+            "图的位置随文字长短漂了：短文 {:?} vs 长文 {:?}",
+            short_text[0],
+            long_text[0]
+        );
+        assert!(
+            long_text[0].w_mm < cell,
+            "图宽 {:.1}mm 超过了 {:.1}mm 的图列",
+            long_text[0].w_mm,
+            cell
+        );
+        assert!(
+            long_text[0].w_mm > 20.0,
+            "90px 的图只画了 {:.1}mm",
+            long_text[0].w_mm
+        );
+        // 左栏真的被 65% 挤窄了：同一段字，浮动比通栏多占行。少了这一条，
+        // 「栅格根本没生效」也能通过上面所有断言。
+        let flowed = {
+            let mut doc = long.clone();
+            let LayoutBlock::Question(q) = &mut doc.sections[0].blocks[0] else {
+                unreachable!()
+            };
+            q.figure = None;
+            doc
+        };
+        let (_, flowed_pages) = compile_figure(&flowed);
+        assert!(
+            wrapped_lines(&long_pages) > wrapped_lines(&flowed_pages),
+            "左栏没比整栏窄：浮动 {} 行 vs 通栏 {} 行",
+            wrapped_lines(&long_pages),
+            wrapped_lines(&flowed_pages)
+        );
+    }
+
+    #[test]
+    fn floated_figure_sits_right_of_the_text_and_inside_the_column() {
+        let (w, x) = drawn_figure(&figure_doc(
+            vec![text("如图，求阴影部分面积。"), figure_px(90)],
+            4,
+        ));
+        // 左边距 15mm + 半栏 43mm：图必须在右半栏里，选项栅格才有它自己的位置
+        assert!(x > 58.0, "图没排到右栏：x = {x:.1}mm");
+        assert!(
+            x + w < 101.5,
+            "图溢出栏外：右边界 {:.1}mm（栏右边界 101mm）",
+            x + w
+        );
+    }
+
+    #[test]
+    fn wide_figure_is_left_in_the_flow() {
+        // 200px ≈ 53mm，装不进 30mm 的图列 → 照旧独占整行，不许硬塞
+        let doc = figure_doc(vec![text("如图，求阴影部分面积。"), figure_px(200)], 0);
+        assert!(!floated(&doc), "判定阶段就不该放行这张宽图");
+        let s = generate(&doc, &images()).source;
+        assert!(!s.contains("#figure-float("), "宽图不该浮动：{s}");
+        assert!(s.contains("#image("), "宽图仍然要画出来：{s}");
+    }
+
+    #[test]
+    fn float_source_wires_the_tracks_and_the_options() {
+        let doc = figure_doc(vec![text("如图，求阴影部分面积。"), figure_px(90)], 4);
+        let s = generate(&doc, &images()).source;
+        // 图列比例只有一个来源：Rust 侧的 FIGURE_SHARE
+        assert!(
+            s.contains(&format!("columns: (1fr, {}%)", FIGURE_SHARE * 100.0)),
+            "模板里的图列比例与 FIGURE_SHARE 不一致：{s}"
+        );
+        for needle in ["#figure-float(", "\", [#image(", "rest: [#choices(4,"] {
+            assert!(s.contains(needle), "函数库缺 {needle}：{s}");
+        }
+    }
+
+    #[test]
+    fn floating_rearranges_the_paper_without_changing_its_text() {
+        let stem = vec![
+            text("如图，甲、乙两人在同一直线上相向而行。"),
+            InlineNode::LineBreak,
+            figure_px(90),
+        ];
+        let mut doc = figure_doc(stem, 0);
+        let floated = flat(&compile_pages(&doc));
+        if let LayoutBlock::Question(q) = &mut doc.sections[0].blocks[0] {
+            q.figure = None;
+        }
+        let flowed = flat(&compile_pages(&doc));
+        assert_eq!(floated, flowed, "浮动把卷面文字改动了");
     }
 }
