@@ -197,7 +197,11 @@ pub fn to_mathml(latex: &str, display: bool) -> MathOutcome {
             Some(reason) => MathOutcome::Failed(reason),
             None => MathOutcome::Ok(escape_stray_markup(&mathml).into_owned()),
         },
-        Err(e) => MathOutcome::Failed(e.to_string()),
+        // crate 的错误串两端带裸引号，且不带任何中文上下文；这条要直接给教师看
+        Err(e) => MathOutcome::Failed(format!(
+            "公式无法解析：{}",
+            e.to_string().trim_matches('"')
+        )),
     }
 }
 
@@ -736,11 +740,15 @@ mod tests {
                 assert!(!reason.is_empty(), "{latex} 失败却没给原因");
             }
         }
-        // 明确缺右花括号的用例必须走降级分支（docx 侧据此输出红色原文 + 警告）
-        assert!(matches!(
-            to_mathml(r"\frac{1}{", true),
-            MathOutcome::Failed(_)
-        ));
+        // 明确缺右花括号的用例必须走降级分支（docx 侧据此输出红色原文 + 警告），
+        // 且原因是给教师看的：带中文定性、不被 crate 的包裹引号污染
+        match to_mathml(r"\frac{1}{", true) {
+            MathOutcome::Failed(reason) => {
+                assert!(reason.starts_with("公式无法解析："), "{reason}");
+                assert!(!reason.ends_with('"'), "残留引号: {reason}");
+            }
+            MathOutcome::Ok(m) => panic!("缺右花括号不该转换成功: {m}"),
+        }
     }
 
     #[test]

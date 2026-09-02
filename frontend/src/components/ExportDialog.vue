@@ -49,7 +49,7 @@ const emit = defineEmits<{
 const toast = useToast()
 
 const FORMATS: FormatOption[] = [
-  { value: 'docx', label: 'Word', hint: '公式可编辑', icon: 'file-text', enabled: false, milestone: 'M2 交付' },
+  { value: 'docx', label: 'Word', hint: '公式可编辑', icon: 'file-text', enabled: true },
   { value: 'pdf', label: 'PDF', hint: '标准排版', icon: 'document', enabled: false, milestone: 'M3 交付' },
   { value: 'markdown', label: 'Markdown', hint: '纯文本 · 可移植', icon: 'download', enabled: true },
 ]
@@ -135,8 +135,16 @@ async function runExport() {
   detailsOpen.value = false
   try {
     const req = buildRequest()
-    const res = await exportApi.markdown(req, { bundle: bundle.value })
-    const fallback = `${req.title}.${res.blob.type.includes('zip') ? 'zip' : 'md'}`
+    const isDocx = format.value === 'docx'
+    const res = isDocx
+      ? await exportApi.docx(req)
+      : await exportApi.markdown(req, { bundle: bundle.value })
+    const ext = isDocx
+      ? 'docx'
+      : res.blob.type.includes('zip')
+        ? 'zip'
+        : 'md'
+    const fallback = `${req.title}.${ext}`
     saveBlob(res.blob, res.filename || fallback)
     warnings.value = res.warnings
     truncated.value = res.truncated

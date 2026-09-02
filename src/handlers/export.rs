@@ -1,7 +1,7 @@
-//! 导出端点（模块 A 的 HTTP 入口）— T1.7
+//! 导出端点（模块 A 的 HTTP 入口）— T1.7 Markdown / T2.8 DOCX
 //!
-//! `POST /export/markdown[?bundle=true]`：
-//! - 装配（`assemble_exam`：批量取题 + 可见性过滤）→ 生成 Markdown / zip；
+//! `POST /export/markdown[?bundle=true]` 与 `POST /export/docx` 共用同一套响应契约：
+//! - 装配（`assemble_exam`：批量取题 + 可见性过滤）→ 生成文件字节；
 //! - `Content-Disposition` RFC 5987 编码中文文件名（§四）；
 //! - `X-Export-Warnings` 头返回降级警告（URL-encoded JSON `[{question_no,
 //!   field, latex, reason}]`）；序列化超 ~8KB 截断并附 `truncated:true`
@@ -20,6 +20,7 @@ use serde_json::json;
 
 use crate::auth::middleware::AuthUser;
 use crate::export::assembler::assemble_exam;
+use crate::export::docx::writer::generate_docx;
 use crate::export::markdown::generate_markdown;
 use crate::export::model::{ExamBundle, ExamRequest, Issue};
 use crate::handlers::questions::db_err;
@@ -65,28 +66,68 @@ pub async fn export_markdown(
     issues.extend(result.issues);
 
     let (content_type, ext, body) = if make_zip {
-        let zip = result.zip.unwrap_or_default();
-        (
-            HeaderValue::from_static("application/zip"),
-            "zip",
-            zip,
-        )
+        ("application/zip", "zip", result.zip.unwrap_or_default())
     } else {
         (
-            HeaderValue::from_static("text/markdown; charset=utf-8"),
+            "text/markdown; charset=utf-8",
             "md",
             result.markdown.into_bytes(),
         )
     };
 
-    let filename = sanitize_filename(&assembled.bundle.title);
+    file_response(content_type, ext, &assembled.bundle.title, body, &issues)
+}
+
+/// POST /api/v1/export/docx — Word 文档导出（T2.8）
+///
+/// 与 `export_markdown` 同骨架（装配 → 生成 → 合并警告 → 文件响应）。图片一律内嵌进
+/// OPC 包，因此没有 `?bundle=` 开关。
+pub async fn export_docx(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthUser>,
+    Json(req): Json<ExamRequest>,
+) -> Response {
+    let assembled = match assemble_exam(&state.pool, &auth, &req).await {
+        Ok(a) => a,
+        Err(e) => return db_err(e.to_string()).into_response(),
+    };
+
+    let result = generate_docx(
+        &assembled.bundle,
+        &req.options,
+        Path::new(&state.upload_dir),
+    )
+    .await;
+
+    let mut issues = assembled.issues;
+    collect_question_issues(&assembled.bundle, &mut issues);
+    issues.extend(result.issues);
+
+    file_response(
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "docx",
+        &assembled.bundle.title,
+        result.bytes,
+        &issues,
+    )
+}
+
+/// 文件类响应：Content-Type + RFC 5987 文件名 + 警告头（无警告时不带头）
+fn file_response(
+    content_type: &'static str,
+    ext: &str,
+    title: &str,
+    body: Vec<u8>,
+    issues: &[Issue],
+) -> Response {
+    let filename = sanitize_filename(title);
 
     let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, content_type);
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     if let Ok(v) = HeaderValue::from_str(&content_disposition(&filename, ext)) {
         headers.insert(header::CONTENT_DISPOSITION, v);
     }
-    if let Some(v) = warnings_header_value(&issues) {
+    if let Some(v) = warnings_header_value(issues) {
         headers.insert("X-Export-Warnings", v);
     }
 

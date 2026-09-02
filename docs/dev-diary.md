@@ -895,3 +895,59 @@ IR → OOXML 字符串全在这里，`mod.rs` 只当容器。图片抓取必须�
 `docx/writer.rs` 退出码 0。`markdown.rs` **刻意保持原排版**：对它跑 rustfmt 会顺手改到 200 行已提交代码
 （import 顺序、let 链、结构体字面量折行），把两个可见性改动埋进格式噪声里 —— 本仓库整体不是
 rustfmt-clean，格式统一该单独一刀，不混进功能提交。
+
+### 九、T2.8 `/export/docx` 端到端与 M2 收尾
+
+**端点**。`handlers/export.rs::export_docx` 与 `export_markdown` 同骨架：装配 → 生成 → 合并警告 → 文件响应。
+两条链路的尾巴此前各写一份，这回收成 `file_response(content_type, ext, title, body, issues)` —— RFC 5987
+文件名编码、`X-Export-Warnings` 的 URL 编码与 8000 字符截断（超限补 `truncated:true` 哨兵）现在只有一处真相。
+理由不是省事：两种格式的警告语义若漂了，前端表现为「Markdown 有警告、Word 静默」，是最难查的那类差异。
+docx **没有 `?bundle=` 开关** —— 图片一律内嵌进 OPC 包，包本身就是 bundle。路由挂 `src/lib.rs` 的 `/export/docx`。
+
+**测试**（`tests/export_docx_api.rs`，4 例 oneshot 打真库）：无 token → 401；正常卷 → 200 + OOXML content type
++ `filename*=UTF-8''%E9%9B%86…` + `PK\x03\x04` + 7 个必备部件 + `m:oMath==4` 且 `m:oMathPara==1` + 无警告头；
+含 `$\frac{1}{$` 的卷 → 仍 200、`m:oMath==3`、原文留在纸上、警告 `{field:"stem",question_no:1,latex:"\frac{1}{"}`、
+无截断哨兵；题目 ID 不存在 → 跳过该题并记 `field:"other"` 警告，`参考答案` 段照常出。三处口径值得单独记：
+
+- **文字断言一律走 `text_of()`**：把全文档的 `w:t` / `m:t` 拼平再比。OMML 转换器会按结构切 run，
+  对着原始 XML 找子串会因为 run 边界假失败（同一公式两次转换的 run 数不保证相同）。
+- **计数走 roxmltree `has_tag_name((NS_M,"oMath"))`**，不数 `<m:oMath>` 字符串 —— 带属性的开始标签
+  （`<m:oMath …>`）字符串数法会漏。roxmltree 0.21 的 `ExpandedName` 没有 `local_name`，只能这么判。
+- **`E0502` 的所有权坑**：`ZipArchive::by_name` 要 `&mut`，而 match 的 scrutinee 已经借住 `archive`
+  并跨所有分支，`unwrap_or_else` 里再捕获 `archive` 同样编不过。修法是先收集 **owned** `Vec<String>`
+  文件名（`Vec<&str>` 仍持借用）再进 match，把报错文本里的包内清单留着 —— 缺部件时只说「缺」没用，
+  要说「包里有什么」。
+
+**前端**：`ExportDialog.vue` 的 Word 芯片从 `enabled:false` 打开（标签「Word」、提示「公式可编辑」），
+`runExport` 按 `format` 分派 `exportApi.docx` / `exportApi.markdown`，扩展名兜底三档 `docx / zip / md`。
+
+**真机验收**（浏览器登录 `visualtest` → 试题篮组卷 → 导出 Word；`POST /api/v1/export/docx` 200、33,181 字节，
+落 `target/t28_browser_export.docx`）：包内 11 部件（含 `word/media/image1.jpg`、`image2.jpg`、`footer1.xml`），
+`document.xml` 实测 `oMath=34 / oMathPara=0 / w:tbl=4 / w:drawing=2 / 红色降级 run=1`；
+`scripts/check_docx_opens.ps1` 两端 **PASS** 且逐字相同：`Word.Application pages=3 omaths=34 chars=1032`、
+`KWPS.Application` 同。`OMaths.Count` 与从 XML 里数出的 `m:oMath` 相等，就是「双击公式进编辑器」的机器判据 ——
+任一编辑器把它当图片，这个数会直接掉到 0。`oMathPara=0` 与切分规则自洽：只有 `$$…$$` / `\[…\]` 才
+`display:true`（`content.rs:92`），这份真实卷的公式全是 `$…$` 行内，所以 writer 不该套 `m:oMathPara`；
+该分支另有单测 `display_math_gets_one_mathpara` 盯着，不是丢了。
+
+**验收暴露的两处**：
+
+1. **降级原因串是英文原句**。`latex2mathml` 对 `\frac{1}{` 报 `The token "RBrace" is expected, but the
+   token "EOF" is found.`，直接进教师看的警告里不合适。修在源头 `math/mod.rs`：
+   `Failed(format!("公式无法解析：{}", …trim_matches('"')))` —— 裁掉 crate 错误串两端的裸引号，前面补中文语境；
+   单测改判前缀且断言不以引号收尾。API 层只判「非空」。剩下的已知边界：中文前缀 + 英文核心句，够教师定位
+   「哪一题的哪一段坏了」，不够他知道「怎么改」。
+2. **奇数个 `$` 会让降级扩散**。第 3 题的干里 `$` 不成对，切分器按 `$…$` 贪婪配对，把「，比较」「 与 」
+   两段中文吃成了公式对象（实测含中文的 `m:t` 恰好这 2 枚，它们算在 34 里），同时纸上留了一个游离 `$`
+   （`g(2)$ 的大小。`）。畸形输入下的既有行为，先记账：要不要在「配对片段里中文标点占比过高」时退回字面量，
+   等教师反馈再定，不提前加启发式。
+
+**M2 收尾**。全量 `cargo test` 退出码 0（`--lib` 545 passed / 0 failed / 3 ignored，集成 13 个 target 共
+90 passed，含新增的 4 例）；`python scripts/gen_omml_snapshots.py --check` 55 例固件 exit 0；
+`npm run build` ✓ 27.57s；本阶段新增与改动的文件（`handlers/export.rs`、`export/docx/*`、
+`export/math/mod.rs`、`tests/export_docx_api.rs`）clippy 0 告警，`cargo doc --no-deps` 干净。
+`handlers/export.rs` 里既有的 5 处 rustfmt 差异（第 10/20/24/149/346 行）与 `markdown.rs` 同一口径处理：
+只保证新写代码 clean，不动已提交排版。
+
+M2 到此交付完：`LaTeX →(规范化 + latex2mathml)→ Presentation MathML →(MML2OMML 等价转换器)→ OMML → OOXML`，
+Word 与 WPS 里公式可编辑，一枚坏公式只降级不失败整卷。M3 是排版系统与 PDF 委托。
