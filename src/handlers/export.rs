@@ -1,6 +1,7 @@
-//! 导出端点（模块 A 的 HTTP 入口）— T1.7 Markdown / T2.8 DOCX
+//! 导出端点（模块 A 的 HTTP 入口）— T1.7 Markdown / T2.8 DOCX / T3.7 PDF
 //!
-//! `POST /export/markdown[?bundle=true]` 与 `POST /export/docx` 共用同一套响应契约：
+//! 三个出口 `POST /export/markdown[?bundle=true]` / `POST /export/docx` / `POST /export/pdf`
+//! 共用同一套响应契约：
 //! - 装配（`assemble_exam`：批量取题 + 可见性过滤）→ 生成文件字节；
 //! - `Content-Disposition` RFC 5987 编码中文文件名（§四）；
 //! - `X-Export-Warnings` 头返回降级警告（URL-encoded JSON `[{question_no,
@@ -23,6 +24,7 @@ use crate::export::assembler::assemble_exam;
 use crate::export::docx::writer::generate_docx;
 use crate::export::markdown::generate_markdown;
 use crate::export::model::{ExamBundle, ExamRequest, Issue};
+use crate::export::pdf::{build_layout_doc, generate_pdf};
 use crate::handlers::questions::db_err;
 use crate::AppState;
 
@@ -109,6 +111,54 @@ pub async fn export_docx(
         &assembled.bundle.title,
         result.bytes,
         &issues,
+    )
+}
+
+/// POST /api/v1/export/pdf — PDF 导出（T3.7，R1：PDF 出口唯一化在这里）
+///
+/// 与 `export_docx` 同骨架，多两步：`ExamBundle → LayoutDoc`（[`build_layout_doc`]，请求带
+/// `spec` 就整体替换 mode 的默认预设）与排版编译。一处坏公式、一张坏图都只降级 + 记警告，
+/// 唯一能让整卷开天窗的是 typst 编译失败 —— 那是模板/环境问题，回 500 而不是硬发半个文件。
+pub async fn export_pdf(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthUser>,
+    Json(req): Json<ExamRequest>,
+) -> Response {
+    let assembled = match assemble_exam(&state.pool, &auth, &req).await {
+        Ok(a) => a,
+        Err(e) => return db_err(e.to_string()).into_response(),
+    };
+    let doc = build_layout_doc(&assembled.bundle, &req.options, req.spec.as_ref());
+
+    let mut issues = assembled.issues;
+    collect_question_issues(&assembled.bundle, &mut issues);
+    issues.extend(doc.issues.iter().cloned());
+
+    let result = match generate_pdf(&doc, Path::new(&state.upload_dir)).await {
+        Ok(r) => r,
+        Err(e) => return compile_failed(e.summary()).into_response(),
+    };
+    issues.extend(result.issues);
+
+    file_response(
+        "application/pdf",
+        "pdf",
+        &assembled.bundle.title,
+        result.bytes,
+        &issues,
+    )
+}
+
+/// 编译失败：诊断原文进日志，响应带摘要（`detail`）方便教师截图反馈
+fn compile_failed(detail: String) -> (StatusCode, Json<serde_json::Value>) {
+    tracing::error!("PDF 排版失败: {detail}");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({
+            "error": "PDF 排版失败，请稍后重试或改用其他格式",
+            "code": "ERR_TYPESET_COMPILE_FAILED",
+            "detail": detail,
+        })),
     )
 }
 

@@ -1112,7 +1112,65 @@ typst 编译的耗时余量比 M3 预估更宽松。全量 `cargo test --lib --o
 类型（typst 依赖闭包带进来的 `palette` 给 `[T; N]` 补了多个 `AsRef` 实现 → E0283），改成
 `strip_prefix("x").or_else(|| strip_prefix("X"))`。语义等价，但这类「加依赖把老代码编坏了」的账值得记下来。
 
-### 六、踩坑记录：`cargo fmt -- <file>` 在这个仓库会把全仓库格式化了
+### 六、T3.6 `typst_gen`：把 spec 翻译成一份编得过的源码
+
+`src/typeset/typst_gen.rs`。公开面只有 `generate(doc, images) -> Generated { source, issues }`：`LayoutDoc`
++ `LayoutSpec` 进，一段完整 typst markup 出，编译归 T3.5。这一层的契约是**生成的源码必须编得过**，所以它也是
+所有实测坑的收容所：
+
+- **多栏走页级 `columns`，不走 `#columns(2)[…]` 包壳**。后者是布局容器，容器里 `#pagebreak` 直接报
+  "pagebreaks are not allowed inside of containers"（实测）—— 卷末答案就没法另起一页，T4 的脚注与行号会同源失效。
+  typst 在 `pages/run.rs` 里同时读 `PageElem::columns` 与 `ColumnsElem::gutter`，所以栏距单独写一条
+  `#set columns(gutter:)` 就够，与栏数同处一页级口径。
+- **页码只能在 `context` 里求值**：裸 `counter(page).display()` 报 "can only be used when context is known"（实测）。
+- **数学字体在 typst 0.15 里没有旋钮**：`math` 是模块不是元素，`#set math(font:)` 报 "expected function, found
+  module"，而 `EquationElem` 自带的 show_set 又把方程字体硬设成 New Computer Modern Math。`spec.fonts.math`
+  于是和 docx 侧一样没有落点（OMML 的字体由 Word 自己挑）—— 字段按 §6.1 定齐、注释写明现状、`layout.ts` 的文档
+  注释跟着重生成。等真能落地再生效，比悄悄收着一个不起作用的字段诚实。
+- **图片宽度在 Rust 侧算**：typst 的 `min()` 不许 ratio 与 length 比较（实测），所以 `px → mm`
+  （`PX_MM = 25.4 / 96.0`）后 `clamp(1.0, spec.column_width_mm())`，写进源码的是绝对值。
+- 素材表是**三态**的：`Some(path)` 渲染 / `None` 静默跳过 / 缺键才记一条通用 Issue。形状照抄 docx 的
+  `HashMap<String, Option<ImagePart>>`。不去 string-match 上游的警告文本再决定报不报 —— 那样一张坏图会同时刷出
+  两条 `Image` 警告，而 `X-Export-Warnings` 头顶着 B3 的 8KB 截断线。
+- `MITEX_PREAMBLE` 原样输出一次即可：T3.4 的「我们定义了哪些名字」就是从这段文本扫 `#let` 来的，两边天然同源。
+
+**验收口径**：PDF 字节里存的是矢量轮廓，**没有可读明文**，所以「中文有没有豆腐块」只能靠 frame-tree oracle
+`compiler::rendered_runs`。`simulated_paper_has_no_tofu_and_keeps_its_text` 用 20 题仿真卷（四大题型 + 单栏/双栏
+/A3 三套 spec 各跑真编译）断言：页数 >1、必现文案都在 `glue(runs)` 里、并且**每一个 CJK run 的族名都以
+`Source Han` 开头**。13 例（3 例真编译），`#image` / `#callout-box` / 选项栅格这些结构断言负责在没有文本 oracle
+的情况下盯住模板本身。
+
+### 七、T3.7 `/export/pdf`：PDF 出口唯一化
+
+`src/export/pdf.rs` 从 T3.7 起兼任**渲染出口**（`generate_pdf(doc, upload_dir)`），入口只有
+`handlers/export.rs::export_pdf`。**R1：不建 `/typeset/render`** —— 路由表里只加 `/export/pdf` 与
+`/typeset/profiles`（后者只返回四枚预设，给 T3.8 的表单用），并留一枚 404 断言
+`there_is_no_typeset_render_route` 把这个决定钉住，免得 M4 有人手滑加一条平行通道。
+
+预取侧两条新事实：
+
+- **typst 按路径扩展名分派图片解码器**。注入名 `/ext/<n>.<ext>` 里的 `ext` 一律用嗅探出的真实格式（`infer`），
+  不用 URL 里那一段 —— 一张 `.jpg` 结尾的 PNG 若按原名注入，选错解码器就是**整卷编译失败**。
+- 新增 `RENDERABLE` 白名单（png/jpg/jpeg/gif/webp/svg）：`tif/bmp/ico/heic` 都能被 `infer` 认出来，但 typst 0.15
+  解不动。缺这道门等于把「一张怪图」升级成「一次 500」，白名单外只丢图 + 记警告。
+
+失败口径只有一种：`compile_pdf` 返回 `Err` → 500 `ERR_TYPESET_COMPILE_FAILED`。公式降级、图片丢弃都只进
+`X-Export-Warnings`，与 docx / markdown 共用 `file_response`（顺手把 `content_type` 提成 `&'static str` 参数）。
+
+§13.4 的「缺字体回退 + 记警告」到这才算真落地：新增 `compiler::missing_cjk_fonts(dirs)`（走记忆化池），每次编译
+后查一遍，缺哪几族就写进警告。以前 `missing_cjk_families` 只被测试用着，线上缺字体是静默的豆腐块。
+
+**两个出口对「坏公式」的判定不一致**，集成测试的降级用例只能各用各的输入：docx 侧那枚 `$\frac{1}{$`
+（latex2mathml 报错）在 PDF 侧完全不成问题 —— mitex 对不配平括号宽容（T3.4 已记），`to_typst` 返回 Ok、typst 也
+编得过。PDF 侧的降级锚点是 `\argmax_x f`：mitex 转得动、typst 不认，被 `unresolved_name` 拦下来。
+
+测试：pdf.rs T3.7 新增 5 例（序号注入与按 URL 去重、读不到的图带上真实原因、非白名单格式被拦在包外、
+`collect_images` 覆盖到每一种可带图的块、真编译出嵌图的 PDF），`tests/export_pdf_api.rs` 7 例（401、RFC 5987
+文件名、降级不中断整卷、profiles 预设 round-trip 成 `spec` 后仍能出 PDF、隐藏题存活、四枚预设清单、
+`/typeset/render` 不存在）。全量 `cargo test --lib --offline` = **627 passed / 0 failed / 9 ignored**，
+新增文件 clippy 零告警。
+
+### 八、踩坑记录：`cargo fmt -- <file>` 在这个仓库会把全仓库格式化了
 
 想只格式化新增的两个文件，跑的是：
 
@@ -1128,4 +1186,23 @@ cargo fmt -- src/export/pdf.rs src/typeset/ir.rs src/typeset/mod.rs
 `git checkout -- $(git diff --name-only | grep -v -E '^(src/export/mod\.rs|src/typeset/mod\.rs|src/typeset/blocks/choice_grid\.rs)$')`
 收回来，只留 3 处有意改动 + 2 个未跟踪新文件。**这个仓库里格式化单个文件请用**
 `rustfmt --edition 2024 <files>`（`--check` 用于验证），不要碰 `cargo fmt`。
+
+**同一条坑在 T3.7 复发了一次，而且换了个马甲**：这次用的是上面那条「正确口径」——
+
+```bash
+rustfmt --edition 2024 src/typeset/typst_gen.rs ... src/lib.rs tests/export_pdf_api.rs
+```
+
+`git status` 当场变成 **83 个文件**。rustfmt 处理一个文件时会**顺着 `mod` 声明递归**，`src/lib.rs`
+一进参数就等于把整个 crate 重排（`src/ai/**`、`src/handlers/questions.rs`、`src/workers/**` 全中）。
+所以那条口径得再收紧一句：**只给叶子文件跑 rustfmt，绝不把 `lib.rs` / `mod.rs` 这类聚合入口写进
+参数**（`src/typeset/mod.rs` 与 `src/handlers/mod.rs` 同样是递归入口，任何一个进参数都等于整棵模块树
+重排）；入口文件的改动一律手写、照周边风格排版（本次 `lib.rs` 最终 diff = 4 增 1 删）。反过来，
+本来就 rustfmt-clean 的文件（如 `typeset/mod.rs`、`handlers/mod.rs`）在列表里不会留下噪声 —— 别把
+「这次没事」当成「可以放进去」，没被重排只是因为它们本来就没得重排。
+
+回收流程同上：先把 9 个有意改动的文件拷到 `$LOCALAPPDATA/Temp/fmtbak`，
+`git diff --name-only | grep -v <保留清单> | xargs git checkout --`，再逐个 `git diff` 复核剩下文件里
+**纯 reflow 的 hunk** 手工还原（本次 `handlers/export.rs` 三处：import 排序、`sanitize_filename` 的超宽
+`filter` 闭包、一枚单行 `assert!`）。还原后重跑 `cargo test --lib` 与两个端点集成套件确认没改坏。
 

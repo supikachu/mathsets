@@ -51,7 +51,9 @@ body: string,
  */
 heading: string, 
 /**
- * 数学：typst 内嵌的 New Computer Modern
+ * 数学字体：两个出口当前都没有落点 —— typst 0.15 的方程元素把自己的字体硬设成
+ * New Computer Modern Math（见 `typeset::typst_gen` 的实测说明），docx 的 OMML 由
+ * Word 自行选字体。字段按 §6.1 定齐，等真能落地时再生效
  */
 math: string, };
 

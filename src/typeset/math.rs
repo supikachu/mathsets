@@ -71,8 +71,8 @@ pub fn to_typst(latex: &str, display: bool) -> Result<String, String> {
 /// 颜色仍是判定「这一处是原文而非公式」的视觉锚点。
 pub fn degraded(latex: &str) -> String {
     format!(
-        "#text(fill: rgb(\"#B00000\"), font: \"DejaVu Sans Mono\", size: 0.9em)[{}]",
-        escape_markup(latex)
+        "#text(fill: rgb(\"#B00000\"), font: \"DejaVu Sans Mono\", size: 0.9em)[#({})]",
+        typst_str(latex)
     )
 }
 
@@ -338,18 +338,28 @@ fn failure_reason(raw: &str) -> String {
     format!("公式无法解析：{core}")
 }
 
-/// 转义 typst markup 的裸字符（降级原文走这条路，公式正文不走）
-fn escape_markup(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 8);
+/// 把任意文本落成 typst **字符串字面量**（含首尾引号）
+///
+/// 这是排版域唯一的「外部文本进 typst 源码」通道，`typst_gen` 与 [`degraded`] 共用。
+/// 为什么不用 markup 转义（`\_` 那一套）：typst 的 markup 层会解释太多东西 —— 行内 `//`
+/// 是行注释、行首 `- ` / `1. ` / `= ` 变列表与标题、`*` 变粗体、`--` 与 `...` 变连字（全部
+/// 实测）。字符串字面量则逐字不动，连 `#("a//b")` 与 `#("[甲]{乙}")` 都照原样上图，所以
+/// 只需要处理引号与反斜杠本身，转义面从「一整个语法层」缩到三个字符。
+pub(crate) fn typst_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
     for ch in s.chars() {
         match ch {
-            '#' | '$' | '%' | '&' | '_' | '<' | '>' | '@' | '[' | ']' | '{' | '}' | '\\' => {
-                out.push('\\');
-                out.push(ch);
-            }
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            // C0 控制字符与 DEL：留在串里就是 PDF 上的豆腐块，题库里的垃圾字符不值得保
+            '\r' | '\u{0}'..='\u{8}' | '\u{b}'..='\u{1f}' | '\u{7f}' => {}
             other => out.push(other),
         }
     }
+    out.push('"');
     out
 }
 
@@ -584,16 +594,23 @@ mod tests {
     }
 
     #[test]
-    fn degraded_output_escapes_markup_controls() {
-        let s = degraded(r"$\frac{#a}[x]{y}$");
-        assert!(s.starts_with("#text(fill:") && s.ends_with(']'), "{s}");
-        let body = &s[s.find('[').unwrap() + 1..s.rfind(']').unwrap()];
-        for ch in ['#', '$', '[', ']', '{', '}', '\\'] {
-            assert!(
-                !body.contains(ch) || body.contains(&format!("\\{ch}")),
-                "未转义的 {ch} 会破坏 markup：{body}"
-            );
-        }
+    fn degraded_lands_latex_verbatim_in_a_string() {
+        // 降级原文里满是 markup 触发符（`#` `[` `]` `{` `\` `$`）：它们必须整体关在
+        // `#("…")` 里逐字上图，而不是靠逐个转义侥幸不出错
+        let s = degraded("含 \\ 与 \" 的 $\\frac{#a}$");
+        assert!(s.starts_with("#text(fill:"), "{s}");
+        assert!(s.ends_with(r#"[#("含 \\ 与 \" 的 $\\frac{#a}$")]"#), "{s}");
+    }
+
+    #[test]
+    fn typst_str_only_escapes_the_string_delimiters() {
+        assert_eq!(typst_str("甲"), r#""甲""#);
+        assert_eq!(typst_str("a\"b"), r#""a\"b""#);
+        assert_eq!(typst_str(r"a\b"), r#""a\\b""#);
+        // markup 触发符原样留在串里：`#("= 甲")` 实测不成标题
+        assert_eq!(typst_str("- 甲 // 乙"), r#""- 甲 // 乙""#);
+        assert_eq!(typst_str("a\r\nb"), r#""a\nb""#);
+        assert_eq!(typst_str("甲\u{1}\u{7f}乙"), r#""甲乙""#);
     }
 
     #[test]
@@ -737,7 +754,7 @@ mod tests {
     #[ignore]
     fn dump_typst_names() {
         let lib = Library::default();
-        let mut dump = |label: &str, scope: &typst::foundations::Scope| {
+        let dump = |label: &str, scope: &typst::foundations::Scope| {
             let mut names: Vec<&str> = scope.iter().map(|(n, _)| n.as_str()).collect();
             names.sort_unstable();
             println!("--- {label}（{} 个）", names.len());

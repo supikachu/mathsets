@@ -23,6 +23,7 @@ use ecow::{EcoVec, eco_format};
 use typst::Library as TypstLibrary;
 use typst::diag::{FileError, FileResult, SourceDiagnostic};
 use typst::foundations::{Bytes, Datetime, Duration};
+use typst::layout::{Frame, FrameItem};
 use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
 use typst::text::{Font, FontBook, FontInfo};
 use typst::utils::LazyHash;
@@ -37,8 +38,10 @@ pub struct CompileRequest<'a> {
     pub upload_dir: &'a Path,
     /// 字体搜索目录（R6）
     pub font_dirs: &'a [PathBuf],
-    /// 外链图片字节（B1）：`(虚拟路径, 字节)`，路径须为 `/ext/<n>.<ext>`
-    pub injected: &'a [(&'a str, Vec<u8>)],
+    /// 外链图片字节（B1）：`(虚拟路径, 字节)`，路径须为 `/ext/<n>.<ext>`。
+    /// 路径收 `String` 而不是 `&str`：调用方分配序号时天然持有 String，收 `&str` 就逼它
+    /// 为了换个类型把十几 MB 的字节整份 clone 一遍。
+    pub injected: &'a [(String, Vec<u8>)],
 }
 
 /// 编译产物 + typst 自己提出的告警（缺字体、弃用写法等）。
@@ -105,13 +108,53 @@ pub fn compile_svg_pages(req: &CompileRequest) -> Result<Compiled<Vec<String>>, 
 }
 
 /// 编译到 `PagedDocument`：World 之外的失败统一成 typst 诊断。
-fn compile_paged(req: &CompileRequest) -> Result<Compiled<PagedDocument>, CompileError> {
+///
+/// 公开是为了 [`rendered_runs`] 能拿到帧树 —— 版面文字只能从 `Page::frame` 里读。
+pub fn compile_paged(req: &CompileRequest) -> Result<Compiled<PagedDocument>, CompileError> {
     let world = TypesetWorld::new(req);
     let warned = compile::<PagedDocument>(&world);
     Ok(Compiled {
         output: warned.output.map_err(to_error)?,
         warnings: flatten_warnings(&warned.warnings),
     })
+}
+
+// ---------------------------------------------------------------- 帧树回读
+
+/// 版面上真正画出来的一段字：文本 + 画它的那个字体族名。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedRun {
+    pub text: String,
+    pub family: String,
+}
+
+/// 深度优先走帧树，收集所有落到版面的文字段。
+///
+/// 为什么要走帧树而不是搜 SVG/PDF 字节：typst 的 SVG 与 PDF 都把汉字画成**矢量轮廓**，
+/// 文件里根本没有「中文字」这三个字的明文，搜关键词恒为 false（实测踩过）。帧树里的
+/// `TextItem.text` 才是明文，而且同时带 `font` —— 于是「这段字到底出没出现」和
+/// 「这个字是哪个字体画的（豆腐块判定）」两件事共用一次遍历。
+///
+/// 只走 `Group` 递归；`Shape` / `Image` / `Tag` 与文字无关。
+pub fn rendered_runs(doc: &PagedDocument) -> Vec<RenderedRun> {
+    let mut out = Vec::new();
+    for page in doc.pages() {
+        walk_frame(&page.frame, &mut out);
+    }
+    out
+}
+
+fn walk_frame(frame: &Frame, out: &mut Vec<RenderedRun>) {
+    for (_, item) in frame.items() {
+        match item {
+            FrameItem::Text(text) => out.push(RenderedRun {
+                text: text.text.to_string(),
+                family: text.font.info().family.clone(),
+            }),
+            FrameItem::Group(group) => walk_frame(&group.frame, out),
+            _ => {}
+        }
+    }
 }
 
 /// 模板里要用的中文字体族名（`CJK_FAMILIES[0]` 正文、`[1]` 标题），缺一即回退 + 告警
@@ -130,7 +173,29 @@ pub fn missing_cjk_families(book: &FontBook) -> Vec<&'static str> {
         .collect()
 }
 
+/// 这组目录解析出来的字体池里缺哪些中文字体（§13.4：回退不报错，但必须可告警）。
+///
+/// 走 [`font_pool`] 而不是新解析一遍：目录集相同就直接命中缓存。调用方是 `/export/pdf`
+/// 的 handler —— 豆腐块只有教师能看见，得让它进 `X-Export-Warnings`。
+pub fn missing_cjk_fonts(dirs: &[PathBuf]) -> Vec<&'static str> {
+    missing_cjk_families(&font_pool(dirs).book)
+}
+
 // ---------------------------------------------------------------- 字体池
+
+/// 字体搜索目录（R6）：默认仓库里的 `assets/fonts`，`TYPESET_FONT_DIRS` 按平台路径分隔符
+/// 覆盖它（部署时字体放在二进制外面）。
+///
+/// 放在这儿而不是 `AppConfig`：全仓有十几处 `AppState::new`，为一个「只有排版出口用」的
+/// 路径给它们统统加字段不划算。目录集的解析结果由 [`font_pool`] 记忆化，重复调用零成本。
+pub fn font_dirs() -> Vec<PathBuf> {
+    match std::env::var_os("TYPESET_FONT_DIRS") {
+        Some(v) if !v.is_empty() => std::env::split_paths(&v)
+            .filter(|p| !p.as_os_str().is_empty())
+            .collect(),
+        _ => vec![PathBuf::from("assets/fonts")],
+    }
+}
 
 /// 解析过一次的字体集：`faces[i]` 与 `book` 里第 i 条 `FontInfo` 一一对应。
 struct FontPool {
@@ -334,10 +399,6 @@ mod tests {
     /// 用 `r##` 而不是 `r#`：内容里的 `fill="#333"` 含 `"#`，会提前终结单层原始字符串。
     const DOT_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="#333"/></svg>"##;
 
-    fn font_dirs() -> Vec<PathBuf> {
-        vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/fonts")]
-    }
-
     fn request<'a>(source: &'a str, dirs: &'a [PathBuf]) -> CompileRequest<'a> {
         CompileRequest {
             source,
@@ -373,7 +434,7 @@ mod tests {
             crate::typeset::math::MITEX_PREAMBLE,
             CJK_FAMILIES[1],
         );
-        let injected = [("/ext/0.svg", DOT_SVG.as_bytes().to_vec())];
+        let injected = [("/ext/0.svg".to_string(), DOT_SVG.as_bytes().to_vec())];
         let dirs = font_dirs();
         let req = CompileRequest {
             source: &source,

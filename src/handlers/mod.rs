@@ -17,5 +17,6 @@ pub mod questions;
 pub mod spaces;
 pub mod tag_governance;
 pub mod tags;
+pub mod typeset;
 pub mod uploads;
 pub mod users;

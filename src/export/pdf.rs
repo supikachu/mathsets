@@ -12,7 +12,15 @@
 //!    `spec.answer_blank` 手里，两者冲突以 options 为准并记一条 info；
 //! 4. **文本切分**：问树 `stem` 与解析 `content` 在 bundle 里仍是原始文本，出口前一律过
 //!    [`split_content`]，让 IR 只剩 `InlineNode`（见 [`crate::typeset::ir`] 的不变式 1）。
+//!
+//! T3.7 起本模块兼任 **PDF 渲染出口**（[`generate_pdf`]：预取素材 → `typst_gen` → `compiler`）。
+//! 放在桥上而不是 handler 里，是因为「这张卷子要哪些图」只有排版域自己说得清，而 R1 已经把
+//! PDF 出口唯一化到 `/export/pdf` —— 一条链、一个入口。
 
+use std::collections::HashMap;
+use std::path::Path;
+
+use crate::export::assets::{FetchedImage, fetch_image};
 use crate::export::content::split_content;
 use crate::export::model::{
     AnswerSpace, BlankStyle as WireBlankStyle, ExamBundle, ExamQuestion, ExamSection, ExportMode,
@@ -20,11 +28,15 @@ use crate::export::model::{
 };
 use crate::models::question_structure::{QuestionPart, walk_leaves};
 use crate::typeset::blocks::choice_grid::{self, requires_single_column};
+use crate::typeset::compiler::{
+    CompileError, CompileRequest, compile_pdf, font_dirs, missing_cjk_fonts,
+};
 use crate::typeset::ir::{
     AnalysisEntry, AnswerBlock, AnswerLine, BlankBlock, BlockMeta, CalloutBlock, DocumentMeta,
     LayoutBlock, LayoutDoc, QuestionBlock, Section, SectionHeader, SubQuestionBlock,
 };
 use crate::typeset::spec::{BlankStyle, LayoutSpec, OutputProfile, ResolvedBlank};
+use crate::typeset::typst_gen;
 
 /// 题号「3.」的悬挂缩进占宽（em）—— docx 侧是 420tw = 2em，两处必须一致
 const HANGING_EM: f64 = 2.0;
@@ -385,6 +397,180 @@ fn analyses(q: &ExamQuestion, options: &ExportOptions) -> Vec<AnalysisEntry> {
         })
         .filter(|e| !e.nodes.is_empty())
         .collect()
+}
+
+// ═══════════════════════════ PDF 出口（T3.7） ═══════════════════════════
+
+/// typst 认得的图片格式。`infer` 能嗅出来的类型远多于这一列（tif/bmp/ico/heic…），
+/// 闸门必须自己把关：一张解不了的图会让**整次编译**开天窗，比 docx 少嵌一张图严重。
+const RENDERABLE: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg"];
+
+/// PDF 生成结果
+pub struct PdfResult {
+    pub bytes: Vec<u8>,
+    /// 生成期新问题（素材、公式降级、字体回退）；与题级 issues 合并进 X-Export-Warnings
+    pub issues: Vec<Issue>,
+}
+
+/// LayoutDoc → main.typ → PDF：排版出口的唯一渲染路径（R1，不提供 `/typeset/render`）
+///
+/// 编译失败是唯一能让整卷开天窗的失败：坏公式在 [`typst_gen::generate`] 里逐枚降级、坏图在
+/// [`prefetch_assets`] 里摘掉，还在出错就是模板或环境的问题。把诊断原样交给 handler（500），
+/// 不在这里假装修好 —— 静默产出一份缺页的考卷比报错更糟。
+pub async fn generate_pdf(doc: &LayoutDoc, upload_dir: &Path) -> Result<PdfResult, CompileError> {
+    let assets = prefetch_assets(doc, upload_dir).await;
+    let generated = typst_gen::generate(doc, &assets.images);
+
+    let dirs = font_dirs();
+    let compiled = compile_pdf(&CompileRequest {
+        source: &generated.source,
+        upload_dir,
+        font_dirs: &dirs,
+        injected: &assets.injected,
+    })?;
+
+    let mut issues = assets.issues;
+    issues.extend(generated.issues);
+    // §13.4：缺中文字体照常排，但豆腐块必须可诊断 —— 能回退不是静默的理由
+    let missing = missing_cjk_fonts(&dirs);
+    if !missing.is_empty() {
+        issues.push(Issue {
+            question_no: None,
+            field: IssueField::Other,
+            severity: IssueSeverity::Warning,
+            latex: None,
+            reason: format!(
+                "缺少中文字体：{}，中文按字体回退渲染（可能出现豆腐块）",
+                missing.join("、")
+            ),
+        });
+    }
+    // typst 自己的告警（字形缺失、弃用写法等）：卷级，源码是我们生成的，行号对教师无意义
+    issues.extend(compiled.warnings.into_iter().map(|warning| Issue {
+        question_no: None,
+        field: IssueField::Other,
+        severity: IssueSeverity::Warning,
+        latex: None,
+        reason: format!("typst：{warning}"),
+    }));
+
+    Ok(PdfResult {
+        bytes: compiled.output,
+        issues,
+    })
+}
+
+/// 渲染素材：`typst_gen` 要的 URL 表 + `compiler` 要的注入字节 + 预取期发现的问题
+#[derive(Default)]
+struct Assets {
+    /// 值 `None` = 这张图拿不到且**已记 Issue**（见 [`typst_gen::generate`] 的口径）
+    images: HashMap<String, Option<String>>,
+    injected: Vec<(String, Vec<u8>)>,
+    issues: Vec<Issue>,
+}
+
+/// 预取版面上的全部图片（B1）
+///
+/// 抓一遍才准：typst 的 `#image()` 打不开或解不出文件是整次编译失败，一个丢了的文件能把
+/// 整卷变成 500。本地图与外链走同一个入口 `assets::fetch_image`，区别只在外链要过网络。
+async fn prefetch_assets(doc: &LayoutDoc, upload_dir: &Path) -> Assets {
+    let mut a = Assets::default();
+    for (qno, url) in collect_images(doc) {
+        if a.images.contains_key(&url) {
+            continue; // 同图复用：一次抓取、一份字节、一个注入名
+        }
+        let path = match fetch_image(&url, upload_dir).await {
+            Ok(img) => a.register(qno, &url, img),
+            Err(e) => {
+                a.issues.push(Issue {
+                    question_no: qno,
+                    field: IssueField::Image,
+                    severity: IssueSeverity::Warning,
+                    latex: None,
+                    reason: format!("图片 {url} 处理失败：{e}"),
+                });
+                None
+            }
+        };
+        a.images.insert(url, path);
+    }
+    a
+}
+
+impl Assets {
+    /// 登记一张抓到的图。
+    ///
+    /// 一律注入 `/ext/<n>.<ext>` 而不是让 typst 直接读盘：typst 按**路径扩展名**选解码器，
+    /// 而库里的 URL 后缀与真实格式对不对得上没人保证（`.jpg` 里装着 PNG 是上传侧常事）。
+    /// 序号命名而非 URL 哈希见 [`crate::typeset::compiler`] 模块头的 FileId interner 说明。
+    fn register(&mut self, qno: Option<u32>, url: &str, img: FetchedImage) -> Option<String> {
+        let ext = img.ext.to_ascii_lowercase();
+        if !RENDERABLE.contains(&ext.as_str()) {
+            self.issues.push(Issue {
+                question_no: qno,
+                field: IssueField::Image,
+                severity: IssueSeverity::Warning,
+                latex: None,
+                reason: format!("图片 {url} 是 {ext}，PDF 不嵌入（仅支持 PNG/JPEG/GIF/WebP/SVG）"),
+            });
+            return None;
+        }
+        let path = format!("/ext/{}.{}", self.injected.len(), ext);
+        self.injected.push((path.clone(), img.bytes));
+        Some(path)
+    }
+}
+
+/// 版面上会出现的图片 URL（带归属题号）。IR 已是切分后的 `InlineNode`，无需二次解析文本。
+fn collect_images(doc: &LayoutDoc) -> Vec<(Option<u32>, String)> {
+    let mut out = Vec::new();
+    for section in &doc.sections {
+        for block in &section.blocks {
+            block_images(block, &mut out);
+        }
+    }
+    for answer in &doc.answer_key {
+        answer_images(answer, &mut out);
+    }
+    out
+}
+
+fn block_images(block: &LayoutBlock, out: &mut Vec<(Option<u32>, String)>) {
+    let qno = Some(block.question_no());
+    match block {
+        LayoutBlock::Question(q) => {
+            push_nodes(&q.stem, qno, out);
+            for option in &q.options {
+                push_nodes(&option.content, qno, out);
+            }
+        }
+        LayoutBlock::SubQuestion(s) => push_nodes(&s.stem, qno, out),
+        LayoutBlock::Callout(c) => push_nodes(&c.callout.nodes, qno, out),
+        LayoutBlock::Answer(a) => answer_images(a, out),
+        LayoutBlock::Blank(_) => {}
+    }
+}
+
+fn answer_images(answer: &AnswerBlock, out: &mut Vec<(Option<u32>, String)>) {
+    let qno = Some(answer.number);
+    for line in &answer.lines {
+        push_nodes(&line.nodes, qno, out);
+    }
+    for entry in &answer.analyses {
+        push_nodes(&entry.nodes, qno, out);
+    }
+}
+
+fn push_nodes(nodes: &[InlineNode], qno: Option<u32>, out: &mut Vec<(Option<u32>, String)>) {
+    for node in nodes {
+        match node {
+            InlineNode::Image { url, .. } => out.push((qno, url.clone())),
+            InlineNode::ImgRow { images, .. } => {
+                out.extend(images.iter().map(|i| (qno, i.url.clone())));
+            }
+            _ => {}
+        }
+    }
 }
 
 // ═══════════════════════════ 测试 ═══════════════════════════
@@ -1018,5 +1204,156 @@ mod tests {
         );
         let grid = question_of(&doc).grid;
         assert!((1..=4).contains(&grid.columns), "{grid:?}");
+    }
+
+    // ── 素材预取与 PDF 出口（T3.7） ──
+
+    /// 1×1 灰块 SVG：typst 真解得动，又能当文本常量写进断言
+    const DOT_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="#333"/></svg>"##;
+    /// 最小 PNG 签名：`infer` 认得，够预取层用（typst 解码才需要真图）
+    const PNG_SIG: &[u8] = &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+
+    fn uploads_with(files: &[(&str, &[u8])]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("mathset-pdf-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, bytes) in files {
+            let path = dir.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, bytes).unwrap();
+        }
+        dir
+    }
+
+    /// 单题卷子，题干按 markdown 图片语法写（`![alt](url)` 必须独占一行）
+    fn image_doc(stem: &str) -> LayoutDoc {
+        let q = ExamQuestion {
+            stem: nodes(stem),
+            ..choice(1, &["A"])
+        };
+        build_layout_doc(
+            &bundle(ExportMode::Student, vec![q]),
+            &ExportOptions::default(),
+            None,
+        )
+    }
+
+    fn img(ext: &str) -> FetchedImage {
+        FetchedImage {
+            bytes: vec![9],
+            ext: ext.to_string(),
+            remote: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn uploads_are_injected_by_ordinal_and_deduped() {
+        let dir = uploads_with(&[("questions/a.png", PNG_SIG)]);
+        // 同一张图出现两次：只抓一次、只注入一份，两处 #image() 共用一个路径
+        let doc = image_doc(
+            "如图：\n![甲](/uploads/questions/a.png)\n再看\n![乙](/uploads/questions/a.png)",
+        );
+        let a = prefetch_assets(&doc, &dir).await;
+        assert_eq!(
+            a.images.get("/uploads/questions/a.png"),
+            Some(&Some("/ext/0.png".to_string())),
+            "{:?}",
+            a.images
+        );
+        assert_eq!(a.injected.len(), 1);
+        assert_eq!(a.injected[0].0, "/ext/0.png");
+        assert_eq!(a.injected[0].1, PNG_SIG);
+        assert!(a.issues.is_empty(), "{:?}", a.issues);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn unreadable_image_is_skipped_with_the_real_reason() {
+        let dir = uploads_with(&[]);
+        let doc = image_doc("如图：\n![甲](/uploads/questions/missing.png)");
+        let a = prefetch_assets(&doc, &dir).await;
+        assert_eq!(
+            a.images.get("/uploads/questions/missing.png"),
+            Some(&None),
+            "拿不到也要进表：值 None 才让下游静默跳图"
+        );
+        assert!(a.injected.is_empty());
+        let issue = &a.issues[0];
+        assert_eq!(issue.question_no, Some(1));
+        assert_eq!(issue.field, IssueField::Image);
+        assert!(issue.reason.contains("不存在"), "{}", issue.reason);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn undecodable_formats_are_gated_out_of_the_package() {
+        // tif/bmp/ico 都逃得过 infer 的鼻子，却会让 typst 整次编译失败 —— 必须在这儿拦下
+        let mut a = Assets::default();
+        assert_eq!(
+            a.register(Some(1), "u1", img("png")),
+            Some("/ext/0.png".to_string())
+        );
+        assert_eq!(
+            a.register(Some(1), "u2", img("SVG")),
+            Some("/ext/1.svg".to_string()),
+            "扩展名大小写归一"
+        );
+        assert_eq!(a.register(Some(2), "u3", img("tif")), None);
+        assert_eq!(a.injected.len(), 2, "被拦下的图不进包");
+        assert_eq!(a.issues.len(), 1);
+        assert_eq!(a.issues[0].question_no, Some(2));
+        assert!(a.issues[0].reason.contains("tif"), "{}", a.issues[0].reason);
+    }
+
+    #[test]
+    fn collect_images_covers_every_block_that_can_carry_one() {
+        let mut q = choice(1, &["A"]);
+        q.stem = nodes("题干：\n![s](/uploads/s.png)");
+        q.options[0].content = nodes("选项：\n![o](/uploads/o.png)");
+        q.callouts = vec![Callout {
+            kind: CalloutKind::Knowledge,
+            title: "考点".into(),
+            nodes: nodes("提示：\n![c](/uploads/c.png)"),
+        }];
+        q.analyses = vec![AnalysisBlock {
+            id: "a".into(),
+            title: String::new(),
+            content: "解析：\n![a](/uploads/a.png)".into(),
+        }];
+        let doc = build_layout_doc(
+            &bundle(ExportMode::Teacher, vec![q]),
+            &ExportOptions {
+                include_analysis: true,
+                ..ExportOptions::default()
+            },
+            None,
+        );
+        let found = collect_images(&doc);
+        assert_eq!(found.len(), 4, "题干/选项/Callout/解析都要收：{found:?}");
+        assert!(
+            found.iter().all(|(qno, _)| *qno == Some(1)),
+            "警告要能指回题号：{found:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_pdf_renders_a_real_pdf_with_the_image_embedded() {
+        let dir = uploads_with(&[("d.svg", DOT_SVG.as_bytes())]);
+        let doc = image_doc("如图：\n![函数图象](/uploads/d.svg)\n求值域。");
+        let out = generate_pdf(&doc, &dir)
+            .await
+            .expect("一张本地图不该让整卷编译失败");
+        assert!(out.bytes.starts_with(b"%PDF"), "产物不是 PDF");
+        assert!(out.bytes.len() > 1000, "PDF 小得可疑：{}", out.bytes.len());
+        let image_issues: Vec<&str> = out
+            .issues
+            .iter()
+            .filter(|i| i.field == IssueField::Image)
+            .map(|i| i.reason.as_str())
+            .collect();
+        assert!(
+            image_issues.is_empty(),
+            "素材齐了就不该有图片警告：{image_issues:?}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
