@@ -3,14 +3,11 @@ import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   questionApi,
-  type ExamRequest,
   type ExamSectionRequest,
-  type ExportMode,
   type QuestionDetail,
 } from '@/api/client'
-import { AppIcon, AppModal, AppSelect } from '@/components/ui'
+import { AppIcon } from '@/components/ui'
 import ExportDialog from '@/components/ExportDialog.vue'
-import TypesetPreview from '@/components/TypesetPreview.vue'
 import LatexRender from '@/components/LatexRender.vue'
 import QuestionOptions from '@/components/QuestionOptions.vue'
 import QuestionStructureView from '@/components/QuestionStructureView.vue'
@@ -366,51 +363,6 @@ function openExport(sectionTitle?: string) {
   showExport.value = true
 }
 
-// ── 版式预览（T5.5）：TypesetPreview 只认一个 request，本视图给一份与导出同形的请求体。
-// 宿主刻意做小 —— 一个模式下拉足够验「参数变更自动刷新 + 预检点击定位」，版面微调与
-// 预览并入导出对话框是 T5.6 的活儿，届时这段序列化应当收进那里，别在两处各写一份口径。
-
-const showPreview = ref(false)
-const previewMode = ref<ExportMode>('exam')
-const previewSections = ref<ExamSectionRequest[]>([])
-
-const PREVIEW_MODES = [
-  { value: 'student', label: '学生练习' },
-  { value: 'teacher', label: '教师讲义' },
-  { value: 'exam', label: '标准考卷' },
-]
-
-/// 不带 `spec`：后端按 mode 取内置预设（T3.3 口径），预览与导出一字不差
-const previewRequest = computed<ExamRequest | null>(() =>
-  previewSections.value.length
-    ? {
-        title: '试题篮组卷',
-        exam_meta: { instructions: [] },
-        mode: previewMode.value,
-        sections: previewSections.value,
-        options: {
-          include_answer: previewMode.value !== 'student',
-          include_analysis: previewMode.value !== 'student',
-          answer_at_end: previewMode.value === 'exam',
-          callouts: { knowledge: false, error_prone: false, analysis: false },
-        },
-      }
-    : null,
-)
-
-function openPreview() {
-  if (!items.value.length) {
-    toast.info('试题篮是空的，先去题库选题')
-    return
-  }
-  previewSections.value = sectionsPayload(groupedSections.value)
-  showPreview.value = true
-}
-
-function onPreviewMode(value?: string) {
-  if (value) previewMode.value = value as ExportMode
-}
-
 /// print 兜底：导出引擎未覆盖的排版需求仍可用浏览器打印
 function printPaper() {
   setTimeout(() => window.print(), 300)
@@ -663,10 +615,6 @@ function goDetail(id: string) {
             <AppIcon name="download" :size="15" />
             <span>下载试卷</span>
           </button>
-          <button type="button" class="bk-preview-cta" @click="openPreview">
-            <AppIcon name="eye" :size="14" />
-            <span>预览版式</span>
-          </button>
         </div>
 
         <div class="apple-sidebar-widget">
@@ -773,22 +721,6 @@ function goDetail(id: string) {
       default-title="试题篮组卷"
       @print="printPaper"
     />
-
-    <AppModal v-model="showPreview" title="版式预览" width="1160px">
-      <div class="bk-preview-bar">
-        <span class="bk-preview-caption">输出模式</span>
-        <AppSelect
-          :model-value="previewMode"
-          :options="PREVIEW_MODES"
-          @update:model-value="onPreviewMode"
-        />
-        <span class="bk-preview-note">
-          换模式即重排（攒 300ms）；纸张与栏数走该模式的默认预设，版面微调在导出面板里
-        </span>
-      </div>
-      <!-- v-if：关掉即卸载，下次打开重新编译一份，而不是留着上一次的版面 -->
-      <TypesetPreview v-if="showPreview" :request="previewRequest" />
-    </AppModal>
   </div>
 </template>
 
@@ -889,45 +821,6 @@ a.apple-basket-cta {
 
 .bk-download-cta:hover {
   background: #0077ed;
-}
-
-.bk-preview-cta {
-  width: 100%;
-  height: 34px;
-  margin-top: 8px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  font-size: 13px;
-  font-weight: 600;
-  color: #0071e3;
-  background: rgba(0, 113, 227, 0.05);
-  border: 1px solid rgba(0, 113, 227, 0.22);
-  border-radius: 12px;
-  cursor: pointer;
-}
-
-.bk-preview-bar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 12px;
-}
-
-.bk-preview-caption {
-  font-size: 12px;
-  color: var(--text-secondary);
-  white-space: nowrap;
-}
-
-.bk-preview-bar :deep(.app-select-wrapper) {
-  width: 150px;
-}
-
-.bk-preview-note {
-  font-size: 11px;
-  color: var(--text-muted);
 }
 
 .bk-sort-seg {

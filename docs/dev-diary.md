@@ -2410,5 +2410,106 @@ browsing context，而页码导航与缩放都要在同一份可测 DOM 上算�
   `--test typeset_preview_api`（6 条）全绿（两枚 `DATABASE_URL_TEST` 已配置，真实跑在 `mathset_test` 库上，
   不是自跳过）；`npm run build`（`vue-tsc -b && vite build`）退出码 0。
 
+## 2026-09-03 导出引擎 M5 批次④（导出面板完整化：预览联动 / 全部版面参数 / 统一清单）
+
+### 一、一份请求体搬进导出面板，Basket 那份序列化整块删（R14 的收口）
+
+`ExportDialog` 的 `buildRequest()` 现在同时喂导出与预览，`previewRequest` 是它的一份深拷贝快照；
+Basket 侧的 `previewRequest` / `previewMode` / `PREVIEW_MODES` / `onPreviewMode`、版式预览模态与
+「预览版式」入口整块删掉（该文件 −109 行）。`TypesetPreview` 从此只有一个宿主。
+
+快照不是洁癖，是这条路的时间常数逼出来的：预览要过 300ms debounce 再加一次冷编（debug 下 4–5s），
+`spec` 若与 `layout` 共享引用，教师边等编译边改边距，在途那趟序列化就会把新旧值混成一份**谁也没排过的
+版面**。导出侧不拍——从点按钮到序列化之间没有可停顿的间隙。代价按 R15 认了：试题篮不再有独立预览按钮。
+
+### 二、预览只对 PDF 开，开关跟着格式一起关
+
+`pickFormat` 里 `if (next !== 'pdf') showPreview.value = false`，开关本身 `:disabled="!isPdf"`，
+旁边写的是原因而不是借口：「预览走排版引擎，Word 的分页在 Word 自己手里、Markdown 没有版面」。
+docx / markdown 那六格因此验导出口径不验预览：**格式切走之后预览请求数全程 10 → 10**，
+切回 PDF 再勾上才新增第 11 枚（同一次参数没动，也只新增这一枚）。
+
+顺手收一处不一致：`仅 PDF` 角标与 `disabled` 原本各占一半，同一块面板里三格能点、两格灰着。
+定死为 **参数格只挂角标、不禁用**（教师完全可以先在 Word 下把留白高度调好再切回 PDF），
+只有真不生效的那个开关才禁用。
+
+### 三、九格矩阵逐格读数（浏览器 / 篮内 10 题 / debug 后端）
+
+| 格 | 端点 | HTTP | 字节 | 回执头 | 这一格动过的参数 → 请求体落点 |
+| --- | --- | --- | --- | --- | --- |
+| PDF·学生练习 | `/export/pdf` | 200 | 48 928 | 0 | 模式预设 `a4_practice` + `margins.top_mm`=15 |
+| PDF·教师讲义 | `/export/pdf` | 200 | 47 170 | 420 字符 | 连切模式，每改一次参数恰好多一枚预览请求 |
+| PDF·标准考卷 | `/export/pdf` | 200 | 54 166 | 0 | `a3_fold_exam` 预设 + 纸张 `a3_tri` |
+| Word·学生练习 | `/export/docx` | 200 | 5 425 | 0 | `margins.left_mm`=12（预设 `a4_practice`：2 栏 / 上 20 / 栏距 8）|
+| Word·教师讲义 | `/export/docx` | 200 | 5 512 | 0 | `margins.gutter_mm`=10（`a4_lecture`：1 栏 / 上 22）|
+| Word·标准考卷 | `/export/docx` | 200 | 5 569 | 0 | `margins.right_mm`=9；`paper`=a3_fold、`binding`=center_fold、`odd_even_outer`=true 随模式预设进来 |
+| MD·学生练习 | `/export/markdown?bundle=true` | 200 | 562（zip）| 0 | 版面区块不存在，**请求体里没有 `spec` 字段** |
+| MD·教师讲义 | `/export/markdown` | 200 | 2 651（md）| 0 | 同上；`callouts.knowledge` / `error_prone`=true |
+| MD·标准考卷 | `/export/markdown?bundle=true` | 200 | 664（zip）| 0 | 同上；`options.answer_at_end`=true |
+
+扩展名与 MIME 每格都核过：`…试题篮组卷.pdf` / `.docx`（`application/vnd.openxmlformats-…wordprocessingml.document`）
+/ `.zip`（`application/zip`）/ `.md`（`text/markdown; charset=utf-8`），`Content-Disposition` 与
+`<a download>` 落的名字一致（都是 `URL.createObjectURL` 那一路，不靠下载目录）。
+Markdown 三格 `spec` 缺失是 `hasLayout` 说了算，不是「显示了但没填」——所以那三格连版面区块都不渲染。
+
+教师格那 420 字符本轮**没解码出条目**，事后同一端点用另一份 spec 复测是 0 条：差别只能在当时那份
+参数（PDF 走 `doc.issues`，排版期降级）。这一格按读数记账，不按归因记账。
+
+### 四、⛔ 4984ms 与 562ms 是同一份参数：矩阵里的 PDF 毫秒数是缓存的读数
+
+上表 PDF 三格 232–326ms 看着比批次② 那扇门还快，是**假的**：每格都是「改参数 → 等预览编完 →
+立刻同参数导出」，导出吃的是 comemo 的热缓存。把预览关掉、改一处边距、连点两次导出，同一份请求体
+读到 **4984ms 首编 / 562ms 第二编**（字节同为 50 227）。所以矩阵里的 PDF 毫秒只能当「同参第二遍」读，
+冷编的价仍在 `--release` 那三档里（20 题 674ms / 百页 2.5s）。
+
+这条与批次② 记的「debug/release 抢锁、读数必须 `--release`」是同一族坑的第三张脸：**缓存命中会让
+端到端读数比基准低一个数量级**，而 UI 上看着完全正常。
+
+### 五、同屏只有一份清单：预览 ⇄ 回执是互换，不是并排
+
+行的画法抽成 `PreflightList.vue`（级别点 / 字段 / 题号 / 页 / 文案 + 点击定位 + 当前页高亮 +
+「无页可定位」，排序与分级计数也在组件里），预览底部与导出面板的回执共用它。回执那侧先归一：
+`ExportWarning` 只有四字段，无级别无页码 ⇒ 一律按警告画、标「无页可定位」。
+
+**回执这一路本轮才真被画出来**——先前九格里 warn 全是 0，等于没测。把探针题的题干临时追加
+`![](/uploads/t56-missing.png)`（`assets.rs:102` 走 `NotFound`），Word 与 Markdown 各自从自己的抓图分支
+（`docx/writer.rs:234`、`markdown.rs:59`）报出同一条，读到：
+
+- 头 304 字符 → 屏上「本次导出回执 1 条内容降级」，清单头「导出回执 · 警告 1 · 回执口径不含级别与页码」，
+  行文案「图片 / 第 1 题 / 无页可定位 / 图片 /uploads/t56-missing.png 处理失败：本地图片不存在」，
+  行 `disabled` 且 title 写着「这条发生在排版之前，没有页可跳」；toast 换成「已导出，但有 1 条降级警告」。
+  Word 格字节 5 425 → 5 671、Markdown 格 644（zip），**回执条数与格式无关、与图源有关**。
+- 再把格式切回 PDF、开预览：屏上 `.pl-head` **恒为 1 枚**，标题换成「印前预检 · 警告 2」，同一条图片项
+  （无页）与一条「版面 / 第 1 页 / 超出纸张右边界 943.4mm」并列，后者可点、点后拿到 `.is-active`；
+  面板里的回执退化成一行指引「本次导出回执 1 条 —— 全量清单在右侧面板底部」。
+- 验完把题干还原，探针库里不留坏图。
+
+### 六、装订带备忘录、客户端夹取、以及一处必须说清的口径
+
+- `onBindingToggle` 关掉时把 `binding` 存进 `bindingMemo` 再置 null，重开回填：实测「装订位=左侧装订带 +
+  考号不勾 → 关 → 开」四个勾与位置原样回来（没有 memo 会洗回 `center_fold` + 四区全勾），且这份态真上了线
+  —— 导出体 `binding:{position:"left",areas:{…exam_no:false}}`。
+- 夹取只在客户端：`上` 填 300 归一 40（`MARGIN_MM.max`）、填非数取原值、留白滑杆 2–20cm 步长 0.5。
+  后端对 `LayoutSpec` 仍零校验，这层只挡得住从这一格进来的人。
+- 版面参数露到 `color / header_footer / answer_blank` 三组带角标，`fonts` 整组不露（无字体清单接口，
+  `math` 按其字段注释当前没有落点），面板里留一行写明「字体族跟随预设」。
+- 面板形态：预览关着单列 600px，开着 1240px 双列。验收窗口只有 744px 宽，右列被挤到 160px、纸张量到
+  126px —— 加了 1080px 断点改堆叠，HMR 后纸张回到 600×849px（A4 比例）。
+
+### 七、本批次已知边界
+
+- 面板默认格式仍是 Markdown（M1 时代留下的），PDF 排在第三格。没动默认值：那会让「默认导出什么」这件事
+  跟着版面能力跑偏，属另一个决定。
+- Word 下「色彩 / 页眉页脚 / 答题留白」可编辑但不生效，只靠角标 + 一行说明交代。让 Word 真吃 `color`
+  不在 T5.6 范围内。
+- `seq` 序号守卫依旧**只被推理与代码审查覆盖**，九格里没造出后发先至（同批次③ 那条）。
+- 逐字符输入（标题）的请求数没单测过，只测过模式连切与参数逐次改。
+- 本批次**无 Rust 改动**（`git status` 只有 docs + 4 枚前端文件 + 1 枚新增），因此未重跑
+  `cargo test --lib`：批次③ 提交前那一次 722 passed 覆盖的正是当前 HEAD 的 Rust 代码，ts-rs 那枚规矩
+  本轮没有触发面（新读的 `Binding` / `BlankStyle` / `ColorMode` / `Issue` 全部来自已生成的 `api/types`）。
+  `npm run build`（`vue-tsc -b && vite build`）退出码 0。
+- **改 `<script setup>` 会把组件本地态洗回默认**：本轮矩阵收完补一条注释，Vite 重跑 setup，面板从
+  「PDF + 左装订带」直接回到 Markdown 默认、`.ex-num` 全没了。验收中途只改 `<style>` 才保得住态。
+
 
 

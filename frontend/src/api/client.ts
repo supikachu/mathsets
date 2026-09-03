@@ -2013,7 +2013,16 @@ export type {
   Issue,
   IssueSeverity,
 } from './types/exam'
-export type { BlankStyle, LayoutSpec, Paper, PreviewResponse, ProfilePreset } from './types/layout'
+export type {
+  Binding,
+  BlankStyle,
+  ColorMode,
+  LayoutSpec,
+  Margins,
+  Paper,
+  PreviewResponse,
+  ProfilePreset,
+} from './types/layout'
 
 /// 导出类请求超时（B4：全局 10s 对百页大卷 + 大 blob 下载会触顶）
 const EXPORT_TIMEOUT_MS = 60000

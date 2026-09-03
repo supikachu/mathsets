@@ -5,6 +5,9 @@
  * 只认一个入参：`request`（与 `/export/pdf` 完全同一份请求体）。预览与导出用的是同一次编译
  * 的产物，所以这里看到的就是点「导出」会拿到的东西（R12）。
  *
+ * 宿主：`ExportDialog`（T5.6 起预览并入导出面板，Basket 里那个最小宿主已撤）。清单本身交给
+ * `PreflightList` 画 —— 导出回执在面板里走同一个组件，两边不会各写一份口径（R15）。
+ *
  * 三处刻意的设计：
  * - **只挂载当前页**。一页 SVG ~200KB，百页卷 ~4MB（`handlers/typeset.rs` 尾部那笔账），
  *   整卷进 DOM 会把面板做成第二个标签页。
@@ -18,10 +21,10 @@ import {
   typesetApi,
   type ExamRequest,
   type Issue,
-  type IssueSeverity,
   type PreviewResponse,
 } from '@/api/client'
 import { AppIcon, AppSelect } from '@/components/ui'
+import PreflightList from '@/components/PreflightList.vue'
 import { intrinsicWidthPx, sanitizeSvg } from '@/utils/svgSanitize'
 
 const props = defineProps<{ request: ExamRequest | null }>()
@@ -37,22 +40,6 @@ const ZOOM_OPTIONS = [
   { value: 'fit', label: '适应宽度' },
 ]
 
-const FIELD_LABEL: Record<Issue['field'], string> = {
-  stem: '题干',
-  analysis: '解析',
-  choice: '选项',
-  answer: '答案',
-  structure: '结构',
-  image: '图片',
-  other: '版面',
-}
-const SEVERITY_LABEL: Record<IssueSeverity, string> = {
-  error: '错误',
-  warning: '警告',
-  info: '提示',
-}
-const SEVERITY_RANK: Record<IssueSeverity, number> = { error: 0, warning: 1, info: 2 }
-
 const result = ref<PreviewResponse | null>(null)
 const loading = ref(false)
 const errorText = ref('')
@@ -65,19 +52,6 @@ let timer: ReturnType<typeof setTimeout> | null = null
 const pageCount = computed(() => result.value?.page_count ?? 0)
 const issues = computed<Issue[]>(() => result.value?.issues ?? [])
 const engineWarnings = computed(() => result.value?.warnings ?? [])
-
-/// 分级展示：错误在前，同级按页码排（教师从上往下读就是从上卷往下卷）
-const sortedIssues = computed(() =>
-  [...issues.value].sort(
-    (a, b) =>
-      SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity] || (a.page ?? 0) - (b.page ?? 0),
-  ),
-)
-const severityCounts = computed(() =>
-  (['error', 'warning', 'info'] as IssueSeverity[])
-    .map((sev) => ({ sev, n: issues.value.filter((i) => i.severity === sev).length }))
-    .filter((c) => c.n > 0),
-)
 
 /// 当前页只有一张：过完 sanitize 才进 DOM（B7），读不懂的整页不显示
 const currentSvg = computed(() => {
@@ -103,10 +77,6 @@ const statusText = computed(() => {
 
 function go(next: number) {
   page.value = Math.min(Math.max(1, next), Math.max(1, pageCount.value))
-}
-
-function jumpTo(issue: Issue) {
-  if (issue.page) go(issue.page)
 }
 
 function onZoom(value?: string) {
@@ -219,44 +189,15 @@ onBeforeUnmount(() => {
       <p v-else class="tp-empty">{{ errorText || '没有可预览的内容' }}</p>
     </div>
 
-    <section class="tp-checks">
-      <header class="tp-checks-head">
-        <AppIcon name="shield-check" :size="14" />
-        <span class="tp-checks-title">印前预检</span>
-        <span v-for="c in severityCounts" :key="c.sev" class="tp-count" :data-sev="c.sev">
-          {{ SEVERITY_LABEL[c.sev] }} {{ c.n }}
-        </span>
-        <span class="tp-hint">点一条就跳到它所在的那一页</span>
-      </header>
+    <!-- 清单的画法在 PreflightList：导出面板用同一个组件显示回执，两边不会各写一份口径（R15） -->
+    <PreflightList :items="issues" :active-page="page" @locate="go" />
 
-      <ul v-if="sortedIssues.length" class="tp-list">
-        <li v-for="(it, i) in sortedIssues" :key="i">
-          <button
-            type="button"
-            class="tp-item"
-            :class="{ 'is-active': it.page === page }"
-            :disabled="!it.page"
-            :title="it.page ? `跳到第 ${it.page} 页` : '这条发生在排版之前，没有页可跳'"
-            @click="jumpTo(it)"
-          >
-            <span class="tp-dot" :data-sev="it.severity"></span>
-            <span class="tp-tag">{{ FIELD_LABEL[it.field] }}</span>
-            <span v-if="it.question_no" class="tp-tag">第 {{ it.question_no }} 题</span>
-            <span v-if="it.page" class="tp-tag tp-tag--page">第 {{ it.page }} 页</span>
-            <span v-else class="tp-tag tp-tag--muted">排版之前，无页可定位</span>
-            <span class="tp-reason">{{ it.reason }}</span>
-          </button>
-        </li>
+    <details v-if="engineWarnings.length" class="tp-engine">
+      <summary>排版引擎告警 {{ engineWarnings.length }} 条（原文，给人看）</summary>
+      <ul>
+        <li v-for="(w, i) in engineWarnings" :key="i">{{ w }}</li>
       </ul>
-      <p v-else class="tp-clean">没报出问题：图够清、内容没画出纸外、中文由思源系字体绘制。</p>
-
-      <details v-if="engineWarnings.length" class="tp-engine">
-        <summary>排版引擎告警 {{ engineWarnings.length }} 条（原文，给人看）</summary>
-        <ul>
-          <li v-for="(w, i) in engineWarnings" :key="i">{{ w }}</li>
-        </ul>
-      </details>
-    </section>
+    </details>
   </div>
 </template>
 
@@ -398,134 +339,6 @@ onBeforeUnmount(() => {
 
 .tp-empty--bad {
   color: var(--danger);
-}
-
-.tp-checks {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px 12px;
-  background: var(--bg-input);
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-sm);
-}
-
-.tp-checks-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-
-.tp-checks-title {
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-.tp-count {
-  padding: 1px 6px;
-  font-variant-numeric: tabular-nums;
-  border-radius: 999px;
-  border: 1px solid var(--border-color);
-}
-
-.tp-count[data-sev='error'] {
-  color: var(--danger);
-}
-
-.tp-count[data-sev='warning'] {
-  color: var(--warning);
-}
-
-.tp-hint {
-  margin-left: auto;
-  font-size: 11px;
-  color: var(--text-muted);
-}
-
-.tp-list {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  max-height: 190px;
-  margin: 0;
-  padding: 0;
-  overflow-y: auto;
-  list-style: none;
-}
-
-.tp-item {
-  display: flex;
-  align-items: baseline;
-  gap: 7px;
-  width: 100%;
-  padding: 5px 6px;
-  font: inherit;
-  font-size: 12px;
-  line-height: 1.5;
-  text-align: left;
-  color: var(--text-primary);
-  background: none;
-  border: none;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-}
-
-.tp-item:not(:disabled):hover {
-  background: var(--bg-hover);
-}
-
-.tp-item:disabled {
-  cursor: default;
-}
-
-.tp-item.is-active {
-  background: var(--accent-light);
-}
-
-.tp-dot {
-  width: 7px;
-  height: 7px;
-  flex-shrink: 0;
-  background: var(--text-muted);
-  border-radius: 50%;
-}
-
-.tp-dot[data-sev='error'] {
-  background: var(--danger);
-}
-
-.tp-dot[data-sev='warning'] {
-  background: var(--warning);
-}
-
-.tp-tag {
-  flex-shrink: 0;
-  padding: 0 5px;
-  font-size: 11px;
-  color: var(--text-secondary);
-  border: 1px solid var(--border-color);
-  border-radius: 3px;
-}
-
-.tp-tag--page {
-  color: var(--accent);
-  border-color: var(--accent);
-}
-
-.tp-tag--muted {
-  color: var(--text-muted);
-}
-
-.tp-reason {
-  color: var(--text-secondary);
-}
-
-.tp-clean {
-  margin: 0;
-  font-size: 12px;
-  color: var(--text-secondary);
 }
 
 .tp-engine {
