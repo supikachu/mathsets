@@ -105,3 +105,7 @@ ecow = "0.2"              # typst 公开签名里的 Sm / Arc 字符串类型；
 tower = { version = "0.5", features = ["util"] }
 # 使用真实数据库的测试
 serde_json = "1"
+# 只为 `comemo::testing::last_was_hit` 这一枚命中断言（R13 / T5.3 DoD）。测试构建里整个图
+# 共享同一份 comemo，所以 typst 内部那些 `#[comemo::memoize]` 的命中也看得见；`testing` 只
+# 加一对 thread_local，且 dev-dependency 不进 release 产物。
+comemo = { version = "0.5.1", features = ["testing"] }

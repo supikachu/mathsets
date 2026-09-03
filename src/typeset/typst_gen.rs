@@ -260,36 +260,74 @@ const FUNCTION_LIBRARY: &str = r#"
 
 /// 选项栅格：列数与 docx 同源（typeset::blocks::choice_grid），不各排各的。
 ///
-/// **R7 兜底**：Rust 侧的估宽是先验，只有 typst 这边能拿到渲染后的真实宽度。所以多列时用
-/// `layout` 取「这一栏实际分给栅格的宽度」（`inset` 已经扣掉了题号悬挂缩进，T4.3 的左文右图
-/// 之后也会自动变小），用 `measure` 量每个单元格**不折行**的自然宽，装不下就降列：
-/// 4 → 2 → 1。跳过 3 是故意的 —— 四枚选项排成 3+1 比排成 2+2 难看。
-/// 三处误差都由它兜：估宽对没见过的 LaTeX 命令偏乐观、图片宽要解码后才知道、
-/// 以及 docx 与 typst 的悬挂缩进口径差（2.0em vs 2.6em）。
-/// 行间距 0.7em 与 [`item`] 同一道理：栅格的每一行只有字框高，`par` 的 leading 不会管到栅格行，
-/// 2pt 的行距会让「一列四行」的选项在竖向上压在一起。
-/// 判定为单列时一个单元格都不量 —— 不是为省钱：20 题卷实测 113ms（开兜底）对 114ms（全单列），
-/// 500ms/卷的预算很宽（探针见 `cost_of_the_measure_fallback`），单列本来就装不下溢出这回事。
-#let choices(cols, ..cells) = {
+/// ## 一份渲染，两枚开关（R13）
+/// 画出来的行**只有一种**：定宽 `box` 直排（`rows`）。两枚开关都只改「列数怎么定」，不改怎么画：
+///
+/// - `probe` = 要不要请 typst 复量一趟列数。`choice_grid::decide` 的 25% / 50% 阈值不带余量，
+///   Rust 侧算出「最宽选项 ≤ 单列预算的 85%」时这一题必然装得进本列、必然单行，复量只是重算一遍
+///   已经知道的结论 ⇒ `probe: false`，一枚都不量（复量一行四选项 ≈20–30ms，`cost_of_the_measure_fallback`）。
+/// - `boxed` = 这些单元格能不能进行内盒。表格 / 硬换行 / 并排图组 / 块级公式进了 `box`（inline
+///   block）会改分页与显示样式语义，图片的宽高比 Rust 侧无从得知 ⇒ `boxed: false`，那一侧仍是
+///   `grid` + 4→2→1，与 R13 之前逐字相同。
+///
+/// ## 为什么值得为「怎么画」单独立一枚开关
+/// 实测单价（`--release`，冷档前 `comemo::evict(0)`；`cost_of_a_preview` 的逐题型矩阵）：
+/// 同样 40 枚选项单元格，`grid` 排 1025ms、`box` 排 109ms，而空卷地板 91–96ms（调优前记的是 117ms）
+/// —— 两者之差已在噪声底以下 ⇒ 免量那侧等于不要钱。
+/// 同一份源码 A/B 只换渲染器：1050ms → 470ms。也就是说 **`grid` 一枚单元格 ≈ 14–22ms**，
+/// 是整条管线里除字体外最贵的东西，比它上面那趟 `measure` 还贵三倍。
+/// 顺带修掉一个版面缺陷：`grid` 包在 `layout(size => …)` 里会把整行收成**内容宽**而不是铺满容器
+/// （两列实测档距 34.28mm，铺满该是 38.2mm；三栏卷上四列挤在左半截就是这么来的）。
+/// `box(width: 100% / n)` 是精确分数，等距且铺满，与 docx 的等宽 `w:tblGrid` 同一个口径。
+///
+/// 阶梯（`ladder`）三处误差由它兜：估宽对没见过的 LaTeX 命令偏乐观、图片宽要解码后才知道、
+/// 以及 docx 与 typst 的悬挂缩进口径差（2.0em vs 2.6em）。跳过 3 列是故意的 —— 四枚选项排成
+/// 3+1 比排成 2+2 难看。
+/// `first-line-indent: 0em` 是必须的：外层 [`item`] 那枚负的悬挂缩进会顺着 `set par` 传进来，
+/// 栅格单元不吃它、`par` 直排会把首列拉到题号底下。
+/// `leading: 0.7em` 与母版的正文同值：行内盒没有栅格那样的 `row-gutter`，竖着排的四枚选项
+/// 全靠这一份行距撑开，给 0 就是挤成一坨。
+#let choices(cols, probe: true, boxed: true, ..cells) = {
   let gut = 10pt
-  if cols <= 1 {
-    grid(columns: 1, gutter: (gut, 0.7em), ..cells)
-  } else {
-    layout(size => {
-      let want = {
-        let w = 0pt
-        // `..cells` 收来的是 arguments 不是数组，循环得先 `.pos()`（实测：直接 loop 报
-        // "cannot loop over arguments"）；下面的 `..cells` 展开传参仍然照旧可用
-        for cell in cells.pos() {
-          let natural = measure(cell).width
-          if natural > w { w = natural }
-        }
-        w
+  // `..cells` 收来的是 arguments 不是数组，循环得先 `.pos()`（实测：直接 loop 报
+  // "cannot loop over arguments"）；下面的 `..cells` 展开传参仍然照旧可用
+  let cs = cells.pos()
+  let rows(n) = par(leading: 0.7em, first-line-indent: 0em, justify: false)[
+    // 换行放在**每行开头**（首行跳过）：typst 代码里没有 `%` 取模运算符（实测报错
+    // "the character `%` is not valid in code"），而 `chunks` 已经替我们把选项分成行，
+    // 不需要再按枚数算余数。
+    #for (r, row) in cs.chunks(n).enumerate() {
+      if r > 0 { linebreak() }
+      for cell in row {
+        box(width: 100% / n)[#cell]
       }
-      let fits(c) = want <= (size.width - (c - 1) * gut) / c
-      let n = if fits(cols) { cols } else if cols >= 4 and fits(2) { 2 } else { 1 }
-      grid(columns: n, gutter: (gut, 0.7em), ..cells)
-    })
+    }
+  ]
+  // 复量：取这一栏实际分给选项的宽度，量每枚单元格**不折行**的自然宽，装不下就降列 4 → 2 → 1
+  let ladder(size) = {
+    let want = {
+      let w = 0pt
+      for cell in cs {
+        let natural = measure(cell).width
+        if natural > w { w = natural }
+      }
+      w
+    }
+    let fits(c) = want <= (size.width - (c - 1) * gut) / c
+    if fits(cols) { cols } else if cols >= 4 and fits(2) { 2 } else { 1 }
+  }
+  if not boxed {
+    if cols <= 1 {
+      grid(columns: 1, gutter: (gut, 0.7em), ..cells)
+    } else {
+      layout(size => grid(columns: ladder(size), gutter: (gut, 0.7em), ..cells))
+    }
+  } else if probe and cols > 1 {
+    layout(size => rows(ladder(size)))
+  } else {
+    // 走到这里 cols 必然 ≥ 1：Rust 侧 `columns.max(1)` 已经夹过（写模板时别指望 typst 有
+    // `(n).max(1)` 这种方法，取大的是 `calc.max`）。
+    rows(cols)
   }
 }
 
@@ -1036,7 +1074,8 @@ impl Gen<'_> {
         )
     }
 
-    /// 选项栅格调用（`None` = 这道题没有选项）：`#choices(列数, [A. …], [B. …])`
+    /// 选项栅格调用（`None` = 这道题没有选项）：
+    /// `#choices(列数, probe: 要不要复量, boxed: 能否走行内盒, [A. …], [B. …])`
     fn choices(&mut self, options: &[ExamOption], columns: usize) -> Option<String> {
         if options.is_empty() {
             return None;
@@ -1056,7 +1095,13 @@ impl Gen<'_> {
                 )
             })
             .collect();
-        Some(format!("#choices({},{})", columns.max(1), cells.join(", ")))
+        let columns = columns.max(1);
+        let boxed = options.iter().all(|o| measurable(&o.content));
+        let probe = needs_probe(options, est_avail_em(self.spec), columns);
+        Some(format!(
+            "#choices({columns}, probe: {probe}, boxed: {boxed}, {})",
+            cells.join(", ")
+        ))
     }
 
     /// 左文右图（T4.3）：题干按 `split` 切成左右两格，配图并排进右栏
@@ -1378,16 +1423,46 @@ fn aligns_for(aligns: &[TableAlign], cols: usize) -> String {
         .join(", ")
 }
 
-/// 这段内容的高估得准吗：只能按「宽 ÷ 栏宽 = 行数」折行估的内容才算准。
+/// 这段内容走得进定宽 `box` 吗，以及它的**高**估得准吗 —— 模板 `choices` 的 `boxed` 与 `probe`
+/// 两枚开关共用这一个判据（R13），不各写一套。
 ///
-/// 硬换行 / 表格 / 并排图组 / 块级公式由 [`choice_grid::requires_single_column`] 认（与栅格
-/// 决策同一判据，不各写一套），图片另外单独排除 —— 只知道像素宽、不知道宽高比，
-/// 等比缩放后的毫米高在 Rust 侧无从得知。
+/// 硬换行 / 表格 / 并排图组 / 块级公式由 [`choice_grid::requires_single_column`] 认：它们进了
+/// 行内盒会改分页与显示样式语义，所以那一侧仍是 `grid`。图片单独排除：只知道像素宽、不知道宽高比，
+/// 等比缩放后的毫米高在 Rust 侧无从得知，而它也是**宽度**唯一会系统性低估的一类。
+/// 只按「宽 ÷ 栏宽 = 行数」折行估的内容才算准。
 fn measurable(nodes: &[InlineNode]) -> bool {
     !choice_grid::requires_single_column(nodes)
         && !nodes
             .iter()
             .any(|n| matches!(n, InlineNode::Image { .. } | InlineNode::ImgRow { .. }))
+}
+
+/// 选项栅格的列间距（em）：模板 `choices` 里写死 `gut = 10pt`，正文 10.5pt ⇒ 0.95em。
+/// 两边必须同一个数，否则免量那侧算出的预算与复量那侧的判据差一截。
+const CHOICE_GUT_EM: f64 = 10.0 / 10.5;
+
+/// 离阈值多远才值得让 typst 复量（R13）：[`choice_grid::decide`] 的 25% / 50% 是**贴线**判定、
+/// 本身不带余量，所以只有贴线的判定才真的需要复量。0.85 = 估宽得比单列预算窄 15% 才免量。
+const PROBE_HEADROOM: f64 = 0.85;
+
+/// 这一题的选项要不要请 typst 复量（模板 `choices` 的 `probe`，R13）。
+///
+/// 单列不问：那条分支本来就一枚都不量。免量的前提是「每一枚单元格都被证明装得进本列、必然
+/// 单行」，所以估宽不准的那一类（表格 / 硬换行 / 并排图 / 块级公式 / 图片 —— 全在
+/// [`measurable`] 的口径里，图片是唯一会系统性低估的）一律复量。
+fn needs_probe(options: &[ExamOption], avail_em: f64, columns: usize) -> bool {
+    if columns <= 1 {
+        return false;
+    }
+    if options.iter().any(|o| !measurable(&o.content)) {
+        return true;
+    }
+    let budget = (avail_em - (columns - 1) as f64 * CHOICE_GUT_EM) / columns as f64;
+    let widest = options
+        .iter()
+        .map(choice_grid::option_width)
+        .fold(0.0_f64, f64::max);
+    widest > budget * PROBE_HEADROOM
 }
 
 /// 把块序列切成「一次出的连续段」（返回 `Range<usize>`，长度 1 = 照常单出）
@@ -3034,6 +3109,114 @@ mod tests {
         (lanes(&ys, 3.0), lanes(&xs, 3.0))
     }
 
+    /// 免量快路（R13）的几何：四枚等距列、单行、一格不丢。
+    ///
+    /// 改造前实测 `grid` 那一侧的四列间距是 12.16 / 10.94 / 11.12mm（不等距，整行只占栏宽
+    /// 三分之二），`box(width: 100% / cols)` 这一侧是严格的四等分 —— 与 docx 的等宽
+    /// `w:tblGrid` 同一个口径。等距断言同时兜住两类翻车：某列被挤到第二行、以及首列被
+    /// 外层 [`item`] 的负悬挂缩进拉走。
+    #[test]
+    fn comfortable_options_keep_four_even_columns() {
+        let doc = choice_doc(4, [SHORT; 4]);
+        let s = generate(&doc, &HashMap::new()).source;
+        assert!(
+            s.contains("#choices(4, probe: false,"),
+            "短选项没走免量快路：{s}"
+        );
+        let positions = option_positions(&doc);
+        assert_eq!(measured_grid(&positions), (1, 4), "{positions:?}");
+        let xs: Vec<f64> = positions.iter().map(|p| p.0).collect();
+        let gaps: Vec<f64> = xs.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(
+            gaps.windows(2).all(|w| (w[0] - w[1]).abs() < 0.05),
+            "四列不是等距的：{gaps:?}"
+        );
+        // 同一份栏宽里，两列的档距必须是四列的两倍 —— `box(width: 100% / n)` 是精确分数，做得到。
+        // **别拿 `grid` 那一侧当参照**（本条断言最初的写法就是这么写的）：`boxed: false` 的栅格包在
+        // `layout(size => …)` 里会收成**内容宽**而不是铺满容器，两列实测档距 34.28mm（铺满该是
+        // 38.2mm）。改造前量到的 12.16 / 10.94 / 11.12mm 不等距是同一个病灶的极端形态。
+        let by_two = option_positions(&choice_doc(2, [SHORT; 4]));
+        assert_eq!(
+            lanes(&by_two.iter().map(|p| p.0).collect::<Vec<_>>(), 3.0),
+            2,
+            "{by_two:?}"
+        );
+        let pitch2 = by_two[1].0 - by_two[0].0;
+        assert!(
+            (pitch2 - gaps[0] * 2.0).abs() < 0.05,
+            "四列档距 {}mm 与两列档距 {pitch2}mm 不成比例",
+            gaps[0]
+        );
+        // 两条路的**起点**必须同一个 x：`probe` 只该决定要不要复量一趟，不该顺手把首列挪进
+        // 外层 [`item`] 的负悬挂缩进里（那是 `first-line-indent: 0em` 存在的唯一理由）。
+        let measured = option_positions(&choice_doc(2, [MEDIUM; 4]));
+        assert!(
+            (measured[0].0 - positions[0].0).abs() < 0.05,
+            "免量那侧的首列 x = {}mm，复量那侧 = {}mm",
+            positions[0].0,
+            measured[0].0
+        );
+    }
+
+    /// `probe` 的判据（R13）：贴着 R7 阈值才付复量的钱，留足余量才免量。
+    #[test]
+    fn only_near_threshold_options_get_remeasured() {
+        let option = |text: &str| ExamOption {
+            label: "A".into(),
+            content: vec![self::text(text)],
+        };
+        let opts = |t: &str| vec![option(t), option("1")];
+        // avail_em = 40 ⇒ 四列预算 (40 - 3 × 0.95) / 4 = 9.29em，免量线 = 9.29 × 0.85 = 7.90em
+        // 「A. 」标签 = 0.55 + 0.55 + 0.3 = 1.4em ⇒ 6 个汉字 7.4em 在线上内侧、8 个 9.4em 贴线外
+        assert!(
+            !needs_probe(&opts(&"甲".repeat(6)), 40.0, 4),
+            "留了 15% 余量的短选项不该复量"
+        );
+        assert!(
+            needs_probe(&opts(&"甲".repeat(8)), 40.0, 4),
+            "贴线（估宽 ≈ 预算的 1.01 倍）的选项必须复量"
+        );
+        // 单列那条分支本来一枚都不量（模板 `probe and cols > 1`），不问
+        assert!(!needs_probe(&opts(&"甲".repeat(40)), 40.0, 1));
+        // 图片是唯一会系统性低估的一类（老数据没有 width 时按 IMAGE_MIN_EM 兜底）
+        let with_image = vec![
+            option("1"),
+            ExamOption {
+                label: "B".into(),
+                content: vec![InlineNode::Image {
+                    alt: None,
+                    url: "/uploads/x.png".into(),
+                    width: None,
+                    align: None,
+                }],
+            },
+        ];
+        assert!(
+            needs_probe(&with_image, 40.0, 4),
+            "带图片的选项一律复量，不看估宽"
+        );
+    }
+
+    /// `boxed` 的边界（R13）：进不了行内盒的选项，画法一个字都不许变。
+    ///
+    /// 图片的高度要靠解码才知道，Rust 侧估不出来；表格 / 硬换行 / 并排图组 / 块级公式进了
+    /// `box`（inline block）会改分页与显示样式语义。这些一律留在 `grid` 那一侧。
+    #[test]
+    fn image_options_stay_on_the_grid_renderer() {
+        let mut doc = choice_doc(2, [SHORT; 4]);
+        let LayoutBlock::Question(q) = &mut doc.sections[0].blocks[0] else {
+            panic!("choice_doc 造的就是一道选择题");
+        };
+        q.options[0].content.push(InlineNode::Image {
+            alt: None,
+            url: "/uploads/x.png".into(),
+            width: None,
+            align: None,
+        });
+        let s = generate(&doc, &HashMap::new()).source;
+        assert!(s.contains("boxed: false,"), "带图片的选项走进了行内盒：{s}");
+    }
+
     #[test]
     fn short_options_render_one_row_of_four() {
         let positions = option_positions(&choice_doc(4, [SHORT; 4]));
@@ -3100,67 +3283,122 @@ mod tests {
     fn grid_source_wires_the_rust_decision_and_the_measure_ladder() {
         let doc = choice_doc(2, [MEDIUM; 4]);
         let s = generate(&doc, &HashMap::new()).source;
-        // Rust 的列数决策忠实传进模板（改的是模板参数，不是模板里的常量）
-        assert!(s.contains("#choices(2,"), "Rust 的列数决策没传进模板：{s}");
+        // Rust 的列数决策与两枚开关都传进模板（改的是模板参数，不是模板里的常量）。
+        // `probe` 的**取值**不在这里钉：MEDIUM 两列的估宽 8.4em 对免量线 8.37em 是贴线的，
+        // 判据本身由 `only_near_threshold_options_get_remeasured` 用显式栏宽钉住。
+        assert!(
+            s.contains("#choices(2, probe:") && s.contains(", boxed: true,"),
+            "Rust 的列数/开关没传进模板：{s}"
+        );
         // 兜底逻辑在函数库里：取实际栏宽 + 量自然宽 + 逐级降列
         for needle in [
-            "#let choices(cols, ..cells)",
+            "#let choices(cols, probe: true, boxed: true, ..cells)",
             "layout(size =>",
             "measure(cell).width",
             "let fits(c) = want <= (size.width - (c - 1) * gut) / c",
             "cols >= 4 and fits(2)",
+            // 一份渲染（R13）：定宽 `box` 是唯一的画法，`grid` 只剩进不了行内盒那一侧
+            "box(width: 100% / n)",
+            "} else if probe and cols > 1 {",
+            "if not boxed {",
         ] {
             assert!(s.contains(needle), "函数库缺 {needle}");
         }
     }
 
-    /// R7 兜底的成本：整卷编译一次多少毫秒（预算 500ms/卷）
+    /// R7 兜底的成本：**一行复量多少毫秒**（同一份前言 + 同一批 20 行选项，只翻 `probe`）
     ///
-    /// `cargo test --lib typeset::typst_gen::tests::cost_of_the_measure_fallback -- --ignored --nocapture`
+    /// `cargo test --release --lib cost_of_the_measure_fallback -- --ignored --nocapture`
     ///
-    /// 对照组把所有题判成单列 —— 单列走 `cols <= 1` 分支，一个单元格都不量。两组的版面长度不同
-    /// （单列多占行），所以把页数一起打出来，别把版面差异读成兜底的开销。
+    /// 两个坑都在这条探针上踩过：
     ///
-    /// 这里量的是**暖身之后**的逐请求成本，且暖身付掉的不止字体池解析：本机实测同一进程里前两编
-    /// 各 5–9s（把兜底整个关掉仍是 6.2s），之后才落到百毫秒级。别把打出来的数字读成服务启动后
-    /// 的第一次导出耗时。
+    /// 1. **对照组必须先证明两组源码真的不同**。早先拿「把所有题判成单列」当对照，R13 之后单列
+    ///    只留一种画法，那一组连版面长度都变了（3 页 对 4 页）；改成翻 `probe` 之后又翻错了地方 ——
+    ///    `probe: true` 在仿真卷源码里**只出现在模板定义那一行**（`sim_doc` 在 a4_practice 下
+    ///    一枚都不复量），而所有调用点都逐字传参，翻默认值等于两组源码逐字相同。
+    /// 2. 于是那次报出的「差 125ms」是纯噪声：同一份源码、三取中位都挡不住（见下面的轮数）。
+    ///
+    /// 现在两组的差**只可能是**那 20 行 `probe`；页数相等是断言（免量那侧若被降列，这组读数作废）。
+    /// **每编前先 `comemo::evict(0)`，且必须 `--release`。**
+    ///
+    /// 同日跑了四轮：差 414 / 608 / 598 / 454ms ⇒ **每行 ≈20–30ms**。两组绝对值随机器负载同涨同落，
+    /// 站得住的是差值 —— 所以这一枚单价在计划里记成区间，别拿单轮读数当定值。
+    ///
+    /// 它也不再是「整条管线里最贵的一项」：R13 之后选项行只有一种画法，`grid` 那笔税（调优前
+    /// 一枚单元格 ≈14–22ms）已经不存在，剩下的钱在 CJK 文本的逐段 shaping 上（见
+    /// `export::pdf::tests::cost_of_a_preview` 的逐题型矩阵）。
     #[test]
     #[ignore]
     fn cost_of_the_measure_fallback() {
         use std::time::{Duration, Instant};
 
-        let compile = |doc: &LayoutDoc| -> (Duration, usize) {
-            let generated = generate(doc, &HashMap::new());
+        let compile = |source: &str| -> (Duration, usize) {
             let dirs = font_dirs();
             let started = Instant::now();
-            let out = compile_paged(&request(&generated.source, &dirs, &[]))
+            let out = compile_paged(&request(source, &dirs, &[]))
                 .unwrap_or_else(|e| panic!("{}", e.summary()));
             (started.elapsed(), out.output.pages().len())
         };
 
-        let measured = sim_doc(LayoutSpec::preset("a4_practice").unwrap());
-        let mut unmeasured = sim_doc(LayoutSpec::preset("a4_practice").unwrap());
-        for block in unmeasured.sections.iter_mut().flat_map(|s| &mut s.blocks) {
-            if let LayoutBlock::Question(q) = block {
-                q.grid.columns = 1;
-                q.grid.rows = q.options.len().max(1);
-            }
-        }
-
-        // 第一次编译付掉字体池解析（进程级记忆化），之后才是逐请求成本
-        let best = |doc: &LayoutDoc| -> (Duration, usize) {
-            let warm = compile(doc);
-            (0..3)
-                .map(|_| compile(doc))
-                .fold(warm, |a, b| if b.0 < a.0 { b } else { a })
+        let doc = sim_doc(LayoutSpec::preset("a4_practice").unwrap());
+        let base = generate(&doc, &HashMap::new()).source;
+        // 造对照组：20 行四选项，每枚 ≈9.4em（标签 1.4 + 8 个汉字）—— 两种取值都排得进四列，
+        // 所以页数相同；差值只可能是那 20 趟 `measure` 阶梯。
+        let row = |probe: bool| -> String {
+            let cell = |label: &str| format!("[#(\"{label}. \")甲乙丙丁戊己庚辛]");
+            format!(
+                "#choices(4, probe: {probe}, boxed: true, {}, {}, {}, {})\n",
+                cell("A"),
+                cell("B"),
+                cell("C"),
+                cell("D")
+            )
         };
-        let (with_measure, pages_m) = best(&measured);
-        let (skip, pages_s) = best(&unmeasured);
+        const ROWS: usize = 20;
+        let block = |probe: bool| -> String { (0..ROWS).map(|_| row(probe)).collect::<String>() };
+        let probing = format!("{}{}", base, block(true));
+        let free = format!("{}{}", base, block(false));
+        let sites = |src: &str, flag: &str| -> usize {
+            src.matches(&format!("probe: {flag}, boxed: true, ["))
+                .count()
+        };
+        // 精确不变量：差值**只**属于那 20 行。仿真卷自己不复量（正是这一点让上一版探针量出了噪声），
+        // 而它本来就有的那些免量调用点不许混进计数 —— 早先那版断言写成 `== ROWS` 就是被它们骗的。
+        assert_eq!(sites(&base, "true"), 0, "仿真卷自己有复量行，对照组不干净");
+        assert_eq!(
+            sites(&probing, "true"),
+            ROWS,
+            "调用点形态变了，翻不动就等于两组源码相同"
+        );
+        assert_eq!(sites(&free, "true"), 0, "免量那侧没翻干净");
+        assert_eq!(sites(&free, "false"), sites(&base, "false") + ROWS);
+
+        // 五遍冷编取中位数：三遍不够——两组**逐字相同**的源码在 3 页仿真卷上中位数差了 125ms
+        // （读数的 16%），三取中位挡不住这种量级的抖动。
+        let cold = |source: &str| -> (Duration, usize) {
+            let mut costs = Vec::new();
+            let mut pages = 0;
+            for _ in 0..5 {
+                comemo::evict(0);
+                let (cost, count) = compile(source);
+                costs.push(cost);
+                pages = count;
+            }
+            costs.sort_unstable();
+            (costs[2], pages)
+        };
+        let (with_measure, pages_m) = cold(&probing);
+        let (skip, pages_s) = cold(&free);
+        assert_eq!(
+            pages_m, pages_s,
+            "免量那侧把列数降了 ⇒ 差值里混着页数，这组读数作废（{pages_m} 页 对 {pages_s} 页）"
+        );
+        let diff = with_measure.as_millis() as i64 - skip.as_millis() as i64;
         println!(
-            "兜底开：{}ms / {pages_m} 页；全单列（不量）：{}ms / {pages_s} 页；差 {}ms",
+            "兜底开：{}ms；全免量：{}ms；差 {diff}ms｜{ROWS} 行四选项、同为 {pages_m} 页 ⇒ 每行 ≈{}ms",
             with_measure.as_millis(),
             skip.as_millis(),
-            with_measure.as_millis() as i64 - skip.as_millis() as i64
+            diff / ROWS as i64,
         );
     }
 

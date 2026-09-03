@@ -81,6 +81,12 @@ impl CompileError {
     }
 }
 
+/// comemo 增量缓存的保留轮数（R13 的失效策略）：连续这么多轮没被命中的条目才会丢掉。
+///
+/// 取 3 对着预览面板的实际节奏：三模式来回切、改一处又改回来，都在这个范围内；再往外就是
+/// 每次请求净增一份 `PagedDocument`（百页卷的 SVG 4MB 量级）却再也不会被读到。
+pub const COMEMO_KEEP: usize = 3;
+
 /// 源码 → PDF 字节，一步到位。
 ///
 /// 生产路径不走它：`export::pdf` 把 [`compile_paged`] 与取样拆开，好让一份卷子只编一次。
@@ -131,6 +137,10 @@ pub fn svg_pages(doc: &PagedDocument) -> Vec<String> {
 pub fn compile_paged(req: &CompileRequest) -> Result<Compiled<PagedDocument>, CompileError> {
     let world = TypesetWorld::new(req);
     let warned = compile::<PagedDocument>(&world);
+    // R13：typst 的文档布局本来就是按「World 输入指纹」记忆化的，那一层就是请求级缓存，
+    // 但它没有容量上限 —— 预览每改一次参数就净增一份 `PagedDocument`。每次编译推进一轮失效：
+    // 命中会把条目的 age 归零，连续 COMEMO_KEEP 轮没命中的才丢。evict 自身 1–6ms。
+    comemo::evict(COMEMO_KEEP);
     Ok(Compiled {
         output: warned.output.map_err(to_error)?,
         warnings: flatten_warnings(&warned.warnings),
@@ -579,6 +589,153 @@ mod tests {
         );
         assert!(out.output.len() > 800, "PDF 小得可疑：{}", out.output.len());
         assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    }
+
+    /// T5.3：同一份源码连编三次，中间清一次缓存，产物必须一模一样。
+    ///
+    /// 命中路径的**时间**断言不在这儿（`hot_path_hits_comemo`）：comemo 的缓存是进程全局的，
+    /// 并行跑的兄弟用例每次编译都会推进一轮失效，「第二次是不是命中」在 `cargo test --lib`
+    /// 里没有稳定答案。这一枚钉的是另一件事：记忆化与 `evict` 都不许改变产物。
+    #[test]
+    fn identical_source_compiles_identically_across_evictions() {
+        let dirs = font_dirs();
+        let source = "#set page(paper: \"a4\")\n#set text(size: 10.5pt)\n甲乙丙丁戊己庚辛";
+        let mut pages = Vec::new();
+        let mut pdfs = Vec::new();
+        for round in 0..3 {
+            if round == 1 {
+                comemo::evict(0);
+            }
+            let doc = compile_paged(&request(source, &dirs))
+                .expect("编译失败")
+                .output;
+            pages.push(doc.pages().len());
+            pdfs.push(pdf_bytes(&doc).expect("PDF 失败").len());
+        }
+        assert!(
+            pages.windows(2).all(|w| w[0] == w[1]) && pdfs.windows(2).all(|w| w[0] == w[1]),
+            "同一份源码三次结果不同：页 {pages:?}、PDF {pdfs:?}"
+        );
+        assert_eq!(pages[0], 1, "这份源码该只有一页");
+    }
+
+    /// 命中路径（T5.3 DoD，R13）：同参数第二次编译必须**命中** comemo，不是「大概很快」。
+    ///
+    /// `cargo test --release --lib hot_path -- --ignored --exact --nocapture --test-threads=1`
+    ///
+    /// 单线程是硬要求：`compile_paged` 每次编译推进一轮 `comemo::evict(COMEMO_KEEP)`，
+    /// 并行时兄弟用例会在我的两次编译之间把这条目的 age 推过上界，命中断言就变成掷硬币。
+    #[test]
+    #[ignore]
+    fn hot_path_hits_comemo() {
+        use std::time::Instant;
+
+        let dirs = font_dirs();
+        let source = "#set page(paper: \"a4\")\n#set text(size: 10.5pt)\n".to_string()
+            + &"甲乙丙丁戊己庚辛".repeat(40);
+        comemo::evict(0);
+        let started = Instant::now();
+        let cold = compile_paged(&request(&source, &dirs))
+            .expect("冷编失败")
+            .output;
+        let cold_ms = started.elapsed().as_millis();
+        let started = Instant::now();
+        let warm = compile_paged(&request(&source, &dirs))
+            .expect("热编失败")
+            .output;
+        let warm_ms = started.elapsed().as_millis();
+        assert!(
+            comemo::testing::last_was_hit(),
+            "同参数第二次编译没有命中 comemo —— R13 的前提（typst 已经是请求级缓存）不成立"
+        );
+        assert_eq!(cold.pages().len(), warm.pages().len());
+        println!(
+            "冷 {cold_ms}ms → 同参数热 {warm_ms}ms｜{} 页",
+            warm.pages().len()
+        );
+    }
+
+    /// 编译地板在哪：四份最小源码各冷编一次，外加 `Library::default()` 与其哈希。
+    ///
+    /// `cargo test --release --lib cost_of_world_inputs -- --ignored --nocapture`（**必须 release**）
+    ///
+    /// 跑每例前先 `comemo::evict(0)`：不清缓存就是命中，量出来的 1ms 是假的。
+    ///
+    /// 四例的差值就是归因：拉丁 → 汉字 是**中文字体**的账（加载、shaping），
+    /// MITEX 前言单独一例是**模板**的账（每个请求重付、与题量无关），剩下的才是内容排版。
+    #[test]
+    #[ignore]
+    fn cost_of_world_inputs() {
+        use std::time::Instant;
+
+        let dirs = font_dirs();
+        let cjk = "甲".repeat(500);
+        let cases = [
+            ("拉丁一句", "hi".to_string()),
+            ("500 汉字·默认字体", cjk.clone()),
+            (
+                "500 汉字·思源宋体",
+                format!(
+                    "#set text(font: \"{}\", size: 10.5pt)\n{cjk}",
+                    CJK_FAMILIES[0]
+                ),
+            ),
+            (
+                "MITEX 前言",
+                crate::typeset::math::MITEX_PREAMBLE.to_string(),
+            ),
+        ];
+        for (name, source) in &cases {
+            comemo::evict(0);
+            let started = Instant::now();
+            let doc = compile_paged(&request(source.as_str(), &dirs))
+                .expect("编译失败")
+                .output;
+            let paged = started.elapsed().as_millis();
+            let started = Instant::now();
+            let pdf = pdf_bytes(&doc).expect("PDF 失败");
+            println!(
+                "{name}：{} 字符｜编译 {paged}ms｜PDF {}ms（{} KB）",
+                source.len(),
+                started.elapsed().as_millis(),
+                pdf.len() / 1024,
+            );
+        }
+
+        let started = Instant::now();
+        let lib = Library::default();
+        let build = started.elapsed().as_millis();
+        // LazyHash 的哈希在第一次被 comemo 过问时才算（`new` 只存不算）
+        let started = Instant::now();
+        let h = typst::utils::hash128(&lib);
+        println!(
+            "Library::default {build}ms｜哈希 {}ms（{h:x}）",
+            started.elapsed().as_millis()
+        );
+    }
+
+    /// 一个源码文件冷编一次：把 `TYPESET_DUMP=1` 落盘的卷子手改几处再喂回来，就能二分出
+    /// 「每段字 5ms」这笔账到底记在模板的哪一句上。
+    ///
+    /// `TYPESET_SOURCE=<path> cargo test --release --lib cost_of_a_source_file -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn cost_of_a_source_file() {
+        use std::time::Instant;
+
+        let path = std::env::var("TYPESET_SOURCE").expect("要设 TYPESET_SOURCE");
+        let source = std::fs::read_to_string(&path).expect("读不到源码");
+        let dirs = font_dirs();
+        comemo::evict(0);
+        let started = Instant::now();
+        let doc = compile_paged(&request(&source, &dirs))
+            .expect("编译失败")
+            .output;
+        println!(
+            "{path}：{} 页｜冷编 {}ms",
+            doc.pages().len(),
+            started.elapsed().as_millis()
+        );
     }
 
     #[test]

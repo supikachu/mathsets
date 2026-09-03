@@ -1766,10 +1766,79 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// 一份卷子按阶段的耗时拆解（素材 → 源码 → 编译 → 回读帧树 → 预检 → SVG / PDF）。
+    ///
+    /// 拆的是 `compile_once` + `generate_preview` 的同一条路径，只是把夹在中间的时间点露出来。
+    async fn stage_breakdown(name: &str, doc: &LayoutDoc, dir: &Path) {
+        use std::time::Instant;
+
+        let started = Instant::now();
+        let assets = prefetch_assets(doc, dir).await;
+        let generated = typst_gen::generate(doc, &assets.images);
+        if std::env::var_os("TYPESET_DUMP").is_some() {
+            // 耗时只说「贵」，源码才说「贵在哪一句」：TYPESET_DUMP=1 时把生成的 typst 落盘
+            let path = std::env::temp_dir().join(format!(
+                "qoder-typeset-{}.typ",
+                name.replace([' ', '×', '（', '）', '·'], "-")
+            ));
+            std::fs::write(&path, &generated.source).unwrap();
+            println!("源码落盘 {}", path.display());
+        }
+        let rasters = raster_facts(doc, &assets);
+        let prep = started.elapsed();
+        let dirs = font_dirs();
+        let started = Instant::now();
+        let compiled = compile_paged(&CompileRequest {
+            source: &generated.source,
+            upload_dir: dir,
+            font_dirs: &dirs,
+            injected: &assets.injected,
+        })
+        .expect("编译失败");
+        let compile = started.elapsed();
+        let started = Instant::now();
+        let runs = placed_pages(&compiled.output);
+        let images = placed_images(&compiled.output);
+        let paper = page_sizes(&compiled.output);
+        let walk = started.elapsed();
+        let started = Instant::now();
+        let found = preflight::inspect(&preflight::Evidence {
+            runs: &runs,
+            images: &images,
+            paper: &paper,
+            rasters: &rasters,
+        });
+        let inspect = started.elapsed();
+        let started = Instant::now();
+        let svg = svg_pages(&compiled.output);
+        let to_svg = started.elapsed();
+        let started = Instant::now();
+        let pdf = pdf_bytes(&compiled.output).expect("PDF 失败");
+        let to_pdf = started.elapsed();
+        println!(
+            "{name}：{} 页｜源码 {} KB｜素材+源码 {}ms｜编译 {}ms｜回读帧树 {}ms｜预检 {}ms（{} 条）｜SVG {}ms（{} KB/页）｜PDF {}ms（{} KB）",
+            svg.len(),
+            generated.source.len() / 1024,
+            prep.as_millis(),
+            compile.as_millis(),
+            walk.as_millis(),
+            inspect.as_millis(),
+            found.len(),
+            to_svg.as_millis(),
+            svg.first().map_or(0, |s| s.len() / 1024),
+            to_pdf.as_millis(),
+            pdf.len() / 1024,
+        );
+    }
+
     /// 预览的耗时构成（诊断用，不参与常规回归）：
-    /// `cargo test --lib export::pdf -- --ignored --nocapture`
+    /// `cargo test --release --lib cost_of_a_preview -- --ignored --nocapture`
     ///
     /// **必须 `--release` 读数**：debug 下同一份卷编译 6–7s，与线上的排期毫无关系。
+    ///
+    /// **每档只编一次，噪声底 ≈100ms**：`typeset::typst_gen::tests::cost_of_the_measure_fallback`
+    /// 里两组**逐字相同**的源码在 3 页仿真卷上中位数差了 125ms。所以这张矩阵只支持读「几百毫秒
+    /// 级」的归因（带不带 CJK、进不进选项行），更小的差是读不出来的，别拿它当 A/B。
     #[tokio::test]
     #[ignore]
     async fn cost_of_a_preview() {
@@ -1783,54 +1852,130 @@ mod tests {
                 &mode_options(ExportMode::Exam),
                 Some(&spec),
             );
-            let started = Instant::now();
-            let assets = prefetch_assets(&doc, &dir).await;
-            let generated = typst_gen::generate(&doc, &assets.images);
-            let rasters = raster_facts(&doc, &assets);
-            let prep = started.elapsed();
-            let dirs = font_dirs();
-            let started = Instant::now();
-            let compiled = compile_paged(&CompileRequest {
-                source: &generated.source,
-                upload_dir: &dir,
-                font_dirs: &dirs,
-                injected: &assets.injected,
-            })
-            .expect("编译失败");
-            let compile = started.elapsed();
-            let started = Instant::now();
-            let runs = placed_pages(&compiled.output);
-            let images = placed_images(&compiled.output);
-            let paper = page_sizes(&compiled.output);
-            let walk = started.elapsed();
-            let started = Instant::now();
-            let found = preflight::inspect(&preflight::Evidence {
-                runs: &runs,
-                images: &images,
-                paper: &paper,
-                rasters: &rasters,
-            });
-            let inspect = started.elapsed();
-            let started = Instant::now();
-            let svg = svg_pages(&compiled.output);
-            let to_svg = started.elapsed();
-            let started = Instant::now();
-            let pdf = pdf_bytes(&compiled.output).expect("PDF 失败");
-            let to_pdf = started.elapsed();
-            println!(
-                "{id}：{} 页｜素材+源码 {}ms｜编译 {}ms｜回读帧树 {}ms｜预检 {}ms（{} 条）｜SVG {}ms（{} KB/页）｜PDF {}ms（{} KB）",
-                svg.len(),
-                prep.as_millis(),
-                compile.as_millis(),
-                walk.as_millis(),
-                inspect.as_millis(),
-                found.len(),
-                to_svg.as_millis(),
-                svg.first().map_or(0, |s| s.len() / 1024),
-                to_pdf.as_millis(),
-                pdf.len() / 1024,
-            );
+            stage_breakdown(id, &doc, &dir).await;
         }
+        // 空卷先拆一次：它那列「编译」就是**模板地板**（MITEX 前言 + 母版 + 页家具），
+        // 每个请求都要重付、与题量无关的那一笔。20 题卷的 458ms 里有几成是地板，看这行。
+        let empty = bundle(ExportMode::Student, vec![]);
+        let doc = build_layout_doc(&empty, &mode_options(ExportMode::Student), None);
+        stage_breakdown("空卷（只有模板）", &doc, &dir).await;
+        // 最小源码冷编只要 13ms（`cost_of_world_inputs` 实测）⇒ 卷子慢就慢在**逐题构造**上。
+        // 单选四选项是整条管线里唯一会调 typst `measure` 的地方（选项栅格估宽，R7 兜底），
+        // 而它的题干里还带一枚 mitex 公式 —— 下面两行把这两笔账拆开：去公式 / 给填空加公式。
+        for (name, qs) in [
+            ("10 × 单选四选项", (1..=10).map(medium_choice).collect()),
+            (
+                "10 × 单选四选项·短选项（免量）",
+                (1..=10).map(|i| choice(i, &["A"])).collect::<Vec<_>>(),
+            ),
+            (
+                "10 × 单选四选项·无公式",
+                (1..=10)
+                    .map(|i| ExamQuestion {
+                        stem: nodes("设集合 A，则（　）"),
+                        ..medium_choice(i)
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                "10 × 填空·带公式",
+                (1..=10)
+                    .map(|i| ExamQuestion {
+                        stem: nodes("已知 $\\sin x = \\frac{1}{2}$，则 $x = $ ____。"),
+                        ..written(i, QuestionKind::Fill)
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                "10 × 填空",
+                (1..=10)
+                    .map(|i| written(i, QuestionKind::Fill))
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                "10 × 解答（10cm 留白）",
+                (1..=10)
+                    .map(|i| ExamQuestion {
+                        answer_space: Some(space(WireBlankStyle::Lines, 10.0)),
+                        ..written(i, QuestionKind::Solution)
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+        ] {
+            let b = bundle(ExportMode::Student, qs);
+            let doc = build_layout_doc(&b, &mode_options(ExportMode::Student), None);
+            stage_breakdown(name, &doc, &dir).await;
+        }
+        // 同一批题、只把栅格判成单列（`cols <= 1` 那一支一个单元格都不量）：与上面
+        // 「10 × 单选四选项」的差才是 R7 兜底的单价 —— 换成别的卷子比就是拿内容差当开销。
+        let force_single = |mut doc: LayoutDoc| -> LayoutDoc {
+            for block in doc.sections.iter_mut().flat_map(|s| &mut s.blocks) {
+                if let LayoutBlock::Question(q) = block {
+                    q.grid.columns = 1;
+                    q.grid.rows = q.options.len().max(1);
+                }
+            }
+            doc
+        };
+        let choice_doc = |qs: Vec<ExamQuestion>| {
+            build_layout_doc(
+                &bundle(ExportMode::Student, qs),
+                &mode_options(ExportMode::Student),
+                None,
+            )
+        };
+        stage_breakdown(
+            "10 × 单选·全单列（不量）",
+            &force_single(choice_doc((1..=10).map(medium_choice).collect())),
+            &dir,
+        )
+        .await;
+        // 同形、只差选项枚数：这一行与上一行之差 = **栅格单元格**的单价
+        let one_cell = (1..=10)
+            .map(|i| {
+                let mut q = medium_choice(i);
+                q.options.truncate(1);
+                q
+            })
+            .collect();
+        stage_breakdown(
+            "10 × 单选·一枚选项（不量）",
+            &force_single(choice_doc(one_cell)),
+            &dir,
+        )
+        .await;
+        // 上面两行同时动了两个变量（短选项那行是四列 10 行，全单列那行是一列 40 行），
+        // 所以「105ms 对 461ms」既可能是**每枚盒子/每行**的账，也可能是**盒里那 8 个汉字**的账。
+        // 这一行只改列数、内容仍是 1 个字符：≈105ms ⇒ 钱在 CJK 逐盒 shaping；≈460ms ⇒ 钱在行/盒本身。
+        stage_breakdown(
+            "10 × 单选·短选项全单列（不量）",
+            &force_single(choice_doc(
+                (1..=10).map(|i| choice(i, &["A"])).collect::<Vec<_>>(),
+            )),
+            &dir,
+        )
+        .await;
+        // 同样四段八字，排在普通段落里而不是栅格里：区分「栅格贵」还是「文字贵」
+        let runs = (1..=10)
+            .map(|i| ExamQuestion {
+                stem: vec![
+                    text("A. 甲乙丙丁戊己庚辛"),
+                    text("B. 甲乙丙丁戊己庚辛"),
+                    text("C. 甲乙丙丁戊己庚辛"),
+                    text("D. 甲乙丙丁戊己庚辛"),
+                ],
+                ..written(i, QuestionKind::Fill)
+            })
+            .collect();
+        stage_breakdown("10 × 填空·四段八字（不进栅格）", &choice_doc(runs), &dir).await;
+        // 百页大卷单独拆一次：T5.4 那道「构造 100 页大卷 ≤2s」的门要能看出时间花在编译
+        // 还是花在把 101 页描成 4MB SVG —— 这两笔账的优化方向完全不同。
+        let doc = build_layout_doc(
+            &big_bundle(BIG_PAPER_QUESTIONS),
+            &mode_options(ExportMode::Student),
+            None,
+        );
+        stage_breakdown(&format!("百页大卷 {} 题", BIG_PAPER_QUESTIONS), &doc, &dir).await;
         // T5.2 DoD 的那把尺子：端到端预览（不含装配，那一段是数据库的账）。
         // 每份卷跑两遍——第一遍摊着进程内一次性开销（字体池解析、typst 全局初始化），第二遍才是
         // 稳态。只读一遍会把这笔一次性账算到「先跑的那份卷子」头上，量出来的相对大小是假的。
@@ -1862,6 +2007,112 @@ mod tests {
             println!(
                 "{name}：{pages} 页｜冷 {}ms → 热 {}ms｜SVG 共 {kb} KB",
                 costs[0], costs[1]
+            );
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 基准用卷：单选 / 填空 / 解答带留白按 2:1:1 混排，是**多页**的真卷子而非一行一题
+    fn bench_bundle(n: u32) -> ExamBundle {
+        let qs = (1..=n)
+            .map(|i| match i % 4 {
+                1 | 2 => medium_choice(i),
+                3 => written(i, QuestionKind::Fill),
+                _ => ExamQuestion {
+                    answer_space: Some(space(WireBlankStyle::Lines, 6.0)),
+                    ..written(i, QuestionKind::Solution)
+                },
+            })
+            .collect();
+        bundle(ExportMode::Student, qs)
+    }
+
+    /// 百页大卷的题数：实测 400 道带 10cm 横线留白的解答题 = **101 页**，正好压住 T5.4 那道
+    /// 「构造 100 页大卷」的门（300 题只有 76 页，量不到）。
+    const BIG_PAPER_QUESTIONS: u32 = 400;
+
+    /// 百页大卷的构造器：整份全是带 10cm 横线留白的解答题
+    fn big_bundle(n: u32) -> ExamBundle {
+        bundle(
+            ExportMode::Student,
+            (1..=n)
+                .map(|i| ExamQuestion {
+                    answer_space: Some(space(WireBlankStyle::Lines, 10.0)),
+                    ..written(i, QuestionKind::Solution)
+                })
+                .collect(),
+        )
+    }
+
+    /// T5.4 ⛔ 性能基准：冷编译 / 百页 / 热请求三档 + 一次性开销归因
+    ///
+    /// **必须单独跑、且 `--release`**：`cargo test --release --lib benchmark_three_tiers -- --ignored --nocapture`
+    /// （与别的 `--ignored` 用例同进程跑，「进程里第一次」那笔账会被先跑的用例背走）。
+    ///
+    /// 每份卷子跑**冷 → 热 → 再冷**三遍：冷档用 `comemo::evict(0)` 强制清空 typst 的增量缓存，
+    /// 否则第二份卷的「冷」其实是热；第三遍再冷是为了把「进程一次性开销」从「稳态冷编译」里剥出来
+    /// —— 第一遍冷摊着 typst 标准库首次求值这类账，只有再冷一遍才是线上「换一份卷子」的真实成本。
+    #[tokio::test]
+    #[ignore]
+    async fn benchmark_three_tiers() {
+        use std::time::Instant;
+
+        let dir = uploads_with(&[]);
+
+        // 一次性开销归因①：字体池（思源两套字重的 CJK 字体各几十 MB）。实测 ~90ms，1s 级的账不在这里。
+        let started = Instant::now();
+        let dirs = font_dirs();
+        let absent = missing_cjk_fonts(&dirs);
+        println!(
+            "字体池：目录 {dirs:?}、缺字体 {absent:?}、首次解析 {}ms",
+            started.elapsed().as_millis()
+        );
+
+        let big_name = format!("百页大卷 {BIG_PAPER_QUESTIONS}");
+        let papers = [
+            ("20 题仿真卷", bench_bundle(20)),
+            // R13 那两条调优只对得上这一类：四列短选项走 `probe: false`（不复量、定宽 box 直排）。
+            // 上面那道仿真卷里 10 道 medium 选项贴着阈值，复量那侧一个字没改。
+            (
+                "20 题纯短选项卷",
+                bundle(
+                    ExportMode::Student,
+                    (1..=20).map(|i| choice(i, &["A"])).collect::<Vec<_>>(),
+                ),
+            ),
+            ("大卷 300", big_bundle(300)),
+            (big_name.as_str(), big_bundle(BIG_PAPER_QUESTIONS)),
+        ];
+        for (name, b) in &papers {
+            let started = Instant::now();
+            let doc = build_layout_doc(b, &mode_options(ExportMode::Student), None);
+            let build = started.elapsed().as_millis();
+
+            let mut ms = Vec::new();
+            let mut counts = Vec::new();
+            let mut kb = 0;
+            let mut evict_ms = 0;
+            for round in 0..3 {
+                if round != 1 {
+                    let started = Instant::now();
+                    comemo::evict(0);
+                    evict_ms = started.elapsed().as_millis();
+                }
+                let started = Instant::now();
+                let out = generate_preview(&doc, &dir)
+                    .await
+                    .unwrap_or_else(|e| panic!("「{name}」第 {round} 轮预览失败：{}", e.summary()));
+                ms.push(started.elapsed().as_millis());
+                counts.push(out.pages.len());
+                kb = out.pages.iter().map(|s| s.len()).sum::<usize>() / 1024;
+            }
+            assert!(
+                counts.windows(2).all(|w| w[0] == w[1]),
+                "{name}：同一份 IR 编三遍不该给出不同分页 {counts:?}"
+            );
+            println!(
+                "{name}：{} 页｜IR {}ms｜冷 {}ms → 同参数热 {}ms → 再冷 {}ms｜evict(0) {}ms｜SVG {kb} KB",
+                counts[0], build, ms[0], ms[1], ms[2], evict_ms,
             );
         }
         std::fs::remove_dir_all(&dir).unwrap();
