@@ -136,7 +136,7 @@ const MARGIN_MM = { min: 5, max: 40 }
 const GUTTER_MM = { min: 0, max: 40 }
 const BLANK_CM = { min: 2, max: 20, step: 0.5 }
 
-const format = ref<ExportFormat>('markdown')
+const format = ref<ExportFormat>('pdf')
 const mode = ref<ExportMode>('teacher')
 const title = ref(props.defaultTitle || '未命名试卷')
 const includeAnswer = ref(true)
@@ -201,6 +201,9 @@ function pickFormat(next: ExportFormat) {
     void loadPresets()
   }
 }
+
+// 默认格式是 PDF，首次挂载即拉预设，不等教师手动切格式
+void loadPresets()
 
 const presetOptions = computed(() =>
   presets.value.map((p) => ({ value: p.id, label: p.label })),
