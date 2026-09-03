@@ -208,6 +208,7 @@ fn blank_conflicts(options: &ExportOptions, spec: &LayoutSpec) -> Vec<Issue> {
     }
     vec![Issue {
         question_no: None,
+        page: None,
         field: IssueField::Other,
         severity: IssueSeverity::Info,
         latex: None,
@@ -383,6 +384,7 @@ async fn compile_once(doc: &LayoutDoc, upload_dir: &Path) -> Result<Rendered, Co
     if !missing.is_empty() {
         issues.push(Issue {
             question_no: None,
+            page: None,
             field: IssueField::Other,
             severity: IssueSeverity::Warning,
             latex: None,
@@ -416,6 +418,7 @@ pub async fn generate_pdf(doc: &LayoutDoc, upload_dir: &Path) -> Result<PdfResul
     // typst 自己的告警（字形缺失、弃用写法等）：卷级，源码是我们生成的，行号对教师无意义
     issues.extend(rendered.warnings.into_iter().map(|warning| Issue {
         question_no: None,
+        page: None,
         field: IssueField::Other,
         severity: IssueSeverity::Warning,
         latex: None,
@@ -481,6 +484,7 @@ async fn prefetch_assets(doc: &LayoutDoc, upload_dir: &Path) -> Assets {
             Err(e) => {
                 a.issues.push(Issue {
                     question_no: qno,
+                    page: None,
                     field: IssueField::Image,
                     severity: IssueSeverity::Warning,
                     latex: None,
@@ -505,6 +509,7 @@ impl Assets {
         if !RENDERABLE.contains(&ext.as_str()) {
             self.issues.push(Issue {
                 question_no: qno,
+                page: None,
                 field: IssueField::Image,
                 severity: IssueSeverity::Warning,
                 latex: None,

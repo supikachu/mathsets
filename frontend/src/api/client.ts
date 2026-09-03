@@ -1,7 +1,7 @@
 import axios from 'axios'
 import { useToast } from '@/composables/useToast'
 import type { ExamRequest, IssueField } from './types/exam'
-import type { ProfilePreset } from './types/layout'
+import type { PreviewResponse, ProfilePreset } from './types/layout'
 
 // ===========================================================================
 // Axios 实例 & 拦截器（保持不变）
@@ -2004,8 +2004,16 @@ export const notificationApi = {
 // 导出引擎（T1.8）— Markdown / DOCX / PDF 三格式 blob 下载
 // ===========================================================================
 
-export type { ExamRequest, ExamSectionRequest, ExamQuestionRequest, ExportMode, ExportOptions } from './types/exam'
-export type { BlankStyle, LayoutSpec, Paper, ProfilePreset } from './types/layout'
+export type {
+  ExamRequest,
+  ExamSectionRequest,
+  ExamQuestionRequest,
+  ExportMode,
+  ExportOptions,
+  Issue,
+  IssueSeverity,
+} from './types/exam'
+export type { BlankStyle, LayoutSpec, Paper, PreviewResponse, ProfilePreset } from './types/layout'
 
 /// 导出类请求超时（B4：全局 10s 对百页大卷 + 大 blob 下载会触顶）
 const EXPORT_TIMEOUT_MS = 60000
@@ -2127,12 +2135,20 @@ export const exportApi = {
 }
 
 // ===========================================================================
-// 排版参数（T3.7）— 只读预设。R1：PDF 出口唯一化在 /export/pdf，不另开渲染通道
+// 排版参数（T3.7 预设只读 + T5.5 预览）。R1：PDF **文件出口**唯一化到 /export/pdf；
+// 预览不出字节、只消费同一条链的中间产物（一次编译的帧树），故不在此列（R12）
 // ===========================================================================
 
 export const typesetApi = {
   /// 内置版面预设（四套，每套带完整 spec），导出面板「先选预设再微调」的数据源
   profiles() {
     return client.get<ProfilePreset[]>('/typeset/profiles')
+  },
+  /// 逐页 SVG + 印前预检（T5.2）。请求体与 /export/pdf 完全相同，换的只是出口；
+  /// 百页卷冷编 2.5s 量级 ⇒ 与导出同档超时（B4）
+  preview(req: ExamRequest) {
+    return client.post<PreviewResponse>('/typeset/preview', req, {
+      timeout: EXPORT_TIMEOUT_MS,
+    })
   },
 }

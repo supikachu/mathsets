@@ -77,6 +77,7 @@ pub async fn generate_markdown(
 fn image_issue(qno: Option<u32>, url: &str, e: &FetchImageError) -> Issue {
     Issue {
         question_no: qno,
+        page: None,
         field: IssueField::Image,
         severity: IssueSeverity::Warning,
         latex: None,

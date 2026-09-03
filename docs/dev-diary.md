@@ -2318,5 +2318,97 @@ shaping 才是**，而它在 typst 里面。要过门只能减每页内容项（
 - 全量 `cargo test --lib` **720 passed / 0 failed / 21 ignored**；`--test export_pdf_api`（7 条）、
   `--test typeset_preview_api`（6 条）全绿，退出码 0。
 
+## 2026-09-03 导出引擎 M5 批次③（预览面板与预检点击定位）
+
+### 一、⛔ 「点击定位页」不是一句文案能兑现的：`Issue` 长出 `page` 字段
+
+T5.5 的 DoD 写着「预检项可点击定位」。先按 DoD 去前端找抓手，三条路都是死的：
+
+- 在 SVG 里搜文字定位？预览 SVG 的字形**已经描成轮廓**（批次① 就记过这条），整页没有 `<text>` 可搜，
+  本轮在浏览器里再确认一次：`"<text" in pageSvg === false`。
+- 用 `question_no` 反查题在第几页？帧树里没有题号（R12），要反查就得把排版侧再牵一遍。
+- 正则从 `reason` 里抠「第 N 页」？那是把 UI 焊在文案上，改一个标点就碎。
+
+所以页码必须是**类型化输出**：`Issue` 加 `page: Option<u32>`（1-based **物理页**，与
+`PreviewResponse.pages` 同口径）。R12 当年估「牵动三处」是错的，实际 **22 个构造点 / 8 个文件**——
+其中 3 处（预检那三条判据）填真页码，19 处机械补 `page: None`。
+
+两个必须钉住的地方：
+
+- **不许动导出响应头**。`X-Export-Warnings` 是 `Issue` 直接序列化出来的，加字段就会改变字节。靠
+  `#[serde(skip_serializing_if = "Option::is_none")]` 保住逐字不变，而它成立的前提是
+  `preflight::inspect` **只在预览链上被调用**（`src/export/pdf.rs:444` 那一处）——PDF 出口的 issue 永远
+  没有 page，所以头里永远不会出现这个键。契约测试把这两件事都断言了。
+- **字段与文案不许分叉**。每条判据把 `page_no` 算一次，`reason` 里的「第 N 页」和 `page` 读同一个值；
+  另加一枚契约测试反过来**解析自己写的文案**比对数字（helper 上标明「只给这枚断言用，产品代码不许这么读」）。
+  字体回退一族只报一条，页码取它**首次出现**那页，文案同步改成「首次出现于第 N 页」。
+
+生成期问题（装配、素材、公式降级）恒为 `None`——它们发生在编译之前，物理上没有页。面板必须把这件事
+**说出来**而不是默默不可点：那条 chip 写「排版之前，无页可定位」，按钮 `disabled`，`title` 给原因。
+排序上 `page ?? 0` 让无页项排在同级有页项之前，读起来正好是流水线的顺序：先装配期、再印前。
+
+### 二、B7 落在 sanitize 而不是 iframe：一页一个 browsing context 买不起
+
+B7 的两个候选是「iframe sandbox」与「注入前净化」。选了后者，理由是可测量的：百页卷就是 101 个
+browsing context，而页码导航与缩放都要在同一份可测 DOM 上算尺寸。于是
+`utils/svgSanitize.ts`：DOMParser 解析 → `parsererror` 或根不是 `svg` 就**整页不注入**（fail-closed，
+宁可白屏）→ 删可执行载体（`script` / `foreignObject` / `iframe` / `embed` / `object` / SMIL 那一族
+`animate*` / `set` / `handler` / `listener`）→ 删所有 `on*` 与 `javascript:`/`vbscript:`/`livescript:`/
+`data:text/html` 链接。**`data:image/*` 必须活下来**，typst 就往 SVG 里嵌位图。不引 DOMPurify：为这一个
+函数多一整包依赖不值当，而这份黑名单整族来自 SVG 规范的脚本入口清单，不依赖「哪些元素算安全」的白名单判断。
+
+浏览器里跑了一枚八项攻击样本，逐条读结果：`<script>` / `foreignObject` / `iframe` / `set` / `animate`
+全部消失，`onload` / `onmouseover` / `onclick` 全部剥掉，`href="javascript:…"` 与
+`xlink:href="JaVaScRiPt:…"`（大小写混排）都被摘，`data:image/png;base64,…` 与正文 `text`/`rect`、
+根元素 `width="595pt"` 完好。畸形 XML、未闭合标签、一段 HTML 都返回 `null`。
+
+**这一枚测试第一版是假阴性**：样本里写了 `src="data:text/html,<script>…</script>"` 和
+`onclick=alert(10)`——裸 `<` 与不带引号的属性在 XML 里非法，DOMParser 直接 parsererror，于是
+`sanitizeSvg` 返回 `null`，看起来像「把整页毙了」。实际是样本自己不成形，fail-closed 行为是对的。
+把样本改成合法 XML 后才是真正的矩阵。
+
+### 三、面板的三条不变式，都在浏览器里量过（探针账号 11 题 / 2 页 A3）
+
+- **只挂载当前页**：`handlers/typeset.rs` 尾部那笔账（一页 ~200KB、二十页 ~4MB、服务没挂压缩层）落地成
+  「DOM 里恒为一张」。翻页时 `document.querySelectorAll('.tp-svg svg').length === 1` 始终成立，且
+  **翻页不发请求**（页内导航与缩放两个动作合计新增请求 0 枚）。
+- **换参数不清屏**：`result` 只在成功分支赋值，配 300ms debounce。连切三次模式、每 60ms 采样一次，
+  **169 个样本里 0 帧空白**，状态条走「结果 → 正在排版… → 结果 → 正在排版… → 结果」。
+  再把失败也当成参数变更：把预览请求打到不存在的路由制造 404，屏幕上**上一页的 SVG 与预检清单原样留着**，
+  状态条转红并给出「重试」，取消拦截后点「重试」即恢复（教师讲义 1 页 / 预检 2 条）。
+- **debounce 真的在合流**：两次模式切换相隔 **34ms** ⇒ 只发出 **1** 个请求，且它在最后一次变更后
+  **311ms** 才出网；最终版面是最后一次选择的那个模式。
+- **缩放按「实际尺寸 = 100%」标**：A3 横 `width="1190.551181102pt"`，100% 档量到 **1587px**
+  （= 1190.55 × 96/72 ✓），150% 档 **2381px**，适应宽度 **616px**（铺满容器）。
+  AppSelect 那行「请选择」点了是空操作，触发器仍显示原值——它靠 `modelValue` 反查标签，不存自己的态。
+
+**读到的耗时都是 debug 的**：`cargo run --bin mathset` 跑的是 `target/debug`，一次预览 4.7–5.1s。
+这与 T5.4 那扇门（`--release` 下 20 题 674ms / 百页 2.5s）不矛盾，也不构成回退——批次② 记过这条测量律。
+
+### 四、ts-rs 的一条硬规矩：绑定不许用过滤跑生成
+
+`frontend/src/api/types/exam.ts` 是 `#[ts(export)]` 写出来的。本轮为了只重生成 `Issue` 一枚类型，跑了
+`cargo test --lib export_bindings_issue` —— 结果它把整个 `exam.ts` **重写成只有那一个类型**
+（−210 行 / +7 行）。每个 `export_bindings_*` 用例写的是整个文件，跑子集等于用子集覆盖全量。
+所以口径钉死：**改完 Rust 类型必须跑全量 `cargo test --lib`**，提交前那一次尤其不能省。
+本轮终态：`exam.ts` +7 / −1，就是 `page?: number` 那一段（连注释一起带过来）。
+
+### 五、本批次已知边界
+
+- 宿主只做在试题篮（一个「预览版式」按钮 + 一个模式下拉）。**版面参数与预览不联动**——纸张、栏数、
+  密封线、留白这些微调仍只在导出面板里，`spec` 因此刻意不回传，走该模式的默认预设。并入导出对话框、
+  参数联动、「三格式 × 三模式」手工矩阵都是 T5.6。
+- `seq` 序号守卫（晚到的旧响应作废）本轮**只被推理与代码审查覆盖，没在浏览器里造出乱序到达**：
+  debug 下请求几乎串行完成，凑不出「后发先至」。它是防百页冷编 2.5s 那档的，不是防本轮这 11 题的。
+- 无页项排在同级有页项之前是本轮定的口径，不是任务分解里写的；若 T5.6 要把「装配期问题」与「印前
+  预检」分成两段展示，这条排序就该跟着改。
+- `Dashboard.vue` 用了 `<AppIcon>` 却没 import，浏览器控制台每次进工作台报 5 条
+  `Failed to resolve component`。**与本轮无关**（该文件未改动），没顺手修。
+- 探针数据留在开发库：用户 `t55probe` + 14 道题（其中一道 400 个不间断拉丁字母的溢流题、一道
+  `\argmax_x` 降级题，专门用来凑出「有页 / 无页」两类预检项）。
+- 全量 `cargo test --lib` **722 passed / 0 failed / 21 ignored**；`--test export_pdf_api`（7 条）、
+  `--test typeset_preview_api`（6 条）全绿（两枚 `DATABASE_URL_TEST` 已配置，真实跑在 `mathset_test` 库上，
+  不是自跳过）；`npm run build`（`vue-tsc -b && vite build`）退出码 0。
+
 
 

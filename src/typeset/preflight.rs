@@ -24,6 +24,10 @@
 //!
 //! 帧树里没有「第几题」。图片问题靠 [`Raster::question_no`]（`prefetch_assets` 一路持有），
 //! 文字溢流只能报到「第几页 + 原文片段」（R12 把「逐题定位」这一条改掉了）。
+//!
+//! 页码是**类型化输出**：三条判据都填 [`Issue::page`]（1-based 物理页），预览面板按它跳页；
+//! `reason` 里那句「第 N 页」给人读，两处必须同源（R14，断言见本模块 tests）。字体回退一族只报
+//! 一条，页码取它**首次出现**那页。
 
 use crate::export::model::{Issue, IssueField, IssueSeverity};
 use crate::typeset::compiler::{CJK_FAMILIES, PlacedImage, PlacedRun};
@@ -91,14 +95,17 @@ pub fn dpi_findings(images: &[Vec<PlacedImage>], rasters: &[Raster]) -> Vec<Issu
             if dpi >= MIN_PRINT_DPI {
                 continue;
             }
+            // 一次算好、两处同读：`reason` 里那句「第 N 页」与 `Issue.page` 不许各读各的（R14）
+            let page_no = page as u32 + 1;
             out.push(Issue {
                 question_no: r.question_no,
+                page: Some(page_no),
                 field: IssueField::Image,
                 severity: IssueSeverity::Warning,
                 latex: None,
                 reason: format!(
                     "第 {} 页的图 {}（{}×{}px）印成 {:.1}mm 宽，有效 DPI 只有 {:.0}（目标 {:.0}），建议改用 SVG 或换更高清的素材",
-                    page + 1,
+                    page_no,
                     r.url,
                     r.px_w,
                     r.px_h,
@@ -152,8 +159,8 @@ pub fn overflow_findings(
 pub fn font_fallback_findings(runs: &[Vec<PlacedRun>]) -> Vec<Issue> {
     let mut seen: Vec<&str> = Vec::new();
     let mut out = Vec::new();
-    for page in runs {
-        for r in page {
+    for (page, rs) in runs.iter().enumerate() {
+        for r in rs {
             if !has_han(&r.run.text) || CJK_FAMILIES.contains(&r.run.family.as_str()) {
                 continue;
             }
@@ -161,15 +168,18 @@ pub fn font_fallback_findings(runs: &[Vec<PlacedRun>]) -> Vec<Issue> {
                 continue;
             }
             seen.push(r.run.family.as_str());
+            let page_no = page as u32 + 1;
             out.push(Issue {
                 question_no: None,
+                page: Some(page_no),
                 field: IssueField::Other,
                 severity: IssueSeverity::Warning,
                 latex: None,
                 reason: format!(
-                    "中文由字体「{}」绘制而非 {}，印出来可能是豆腐块（缺字体或字体回退）",
+                    "中文由字体「{}」绘制而非 {}（首次出现于第 {} 页），印出来可能是豆腐块（缺字体或字体回退）",
                     r.run.family,
-                    CJK_FAMILIES.join(" / ")
+                    CJK_FAMILIES.join(" / "),
+                    page_no
                 ),
             });
         }
@@ -207,6 +217,7 @@ fn merge(page: usize, hits: &[Hit]) -> Vec<Issue> {
         };
         out.push(Issue {
             question_no: None,
+            page: Some(page as u32 + 1),
             field: IssueField::Other,
             severity: IssueSeverity::Warning,
             latex: None,
@@ -299,6 +310,7 @@ mod tests {
         assert_eq!(issues.len(), 1, "{issues:?}");
         let i = &issues[0];
         assert_eq!(i.question_no, Some(7), "题号必须跟着图走");
+        assert_eq!(i.page, Some(1), "预览面板按页定位（R14）");
         assert_eq!(i.field, IssueField::Image);
         assert_eq!(i.severity, IssueSeverity::Warning);
         let reason = &i.reason;
@@ -359,6 +371,7 @@ mod tests {
         )]];
         let issues = overflow_findings(&runs, &[], &[(60.0, 120.0)]);
         assert_eq!(issues.len(), 1, "{issues:?}");
+        assert_eq!(issues[0].page, Some(1), "跳页要的是字段不是文案（R14）");
         let reason = &issues[0].reason;
         assert!(reason.contains("第 1 页"), "{reason}");
         assert!(reason.contains("右"), "{reason}");
@@ -433,8 +446,26 @@ mod tests {
         ];
         let issues = font_fallback_findings(&runs);
         assert_eq!(issues.len(), 1, "同一族名只报一条：{issues:?}");
+        assert_eq!(issues[0].page, Some(1), "{}", issues[0].reason);
         assert!(
             issues[0].reason.contains("DejaVu Sans"),
+            "{}",
+            issues[0].reason
+        );
+    }
+
+    #[test]
+    fn fallback_reports_where_it_first_appears() {
+        let runs = vec![
+            vec![run("这页正常", "Source Han Serif SC", 5.0, 7.0, 20.0)],
+            vec![run("第 2 页回退", "DejaVu Sans", 5.0, 7.0, 20.0)],
+            vec![run("第 3 页也回退", "DejaVu Sans", 5.0, 7.0, 20.0)],
+        ];
+        let issues = font_fallback_findings(&runs);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].page, Some(2), "跳页要跳到能看见的那一页");
+        assert!(
+            issues[0].reason.contains("首次出现于第 2 页"),
             "{}",
             issues[0].reason
         );
@@ -447,5 +478,45 @@ mod tests {
             run("，。", "DejaVu Sans", 5.0, 9.0, 3.0),
         ]];
         assert!(font_fallback_findings(&runs).is_empty());
+    }
+
+    /// R14 的契约：`page` 是给机器跳页的，`reason` 里那句「第 N 页」是给人读的，
+    /// 两处一旦分叉，教师看到的页码与点过去看到的页码就不是同一张纸。
+    #[test]
+    fn page_field_and_the_page_named_in_reason_never_disagree() {
+        let prints = vec![vec![], vec![img(70.5556, 35.2778)]];
+        let rasters = [raster(Some(7), "a.png", 200, 100)];
+        let runs = vec![
+            vec![run("这页正常", "Source Han Serif SC", 5.0, 7.0, 20.0)],
+            vec![run("这页回退", "DejaVu Sans", 5.0, 7.0, 20.0)],
+            vec![run(
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+                "Source Han Serif SC",
+                5.0,
+                9.38,
+                115.32,
+            )],
+        ];
+        let mut issues = dpi_findings(&prints, &rasters);
+        issues.extend(overflow_findings(&runs, &prints, &[(100.0, 300.0); 3]));
+        issues.extend(font_fallback_findings(&runs));
+        assert_eq!(issues.len(), 3, "三条判据各一条：{issues:?}");
+        for i in &issues {
+            assert_eq!(i.page, Some(cited_page(&i.reason)), "{}", i.reason);
+        }
+    }
+
+    /// 从「第 N 页」这类文案里抠出 N —— 只给上面那枚同源断言用，产品代码不许这么读。
+    fn cited_page(reason: &str) -> u32 {
+        let digits: String = reason
+            .split_once("第 ")
+            .unwrap_or_else(|| panic!("预检文案必须带页码：{reason}"))
+            .1
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        digits
+            .parse()
+            .unwrap_or_else(|e| panic!("页码读不出来（{reason}）：{e}"))
     }
 }

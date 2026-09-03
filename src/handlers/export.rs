@@ -328,6 +328,7 @@ mod tests {
     fn issue(reason: &str) -> Issue {
         Issue {
             question_no: Some(3),
+            page: None,
             field: IssueField::Stem,
             severity: IssueSeverity::Warning,
             latex: None,

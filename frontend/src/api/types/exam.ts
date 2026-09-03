@@ -197,7 +197,13 @@ export type Issue = {
 /**
  * 关联题号（卷级问题为 None）
  */
-question_no?: number, field: IssueField, severity: IssueSeverity, 
+question_no?: number, 
+/**
+ * **物理页**（1-based，与 `PreviewResponse.pages` 同口径）。只有印前预检填得出 ——
+ * 页码来自编译后的帧树，生成期问题（装配、素材、公式降级）还没有页。
+ * `skip_serializing_if` 让 `X-Export-Warnings` 头对无页码的 issue 逐字不变（R14）。
+ */
+page?: number, field: IssueField, severity: IssueSeverity, 
 /**
  * 公式降级时的原始 LaTeX（其余场景为 None）
  */

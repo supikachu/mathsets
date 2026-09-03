@@ -1384,6 +1384,7 @@ impl Gen<'_> {
     ) {
         self.issues.push(Issue {
             question_no: self.number,
+            page: None,
             field,
             severity,
             latex: latex.map(String::from),

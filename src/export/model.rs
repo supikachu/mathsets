@@ -285,6 +285,12 @@ pub struct Issue {
     #[serde(default)]
     #[ts(optional)]
     pub question_no: Option<u32>,
+    /// **物理页**（1-based，与 `PreviewResponse.pages` 同口径）。只有印前预检填得出 ——
+    /// 页码来自编译后的帧树，生成期问题（装配、素材、公式降级）还没有页。
+    /// `skip_serializing_if` 让 `X-Export-Warnings` 头对无页码的 issue 逐字不变（R14）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub page: Option<u32>,
     pub field: IssueField,
     pub severity: IssueSeverity,
     /// 公式降级时的原始 LaTeX（其余场景为 None）
@@ -614,6 +620,7 @@ mod tests {
                     }),
                     issues: vec![Issue {
                         question_no: Some(1),
+                        page: None,
                         field: IssueField::Stem,
                         severity: IssueSeverity::Warning,
                         latex: Some(r"\badcmd".into()),
@@ -642,6 +649,7 @@ mod tests {
     fn issue_warning_contract() {
         let issue = Issue {
             question_no: Some(3),
+            page: None,
             field: IssueField::Analysis,
             severity: IssueSeverity::Warning,
             latex: Some(r"\sqrt[3]".into()),
@@ -655,6 +663,7 @@ mod tests {
         // 卷级问题（无题号）
         let global = Issue {
             question_no: None,
+            page: None,
             field: IssueField::Image,
             severity: IssueSeverity::Info,
             latex: None,
@@ -662,5 +671,21 @@ mod tests {
         };
         let v = serde_json::to_value(&global).unwrap();
         assert!(v.get("question_no").is_none() || v["question_no"].is_null());
+
+        // R14：`page` 缺省时整条 JSON 逐字不变 —— 导出警告头的契约不受预览字段影响
+        assert!(v.get("page").is_none(), "{v}");
+        let located = Issue {
+            question_no: None,
+            page: Some(2),
+            field: IssueField::Other,
+            severity: IssueSeverity::Warning,
+            latex: None,
+            reason: "第 2 页有 1 处内容超出纸张右边界".into(),
+        };
+        assert_eq!(serde_json::to_value(&located).unwrap()["page"], 2);
+        // 不带 `page` 键的旧报文照样读得进来
+        let legacy: Issue =
+            serde_json::from_str(r#"{"field":"other","severity":"info","reason":"x"}"#).unwrap();
+        assert_eq!(legacy.page, None);
     }
 }

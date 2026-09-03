@@ -218,6 +218,7 @@ fn assemble_bundle(
 fn skip_issue(id: Uuid, reason: &str) -> Issue {
     Issue {
         question_no: None,
+        page: None,
         field: IssueField::Other,
         severity: IssueSeverity::Warning,
         latex: None,

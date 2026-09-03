@@ -323,6 +323,19 @@ async fn preview_carries_the_preflight_report() {
     assert_eq!(overflow["severity"], "warning");
     let reason = overflow["reason"].as_str().unwrap();
     assert!(reason.contains('A'), "溢流该带上原文片段：{reason}");
+    // R14：预览面板按 `page` 跳页，所以这个数字必须真的到了客户端，且与文案里的页码同值
+    let page = overflow["page"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("预检条目没带机器可读页码：{overflow}"));
+    assert!(
+        page >= 1 && page <= resp["page_count"].as_u64().unwrap(),
+        "页码越界：{page} / 共 {} 页",
+        resp["page_count"].as_u64().unwrap()
+    );
+    assert!(
+        reason.contains(&format!("第 {page} 页")),
+        "`page` 与文案里的页码分叉：{reason}"
+    );
 
     // 好那一题不该被连坐：整页 SVG 照常出
     assert_preview_shape(&resp);

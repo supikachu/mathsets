@@ -233,6 +233,7 @@ impl<'a> Writer<'a> {
                 Err(e) => {
                     self.issues.push(Issue {
                         question_no: qno,
+                        page: None,
                         field: IssueField::Image,
                         severity: IssueSeverity::Warning,
                         latex: None,
@@ -251,6 +252,7 @@ impl<'a> Writer<'a> {
         if !EMBEDDABLE.contains(&ext.as_str()) {
             self.issues.push(Issue {
                 question_no: qno,
+                page: None,
                 field: IssueField::Image,
                 severity: IssueSeverity::Warning,
                 latex: None,
@@ -261,6 +263,7 @@ impl<'a> Writer<'a> {
         let Some(nat) = image_size(&ext, &img.bytes) else {
             self.issues.push(Issue {
                 question_no: qno,
+                page: None,
                 field: IssueField::Image,
                 severity: IssueSeverity::Warning,
                 latex: None,
@@ -712,6 +715,7 @@ impl<'a> Writer<'a> {
             Err(reason) => {
                 self.issues.push(Issue {
                     question_no: slot.qno,
+                    page: None,
                     field: slot.field,
                     severity: IssueSeverity::Warning,
                     latex: Some(latex.to_string()),
