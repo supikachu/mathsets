@@ -69,11 +69,15 @@ const emit = defineEmits<{
 
 const toast = useToast()
 
-const FORMATS: FormatOption[] = [
+/** Word 导出暂时冻结（代码保留，UI 隐藏）——改为 true 即可恢复 */
+const DOCX_ENABLED = false
+
+const ALL_FORMATS: FormatOption[] = [
   { value: 'docx', label: 'Word', hint: '公式可编辑', icon: 'file-text' },
   { value: 'pdf', label: 'PDF', hint: '版面可控', icon: 'document' },
   { value: 'markdown', label: 'Markdown', hint: '纯文本 · 可移植', icon: 'download' },
 ]
+const FORMATS = ALL_FORMATS.filter(f => f.value !== 'docx' || DOCX_ENABLED)
 
 const MODES: ModeOption[] = [
   { value: 'student', label: '学生练习', hint: '仅题目，无答案无解析' },

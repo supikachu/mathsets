@@ -47,6 +47,8 @@ const BACKSLASH_SPACE_EM: f64 = 0.3;
 const PX_PER_EM: f64 = 14.0;
 /// 版面尺寸换算：10.5pt 正文在 96dpi 下 1em ≈ 3.7mm（= 14px × 2.54/96）
 pub const MM_PER_EM: f64 = 3.7;
+/// 题号悬挂缩进（em）—— typst 模板与 PDF 适配器共用同一份值，避免选项栅格列数判定与实际渲染不一致
+pub const QUESTION_INDENT_EM: f64 = 2.6;
 /// 选项里的图片最小估宽（老数据没有 width 也不至于算成 0）
 const IMAGE_MIN_EM: f64 = 3.0;
 /// 表格里出现即单列，宽度不参与比较（给一个必然超阈值的常量）

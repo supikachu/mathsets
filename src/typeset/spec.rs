@@ -136,6 +136,72 @@ impl Default for HeaderFooter {
     }
 }
 
+// ── 母版页配置（InDesign Parent Page 概念）──
+
+/// 首页（封面）配置
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(default)]
+#[ts(export, export_to = "../frontend/src/api/types/layout.ts")]
+pub struct CoverConfig {
+    /// 显示试卷标题
+    pub show_title: bool,
+    /// 显示分数统计表
+    pub show_score_table: bool,
+    /// 显示考生须知
+    pub show_instructions: bool,
+    /// 显示考生信息（姓名/考号/班级）
+    pub show_student_info: bool,
+}
+
+impl Default for CoverConfig {
+    fn default() -> Self {
+        Self {
+            show_title: true,
+            show_score_table: true,
+            show_instructions: true,
+            show_student_info: true,
+        }
+    }
+}
+
+/// 正文页配置
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(default)]
+#[ts(export, export_to = "../frontend/src/api/types/layout.ts")]
+pub struct BodyConfig {
+    /// 显示页眉
+    pub show_header: bool,
+    /// 显示页脚
+    pub show_footer: bool,
+}
+
+impl Default for BodyConfig {
+    fn default() -> Self {
+        Self {
+            show_header: true,
+            show_footer: true,
+        }
+    }
+}
+
+/// 母版页配置：分首页（封面）和正文页两套模板
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(default)]
+#[ts(export, export_to = "../frontend/src/api/types/layout.ts")]
+pub struct ParentPageConfig {
+    pub cover: CoverConfig,
+    pub body: BodyConfig,
+}
+
+impl Default for ParentPageConfig {
+    fn default() -> Self {
+        Self {
+            cover: CoverConfig::default(),
+            body: BodyConfig::default(),
+        }
+    }
+}
+
 /// 出片对象。与导出域的 `ExportMode` 同形但独立 —— typeset 不依赖 export
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -227,6 +293,9 @@ pub struct LayoutSpec {
     pub margins: Margins,
     pub binding: Option<Binding>,
     pub header_footer: HeaderFooter,
+    /// 母版页配置（首页/正文页差异化）
+    #[serde(default)]
+    pub parent_pages: ParentPageConfig,
     pub profile: OutputProfile,
     pub fonts: FontSpec,
     pub answer_blank: BlankSpec,
@@ -241,6 +310,7 @@ impl Default for LayoutSpec {
             margins: Margins::default(),
             binding: None,
             header_footer: HeaderFooter::default(),
+            parent_pages: ParentPageConfig::default(),
             profile: OutputProfile::default(),
             fonts: FontSpec::default(),
             answer_blank: BlankSpec::default(),
@@ -385,6 +455,7 @@ pub fn presets() -> Vec<ProfilePreset> {
                 margins: Margins::default(),
                 binding: None,
                 header_footer: HeaderFooter::default(),
+                parent_pages: ParentPageConfig::default(),
                 profile: OutputProfile::Teacher,
                 fonts: FontSpec::default(),
                 answer_blank: BlankSpec::default(),
@@ -406,6 +477,7 @@ pub fn presets() -> Vec<ProfilePreset> {
                 },
                 binding: None,
                 header_footer: HeaderFooter::default(),
+                parent_pages: ParentPageConfig::default(),
                 profile: OutputProfile::Student,
                 fonts: FontSpec::default(),
                 answer_blank: BlankSpec::default(),
@@ -439,6 +511,7 @@ pub fn presets() -> Vec<ProfilePreset> {
                     page_number: true,
                     odd_even_outer: true,
                 },
+                parent_pages: ParentPageConfig::default(),
                 profile: OutputProfile::Exam,
                 fonts: FontSpec::default(),
                 answer_blank: BlankSpec::default(),
@@ -472,6 +545,7 @@ pub fn presets() -> Vec<ProfilePreset> {
                     page_number: true,
                     odd_even_outer: false,
                 },
+                parent_pages: ParentPageConfig::default(),
                 profile: OutputProfile::Exam,
                 fonts: FontSpec::default(),
                 answer_blank: BlankSpec::default(),

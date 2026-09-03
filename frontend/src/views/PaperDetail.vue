@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { paperApi, type PaperDetail, type PaperQuestionItemDetail } from '@/api/client'
+import { paperApi, type PaperDetail, type PaperQuestionItemDetail, type ExamSectionRequest } from '@/api/client'
 import { AppIcon } from '@/components/ui'
 import LatexRender from '@/components/LatexRender.vue'
 import QuestionOptions from '@/components/QuestionOptions.vue'
 import QuestionStructureView from '@/components/QuestionStructureView.vue'
+import ExportDialog from '@/components/ExportDialog.vue'
 import { useToast } from '@/composables/useToast'
 import { useQuestionBasket } from '@/composables/useQuestionBasket'
 import { displayPaperSource } from '@/utils/questionSource'
@@ -313,11 +314,31 @@ function sharePaper() {
   }
 }
 
+// ── 导出：通过 PaperExportShell 调用 Typst 引擎 ──
+const showExport = ref(false)
+const exportSections = ref<ExamSectionRequest[]>([])
+const exportQuestionCount = ref(0)
+const exportScopeLabel = ref('')
+
+function sectionsPayload(groups: SectionGroup[]): ExamSectionRequest[] {
+  return groups.map((sec) => ({
+    title: sec.title,
+    questions: sec.questions.map((q) => {
+      const score = Number(q.default_score)
+      return score > 0 ? { id: q.id, default_score: score } : { id: q.id }
+    }),
+  }))
+}
+
 function downloadPaper(sectionTitle?: string) {
-  toast.info(sectionTitle ? `正在准备下载【${sectionTitle}】...` : '正在准备生成试卷下载文档...')
-  setTimeout(() => {
-    window.print()
-  }, 300)
+  const groups = sectionTitle
+    ? groupedSections.value.filter((s) => s.title === sectionTitle)
+    : groupedSections.value
+  const target = groups.length ? groups : groupedSections.value
+  exportSections.value = sectionsPayload(target)
+  exportQuestionCount.value = target.reduce((n, s) => n + s.questions.length, 0)
+  exportScopeLabel.value = sectionTitle || ''
+  showExport.value = true
 }
 
 function showAnalysisModal() {
@@ -659,6 +680,15 @@ onMounted(async () => {
     </template>
 
     <div v-else class="apple-empty-state">试卷不存在或已被移除</div>
+
+    <ExportDialog
+      v-model="showExport"
+      :sections="exportSections"
+      :question-count="exportQuestionCount"
+      :default-title="paper?.title || '未命名试卷'"
+      :scope-label="exportScopeLabel"
+      @print="() => window.print()"
+    />
   </div>
 </template>
 

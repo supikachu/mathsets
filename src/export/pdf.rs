@@ -48,8 +48,7 @@ use crate::typeset::preflight::{self, Raster};
 use crate::typeset::spec::{BlankStyle, LayoutSpec, OutputProfile};
 use crate::typeset::typst_gen;
 
-/// 题号「3.」的悬挂缩进占宽（em）—— docx 侧是 420tw = 2em，两处必须一致
-const HANGING_EM: f64 = 2.0;
+use crate::typeset::blocks::choice_grid::QUESTION_INDENT_EM;
 
 /// 排版域 IR 的入口：`ExamBundle` + 导出选项（+ 请求里的版面覆盖）→ `LayoutDoc`
 pub fn build_layout_doc(
@@ -134,7 +133,7 @@ pub fn resolve_spec(profile: OutputProfile, request_spec: Option<&LayoutSpec>) -
 /// 本张卷子的选项可用栏宽（em）
 fn available_em(spec: &LayoutSpec) -> f64 {
     let mm = f64::from(spec.column_width_mm());
-    (choice_grid::em_from_mm(mm) - HANGING_EM).max(1.0)
+    (choice_grid::em_from_mm(mm) - QUESTION_INDENT_EM).max(1.0)
 }
 
 fn document_meta(bundle: &ExamBundle) -> DocumentMeta {

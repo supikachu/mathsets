@@ -35,9 +35,43 @@ height_cm: number, };
 export type BlankStyle = "lines" | "dots" | "blank";
 
 /**
+ * 正文页配置
+ */
+export type BodyConfig = { 
+/**
+ * 显示页眉
+ */
+show_header: boolean, 
+/**
+ * 显示页脚
+ */
+show_footer: boolean, };
+
+/**
  * 印前色彩模式
  */
 export type ColorMode = "rich" | "print_black_only";
+
+/**
+ * 首页（封面）配置
+ */
+export type CoverConfig = { 
+/**
+ * 显示试卷标题
+ */
+show_title: boolean, 
+/**
+ * 显示分数统计表
+ */
+show_score_table: boolean, 
+/**
+ * 显示考生须知
+ */
+show_instructions: boolean, 
+/**
+ * 显示考生信息（姓名/考号/班级）
+ */
+show_student_info: boolean, };
 
 /**
  * 字体族名（typst `set text(font: ...)` 直接吃）
@@ -83,7 +117,11 @@ export type LayoutSpec = { paper: Paper,
 /**
  * 1 | 2 | 3
  */
-columns: number, margins: Margins, binding: Binding | null, header_footer: HeaderFooter, profile: OutputProfile, fonts: FontSpec, answer_blank: BlankSpec, color: ColorMode, };
+columns: number, margins: Margins, binding: Binding | null, header_footer: HeaderFooter, 
+/**
+ * 母版页配置（首页/正文页差异化）
+ */
+parent_pages: ParentPageConfig, profile: OutputProfile, fonts: FontSpec, answer_blank: BlankSpec, color: ColorMode, };
 
 /**
  * 四边边距 + 栏间距（mm）
@@ -103,6 +141,11 @@ export type OutputProfile = "student" | "teacher" | "exam";
  * 纸张：A3 两档都按长边横置出纸；一张纸算几个「逻辑页」由 `Paper::logical_slots_per_sheet` 定
  */
 export type Paper = "a4" | "a3_fold" | "a3_tri";
+
+/**
+ * 母版页配置：分首页（封面）和正文页两套模板
+ */
+export type ParentPageConfig = { cover: CoverConfig, body: BodyConfig, };
 
 /**
  * `POST /typeset/preview` 的响应（§6.5）

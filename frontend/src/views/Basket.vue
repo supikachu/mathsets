@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import {
+  paperApi,
   questionApi,
   type ExamSectionRequest,
   type QuestionDetail,
@@ -368,8 +369,38 @@ function printPaper() {
   setTimeout(() => window.print(), 300)
 }
 
-function savePaper() {
-  toast.info('组卷保存即将开放，当前可先下载预览')
+const saving = ref(false)
+
+async function savePaper() {
+  if (!items.value.length) {
+    toast.info('试题篮是空的，先去题库选题')
+    return
+  }
+  const title = window.prompt('请输入试卷标题', '未命名试卷')
+  if (!title) return
+
+  saving.value = true
+  try {
+    const { data: created } = await paperApi.create({ title })
+    const sections = sectionsPayload(groupedSections.value)
+    let order = 0
+    for (const sec of sections) {
+      for (const q of sec.questions) {
+        await paperApi.addQuestion(created.id, {
+          question_id: q.id,
+          score: q.default_score,
+          section: sec.title,
+          sort_order: order++,
+        })
+      }
+    }
+    toast.success('试卷保存成功')
+    router.push(`/papers/${created.id}`)
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error || '保存失败，请稍后重试')
+  } finally {
+    saving.value = false
+  }
 }
 
 function showAnalysis() {

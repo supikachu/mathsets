@@ -640,6 +640,43 @@ export const paperApi = {
   getQuestionPapers(questionId: string) {
     return client.get<QuestionPaperItem[]>(`/questions/${questionId}/papers`)
   },
+
+  /** 创建试卷 */
+  create(data: {
+    title: string
+    description?: string
+    subject?: string
+    grade?: string
+    total_score?: number
+    duration_minutes?: number
+    metadata?: Record<string, unknown>
+  }) {
+    return client.post<PaperDetail>('/papers', data)
+  },
+
+  /** 向试卷添加单题 */
+  addQuestion(paperId: string, data: {
+    question_id: string
+    score?: number
+    section?: string
+    sort_order?: number
+    question_no?: string
+  }) {
+    return client.post(`/papers/${paperId}/questions`, data)
+  },
+
+  /** 批量添加题目（逐条调用后端接口） */
+  async addQuestions(paperId: string, questions: Array<{
+    question_id: string
+    score?: number
+    section?: string
+    sort_order?: number
+    question_no?: string
+  }>) {
+    for (const q of questions) {
+      await client.post(`/papers/${paperId}/questions`, q)
+    }
+  },
 }
 
 // ===========================================================================

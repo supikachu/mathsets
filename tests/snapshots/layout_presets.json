@@ -18,6 +18,18 @@
         "page_number": true,
         "odd_even_outer": false
       },
+      "parent_pages": {
+        "cover": {
+          "show_title": true,
+          "show_score_table": true,
+          "show_instructions": true,
+          "show_student_info": true
+        },
+        "body": {
+          "show_header": true,
+          "show_footer": true
+        }
+      },
       "profile": "teacher",
       "fonts": {
         "body": "Source Han Serif SC",
@@ -49,6 +61,18 @@
         "header_title": false,
         "page_number": true,
         "odd_even_outer": false
+      },
+      "parent_pages": {
+        "cover": {
+          "show_title": true,
+          "show_score_table": true,
+          "show_instructions": true,
+          "show_student_info": true
+        },
+        "body": {
+          "show_header": true,
+          "show_footer": true
+        }
       },
       "profile": "student",
       "fonts": {
@@ -90,6 +114,18 @@
         "page_number": true,
         "odd_even_outer": true
       },
+      "parent_pages": {
+        "cover": {
+          "show_title": true,
+          "show_score_table": true,
+          "show_instructions": true,
+          "show_student_info": true
+        },
+        "body": {
+          "show_header": true,
+          "show_footer": true
+        }
+      },
       "profile": "exam",
       "fonts": {
         "body": "Source Han Serif SC",
@@ -129,6 +165,18 @@
         "header_title": false,
         "page_number": true,
         "odd_even_outer": false
+      },
+      "parent_pages": {
+        "cover": {
+          "show_title": true,
+          "show_score_table": true,
+          "show_instructions": true,
+          "show_student_info": true
+        },
+        "body": {
+          "show_header": true,
+          "show_footer": true
+        }
       },
       "profile": "exam",
       "fonts": {

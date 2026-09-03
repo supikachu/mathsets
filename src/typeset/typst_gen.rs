@@ -503,8 +503,8 @@ const FUNCTION_LIBRARY: &str = r#"
 const PX_MM: f32 = 25.4 / 96.0;
 /// 每深一层小问的额外缩进（em）
 const SUB_INDENT_EM: f32 = 1.2;
-/// 题号悬挂缩进宽度（em）
-const HANG_EM: f32 = 2.6;
+/// 题号悬挂缩进宽度（em）—— 与 `choice_grid::QUESTION_INDENT_EM` 同源
+const HANG_EM: f32 = crate::typeset::blocks::choice_grid::QUESTION_INDENT_EM as f32;
 /// 留白横线的目标行距（mm）；T4.5 的估高把一行文本也按这个口径算，两边同名字同数值
 const BLANK_LINE_MM: f32 = 8.0;
 /// 点阵的点距 = 行距（mm）：横竖同距才成阵
@@ -593,19 +593,23 @@ impl Gen<'_> {
         if let Some(background) = self.sealing() {
             page.push_str(&background);
         }
-        if spec.header_footer.page_number {
+        if spec.header_footer.page_number && spec.parent_pages.body.show_footer {
             // 内置页码只在**没给 `footer`** 时才出场（实测 typst-layout `pages/run.rs`：
             // `footer.as_ref().unwrap_or(&numbering_marginal)`）。页脚由我们按逻辑页自己画，
             // 再写 `numbering` / `number-align` 就是两条注定无效的规则 —— 不写。
             page.push_str(&self.footer());
         }
-        if spec.header_footer.header_title {
+        if spec.header_footer.header_title && spec.parent_pages.body.show_header {
             page.push_str(&self.running_head(doc));
         }
         s.push_str(&page);
         s.push_str(")\n");
 
-        s.push_str(r#"#set text(font: body-font, size: 10.5pt, lang: "zh", region: "cn")"#);
+        // ── 中文微观排版（CJK micro-typography）──
+        // cjk-latin-spacing: auto = 盘古空格（CJK 与 Latin/数学公式间自动插入约 0.25em 间距）
+        // overhang: true（默认）= 标点悬挂（行尾标点允许伸出版心，避免视觉凹陷）
+        // lang: "zh" 激活 Typst 内置的中文标点禁则（行首禁逗号句号、行尾禁前引号前括号）
+        s.push_str(r#"#set text(font: body-font, size: 10.5pt, lang: "zh", region: "cn", cjk-latin-spacing: auto)"#);
         s.push('\n');
         if self.black {
             s.push_str("#set text(fill: luma(0%))\n");
@@ -852,35 +856,52 @@ impl Gen<'_> {
     fn masthead(&mut self, doc: &LayoutDoc) -> String {
         self.number = None;
         self.field = IssueField::Structure;
-        let meta = self.meta_line(doc);
-        let mut s = format!("#masthead({}", typst_str(&doc.title));
-        if let Some(sub) = doc.subtitle.as_deref().filter(|t| !t.is_empty()) {
-            s.push_str(&format!(", subtitle: {}", typst_str(sub)));
+        let cover = &self.spec.parent_pages.cover;
+
+        // 标题始终传入（masthead 函数签名要求），但 show_title = false 时传空字符串跳过渲染
+        let title = if cover.show_title { &doc.title } else { "" };
+        let mut s = format!("#masthead({}", typst_str(title));
+
+        if cover.show_title {
+            if let Some(sub) = doc.subtitle.as_deref().filter(|t| !t.is_empty()) {
+                s.push_str(&format!(", subtitle: {}", typst_str(sub)));
+            }
+            let meta = self.meta_line(doc);
+            if !meta.is_empty() {
+                s.push_str(&format!(", meta: {}", typst_str(&meta)));
+            }
         }
-        if !meta.is_empty() {
-            s.push_str(&format!(", meta: {}", typst_str(&meta)));
+
+        if cover.show_student_info {
+            if let Some(info) = self.candidate_info(doc) {
+                s.push_str(&format!(", info: ({})", typst_array(&info)));
+            }
         }
-        if let Some(info) = self.candidate_info(doc) {
-            s.push_str(&format!(", info: ({})", typst_array(&info)));
+
+        if cover.show_score_table {
+            if let Some((keys, vals, total)) = self.score_summary(doc) {
+                s.push_str(&format!(
+                    ", score-keys: ({}), score-vals: ({})",
+                    typst_array(&keys),
+                    typst_array(&vals)
+                ));
+                s.push_str(&format!(", score-total: {}", typst_str(&total)));
+            }
         }
-        if let Some((keys, vals, total)) = self.score_summary(doc) {
-            s.push_str(&format!(
-                ", score-keys: ({}), score-vals: ({})",
-                typst_array(&keys),
-                typst_array(&vals)
-            ));
-            s.push_str(&format!(", score-total: {}", typst_str(&total)));
+
+        if cover.show_instructions {
+            let notes: Vec<String> = doc
+                .meta
+                .instructions
+                .iter()
+                .filter(|t| !t.trim().is_empty())
+                .cloned()
+                .collect();
+            if !notes.is_empty() {
+                s.push_str(&format!(", instructions: ({})", typst_array(&notes)));
+            }
         }
-        let notes: Vec<String> = doc
-            .meta
-            .instructions
-            .iter()
-            .filter(|t| !t.trim().is_empty())
-            .cloned()
-            .collect();
-        if !notes.is_empty() {
-            s.push_str(&format!(", instructions: ({})", typst_array(&notes)));
-        }
+
         s.push_str(")\n");
         s
     }

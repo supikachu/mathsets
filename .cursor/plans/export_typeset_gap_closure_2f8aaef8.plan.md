@@ -4,37 +4,37 @@ overview: "Freeze Word export at the UI level, then close 8 gaps between the des
 todos:
   - id: freeze-word
     content: Hide Word/DOCX option in ExportDialog.vue FORMATS array
-    status: pending
+    status: completed
   - id: cjk-typography
     content: Add cjk-latin-spacing, hanging-punctuation to typst_gen prologue + snapshot tests
-    status: pending
+    status: completed
   - id: document-word-gaps
     content: Add FROZEN tracking section in docs for Word format parity gaps
-    status: pending
+    status: completed
   - id: paper-export-shell
     content: Extract PaperExportShell.vue component wrapping ExportDialog + TypesetPreview
-    status: pending
+    status: completed
   - id: paper-detail-export
     content: Integrate PaperExportShell into PaperDetail.vue with full preview, replace window.print
-    status: pending
+    status: completed
   - id: question-list-nav
     content: Wire QuestionList downloadPaper to navigate to PaperDetail (which now has export)
-    status: pending
+    status: completed
   - id: save-paper-api
     content: Add paperApi.create and addQuestions to frontend client.ts
-    status: pending
+    status: completed
   - id: save-paper-basket
     content: Implement savePaper in Basket.vue using paperApi create + addQuestions
-    status: pending
+    status: completed
   - id: hanging-em-unify
     content: Unify HANGING_EM (2.0) and HANG_EM (2.6) into single shared constant
-    status: pending
+    status: completed
   - id: svg-selectability
     content: Document SVG text limitation, optionally add copy-text button to TypesetPreview
-    status: pending
+    status: completed
   - id: parent-page-config
     content: Add ParentPageConfig to LayoutSpec and refactor typst_gen cover/prologue to be data-driven
-    status: pending
+    status: completed
 isProject: false
 ---
 
