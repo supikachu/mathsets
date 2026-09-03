@@ -369,6 +369,16 @@ function printPaper() {
   setTimeout(() => window.print(), 300)
 }
 
+function openTypeset() {
+  if (!items.value.length) {
+    toast.info('试题篮是空的，先去题库选题')
+    return
+  }
+  sessionStorage.setItem('typeset_sections', JSON.stringify(sectionsPayload(groupedSections.value)))
+  sessionStorage.setItem('typeset_title', '试题篮组卷')
+  router.push('/basket/typeset')
+}
+
 const saving = ref(false)
 
 async function savePaper() {
@@ -621,6 +631,12 @@ function goDetail(id: string) {
                 <AppIcon name="save" :size="18" />
               </div>
               <span class="tool-title">保存组卷</span>
+            </button>
+            <button type="button" class="apple-tool-tile" @click="openTypeset">
+              <div class="tool-icon-squircle">
+                <AppIcon name="layout" :size="18" />
+              </div>
+              <span class="tool-title">排版预览</span>
             </button>
             <button type="button" class="apple-tool-tile" @click="openExport()">
               <div class="tool-icon-squircle">

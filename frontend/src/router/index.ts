@@ -41,6 +41,12 @@ const router = createRouter({
           component: () => import('@/views/Basket.vue'),
         },
         {
+          path: 'basket/typeset',
+          name: 'TypesetEditor',
+          component: () => import('@/views/TypesetEditor.vue'),
+          meta: { immersive: true },
+        },
+        {
           path: 'papers/:id',
           name: 'PaperDetail',
           component: () => import('@/views/PaperDetail.vue'),
