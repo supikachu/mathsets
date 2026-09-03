@@ -189,7 +189,7 @@ fn file_response(
 }
 
 /// 收集各题携带的题级 issues 到卷级清单
-fn collect_question_issues(bundle: &ExamBundle, out: &mut Vec<Issue>) {
+pub(crate) fn collect_question_issues(bundle: &ExamBundle, out: &mut Vec<Issue>) {
     for s in &bundle.sections {
         for q in &s.questions {
             out.extend(q.issues.iter().cloned());

@@ -6,11 +6,12 @@
 //! 已落地：`blocks::choice_grid`（T2.5 选项栅格决策）、`spec`（T3.2 版面参数与预设）、
 //! `ir`（T3.3 排版域 IR）、`math`（T3.4 LaTeX → Typst 数学源码与降级）、
 //! `compiler`（T3.5 World 实现与 PDF/SVG 编译）、`typst_gen`（T3.6 LayoutDoc → main.typ）。
-//! M4：`blocks` 全量与母版分离、分页粘连与密封线。
+//! M4：`blocks` 全量与母版分离、分页粘连与密封线。M5：`preflight`（T5.1 印前预检，R12）。
 
 pub mod blocks;
 pub mod compiler;
 pub mod ir;
 pub mod math;
+pub mod preflight;
 pub mod spec;
 pub mod typst_gen;

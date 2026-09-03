@@ -2055,5 +2055,135 @@ Word 这条算式与 PDF 侧「声明左边距 + 装订带」逐字对得上，�
 - 单色门只看产物颜色集合，没做「印张黑覆盖率 / 灰阶网点」那类计量——真去印厂校色不在本系统范围。
 - 全量 `cargo test --lib` 700 passed / 0 failed / 15 ignored，`vue-tsc -b` 退出码 0。
 
+## 2026-09-03 导出引擎 M5 批次①（印前预检与预览端点）
+
+### 一、⛔ 「收集 typst 诊断，逐题定位」两头都不成立：判据搬到编译后的帧树
+
+T5.1 原文只有一句「溢流检测：收集 typst 编译诊断（warning/error），逐题定位」。动手前先编了一份
+最坏情况的卷子（`typst_gen::tests::preflight_probe`，`--ignored`）：52 个不可断的拉丁字母塞进
+50mm 版心，帧树里那一段字的右沿到了 **120.32mm**，纸宽 60mm —— 编译诊断 **0 条**。换一枚更狠的：
+`columns: 4*60mm` 的定宽表塞进 90mm 版心，仍然 0 条，而且 typst 自己把四个格子收成了竖排
+（x 恒 6.76、y 递增），既不溢出也不警告。这与 M3 定过的「溢出可见」是同一套哲学：**宁可画到纸外
+也不报错**。
+
+第二条也不成立：`flatten_warnings` 从 T3.5 起就有意只留 message，行号源码里都没了（源码是我们生成
+的，行号对教师无意义）。拿诊断做「逐题定位」等于要回退一个已经付过代价的决定。
+
+于是三条判据一律落在**印出来的事实**上，全部从编译后的帧树读：
+
+- 给 `PlacedRun` 补 `w_mm`（= typst `TextItem::width()` = 各字形 `x_advance` 之和）。它是**排版
+  宽度**不是墨迹范围（含尾部空格、不含字形向右越界），判溢流够用且不误报——光有锚点等于什么都没查。
+- 纸边取 `page.frame.size()`（实测 300×120mm 的页报 300.00×120.00，恰等纸张），不用 `spec.paper`
+  反推：母版分离（T4.9）后首页与正文页本就可能不同尺寸，逐页现读才是事实。
+- **只判纸边、不判版心**。页眉页脚、装订带、密封线本来就在页边距里画图，按版心判会把它们全报成故障。
+- **归属退一步**：帧树里没有「第几题」，文字溢流只能报到「第几页 + 原文片段」。`Issue` 不加 `page`
+  字段——它同时进 `X-Export-Warnings` 与 ts-rs 导出的 TS 类型，为一个字段牵动三处，页码以文字进
+  `reason` 给教师就够。
+
+结论先补进实施计划再动代码（执行纪律 3），落在 **R12**。
+
+### 二、有效 DPI：只认已经印出来的宽度，不复现 typst 的密度回退链
+
+位图那条判据有两个可读口径，我先按「意图」试了一次，然后发现只有「事实」站得住：
+
+- **打印宽**从帧树 `PlacedImage.w_mm` 读，源码里的 `width:` 说了不算；不给 `width:` 的图也有数——
+  实测 typst 对**无密度元数据**的栅格按 **72dpi** 摆放（200×100px PNG 印成 70.56×35.28mm），带
+  EXIF/JFIF/pHYs 时按其密度。我方**不复现**这条四级回退链：`image` 0.25 不暴露密度，`image-png`
+  还不是直接依赖，而密度谁负责都只剩一处真相。
+- **像素**从文件头读：`image::guess_format` 认 magic number，再 `ImageReader::with_format(..)
+  .into_dimensions()`——只读头不解码，一张 10MB 的图不该为预检解压一遍。SVG 是文本，它的 magic
+  number 压根不在 `guess_format` 的表里，读不出像素就等于不检，正合「矢量没有 DPI 概念」；帧树里
+  也确实没有它的 `Image` 项（typst 把 SVG 摆成矢量 `Group`）。
+
+因此 `image` 的 feature 从 `["webp","png"]` 补成含 `jpeg`/`gif`：**解码面不能窄于 PDF 出口的
+`RENDERABLE` 清单**，否则「认不出格式」在预检里与「这张图没问题」长得一模一样。
+
+配对（帧图 ↔ IR 栅格）按**宽高比**取文档序里最早未占用的一条，而不是按下标硬对齐：`figure_float`
+（T4.3）会把题干里的图挪进右栏，它在帧树里就排到同段后续图之后。**配不上就一条不报**——报错题号的
+预检比没有预检更坏。这条有常驻单测钉着（`pairing_follows_aspect_ratio_not_document_order`、
+`an_unmatchable_print_is_reported_as_nothing`）。
+
+### 三、误报比漏报更坏，所以先给预检装一枚「必须什么都不说」的闸门
+
+`the_sample_exam_is_clean_under_every_preset`：同一份仿真卷（T4.6 那套装配，含图文混排、四选项栅格、
+解答题留白）在 **4 套预设 × 3 种模式 = 12 组**下走完整预览链，断言 `issues.is_empty()`。这一组里
+恰好覆盖了三条最容易误伤的东西——页眉页脚画在页边距里、A3 三栏的定宽表格、装订带那行
+`rotate(90deg)` 的竖排字（帧树报的是摆放锚点，`w_mm` 是旋转前的横向宽度，所以竖排只能判「锚点在不在
+纸上」，这条写成了已知边界）。
+
+反向防空跑也有：`overflow_names_the_page_direction_and_how_far` 用的是实测那组数（60mm 纸、字划到
+120.32mm、报「右边界 60.3mm」），`touching_the_edge_is_within_tolerance` 钉住 0.5mm 容差的方向，
+`just_below_the_threshold_still_warns` 钉住 DPI 门槛是「<300 就报」而不是「≈300 就报」。
+字体回退只认汉字区间的字符——逗号落在拉丁字体里是正常排版，报出来只是噪声。
+
+### 四、预览的工程约束：一次编译，多处取样
+
+R12 的最后一句落到代码上是三个小切口。`compile_pdf` / `compile_svg_pages` 退成测试与探针用的便捷
+入口，生产路径改成 `compile_paged` + `pdf_bytes(&PagedDocument)` / `svg_pages(&PagedDocument)`，
+`export::pdf` 里由 `compile_once` 编一次、产出 `Rendered { doc, rasters, issues, warnings }`，
+`generate_pdf` 与 `generate_preview` 各自取样。
+
+为什么预览非切不可读：教师预览里看到的分页、溢流，必须和印出来的是同一份卷子。编两遍既慢，又可能
+因为字体池变化给出两份不一致的卷——那预检就从「把关」变成「误导」。
+
+顺带守住了既有口径：**PDF 路径不跑预检**。预检三条只在预览 JSON 里给（§6.5），`/export/pdf` 保持
+M3 以来的「没有新问题就没有 `X-Export-Warnings` 头」，那几条 HTTP 契约断言才继续有意义。
+
+### 五、契约与前端类型：预览不是下载，`issues` 也不进头
+
+`POST /api/v1/typeset/preview` 请求体与 `/export/pdf` 完全相同（同一个 `ExamRequest`），响应是裸
+载荷 `{pages, page_count, issues, warnings}`。几处刻意的选择：
+
+- `issues` 进 body 而不是 `X-Export-Warnings`：B3 那道 ~8KB 头限正是预览接口存在的理由之一。
+  `warnings`（typst 原文）不编成 `Issue`，前端折叠展示即可。
+- `pages` 下标是**物理页**：A3 对折一张纸两个逻辑页（R4），预览里就是一页纸上左右两栏。
+- 端点级测试里有一条 `preview_is_not_a_file_download`：`Content-Type: application/json` 且**没有**
+  `Content-Disposition`。R1 禁的是第二条**出字节**的渲染通道，测试 `there_is_no_typeset_render_route`
+  里原来那句「`/typeset/preview` 不存在」随之作废，改在注释里说明为什么这次不算违反。
+- `PreviewResponse` 走 ts-rs 生成 `frontend/src/api/types/layout.ts`。typst-svg 0.15.1 把每个字形
+  描成 `<path>`、整页不写 `@font-face`：预览 SVG 自包含（浏览器没装思源也看到将要印出的那套字），
+  代价是**页面上的字不可选中、不可检索**，T5.5 把每页当图片摆出来就好。
+- 载荷大小的账记在 handler 文件尾：描边后一页 ~200KB，二十页 ~4MB，本服务没挂压缩层 ⇒ T5.4 基准要
+  算进去，T5.5 应当逐页取用而不是整卷塞进 DOM。
+
+### 六、耗时：新代码 ~15ms，其余全是 typst 自己的账（`--release` 读数）
+
+`cost_of_a_preview`（`#[ignore]`，**必须 `--release`**；debug 下同一份卷编译 6.3–7.2s，与线上排期无关）：
+
+| 阶段 | a4_lecture（2 页） | a3_tri_exam（2 页） |
+| --- | --- | --- |
+| 素材预取 + 源码 | 2ms | 0ms |
+| **`compile_paged`** | **825ms** | **550ms** |
+| 回读帧树 | 0ms | 0ms |
+| **预检三条** | **0ms（0 条）** | **0ms（0 条）** |
+| SVG 序列化 | 7ms（206 KB/页） | 6ms（225 KB/页） |
+| PDF | 12ms（55 KB） | 8ms（56 KB） |
+
+端到端两份卷各跑两遍（第一遍摊着进程内一次性开销）：`20 题 × a4_practice` 1 页，冷 **1979ms** →
+热 **23ms**；`仿真卷 × a4_practice` 1 页，冷 **552ms** → 热 **15ms**。三个读数说明三件事：
+
+- 本批次新增的**全部**代码（读栅格文件头、回读帧树、三条判据、SVG 序列化）合计 ~15ms 量级，占整条链
+  的 2–3%，瓶颈仍是 typst 编译本身。
+- 那 1.4s 落在**先跑的那份卷**头上——与内容无关，与「进程里第一次」有关。归因是 T5.4 的活。
+- 热跑 15–23ms 说明 **typst 的 `comemo` 记忆缓存已经在兜「源码逐字相同」这条最理想的路径**。但预览的
+  真实形态是每次改参数源码都变，所以 T5.3 不能把 comemo 当成 LRU 做完；反过来，常驻服务从不调
+  `comemo::evict` 意味着这笔缓存只涨不减，也得在 T5.3 一起收口。
+
+DoD 的「20 题卷 ≤1s」按此**不达标**（冷 1979ms、稳态 552ms 都超），且这档测量还不含装配那一段数据库的
+账。正式三档基准（冷编译 / 百页 / 热请求）与调优在 T5.4（⛔ 门）——本批次只把尺子和读数钉进仓库。
+
+### 七、本批次已知边界
+
+- 预检只在预览出口，`/export/pdf` 不跑它（导出保持「无新问题就没有警告头」的口径）。
+- 溢流只判**纸边**不判版心：内容压进页边距（页眉页脚那一带）不算故障。竖排内容（装订带 `rotate`）帧树
+  只给摆放锚点与旋转前宽度，判不到真实包围盒；文字段没有高度读数，下边界按基线锚点判。
+- DPI 只检栅格：SVG 在 typst 里是矢量 `Group`，帧树没有它的 `Image` 项，magic number 也不在
+  `guess_format` 的表里 ⇒ 矢量素材完全不在这一条射程内（本来也没有 DPI 概念）。比例配不上的一条不报，
+  所以「同一张低清图按比例复用」这种病报不全。
+- 预览 SVG 字形已描边 ⇒ 自包含但**不可选中、不可检索**，也不带 `@font-face`。
+- 缺中文字体那条卷级 Issue 仍出自 `compile_once`（与 PDF 同源），预检只汇总不重造。
+- 全量 `cargo test --lib` 716 passed / 0 failed / 17 ignored；`--test typeset_preview_api` 6 passed、
+  `--test export_pdf_api` 7 passed，退出码 0。
+
 
 

@@ -352,9 +352,11 @@ pub fn build_app(state: AppState) -> Router {
         // 导出引擎（模块 A）— Markdown 直出（T1.6-1.7）/ DOCX（T2.6-2.8）/ PDF（T3.6-3.7）
         .route("/export/markdown", post(handlers::export::export_markdown))
         .route("/export/docx", post(handlers::export::export_docx))
-        // R1：PDF 出口唯一化为 /export/pdf —— 没有 /typeset/render，排版不另开渲染通道
+        // R1：PDF 出口唯一化为 /export/pdf —— 没有 /typeset/render，排版不另开出字节的渲染通道
         .route("/export/pdf", post(handlers::export::export_pdf))
         .route("/typeset/profiles", get(handlers::typeset::list_profiles))
+        // T5.2 预览：出的是逐页 SVG + 印前预检清单，不是交付文件，走的仍是导出那条编译
+        .route("/typeset/preview", post(handlers::typeset::preview))
         // 统一应用认证中间件
         .layer(middleware::from_fn_with_state(
             state.clone(),

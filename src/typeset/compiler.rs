@@ -81,31 +81,48 @@ impl CompileError {
     }
 }
 
-/// 编译出 PDF 字节。
+/// 源码 → PDF 字节，一步到位。
+///
+/// 生产路径不走它：`export::pdf` 把 [`compile_paged`] 与取样拆开，好让一份卷子只编一次。
+/// 留着是给测试与探针用的便捷入口。
 pub fn compile_pdf(req: &CompileRequest) -> Result<Compiled<Vec<u8>>, CompileError> {
     let compiled = compile_paged(req)?;
-    let bytes =
-        typst_pdf::pdf(&compiled.output, &typst_pdf::PdfOptions::default()).map_err(to_error)?;
+    let bytes = pdf_bytes(&compiled.output)?;
     Ok(Compiled {
         output: bytes,
         warnings: compiled.warnings,
     })
 }
 
-/// 逐页编译成 SVG（预览用；T5.2 是它的消费者）。
+/// 已有的 `PagedDocument` → PDF 字节。
+///
+/// 拆出来是为了「编译一次、多处取样」：预览（T5.2）同一次编译既要帧树（预检）又要产物，
+/// 编两遍既慢，又可能因为字体池变化给出两份不一致的卷。
+pub fn pdf_bytes(doc: &PagedDocument) -> Result<Vec<u8>, CompileError> {
+    typst_pdf::pdf(doc, &typst_pdf::PdfOptions::default()).map_err(to_error)
+}
+
+/// 源码 → 逐页 SVG，一步到位（消费者同 [`compile_pdf`]：测试与探针）。
 pub fn compile_svg_pages(req: &CompileRequest) -> Result<Compiled<Vec<String>>, CompileError> {
     let compiled = compile_paged(req)?;
-    let options = typst_svg::SvgOptions::default();
-    let pages = compiled
-        .output
-        .pages()
-        .iter()
-        .map(|page| typst_svg::svg(page, &options))
-        .collect();
     Ok(Compiled {
-        output: pages,
+        output: svg_pages(&compiled.output),
         warnings: compiled.warnings,
     })
+}
+
+/// 已有的 `PagedDocument` → 逐页 SVG 源码。
+///
+/// **自包含**：typst-svg 0.15.1 把每个字形描成 `<path>`（字体里带 SVG 表的走 SVG，位图字形走
+/// 内嵌位图），整页不写 `@font-face` —— `SvgOptions` 只有 `render_bleed` 与 `pretty` 两个开关。
+/// 对预览是好事：浏览器没装思源也能看到将要印出来的那套字；代价是页面上的字**不可选中、不可
+/// 检索**，前端（T5.5）把每页当图片摆出来即可，别指望在预览里复制题干。
+pub fn svg_pages(doc: &PagedDocument) -> Vec<String> {
+    let options = typst_svg::SvgOptions::default();
+    doc.pages()
+        .iter()
+        .map(|page| typst_svg::svg(page, &options))
+        .collect()
 }
 
 /// 编译到 `PagedDocument`：World 之外的失败统一成 typst 诊断。
@@ -129,11 +146,16 @@ pub struct RenderedRun {
     pub family: String,
 }
 
-/// 一段字连同它在**页内**的落点（毫米，原点 = 页面左上角）。
+/// 一段字连同它在**页内**的落点与宽度（毫米，原点 = 页面左上角）。
+///
+/// `w_mm` 取 typst `TextItem::width()` = 各字形 `x_advance` 之和：够宽到把「这段字印到哪结束」
+/// 判准（印前预检的溢流判据要的是包围盒，光有锚点等于什么都没查），但它**不是墨迹范围**——
+/// 尾部空格照样计入，字形向右越界伸出（斜体、连字）不计入。
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlacedRun {
     pub x_mm: f64,
     pub y_mm: f64,
+    pub w_mm: f64,
     pub run: RenderedRun,
 }
 
@@ -220,6 +242,21 @@ pub fn placed_lines(doc: &PagedDocument) -> Vec<Vec<PlacedLine>> {
     place_pages(doc).into_iter().map(|p| p.lines).collect()
 }
 
+/// 逐页的纸张尺寸（毫米，下标 = 物理页）。
+///
+/// 印前预检（T5.1 / R12）的溢流判据要的是**纸边**，而 `Page::frame` 的尺寸就是纸边：实测
+/// `#set page(width: 300mm, height: 120mm)` 报 300.00×120.00。不用 `spec.paper` 反推 ——
+/// 母版分离（T4.9）之后首页与正文页本就可能不同尺寸，逐页现读才是事实。
+pub fn page_sizes(doc: &PagedDocument) -> Vec<(f64, f64)> {
+    doc.pages()
+        .iter()
+        .map(|page| {
+            let s = page.frame.size();
+            (s.x.to_mm(), s.y.to_mm())
+        })
+        .collect()
+}
+
 fn place_pages(doc: &PagedDocument) -> Vec<Placed> {
     doc.pages()
         .iter()
@@ -238,6 +275,7 @@ fn walk_frame(frame: &Frame, at: Point, out: &mut Placed) {
             FrameItem::Text(text) => out.runs.push(PlacedRun {
                 x_mm: here.x.to_mm(),
                 y_mm: here.y.to_mm(),
+                w_mm: text.width().to_mm(),
                 run: RenderedRun {
                     text: text.text.to_string(),
                     family: text.font.info().family.clone(),

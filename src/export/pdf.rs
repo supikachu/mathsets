@@ -16,12 +16,16 @@
 //! 5. **题型出块**（T4.1）：「这一题该出哪些块」在 [`crate::typeset::blocks`] 的注册表里，
 //!    本文件只查表，然后把模式差异（Callout、内嵌答案）续在题面后面。
 //!
-//! T3.7 起本模块兼任 **PDF 渲染出口**（[`generate_pdf`]：预取素材 → `typst_gen` → `compiler`）。
+//! T3.7 起本模块兼任 **PDF 渲染出口**（[`generate_pdf`]：预取素材 → `typst_gen` → `compiler`），
+//! T5.2 起再加一个**预览出口**（[`generate_preview`]：同一次编译 → 逐页 SVG + [`preflight`]）。
 //! 放在桥上而不是 handler 里，是因为「这张卷子要哪些图」只有排版域自己说得清，而 R1 已经把
-//! PDF 出口唯一化到 `/export/pdf` —— 一条链、一个入口。
+//! PDF 出口唯一化到 `/export/pdf` —— 一条链、一个入口；预览复用这条链，只是不再出字节。
 
 use std::collections::HashMap;
+use std::io::Cursor;
 use std::path::Path;
+
+use typst_layout::PagedDocument;
 
 use crate::export::assets::{FetchedImage, fetch_image};
 use crate::export::content::split_content;
@@ -33,12 +37,14 @@ use crate::models::question_structure::walk_leaves;
 use crate::typeset::blocks::choice_grid;
 use crate::typeset::blocks::{BlockCtx, Registry};
 use crate::typeset::compiler::{
-    CompileError, CompileRequest, compile_pdf, font_dirs, missing_cjk_fonts,
+    CompileError, CompileRequest, compile_paged, font_dirs, missing_cjk_fonts, page_sizes,
+    pdf_bytes, placed_images, placed_pages, svg_pages,
 };
 use crate::typeset::ir::{
     AnalysisEntry, AnswerBlock, AnswerLine, BlockMeta, CalloutBlock, DocumentMeta, LayoutBlock,
     LayoutDoc, Section, SectionHeader,
 };
+use crate::typeset::preflight::{self, Raster};
 use crate::typeset::spec::{BlankStyle, LayoutSpec, OutputProfile};
 use crate::typeset::typst_gen;
 
@@ -333,17 +339,37 @@ pub struct PdfResult {
     pub issues: Vec<Issue>,
 }
 
-/// LayoutDoc → main.typ → PDF：排版出口的唯一渲染路径（R1，不提供 `/typeset/render`）
+/// 预览生成结果（T5.2）
+pub struct PreviewResult {
+    /// 逐页 SVG 源码，下标 = 物理页
+    pub pages: Vec<String>,
+    /// 生成期问题 + 印前预检发现（T5.1），结构化给前端
+    pub issues: Vec<Issue>,
+    /// typst 自己的告警原文：不进 Issue 通道，前端只做折叠展示
+    pub warnings: Vec<String>,
+}
+
+/// 一次编译的全部产物：字节之外的东西留给两个出口各自取样。
+struct Rendered {
+    doc: PagedDocument,
+    /// 文档序的栅格清单（预检判据 1 的另一半输入）
+    rasters: Vec<Raster>,
+    issues: Vec<Issue>,
+    warnings: Vec<String>,
+}
+
+/// 素材预取 → typst 源码 → `PagedDocument`：PDF 与预览共用的前段。
 ///
-/// 编译失败是唯一能让整卷开天窗的失败：坏公式在 [`typst_gen::generate`] 里逐枚降级、坏图在
-/// [`prefetch_assets`] 里摘掉，还在出错就是模板或环境的问题。把诊断原样交给 handler（500），
-/// 不在这里假装修好 —— 静默产出一份缺页的考卷比报错更糟。
-pub async fn generate_pdf(doc: &LayoutDoc, upload_dir: &Path) -> Result<PdfResult, CompileError> {
+/// 必须只编一次（R12）：预览若另起一次编译，教师在预览里看到的分页、溢流和印出来的分页
+/// 可能不是同一份卷子，预检就从「把关」变成了「误导」；20 题卷的耗时预算（≤1s）也撑不起
+/// 两遍 typst。
+async fn compile_once(doc: &LayoutDoc, upload_dir: &Path) -> Result<Rendered, CompileError> {
     let assets = prefetch_assets(doc, upload_dir).await;
+    let rasters = raster_facts(doc, &assets);
     let generated = typst_gen::generate(doc, &assets.images);
 
     let dirs = font_dirs();
-    let compiled = compile_pdf(&CompileRequest {
+    let compiled = compile_paged(&CompileRequest {
         source: &generated.source,
         upload_dir,
         font_dirs: &dirs,
@@ -366,8 +392,29 @@ pub async fn generate_pdf(doc: &LayoutDoc, upload_dir: &Path) -> Result<PdfResul
             ),
         });
     }
+
+    Ok(Rendered {
+        doc: compiled.output,
+        rasters,
+        issues,
+        warnings: compiled.warnings,
+    })
+}
+
+/// LayoutDoc → main.typ → PDF：排版出口的唯一渲染路径（R1，不提供 `/typeset/render`）
+///
+/// 编译失败是唯一能让整卷开天窗的失败：坏公式在 [`typst_gen::generate`] 里逐枚降级、坏图在
+/// [`prefetch_assets`] 里摘掉，还在出错就是模板或环境的问题。把诊断原样交给 handler（500），
+/// 不在这里假装修好 —— 静默产出一份缺页的考卷比报错更糟。
+///
+/// PDF 路径**不跑预检**：预检的三条判据只在预览里给（§6.5「随预览 JSON 返回前端展示」），
+/// 导出接口保持 M3 以来的「无新问题就没有警告头」口径。
+pub async fn generate_pdf(doc: &LayoutDoc, upload_dir: &Path) -> Result<PdfResult, CompileError> {
+    let rendered = compile_once(doc, upload_dir).await?;
+
+    let mut issues = rendered.issues;
     // typst 自己的告警（字形缺失、弃用写法等）：卷级，源码是我们生成的，行号对教师无意义
-    issues.extend(compiled.warnings.into_iter().map(|warning| Issue {
+    issues.extend(rendered.warnings.into_iter().map(|warning| Issue {
         question_no: None,
         field: IssueField::Other,
         severity: IssueSeverity::Warning,
@@ -376,8 +423,35 @@ pub async fn generate_pdf(doc: &LayoutDoc, upload_dir: &Path) -> Result<PdfResul
     }));
 
     Ok(PdfResult {
-        bytes: compiled.output,
+        bytes: pdf_bytes(&rendered.doc)?,
         issues,
+    })
+}
+
+/// LayoutDoc → 逐页 SVG + 印前预检：预览出口（T5.2）
+///
+/// 预检的输入全在编译后的帧树里（R12），所以它只能长在这个位置：编完再读，不额外编译。
+pub async fn generate_preview(
+    doc: &LayoutDoc,
+    upload_dir: &Path,
+) -> Result<PreviewResult, CompileError> {
+    let rendered = compile_once(doc, upload_dir).await?;
+
+    let runs = placed_pages(&rendered.doc);
+    let images = placed_images(&rendered.doc);
+    let paper = page_sizes(&rendered.doc);
+    let mut issues = rendered.issues;
+    issues.extend(preflight::inspect(&preflight::Evidence {
+        runs: &runs,
+        images: &images,
+        paper: &paper,
+        rasters: &rendered.rasters,
+    }));
+
+    Ok(PreviewResult {
+        pages: svg_pages(&rendered.doc),
+        issues,
+        warnings: rendered.warnings,
     })
 }
 
@@ -387,6 +461,8 @@ struct Assets {
     /// 值 `None` = 这张图拿不到且**已记 Issue**（见 [`typst_gen::generate`] 的口径）
     images: HashMap<String, Option<String>>,
     injected: Vec<(String, Vec<u8>)>,
+    /// 注入路径 → 像素宽高，只有**栅格**图有（矢量没有 DPI 可查）。预检判据 1 的一半输入。
+    dims: HashMap<String, (u32, u32)>,
     issues: Vec<Issue>,
 }
 
@@ -437,9 +513,24 @@ impl Assets {
             return None;
         }
         let path = format!("/ext/{}.{}", self.injected.len(), ext);
+        if let Some(dims) = raster_dims(&img.bytes) {
+            self.dims.insert(path.clone(), dims);
+        }
         self.injected.push((path.clone(), img.bytes));
         Some(path)
     }
+}
+
+/// 读栅格文件头的宽高，**不解码像素**（预检只要内禀尺寸，一张 10MB 的图不该为它解压一遍）。
+///
+/// 认不出的格式一律 `None` = 这张图不查 DPI：`guess_format` 靠 magic number，SVG 是文本、
+/// 不在它的表里，而这正合用 —— 矢量图没有 DPI 概念，帧树里也没有它的 `Image` 项（见
+/// [`crate::typeset::compiler::placed_images`]）。宁可少检一类，也不给预览添假问题。
+fn raster_dims(bytes: &[u8]) -> Option<(u32, u32)> {
+    let format = image::guess_format(bytes).ok()?;
+    image::ImageReader::with_format(Cursor::new(bytes), format)
+        .into_dimensions()
+        .ok()
 }
 
 /// 版面上会出现的图片 URL（带归属题号）。IR 已是切分后的 `InlineNode`，无需二次解析文本。
@@ -454,6 +545,27 @@ fn collect_images(doc: &LayoutDoc) -> Vec<(Option<u32>, String)> {
         answer_images(answer, &mut out);
     }
     out
+}
+
+/// 预检的栅格清单（[`preflight::Raster`]）：文档序、**一次打印出现算一条**（同图复用两遍就是两条）。
+///
+/// 只收「真的被注进去、且文件头读得出宽高」的位图：拿不到的图 typst 那边根本没有对应的
+/// `PlacedImage`，混进清单只会把按宽高比的配对带歪。顺序本身不承载语义 —— 谁认领哪一次
+/// 打印由 [`preflight::dpi_findings`] 的比例配对决定。
+fn raster_facts(doc: &LayoutDoc, assets: &Assets) -> Vec<Raster> {
+    collect_images(doc)
+        .into_iter()
+        .filter_map(|(qno, url)| {
+            let path = assets.images.get(&url)?.as_ref()?;
+            let (px_w, px_h) = *assets.dims.get(path)?;
+            Some(Raster {
+                question_no: qno,
+                url,
+                px_w,
+                px_h,
+            })
+        })
+        .collect()
 }
 
 fn block_images(block: &LayoutBlock, out: &mut Vec<(Option<u32>, String)>) {
@@ -1323,6 +1435,24 @@ mod tests {
         }
     }
 
+    /// 仿真样卷（T4.6 的差异矩阵 + T5.1 的零误报闸门共用这一份装配）
+    fn sample_bundle(mode: ExportMode) -> ExamBundle {
+        let mut questions = mode_questions(mode);
+        let solution = ExamQuestion {
+            number: 6,
+            ..questions.pop().expect("共用内容里最后一题是解答题")
+        };
+        let mut b = bundle(mode, questions);
+        b.sections[0].questions.extend((2..=5).map(medium_choice));
+        b.exam_meta.instructions = vec!["答题前请将自己的姓名、准考证号填写清楚".into()];
+        b.sections.push(ExamSection {
+            title: "二、解答题".into(),
+            instruction: Some("解答应写出必要的文字说明、证明过程或演算步骤".into()),
+            questions: vec![solution],
+        });
+        b
+    }
+
     /// 三模式各出一份真 PDF 供目视（T4.6 验收的「样卷」那一半）
     ///
     /// `cargo test --lib export::pdf -- --ignored --nocapture`
@@ -1343,19 +1473,7 @@ mod tests {
             (ExportMode::Teacher, "教师讲义"),
             (ExportMode::Exam, "标准考卷"),
         ] {
-            let mut questions = mode_questions(mode);
-            let solution = ExamQuestion {
-                number: 6,
-                ..questions.pop().expect("共用内容里最后一题是解答题")
-            };
-            let mut b = bundle(mode, questions);
-            b.sections[0].questions.extend((2..=5).map(medium_choice));
-            b.exam_meta.instructions = vec!["答题前请将自己的姓名、准考证号填写清楚".into()];
-            b.sections.push(ExamSection {
-                title: "二、解答题".into(),
-                instruction: Some("解答应写出必要的文字说明、证明过程或演算步骤".into()),
-                questions: vec![solution],
-            });
+            let b = sample_bundle(mode);
             let doc = build_layout_doc(&b, &mode_options(mode), None);
             let started = Instant::now();
             let pdf = generate_pdf(&doc, &dir)
@@ -1584,6 +1702,219 @@ mod tests {
             "素材齐了就不该有图片警告：{image_issues:?}"
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // ── 预览与印前预检（T5.1 / T5.2）──
+
+    /// 真 PNG：预检要从文件头读像素数，伪造的字节流 `guess_format` 不认，等于什么都没测
+    fn png(w: u32, h: u32) -> Vec<u8> {
+        let img = image::GrayImage::from_pixel(w, h, image::Luma([0u8]));
+        let mut buf = Cursor::new(Vec::new());
+        img.write_to(&mut buf, image::ImageFormat::Png).unwrap();
+        buf.into_inner()
+    }
+
+    #[tokio::test]
+    async fn preview_returns_one_standalone_svg_per_physical_page() {
+        let dir = uploads_with(&[]);
+        let out = generate_preview(&mode_doc(ExportMode::Exam), &dir)
+            .await
+            .expect("预览不该失败");
+        assert!(!out.pages.is_empty(), "一页 SVG 都没有");
+        for page in &out.pages {
+            assert!(
+                page.starts_with("<svg") && page.contains("viewBox"),
+                "不是能独立塞进 <div> 的整页 SVG：{}",
+                &page[..page.len().min(80)]
+            );
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 零误报闸门：四套预设 × 三种模式跑完仿真样卷，预检一条都不该报。
+    ///
+    /// 这条比「报得出真故障」要紧 —— 预检一旦误报，教师就学着忽略它了。它兜住的是自家模板
+    /// 的几何：装订带竖排文字（T4.8）在纸内、A3 三栏的窄栏（T4.7）里表格不失宽、母版分离
+    /// （T4.9）后首页与正文页纸边不同。issues 里此时只可能有预检的三类发现：素材齐（无图）、
+    /// 公式全降级过（`paper_of` 的口径）之后，生成期与字体问题都应为空。
+    #[tokio::test]
+    async fn the_sample_exam_is_clean_under_every_preset() {
+        use std::time::Instant;
+
+        let dir = uploads_with(&[]);
+        for id in ["a4_lecture", "a4_practice", "a3_fold_exam", "a3_tri_exam"] {
+            let spec = LayoutSpec::preset(id).expect("预设存在");
+            for mode in [ExportMode::Student, ExportMode::Teacher, ExportMode::Exam] {
+                let doc = build_layout_doc(&sample_bundle(mode), &mode_options(mode), Some(&spec));
+                let started = Instant::now();
+                let out = generate_preview(&doc, &dir)
+                    .await
+                    .unwrap_or_else(|e| panic!("{id} × {mode:?} 预览失败：{}", e.summary()));
+                println!(
+                    "{id} × {mode:?}：{} 页，{} 条 issue，{}ms",
+                    out.pages.len(),
+                    out.issues.len(),
+                    started.elapsed().as_millis()
+                );
+                assert!(
+                    out.issues.is_empty(),
+                    "{id} × {mode:?} 预检误报：{:?}",
+                    out.issues.iter().map(|i| &i.reason).collect::<Vec<_>>()
+                );
+            }
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 预览的耗时构成（诊断用，不参与常规回归）：
+    /// `cargo test --lib export::pdf -- --ignored --nocapture`
+    ///
+    /// **必须 `--release` 读数**：debug 下同一份卷编译 6–7s，与线上的排期毫无关系。
+    #[tokio::test]
+    #[ignore]
+    async fn cost_of_a_preview() {
+        use std::time::Instant;
+
+        let dir = uploads_with(&[]);
+        for id in ["a4_lecture", "a3_tri_exam"] {
+            let spec = LayoutSpec::preset(id).unwrap();
+            let doc = build_layout_doc(
+                &sample_bundle(ExportMode::Exam),
+                &mode_options(ExportMode::Exam),
+                Some(&spec),
+            );
+            let started = Instant::now();
+            let assets = prefetch_assets(&doc, &dir).await;
+            let generated = typst_gen::generate(&doc, &assets.images);
+            let rasters = raster_facts(&doc, &assets);
+            let prep = started.elapsed();
+            let dirs = font_dirs();
+            let started = Instant::now();
+            let compiled = compile_paged(&CompileRequest {
+                source: &generated.source,
+                upload_dir: &dir,
+                font_dirs: &dirs,
+                injected: &assets.injected,
+            })
+            .expect("编译失败");
+            let compile = started.elapsed();
+            let started = Instant::now();
+            let runs = placed_pages(&compiled.output);
+            let images = placed_images(&compiled.output);
+            let paper = page_sizes(&compiled.output);
+            let walk = started.elapsed();
+            let started = Instant::now();
+            let found = preflight::inspect(&preflight::Evidence {
+                runs: &runs,
+                images: &images,
+                paper: &paper,
+                rasters: &rasters,
+            });
+            let inspect = started.elapsed();
+            let started = Instant::now();
+            let svg = svg_pages(&compiled.output);
+            let to_svg = started.elapsed();
+            let started = Instant::now();
+            let pdf = pdf_bytes(&compiled.output).expect("PDF 失败");
+            let to_pdf = started.elapsed();
+            println!(
+                "{id}：{} 页｜素材+源码 {}ms｜编译 {}ms｜回读帧树 {}ms｜预检 {}ms（{} 条）｜SVG {}ms（{} KB/页）｜PDF {}ms（{} KB）",
+                svg.len(),
+                prep.as_millis(),
+                compile.as_millis(),
+                walk.as_millis(),
+                inspect.as_millis(),
+                found.len(),
+                to_svg.as_millis(),
+                svg.first().map_or(0, |s| s.len() / 1024),
+                to_pdf.as_millis(),
+                pdf.len() / 1024,
+            );
+        }
+        // T5.2 DoD 的那把尺子：端到端预览（不含装配，那一段是数据库的账）。
+        // 每份卷跑两遍——第一遍摊着进程内一次性开销（字体池解析、typst 全局初始化），第二遍才是
+        // 稳态。只读一遍会把这笔一次性账算到「先跑的那份卷子」头上，量出来的相对大小是假的。
+        let papers = [
+            (
+                "20 题 × a4_practice",
+                bundle(
+                    ExportMode::Student,
+                    (1..=20).map(medium_choice).collect::<Vec<_>>(),
+                ),
+            ),
+            // 上面那道题一行半、压得进一页，不等于真实卷子的重量；参照物是仿真卷。
+            ("仿真卷 × a4_practice", sample_bundle(ExportMode::Student)),
+        ];
+        for (name, b) in &papers {
+            let doc = build_layout_doc(b, &mode_options(ExportMode::Student), None);
+            let mut costs = Vec::new();
+            let mut pages = 0;
+            let mut kb = 0;
+            for _ in 0..2 {
+                let started = Instant::now();
+                let out = generate_preview(&doc, &dir)
+                    .await
+                    .unwrap_or_else(|e| panic!("「{name}」预览失败：{}", e.summary()));
+                costs.push(started.elapsed().as_millis());
+                pages = out.pages.len();
+                kb = out.pages.iter().map(|s| s.len()).sum::<usize>() / 1024;
+            }
+            println!(
+                "{name}：{pages} 页｜冷 {}ms → 热 {}ms｜SVG 共 {kb} KB",
+                costs[0], costs[1]
+            );
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn preview_names_the_bitmap_that_would_print_soft() {
+        // 24×18px：按 72dpi 印出来只有 8.5mm，怎么缩放都过不了 300dpi 这道线
+        let dir = uploads_with(&[("low.png", &png(24, 18))]);
+        let doc = image_doc("如图：\n![图象](/uploads/low.png)");
+        let out = generate_preview(&doc, &dir).await.expect("预览不该失败");
+        let hits: Vec<&Issue> = out
+            .issues
+            .iter()
+            .filter(|i| i.reason.contains("有效 DPI"))
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "{:?}",
+            out.issues.iter().map(|i| &i.reason).collect::<Vec<_>>()
+        );
+        assert_eq!(hits[0].question_no, Some(1), "预检要指得回题号");
+        assert_eq!(hits[0].field, IssueField::Image);
+        assert!(
+            hits[0].reason.contains("/uploads/low.png"),
+            "{}",
+            hits[0].reason
+        );
+        assert!(hits[0].reason.contains("24×18px"), "{}", hits[0].reason);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn preview_flags_content_running_off_the_paper() {
+        let mut q = choice(1, &["A"]);
+        // 400 个不间断拉丁字母：typst 一句诊断都不给（R12 实测），只能从帧树里读出来
+        q.stem = nodes(&"A".repeat(400));
+        let doc = one(ExportMode::Exam, q, &ExportOptions::default());
+        let out = generate_preview(&doc, &Path::new("uploads"))
+            .await
+            .expect("预览不该失败");
+        let hits: Vec<&str> = out
+            .issues
+            .iter()
+            .filter(|i| i.reason.contains("超出纸张"))
+            .map(|i| i.reason.as_str())
+            .collect();
+        assert!(!hits.is_empty(), "{:?}", out.issues);
+        assert!(
+            hits.iter().any(|r| r.contains("右边界") && r.contains('A')),
+            "溢流要报到方向、页码和原文片段：{hits:?}"
+        );
     }
 
     #[test]

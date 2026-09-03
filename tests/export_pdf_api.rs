@@ -495,7 +495,10 @@ async fn profiles_endpoint_lists_the_four_presets() {
     }
 }
 
-/// R1：PDF 出口唯一化为 `/export/pdf` —— 排版不另开渲染通道（两条流水线必然漂移）
+/// R1：PDF 出口唯一化为 `/export/pdf` —— 排版不另开**出字节**的渲染通道（两条流水线必然漂移）
+///
+/// 原来这一串里还有「`POST /typeset/preview` 不存在」，T5.2 落地后作废（R12）：预览出的是逐页
+/// SVG 与预检清单，不是交付物，且与 `/export/pdf` 共用同一次编译，不构成第二条流水线。
 #[tokio::test]
 async fn there_is_no_typeset_render_route() {
     let Some(mut app) = create_test_app().await else {
@@ -506,7 +509,6 @@ async fn there_is_no_typeset_render_route() {
     for (method, uri) in [
         (Method::GET, "/api/v1/typeset/render"),
         (Method::POST, "/api/v1/typeset/render"),
-        (Method::POST, "/api/v1/typeset/preview"),
     ] {
         let (status, _, _) = request_raw(
             &mut app,

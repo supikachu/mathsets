@@ -4181,4 +4181,151 @@ mod tests {
 "#,
         );
     }
+
+    /// T5.1 探针（结论进实施计划 R12）：印前预检要用的三条事实
+    ///
+    /// ① 不给 `width:` 的栅格图，typst 按文件自带密度摆放，无密度时回退多少 dpi；
+    /// ② `TextItem` 能不能给出一段文字在纸面上的**宽度**（溢流判据需要包围盒，不只是锚点）；
+    /// ③ 版面溢流（宽表格顶出纸边）时 typst 给不给任何诊断。
+    #[test]
+    #[ignore = "读 typst 行为，结论进实施计划 R12；不参与常规回归"]
+    fn preflight_probe() {
+        use ::image::ExtendedColorType;
+        use ::image::ImageEncoder as _;
+
+        /// `w×h` 像素的纯黑 PNG（不带 pHYs，即「无密度元数据」的典型形态）
+        fn png(w: u32, h: u32) -> Vec<u8> {
+            let mut buf = Vec::new();
+            ::image::codecs::png::PngEncoder::new(&mut buf)
+                .write_image(
+                    &vec![0u8; (w * h * 4) as usize],
+                    w,
+                    h,
+                    ExtendedColorType::Rgba8,
+                )
+                .expect("PNG 编码不会失败");
+            buf
+        }
+
+        let dirs = font_dirs();
+        let probe = |name: &str, src: &str, assets: Vec<(String, Vec<u8>)>| {
+            let req = request(src, &dirs, &assets);
+            let out = match compile_paged(&req) {
+                Ok(out) => out,
+                Err(e) => {
+                    println!("[{name}] 编译失败 {:?}", e.diagnostics);
+                    return;
+                }
+            };
+            println!(
+                "[{name}] 诊断 {} 条：{:?}",
+                out.warnings.len(),
+                out.warnings
+            );
+            for (i, pg) in out.output.pages().iter().enumerate() {
+                println!(
+                    "  第 {} 页 帧尺寸 {:.2}×{:.2}mm",
+                    i + 1,
+                    pg.frame.size().x.to_mm(),
+                    pg.frame.size().y.to_mm()
+                );
+            }
+            let imgs = placed_images(&out.output);
+            for (i, page) in imgs.iter().enumerate() {
+                for im in page {
+                    println!(
+                        "  第 {} 页 图 {:.4}×{:.4}mm @ x={:.2} y={:.2} 右沿 {:.4}",
+                        i + 1,
+                        im.w_mm,
+                        im.h_mm,
+                        im.x_mm,
+                        im.y_mm,
+                        im.x_mm + im.w_mm
+                    );
+                }
+            }
+            for (i, page) in placed_pages(&out.output).iter().enumerate() {
+                for r in page {
+                    println!(
+                        "  第 {} 页 文 {:?} @ x={:.2} y={:.2} w={:.2} 右沿={:.2}",
+                        i + 1,
+                        r.run.text,
+                        r.x_mm,
+                        r.y_mm,
+                        r.w_mm,
+                        r.x_mm + r.w_mm
+                    );
+                }
+            }
+        };
+
+        // ① 200×100 px 无密度 PNG：72dpi 应给 70.72mm，96dpi 应给 52.92mm
+        probe(
+            "P1 无 width 的栅格图",
+            r#"
+#set page(width: 300mm, height: 120mm, margin: 5mm)
+#image("/ext/0.png")
+"#,
+            vec![("/ext/0.png".to_string(), png(200, 100))],
+        );
+        println!("  参考：200px@72dpi = {}mm", 200.0 * 25.4 / 72.0);
+        println!("  参考：200px@96dpi = {}mm", 200.0 * 25.4 / 96.0);
+
+        // ② 文字宽度：10 个 ASCII 与 4 个汉字，同一字号
+        probe(
+            "P2 文字包围盒",
+            r#"
+#set page(width: 200mm, height: 60mm, margin: 5mm)
+#set text(size: 10pt, font: "Source Han Serif SC")
+1234567890
+#v(3mm)
+甲乙丙丁
+"#,
+            vec![],
+        );
+
+        // ③ 溢流：4 栏 × 60mm = 240mm 的表放进 100mm 的纸
+        probe(
+            "P3 宽表格溢流",
+            r#"
+#set page(width: 100mm, height: 120mm, margin: 5mm)
+#set text(size: 9pt, font: "Source Han Serif SC")
+#table(columns: 4 * 60mm, [甲栏], [乙栏], [丙栏], [丁栏])
+"#,
+            vec![],
+        );
+
+        // ③b 溢流：一张顶出纸边的长条文字（不许折行的长串）
+        probe(
+            "P3b 长不可断词溢流",
+            r#"
+#set page(width: 60mm, height: 120mm, margin: 5mm)
+#set text(size: 9pt, font: "Source Han Serif SC")
+#h(1mm)ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZ
+"#,
+            vec![],
+        );
+
+        // ③c 真实出口的形状：auto 列表格里塞一格超长不可断的式子
+        probe(
+            "P3c auto 列表格溢流",
+            r#"
+#set page(width: 80mm, height: 140mm, margin: 5mm)
+#set text(size: 9pt, font: "Source Han Serif SC")
+#table(columns: (auto, auto), [分值], [甲], [10], [$a+b+c+d+e+f+g+h+i+j+k+l+m+n+o+p+q+r+s+t+u+v+w+x+y+z$])
+"#,
+            vec![],
+        );
+
+        // ④ 对照：普通中文长段落必须自己折行，右沿不许越纸（几何判据不能误报）
+        probe(
+            "P4 正常长段落对照组",
+            r#"
+#set page(width: 80mm, height: 200mm, margin: 5mm)
+#set text(size: 10.5pt, font: "Source Han Serif SC")
+已知函数在区间上单调递增且其图象关于点对称现将该函数的图象向右平移若干个单位长度后得到一条新的曲线若该曲线仍关于原点对称则平移量最小值为多少请说明理由并给出完整的推导过程与必要的图形标注
+"#,
+            vec![],
+        );
+    }
 }
