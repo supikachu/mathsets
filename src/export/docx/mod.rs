@@ -65,8 +65,8 @@ pub fn mm_to_twips(mm: f32) -> i64 {
 /// 页眉 / 页脚距纸边的距离（mm）：`LayoutSpec` 里没有这两个字段，沿用 Word 的常用口径
 const HEADER_MM: f32 = 15.0;
 const FOOTER_MM: f32 = 17.5;
-/// CJK 行网格：与纸张无关，保持 M2 的取值
-const DOC_GRID: &str = r#"<w:docGrid w:type="lines" w:linePitch="312"/>"#;
+/// 关闭文档网格：`lines` 网格会把大量短段落（解析里 OCR 换行）撑成稀疏散乱的竖向空白
+const DOC_GRID: &str = "";
 
 /// 页面设置（T4.12 / R11）：纸张、边距、装订位、栏数全部由 `LayoutSpec` 现算
 ///
@@ -338,38 +338,50 @@ fn styles_xml() -> String {
             r#"<w:sz w:val="21"/><w:szCs w:val="21"/>"#,
             r#"<w:lang w:val="en-US" w:eastAsia="zh-CN" w:bidi="ar-SA"/>"#,
             r#"</w:rPr></w:rPrDefault>"#,
-            r#"<w:pPrDefault><w:pPr><w:spacing w:after="0" w:line="276" w:lineRule="auto"/></w:pPr></w:pPrDefault>"#,
+            r#"<w:pPrDefault><w:pPr><w:spacing w:after="60" w:line="276" w:lineRule="auto"/><w:jc w:val="left"/></w:pPr></w:pPrDefault>"#,
             r#"</w:docDefaults>"#,
-            // ── 正文：两端对齐
+            // ── 正文：左对齐；outlineLvl=9 = 正文文本（禁止被当成标题出现左侧黑点）
             r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal">"#,
-            r#"<w:name w:val="Normal"/><w:qFormat/><w:pPr><w:jc w:val="both"/></w:pPr></w:style>"#,
-            // ── 大题标题：黑体小四加粗 + 灰底，且不与其下的小题分页
+            r#"<w:name w:val="Normal"/><w:qFormat/><w:pPr><w:jc w:val="left"/><w:outlineLvl w:val="9"/></w:pPr></w:style>"#,
+            // ── 卷名：唯一允许的一级标题
+            r#"<w:style w:type="paragraph" w:styleId="DocTitle">"#,
+            r#"<w:name w:val="exam title"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/>"#,
+            r#"<w:pPr><w:keepNext/><w:keepLines/>"#,
+            r#"<w:spacing w:before="0" w:after="120"/><w:jc w:val="center"/><w:outlineLvl w:val="0"/></w:pPr>"#,
+            r#"<w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:eastAsia="黑体"/>"#,
+            r#"<w:b/><w:bCs/><w:sz w:val="32"/><w:szCs w:val="32"/></w:rPr></w:style>"#,
+            // ── 大题标题（一、单选题 / 二、填空题…）：唯一允许的二级标题
             r#"<w:style w:type="paragraph" w:styleId="SectionTitle">"#,
-            r#"<w:name w:val="big question title"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/>"#,
+            r#"<w:name w:val="big question title"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/>"#,
             r#"<w:pPr><w:keepNext/><w:keepLines/>"#,
             r#"<w:shd w:val="clear" w:color="auto" w:fill="E7E6E6"/>"#,
-            r#"<w:spacing w:before="240" w:after="120"/><w:jc w:val="left"/></w:pPr>"#,
+            r#"<w:spacing w:before="240" w:after="120"/><w:jc w:val="left"/><w:outlineLvl w:val="1"/></w:pPr>"#,
             r#"<w:rPr><w:rFonts w:eastAsia="黑体"/><w:b/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr></w:style>"#,
-            // ── 题号段：悬挂缩进（首行题号顶格，续行与题面文字对齐）
+            // ── 题号段：正文；不用 keepNext（Word 显示编辑标记时左侧会画黑点）
             r#"<w:style w:type="paragraph" w:styleId="QuestionNo">"#,
             r#"<w:name w:val="question no"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/>"#,
-            r#"<w:pPr><w:keepNext/><w:keepLines/><w:spacing w:after="60"/><w:ind w:left="420" w:hanging="420"/>"#,
-            r#"<w:jc w:val="left"/></w:pPr></w:style>"#,
-            // ── 选项段：选项网格里逐格套用
+            r#"<w:pPr><w:spacing w:after="60"/><w:ind w:left="420" w:hanging="420"/>"#,
+            r#"<w:jc w:val="left"/><w:outlineLvl w:val="9"/></w:pPr></w:style>"#,
+            // ── 答案 / 解析：正文；禁止 keepNext
+            r#"<w:style w:type="paragraph" w:styleId="FieldBlock">"#,
+            r#"<w:name w:val="answer analysis"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/>"#,
+            r#"<w:pPr><w:spacing w:before="40" w:after="60"/><w:ind w:left="420"/>"#,
+            r#"<w:jc w:val="left"/><w:outlineLvl w:val="9"/></w:pPr></w:style>"#,
+            // ── 选项段：正文（单列缩进；多列缩进由段落直接格式覆盖）
             r#"<w:style w:type="paragraph" w:styleId="Choice">"#,
             r#"<w:name w:val="choice"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/>"#,
-            r#"<w:pPr><w:spacing w:after="0"/><w:ind w:left="113"/><w:jc w:val="left"/></w:pPr></w:style>"#,
-            // ── 提示框：四边框 + 浅底纹；四类 Callout 的配色由 writer 用直接格式覆盖
+            r#"<w:pPr><w:spacing w:after="0"/><w:ind w:left="420"/><w:jc w:val="left"/><w:outlineLvl w:val="9"/></w:pPr></w:style>"#,
+            // ── 提示框：正文；禁止 keepNext
             r#"<w:style w:type="paragraph" w:styleId="Callout">"#,
             r#"<w:name w:val="callout"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/>"#,
-            r#"<w:pPr><w:keepNext/><w:keepLines/><w:pBdr>"#,
+            r#"<w:pPr><w:pBdr>"#,
             r#"<w:top w:val="single" w:sz="4" w:space="4" w:color="BFBFBF"/>"#,
             r#"<w:left w:val="single" w:sz="4" w:space="4" w:color="BFBFBF"/>"#,
             r#"<w:bottom w:val="single" w:sz="4" w:space="4" w:color="BFBFBF"/>"#,
             r#"<w:right w:val="single" w:sz="4" w:space="4" w:color="BFBFBF"/>"#,
             r#"</w:pBdr><w:shd w:val="clear" w:color="auto" w:fill="F2F2F2"/>"#,
             r#"<w:spacing w:before="60" w:after="120"/><w:ind w:left="113" w:right="113"/>"#,
-            r#"<w:jc w:val="left"/></w:pPr>"#,
+            r#"<w:jc w:val="left"/><w:outlineLvl w:val="9"/></w:pPr>"#,
             r#"<w:rPr><w:sz w:val="18"/><w:szCs w:val="18"/></w:rPr></w:style>"#,
             r#"</w:styles>"#,
         ),
@@ -697,13 +709,46 @@ mod tests {
             Some("21"),
             "10.5pt = 21 半磅"
         );
-        for id in ["SectionTitle", "QuestionNo", "Choice", "Callout"] {
+        for id in [
+            "SectionTitle",
+            "QuestionNo",
+            "Choice",
+            "Callout",
+            "DocTitle",
+            "FieldBlock",
+        ] {
             assert!(
                 styles
                     .descendants()
                     .any(|n| n.has_tag_name("style") && n.attribute("styleId") == Some(id)),
                 "缺样式 {id}"
             );
+        }
+        // 正文必须左对齐：both + 软换行/短行会把字距撑散
+        let normal_jc = normal
+            .descendants()
+            .find(|n| n.has_tag_name("jc"))
+            .and_then(|n| n.attribute("val"));
+        assert_eq!(normal_jc, Some("left"), "Normal 须左对齐，禁止 both");
+        // 卷名 / 大题才是标题；题号与其余样式必须是正文（outlineLvl=9），否则 Word 左侧会出现标题黑点
+        for (id, lvl) in [
+            ("DocTitle", "0"),
+            ("SectionTitle", "1"),
+            ("Normal", "9"),
+            ("QuestionNo", "9"),
+            ("FieldBlock", "9"),
+            ("Choice", "9"),
+            ("Callout", "9"),
+        ] {
+            let style = styles
+                .descendants()
+                .find(|n| n.has_tag_name("style") && n.attribute("styleId") == Some(id))
+                .unwrap_or_else(|| panic!("缺样式 {id}"));
+            let outline = style
+                .descendants()
+                .find(|n| n.has_tag_name("outlineLvl"))
+                .and_then(|n| n.attribute("val"));
+            assert_eq!(outline, Some(lvl), "{id} outlineLvl");
         }
         // 样式引用的 pStyle 必须真实存在（写错 id 的表现是格式静默失效）
         let doc = parse(&parts, "word/document.xml");

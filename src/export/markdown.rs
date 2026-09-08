@@ -355,7 +355,7 @@ fn render_callout(md: &mut String, c: &Callout, img_map: &HashMap<String, String
     md.push('\n');
 }
 
-/// 答案文本：解答题按问树叶子（label + 答案），其余按空分隔
+/// 答案文本：解答题按问树叶子（label + 答案）；选择/多选字母直拼；填空等多空用「；」
 fn render_answer_text(q: &ExamQuestion) -> String {
     if q.kind == QuestionKind::Solution && !q.structure_parts.is_empty() {
         walk_leaves(&q.structure_parts)
@@ -368,7 +368,8 @@ fn render_answer_text(q: &ExamQuestion) -> String {
             .collect::<Vec<_>>()
             .join("\n")
     } else {
-        q.answers.iter().map(|a| escape_md(a)).collect::<Vec<_>>().join("；")
+        // 先按题型拼接，再整体做最小 MD 转义（字母答案无特殊字符）
+        escape_md(&crate::export::content::format_answer_text(q.kind, &q.answers))
     }
 }
 

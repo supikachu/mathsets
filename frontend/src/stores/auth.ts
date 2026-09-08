@@ -67,6 +67,12 @@ export const useAuthStore = defineStore('auth', () => {
     localStorage.removeItem('token')
     localStorage.removeItem('user')
     localStorage.removeItem('currentSpaceId')
+    try {
+      const { clearQuestionBasketStorage } = await import('@/composables/useQuestionBasket')
+      clearQuestionBasketStorage()
+    } catch {
+      /* ignore */
+    }
     window.location.href = '/login'
   }
 

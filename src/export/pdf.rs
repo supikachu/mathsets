@@ -260,7 +260,7 @@ fn answer_block(q: &ExamQuestion, ctx: &BlockCtx, meta: BlockMeta) -> Option<Ans
     })
 }
 
-/// 答案行：解答题逐小问（带小问号），其余题型一条（多空用「；」串起来）
+/// 答案行：解答题逐小问（带小问号），其余题型一条（选择/多选字母直拼，填空等多空用「；」）
 ///
 /// 「逐小问」的判据与出块侧同源（`policy.expands_parts`）—— 排了小问却不逐小问给答案，
 /// 或反过来，都是同一处漏改。
@@ -284,7 +284,7 @@ fn answer_lines(q: &ExamQuestion, ctx: &BlockCtx) -> Vec<AnswerLine> {
             })
             .collect();
     }
-    let joined = join_answers(&q.answers);
+    let joined = crate::export::content::join_answer_nodes(q.kind, &q.answers);
     if joined.is_empty() {
         return Vec::new();
     }
@@ -292,24 +292,6 @@ fn answer_lines(q: &ExamQuestion, ctx: &BlockCtx) -> Vec<AnswerLine> {
         label: String::new(),
         nodes: joined,
     }]
-}
-
-/// 逐条切分后再用「；」相连 —— 先拼字符串再切分会让 `$…$` 跨条配对
-fn join_answers(answers: &[String]) -> Vec<InlineNode> {
-    let mut out: Vec<InlineNode> = Vec::new();
-    for a in answers {
-        let text = a.trim();
-        if text.is_empty() {
-            continue;
-        }
-        if !out.is_empty() {
-            out.push(InlineNode::Text {
-                text: "；".to_string(),
-            });
-        }
-        out.extend(split_content(text));
-    }
-    out
 }
 
 fn analyses(q: &ExamQuestion, options: &ExportOptions) -> Vec<AnalysisEntry> {
@@ -1181,8 +1163,8 @@ mod tests {
         assert_eq!(a.lines.len(), 1);
         assert_eq!(
             plain(&a.lines[0].nodes),
-            "B；D",
-            "逐条切分后再用「；」串起来"
+            "BD",
+            "多选答案字母直接拼接，无分号"
         );
     }
 

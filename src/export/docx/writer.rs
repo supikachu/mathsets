@@ -59,30 +59,30 @@ const EMBEDDABLE: &[&str] = &["png", "jpg", "jpeg", "gif"];
 
 // ── 段落格式片段（`w:pPr` 子元素顺序：pStyle → keepNext → pBdr → shd → spacing → ind → jc）──
 
-/// 题号段（样式已带 keepNext + 悬挂缩进）
+/// 题号段（悬挂缩进；样式为正文，无 keepNext）
 const PPR_QUESTION: &str = r#"<w:pPr><w:pStyle w:val="QuestionNo"/></w:pPr>"#;
-/// 选项单元格段：去段后距、固定行距，避免网格里高低不齐
+/// 选项单元格段：与题号同缩进；多列时由 [`choice_tabs_ppr`] 覆盖 tabs
 const PPR_CHOICE: &str = concat!(
     r#"<w:pPr><w:pStyle w:val="Choice"/>"#,
-    r#"<w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>"#,
+    r#"<w:spacing w:after="0" w:line="240" w:lineRule="auto"/>"#,
+    r#"<w:ind w:left="420"/><w:jc w:val="left"/><w:outlineLvl w:val="9"/></w:pPr>"#,
 );
-/// 内嵌答案/解析段：与题面文字对齐，且不与所解释的题分两页
-const PPR_PLAIN: &str = r#"<w:pPr><w:keepNext/><w:ind w:left="420"/></w:pPr>"#;
+/// 内嵌答案/解析段：FieldBlock 左对齐 + 与题面同缩进（勿继承两端对齐）
+const PPR_PLAIN: &str = r#"<w:pPr><w:pStyle w:val="FieldBlock"/></w:pPr>"#;
 /// 卷末答案/解析条目：悬挂缩进，续行与编号后的文字对齐
-const PPR_TAIL: &str =
-    r#"<w:pPr><w:ind w:left="420" w:hanging="420"/><w:jc w:val="left"/></w:pPr>"#;
+const PPR_TAIL: &str = concat!(
+    r#"<w:pPr><w:pStyle w:val="FieldBlock"/>"#,
+    r#"<w:ind w:left="420" w:hanging="420"/><w:jc w:val="left"/></w:pPr>"#,
+);
 /// 大题说明与考试说明行
-const PPR_NOTE: &str = r#"<w:pPr><w:keepNext/><w:ind w:left="420"/><w:jc w:val="left"/></w:pPr>"#;
+const PPR_NOTE: &str =
+    r#"<w:pPr><w:ind w:left="420"/><w:jc w:val="left"/><w:outlineLvl w:val="9"/></w:pPr>"#;
 /// 相邻两张表之间必须有一个段落，否则 OOXML 读者会把两张表读成一张
 const SPACER: &str =
     r#"<w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:p>"#;
 
 // ── 字符格式片段（`w:rPr` 顺序：rFonts → b → bCs → color → sz → szCs）──
 
-const RPR_TITLE: &str = concat!(
-    r#"<w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:eastAsia="黑体"/>"#,
-    r#"<w:b/><w:bCs/><w:sz w:val="32"/><w:szCs w:val="32"/></w:rPr>"#,
-);
 const RPR_SUBTITLE: &str =
     r#"<w:rPr><w:rFonts w:eastAsia="楷体"/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr>"#;
 const RPR_BOLD: &str = "<w:rPr><w:b/><w:bCs/></w:rPr>";
@@ -358,7 +358,10 @@ impl<'a> Writer<'a> {
                 .sum()
         });
 
-        self.push(&centered(Some(RPR_TITLE), &bundle.title));
+        self.push(&paragraph_of(
+            r#"<w:pPr><w:pStyle w:val="DocTitle"/></w:pPr>"#,
+            &run(&bundle.title, None),
+        ));
         if let Some(s) = bundle.subtitle.as_deref().filter(|s| !s.trim().is_empty()) {
             self.push(&centered(Some(RPR_SUBTITLE), s));
         }
@@ -493,7 +496,11 @@ impl<'a> Writer<'a> {
         }
     }
 
-    /// 选项网格：列数只问 [`choice_grid::decide`] —— docx 与 typst 因此永远排同样的列数
+    /// 选项网格：列数只问 [`choice_grid::decide`]（与 typst 同源），用 **制表位** 排版，
+    /// 不再写无边框 `w:tbl`（避免 WPS/Word 显示表格虚线、编辑体验像「表」）。
+    ///
+    /// - 1 列：每选项一段  
+    /// - 2 / 4 列：每行一段，选项之间 `<w:tab/>`，`w:tabs` 绝对位置等分栏宽以保证对齐
     fn option_grid(&mut self, q: &ExamQuestion) {
         if q.options.is_empty() {
             return;
@@ -501,66 +508,80 @@ impl<'a> Writer<'a> {
         let cols = choice_grid::decide(&q.options, self.grid_em())
             .columns
             .max(1);
-        let row_twips = self.col_twips() - INDENT_TWIPS as i64;
-        let widths = split_twips(row_twips, cols);
+        let indent = INDENT_TWIPS as i64;
+        let row_twips = (self.col_twips() - indent).max(EM_TWIPS as i64);
+        let col_width = row_twips / cols as i64;
         let slot = Slot::new(Some(q.number), IssueField::Choice);
 
-        // 选项表：无边框、固定布局、与题面文字同缩进
-        let mut tbl = format!(
-            concat!(
-                r#"<w:tbl><w:tblPr><w:tblW w:w="{row}" w:type="dxa"/>"#,
-                r#"<w:tblInd w:w="{ind}" w:type="dxa"/>"#,
-                r#"<w:tblLayout w:type="fixed"/>"#,
-                "{mar}",
-                r#"</w:tblPr><w:tblGrid>"#,
-            ),
-            row = row_twips,
-            ind = INDENT_TWIPS as i64,
-            mar = TBL_CELL_MAR
-        );
-        for wd in &widths {
-            tbl.push_str(&format!(r#"<w:gridCol w:w="{wd}"/>"#));
+        if cols == 1 {
+            for opt in &q.options {
+                let lead = if opt.label.is_empty() {
+                    String::new()
+                } else {
+                    run(&format!("{}. ", opt.label), None)
+                };
+                self.paragraph(PPR_CHOICE, &lead, &opt.content, slot);
+            }
+            return;
         }
-        tbl.push_str("</w:tblGrid>");
 
+        let ppr = choice_tabs_ppr(cols, indent, col_width);
         for chunk in q.options.chunks(cols) {
-            let mut row = String::new();
+            let mut body = String::new();
             for (i, opt) in chunk.iter().enumerate() {
-                row.push_str(&self.option_cell(opt, widths[i], slot));
+                if i > 0 {
+                    body.push_str(r#"<w:r><w:tab/></w:r>"#);
+                }
+                body.push_str(&self.option_inline_runs(opt, slot));
             }
-            // 末行不满：补空格子。少给 tc 会让 Word 把列宽重新平分，栅格就歪了
-            for wd in widths.iter().take(cols).skip(chunk.len()) {
-                row.push_str(&format!(
-                    concat!(
-                        r#"<w:tc><w:tcPr><w:tcW w:w="{wd}" w:type="dxa"/>"#,
-                        r#"</w:tcPr><w:p>{empty}</w:p></w:tc>"#
-                    ),
-                    wd = wd,
-                    empty = PPR_CHOICE
-                ));
-            }
-            tbl.push_str(&format!(
-                concat!(r#"<w:tr><w:trPr><w:cantSplit/></w:trPr>"#, "{row}</w:tr>"),
-                row = row
-            ));
+            self.push(&format!("<w:p>{ppr}{body}</w:p>"));
         }
-        tbl.push_str("</w:tbl>");
-        // 相邻两张表会被读者合并成一张（题干以表格收尾时就会撞上）：中间垫一个段
-        if self.body.ends_with("</w:tbl>") {
-            self.body.push_str(SPACER);
-        }
-        self.body.push_str(&tbl);
     }
 
-    fn option_cell(&mut self, opt: &ExamOption, width: i64, slot: Slot) -> String {
-        let lead = if opt.label.is_empty() {
-            String::new()
-        } else {
-            run(&format!("{}. ", opt.label), None)
-        };
-        let mut inner = String::new();
-        self.push_inline(&opt.content, PPR_CHOICE, &lead, slot, &mut inner);
-        cell_xml(&inner, width)
+    /// 多列制表行内的选项片段：只输出 run / 行内 OMML（多列决策已排除块级内容）。
+    fn option_inline_runs(&mut self, opt: &ExamOption, slot: Slot) -> String {
+        let mut out = String::new();
+        if !opt.label.is_empty() {
+            out.push_str(&run(&format!("{}. ", opt.label), None));
+        }
+        for node in &opt.content {
+            match node {
+                InlineNode::Text { text } => {
+                    let text = normalize_run_text(text);
+                    if !text.is_empty() {
+                        out.push_str(&run(&text, None));
+                    }
+                }
+                InlineNode::LineBreak => out.push_str(&run(" ", None)),
+                InlineNode::Math {
+                    latex,
+                    display: false,
+                } => match self.fragment(latex, false, slot) {
+                    Fragment::Omml(f) => out.push_str(&f),
+                    Fragment::Text(r) => out.push_str(&r),
+                },
+                // 多列路径不应出现块级节点；降级为可见原文，避免整行崩掉
+                InlineNode::Math {
+                    latex,
+                    display: true,
+                } => out.push_str(&run(latex, Some(RPR_DEGRADED))),
+                InlineNode::Image { alt, url, .. } => {
+                    let label = alt
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|a| !a.is_empty())
+                        .unwrap_or(url.as_str());
+                    out.push_str(&run(&format!("[{label}]"), Some(RPR_DEGRADED)));
+                }
+                InlineNode::ImgRow { .. } => {
+                    out.push_str(&run("[图组]", Some(RPR_DEGRADED)));
+                }
+                InlineNode::Table { .. } => {
+                    out.push_str(&run("[表格]", Some(RPR_DEGRADED)));
+                }
+            }
+        }
+        out
     }
 
     // ── Callout ──
@@ -636,8 +657,14 @@ impl<'a> Writer<'a> {
         self.body.push_str(&out);
     }
 
-    /// 行内节点 → 段落 XML。块级节点（display 公式、图片、图组、表格）会先收尾当前段落、
-    /// 自己占一段/一张表，若后面还有行内内容再重开一个同样格式的段落。
+    /// 行内节点 → 段落 XML。
+    ///
+    /// 换行策略（DOCX，针对 OCR/讲义常见「一行一句」）：
+    /// - **单个** `LineBreak` → 段内空格（绝不写 `<w:br/>`，避免 Word 显示 ↓ 且短行被撑散）
+    /// - **连续 ≥2** 个 `LineBreak` → 硬段落边界；多余空行折叠，不产出空段
+    /// - 文本内残留换行/LS/VT 等在 [`normalize_run_text`] 里清掉
+    ///
+    /// 块级节点（display 公式、图片、图组、表格）先收尾当前段落，自己占一段/一张表。
     fn push_inline(
         &mut self,
         nodes: &[InlineNode],
@@ -646,27 +673,79 @@ impl<'a> Writer<'a> {
         slot: Slot,
         out: &mut String,
     ) {
-        out.push_str(&format!("<w:p>{ppr}{lead}"));
-        let mut open = true;
-        let last = nodes.len().saturating_sub(1);
-        for (i, node) in nodes.iter().enumerate() {
-            let more = i < last;
-            match node {
-                InlineNode::Text { text } => out.push_str(&run(text, None)),
-                InlineNode::LineBreak => out.push_str("<w:r><w:br/></w:r>"),
+        let ppr_owned = with_left_jc(ppr);
+        let ppr = ppr_owned.as_ref();
+        let mut open = false;
+        let mut lead_used = false;
+        let mut i = 0usize;
+
+        let open_para = |out: &mut String, open: &mut bool, lead_used: &mut bool| {
+            if !*open {
+                out.push_str("<w:p>");
+                out.push_str(ppr);
+                if !*lead_used {
+                    out.push_str(lead);
+                    *lead_used = true;
+                }
+                *open = true;
+            }
+        };
+
+        while i < nodes.len() {
+            let more = i + 1 < nodes.len();
+            match &nodes[i] {
+                InlineNode::LineBreak => {
+                    let mut n = 1usize;
+                    while i + n < nodes.len() && matches!(nodes[i + n], InlineNode::LineBreak) {
+                        n += 1;
+                    }
+                    i += n;
+                    if n >= 2 {
+                        if open {
+                            out.push_str("</w:p>");
+                            open = false;
+                        }
+                    } else if open {
+                        let rest_has_content = nodes[i..].iter().any(|n| match n {
+                            InlineNode::LineBreak => false,
+                            InlineNode::Text { text } => !text.is_empty(),
+                            _ => true,
+                        });
+                        if rest_has_content {
+                            out.push_str(&run(" ", None));
+                        }
+                    }
+                    continue;
+                }
+                InlineNode::Text { text } => {
+                    let text = normalize_run_text(text);
+                    if text.is_empty() {
+                        i += 1;
+                        continue;
+                    }
+                    open_para(out, &mut open, &mut lead_used);
+                    out.push_str(&run(&text, None));
+                }
                 InlineNode::Math {
                     latex,
                     display: false,
-                } => match self.fragment(latex, false, slot) {
-                    Fragment::Omml(f) => out.push_str(&f),
-                    Fragment::Text(r) => out.push_str(&r),
-                },
+                } => {
+                    open_para(out, &mut open, &mut lead_used);
+                    match self.fragment(latex, false, slot) {
+                        Fragment::Omml(f) => out.push_str(&f),
+                        Fragment::Text(r) => out.push_str(&r),
+                    }
+                }
                 InlineNode::Math {
                     latex,
                     display: true,
                 } => {
+                    if !lead_used && !lead.is_empty() {
+                        open_para(out, &mut open, &mut lead_used);
+                    }
                     let block = self.display_math(latex, ppr, slot);
                     close_and_emit(out, ppr, &mut open, more, &block);
+                    lead_used = true;
                 }
                 InlineNode::Image {
                     alt,
@@ -674,29 +753,46 @@ impl<'a> Writer<'a> {
                     width,
                     align,
                 } => {
+                    if !lead_used && !lead.is_empty() {
+                        open_para(out, &mut open, &mut lead_used);
+                    }
                     let block = self.figure(alt.as_deref(), url, *width, *align);
                     close_and_emit(out, ppr, &mut open, more, &block);
+                    lead_used = true;
                 }
                 InlineNode::ImgRow {
                     align,
                     images,
                     caption,
                 } => {
+                    if !lead_used && !lead.is_empty() {
+                        open_para(out, &mut open, &mut lead_used);
+                    }
                     let block = self.img_row(images, *align, caption.as_deref());
                     close_and_emit(out, ppr, &mut open, more, &block);
+                    lead_used = true;
                 }
                 InlineNode::Table {
                     header,
                     aligns,
                     rows,
                 } => {
+                    if !lead_used && !lead.is_empty() {
+                        open_para(out, &mut open, &mut lead_used);
+                    }
                     let block = self.md_table(header, aligns, rows, slot);
                     close_and_emit(out, ppr, &mut open, more, &block);
+                    lead_used = true;
                 }
             }
+            i += 1;
         }
         if open {
             out.push_str("</w:p>");
+        } else if !lead_used && !lead.is_empty() {
+            out.push_str(&format!("<w:p>{ppr}{lead}</w:p>"));
+        } else if nodes.is_empty() && lead.is_empty() {
+            out.push_str(&format!("<w:p>{ppr}</w:p>"));
         }
     }
 
@@ -861,17 +957,88 @@ impl<'a> Writer<'a> {
 
 // ═══════════════════════════════ 片段与换算 ═══════════════════════════════
 
-/// 块级内容插进正在写的段落序列：先收尾当前段落，插块，后面还有行内内容就重开
-fn close_and_emit(out: &mut String, ppr: &str, open: &mut bool, more: bool, block: &str) {
+/// 块级内容插进正在写的段落序列：先收尾当前段落（若有），再插块。
+/// 不预开下一段——交给后续行内节点 `open_para`，避免「块后紧跟 LineBreak」留下空段。
+fn close_and_emit(out: &mut String, _ppr: &str, open: &mut bool, _more: bool, block: &str) {
     if *open {
         out.push_str("</w:p>");
         *open = false;
     }
     out.push_str(block);
-    if more {
-        out.push_str(&format!("<w:p>{ppr}"));
-        *open = true;
+}
+
+/// 段落未显式声明对齐时强制左对齐；未声明大纲级别时标为正文（9），
+/// 避免自定义段被 Word 当成标题而在左侧画出黑点。已有 `w:jc` / `w:outlineLvl` 则不动。
+fn with_left_jc(ppr: &str) -> std::borrow::Cow<'_, str> {
+    let needs_jc = !ppr.contains("<w:jc ");
+    let needs_body_outline = !ppr.contains("<w:outlineLvl ");
+    if !needs_jc && !needs_body_outline {
+        return std::borrow::Cow::Borrowed(ppr);
     }
+    if let Some(i) = ppr.find("</w:pPr>") {
+        let mut s = String::with_capacity(ppr.len() + 64);
+        s.push_str(&ppr[..i]);
+        if needs_jc {
+            s.push_str(r#"<w:jc w:val="left"/>"#);
+        }
+        if needs_body_outline {
+            s.push_str(r#"<w:outlineLvl w:val="9"/>"#);
+        }
+        s.push_str(&ppr[i..]);
+        return std::borrow::Cow::Owned(s);
+    }
+    if ppr.is_empty() {
+        return std::borrow::Cow::Borrowed(
+            r#"<w:pPr><w:jc w:val="left"/><w:outlineLvl w:val="9"/></w:pPr>"#,
+        );
+    }
+    std::borrow::Cow::Borrowed(ppr)
+}
+
+/// 清掉会变成软换行的控制符；压缩连续 ASCII 空白；去掉 OCR「汉字间空格」。
+/// 全角空格 U+3000 保留（卷头用它做分隔），避免被误伤。
+fn normalize_run_text(text: &str) -> String {
+    let mut chars: Vec<char> = text
+        .chars()
+        .map(|ch| match ch {
+            '\n' | '\r' | '\u{000B}' | '\u{000C}' | '\u{2028}' | '\u{2029}' => ' ',
+            '\u{00A0}' => ' ',
+            c => c,
+        })
+        .collect();
+
+    // 「汉 字」→「汉字」：仅去掉夹在两个汉字之间的 ASCII 空格
+    let mut i = 0usize;
+    while i + 2 < chars.len() {
+        if is_cjk_char(chars[i]) && chars[i + 1] == ' ' && is_cjk_char(chars[i + 2]) {
+            chars.remove(i + 1);
+            continue;
+        }
+        i += 1;
+    }
+
+    let mut out = String::with_capacity(chars.len());
+    let mut prev_ascii_space = false;
+    for ch in chars {
+        if ch == ' ' || ch == '\t' {
+            if prev_ascii_space {
+                continue;
+            }
+            out.push(' ');
+            prev_ascii_space = true;
+        } else {
+            out.push(ch);
+            prev_ascii_space = false;
+        }
+    }
+    out
+}
+
+fn is_cjk_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{4E00}'..='\u{9FFF}' | '\u{3400}'..='\u{4DBF}' | '\u{F900}'..='\u{FAFF}'
+    )
 }
 
 enum Fragment {
@@ -893,26 +1060,23 @@ fn omml_of(latex: &str, display: bool) -> Result<String, String> {
     }
 }
 
-/// 一个文字 run：`\n` → `w:br`、`\t` → `w:tab`，其余进 `w:t`（保留首尾空格）
+/// 一个文字 run：文本经 [`normalize_run_text`]；`\t` → `w:tab`。
+/// 绝不写 `<w:br/>`。
 fn run(text: &str, rpr: Option<&str>) -> String {
+    let flat = normalize_run_text(text);
     let mut s = String::from("<w:r>");
     if let Some(p) = rpr {
         s.push_str(p);
     }
-    for (i, line) in text.split('\n').enumerate() {
-        if i > 0 {
-            s.push_str("<w:br/>");
+    for (j, seg) in flat.split('\t').enumerate() {
+        if j > 0 {
+            s.push_str("<w:tab/>");
         }
-        for (j, seg) in line.split('\t').enumerate() {
-            if j > 0 {
-                s.push_str("<w:tab/>");
-            }
-            if !seg.is_empty() {
-                s.push_str(&format!(
-                    r#"<w:t xml:space="preserve">{}</w:t>"#,
-                    escape(seg)
-                ));
-            }
+        if !seg.is_empty() {
+            s.push_str(&format!(
+                r#"<w:t xml:space="preserve">{}</w:t>"#,
+                escape(seg)
+            ));
         }
     }
     s.push_str("</w:r>");
@@ -932,7 +1096,28 @@ fn centered(rpr: Option<&str>, text: &str) -> String {
 
 fn part_ppr(depth: usize) -> String {
     let left = INDENT_TWIPS as i64 + PART_STEP_TWIPS * depth as i64;
-    format!(r#"<w:pPr><w:keepNext/><w:ind w:left="{left}"/></w:pPr>"#)
+    format!(
+        r#"<w:pPr><w:ind w:left="{left}"/><w:jc w:val="left"/><w:outlineLvl w:val="9"/></w:pPr>"#
+    )
+}
+
+/// 多列选项段：`w:tabs` 绝对位置等分栏宽；首列落在 `indent`，其后每列一个 left tab。
+fn choice_tabs_ppr(cols: usize, indent: i64, col_width: i64) -> String {
+    let mut tabs = String::new();
+    for i in 1..cols.max(1) {
+        let pos = indent + col_width * i as i64;
+        tabs.push_str(&format!(r#"<w:tab w:val="left" w:pos="{pos}"/>"#));
+    }
+    format!(
+        concat!(
+            r#"<w:pPr><w:pStyle w:val="Choice"/>"#,
+            r#"<w:tabs>{tabs}</w:tabs>"#,
+            r#"<w:spacing w:after="0" w:line="240" w:lineRule="auto"/>"#,
+            r#"<w:ind w:left="{indent}"/><w:jc w:val="left"/><w:outlineLvl w:val="9"/></w:pPr>"#,
+        ),
+        tabs = tabs,
+        indent = indent,
+    )
 }
 
 fn image_ppr(align: Option<ImageAlign>) -> String {
@@ -941,8 +1126,8 @@ fn image_ppr(align: Option<ImageAlign>) -> String {
         ImageAlign::Center => "center",
         ImageAlign::Right => "right",
     };
-    // keepNext：图与紧随其后的文字不许分页分开
-    format!(r#"<w:pPr><w:keepNext/><w:jc w:val="{jc}"/></w:pPr>"#)
+    // 正文段落：不用 keepNext，避免 Word「显示编辑标记」时左侧整列黑点
+    format!(r#"<w:pPr><w:jc w:val="{jc}"/><w:outlineLvl w:val="9"/></w:pPr>"#)
 }
 
 /// 表格单元格段：清掉样式带来的缩进，只留对齐（加粗走 run 级，由调用方决定）
@@ -982,7 +1167,7 @@ fn callout_ppr(border: &str, fill: &str) -> String {
     };
     format!(
         concat!(
-            r#"<w:pPr><w:pStyle w:val="Callout"/><w:keepNext/><w:pBdr>"#,
+            r#"<w:pPr><w:pStyle w:val="Callout"/><w:pBdr>"#,
             "{top}{left}{bottom}{right}",
             r#"</w:pBdr><w:shd w:val="clear" w:color="auto" w:fill="{fill}"/></w:pPr>"#,
         ),
@@ -1107,7 +1292,7 @@ pub(crate) fn section_key(title: &str, idx: usize) -> String {
     }
 }
 
-/// 答案条目：解答题按问树叶子逐条，其余按空分隔（与 markdown 的口径一致）
+/// 答案条目：解答题按问树叶子逐条，其余按题型拼接（选择/多选无分号，填空等多空用「；」）
 fn answer_items(q: &ExamQuestion) -> Vec<(String, Vec<InlineNode>)> {
     if q.kind == QuestionKind::Solution && !q.structure_parts.is_empty() {
         return walk_leaves(&q.structure_parts)
@@ -1121,17 +1306,9 @@ fn answer_items(q: &ExamQuestion) -> Vec<(String, Vec<InlineNode>)> {
             })
             .collect();
     }
-    if q.answers.is_empty() {
+    let nodes = crate::export::content::join_answer_nodes(q.kind, &q.answers);
+    if nodes.is_empty() {
         return Vec::new();
-    }
-    let mut nodes: Vec<InlineNode> = Vec::new();
-    for (i, a) in q.answers.iter().enumerate() {
-        if i > 0 {
-            nodes.push(InlineNode::Text {
-                text: "；".to_string(),
-            });
-        }
-        nodes.extend(split_content(a));
     }
     vec![(String::new(), nodes)]
 }
@@ -1447,7 +1624,7 @@ mod tests {
         out
     }
 
-    // ── 选项栅格 ──
+    // ── 选项栅格（制表位）──
 
     #[tokio::test]
     async fn option_grid_shapes_follow_choice_width() {
@@ -1460,20 +1637,71 @@ mod tests {
             q.options = options([body; 4]);
             let (_, parts) = render(&one(q), &ExportOptions::default()).await;
             let doc = document(&parts);
+            // 卷头仍是表；选项不再是表
             let stats = table_stats(&doc);
-            assert_eq!(stats.len(), 3, "卷头两张 + 选项一张");
-            let (grid, cells) = &stats[2];
-            assert_eq!(*grid, cols, "「{body}」应排 {cols} 列");
-            assert_eq!(cells.len(), rows, "「{body}」应排 {rows} 行");
-            assert!(
-                cells.iter().all(|c| *c == cols),
-                "末行不满要补空格子，否则 Word 会重平分列宽：{cells:?}"
+            assert_eq!(stats.len(), 2, "卷头两张表，选项改用制表位：{stats:?}");
+
+            let choice_paras: Vec<_> = doc
+                .descendants()
+                .filter(|n| n.has_tag_name((NS_W, "p")))
+                .filter(|p| {
+                    p.descendants().any(|c| {
+                        c.has_tag_name((NS_W, "pStyle")) && c.attribute("val") == Some("Choice")
+                    })
+                })
+                .collect();
+            assert_eq!(
+                choice_paras.len(),
+                rows,
+                "「{body}」应排 {rows} 行 Choice 段，实际 {}",
+                choice_paras.len()
             );
+            if cols == 1 {
+                for p in &choice_paras {
+                    let tab_jumps = p
+                        .descendants()
+                        .filter(|n| {
+                            n.has_tag_name((NS_W, "tab"))
+                                && n.parent().is_some_and(|par| par.has_tag_name((NS_W, "r")))
+                        })
+                        .count();
+                    assert_eq!(tab_jumps, 0, "单列选项不应含制表跳转");
+                }
+            } else {
+                for p in &choice_paras {
+                    let tab_defs = p
+                        .descendants()
+                        .filter(|n| {
+                            n.has_tag_name((NS_W, "tab"))
+                                && n.parent().is_some_and(|par| par.has_tag_name((NS_W, "tabs")))
+                        })
+                        .count();
+                    assert_eq!(
+                        tab_defs,
+                        cols - 1,
+                        "「{body}」每行应有 {} 个制表位定义",
+                        cols - 1
+                    );
+                    let tab_jumps = p
+                        .descendants()
+                        .filter(|n| {
+                            n.has_tag_name((NS_W, "tab"))
+                                && n.parent().is_some_and(|par| par.has_tag_name((NS_W, "r")))
+                        })
+                        .count();
+                    assert_eq!(
+                        tab_jumps,
+                        cols - 1,
+                        "「{body}」满行应有 {} 次制表跳转，实际 {tab_jumps}",
+                        cols - 1
+                    );
+                }
+            }
         }
     }
 
     #[tokio::test]
-    async fn option_table_follows_the_question_paragraph() {
+    async fn option_tabs_follow_the_question_paragraph() {
         let (_, parts) = render(
             &one(question(1, vec![t("题干")])),
             &ExportOptions::default(),
@@ -1481,22 +1709,107 @@ mod tests {
         .await;
         let doc = document(&parts);
         assert!(
-            doc.descendants().any(|tbl| {
-                tbl.has_tag_name((NS_W, "tbl"))
-                    && tbl.prev_sibling().is_some_and(|p| {
-                        p.is_element()
-                            && p.has_tag_name((NS_W, "p"))
-                            && p.descendants().any(|c| {
+            doc.descendants().any(|p| {
+                p.has_tag_name((NS_W, "p"))
+                    && p.descendants().any(|c| {
+                        c.has_tag_name((NS_W, "pStyle")) && c.attribute("val") == Some("Choice")
+                    })
+                    && p.prev_sibling().is_some_and(|prev| {
+                        prev.is_element()
+                            && prev.has_tag_name((NS_W, "p"))
+                            && prev.descendants().any(|c| {
                                 c.has_tag_name((NS_W, "pStyle"))
                                     && c.attribute("val") == Some("QuestionNo")
                             })
                     })
             }),
-            "选项表必须紧跟题号段（R5 探针按这个结构排）"
+            "选项段必须紧跟题号段"
         );
-        // 防腰斩链落在样式上：题号段/大题标题/提示框都带 keepNext + keepLines
+        // 仅卷名 / 大题标题保留 keepNext+keepLines；正文禁用，否则 Word 左侧满屏黑点
         let styles = xml_of(&parts, "word/styles.xml");
-        assert_eq!(styles.matches(r#"<w:keepNext/><w:keepLines/>"#).count(), 3);
+        assert_eq!(styles.matches(r#"<w:keepNext/><w:keepLines/>"#).count(), 2);
+        assert!(
+            !styles.contains(r#"styleId="FieldBlock""#)
+                || !styles
+                    .split(r#"styleId="FieldBlock""#)
+                    .nth(1)
+                    .unwrap_or("")
+                    .split("</w:style>")
+                    .next()
+                    .unwrap_or("")
+                    .contains("keepNext"),
+            "FieldBlock（答案/解析）不得带 keepNext"
+        );
+    }
+
+    #[tokio::test]
+    async fn line_breaks_become_spaces_or_paragraphs_never_soft_breaks() {
+        let mut q = question(
+            1,
+            vec![
+                t("第一行"),
+                InlineNode::LineBreak,
+                t("第二行"),
+                InlineNode::LineBreak,
+                InlineNode::LineBreak,
+                InlineNode::LineBreak,
+                t("第三段"),
+            ],
+        );
+        q.analyses = vec![AnalysisBlock {
+            id: "a1".into(),
+            title: String::new(),
+            content: "此时 $f(x)<0$，不合题意；\n故选 A。\n\n综上得解。".into(),
+        }];
+        let opts = ExportOptions {
+            include_answer: false,
+            include_analysis: true,
+            answer_at_end: false,
+            ..ExportOptions::default()
+        };
+        let (_, parts) = render(&one(q), &opts).await;
+        let xml = xml_of(&parts, "word/document.xml");
+        assert!(
+            !xml.contains("<w:br"),
+            "不得产出软换行 w:br（Word 会显示 ↓）: count={}",
+            xml.matches("<w:br").count()
+        );
+        assert!(
+            !xml.contains("docGrid"),
+            "不得启用文档网格（短段+网格会显得竖向稀疏散乱）"
+        );
+        let doc = document(&parts);
+        let text = body_text(&doc);
+        // 单个换行并入同一逻辑行
+        assert!(
+            text.contains("第一行") && text.contains("第二行"),
+            "{text}"
+        );
+        assert!(text.contains("不合题意"), "{text}");
+        assert!(text.contains("故选 A"), "{text}");
+        assert!(text.contains("综上得解"), "{text}");
+        // 散开汉字应被收紧
+        let spaced = question(
+            2,
+            vec![t("此 时 不 合 题 意")],
+        );
+        let (_, parts2) = render(&one(spaced), &ExportOptions::default()).await;
+        let text2 = body_text(&document(&parts2));
+        assert!(
+            text2.contains("此时不合题意"),
+            "汉字间 OCR 空格应去掉：{text2}"
+        );
+        let styles_used: Vec<_> = doc
+            .descendants()
+            .filter(|n| n.has_tag_name((NS_W, "pStyle")))
+            .filter_map(|n| n.attribute("val"))
+            .collect();
+        for want in ["DocTitle", "SectionTitle", "QuestionNo", "FieldBlock"] {
+            assert!(
+                styles_used.iter().any(|s| *s == want),
+                "缺 pStyle={want}，已有 {styles_used:?}"
+            );
+        }
     }
 
     // ── 公式 ──
@@ -1881,7 +2194,7 @@ mod tests {
         assert_eq!(
             count(&doc, NS_M, "oMath"),
             7,
-            "题干/选项表格/Callout/问树里的公式都要出来"
+            "题干/选项/Callout/问树里的公式都要出来"
         );
         assert_eq!(count(&doc, NS_M, "oMathPara"), 1);
         for tc in doc.descendants().filter(|n| n.has_tag_name((NS_W, "tc"))) {
@@ -1916,28 +2229,19 @@ mod tests {
         ] {
             assert!(text.contains(want), "缺「{want}」：{text}");
         }
-        // 图片缺失时纸上留占位、段落带 keepNext（图与下文不分页）
+        // 图片缺失时纸上留占位（正文，无 keepNext 黑点）
         assert!(text.contains("[图片缺失"));
         assert!(
             xml_of(&parts, "word/document.xml")
-                .contains(r#"<w:pPr><w:keepNext/><w:jc w:val="center"/></w:pPr>"#)
+                .contains(r#"<w:pPr><w:jc w:val="center"/><w:outlineLvl w:val="9"/></w:pPr>"#)
         );
     }
 
-    /// ⛔ R5 决策门探针：`w:keepNext` 段落 + 紧随其后的 `w:tbl` 到底分不分页
+    /// ⛔ R5 决策门探针（历史）：选项曾用 `w:tbl`，keepNext→表不可靠；现已改为制表位段落。
+    /// 本探针仍可手工跑，观察题号与选项段的分页行为。
     ///
     /// 夹具刻意做「矮」而不是「高」：每题 1 行题号 + 22 行选项 ≈ 26 行，一页（约 50 行）放得下
-    /// 两道，分页边界因此落在题目中间。反过来若每题表格比一页还高，整块只会被推到新的一页，
-    /// 每一对都没被考到，「0 违例」不作数。
-    ///
-    /// 判定靠**对照实验**：`python scripts/strip_keepnext.py` 剥掉全部 `w:keepnext` 产出同结构
-    /// 副本，`scripts/check_keepnext.ps1` 一次跑完两份并按「题号段页码 != 首行起始页码」计违例。
-    /// 压力由对照组直接给出，不用行高几何推算 —— Word 的 `Rows.Item(1).Height` 对 auto 行高返回
-    /// 9999999、行尾标记被报回行的起始页码，几何量算出来的「受压」恒为 0。
-    ///
-    /// **2026-09-02 实测**（24 对，A4 / 10.5pt）：Word 2016 与 WPS 均为「探针 0/24 违例、
-    /// 对照 8/24 违例」（对照里被孤立的题号段停在页尾 y≈717，选项首行去下一页）→ keepNext 在
-    /// `w:tbl` 之前确实生效，两端一致 → **选项栅格保留 `w:tbl`**，不退回 `w:tabs`。
+    /// 两道，分页边界因此落在题目中间。
     ///
     /// 跑法：`DOCX_PROBE_TALL=22 cargo test --lib export::docx -- --ignored`
     #[tokio::test]

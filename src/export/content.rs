@@ -13,7 +13,7 @@
 //!
 //! 容错原则：定界符未闭合 / 围栏未闭合时按普通文本处理，绝不丢失内容。
 
-use crate::export::model::{ImageAlign, InlineImage, InlineNode, TableAlign};
+use crate::export::model::{ImageAlign, InlineImage, InlineNode, QuestionKind, TableAlign};
 
 /// 把一段富文本切分为 InlineNode 序列
 pub fn split_content(text: &str) -> Vec<InlineNode> {
@@ -365,6 +365,45 @@ fn sep_align(cell: &str) -> TableAlign {
         TableAlign::Right
     } else {
         TableAlign::Left
+    }
+}
+
+/// 选择题/多选：答案字母直接拼接（`BD`，无分号）；填空等多空仍用「；」分隔。
+///
+/// 逐条 [`split_content`] 后再相连，避免先拼字符串导致 `$…$` 跨条配对。
+pub fn join_answer_nodes(kind: QuestionKind, answers: &[String]) -> Vec<InlineNode> {
+    let sep = match kind {
+        QuestionKind::SingleChoice | QuestionKind::MultiChoice => None,
+        _ => Some("；"),
+    };
+    let mut out: Vec<InlineNode> = Vec::new();
+    for a in answers {
+        let text = a.trim();
+        if text.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            if let Some(s) = sep {
+                out.push(InlineNode::Text {
+                    text: s.to_string(),
+                });
+            }
+        }
+        out.extend(split_content(text));
+    }
+    out
+}
+
+/// Markdown / 纯文本答案串：口径与 [`join_answer_nodes`] 一致
+pub fn format_answer_text(kind: QuestionKind, answers: &[String]) -> String {
+    let parts: Vec<&str> = answers
+        .iter()
+        .map(|a| a.trim())
+        .filter(|a| !a.is_empty())
+        .collect();
+    match kind {
+        QuestionKind::SingleChoice | QuestionKind::MultiChoice => parts.join(""),
+        _ => parts.join("；"),
     }
 }
 
