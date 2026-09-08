@@ -41,10 +41,15 @@ const router = createRouter({
           component: () => import('@/views/Basket.vue'),
         },
         {
-          path: 'basket/typeset',
-          name: 'TypesetEditor',
-          component: () => import('@/views/TypesetEditor.vue'),
+          path: 'studio',
+          name: 'TypesetStudio',
+          component: () => import('@/views/studio/StudioApp.vue'),
           meta: { immersive: true },
+        },
+        {
+          /** 兼容旧入口 → 结构化排版工作台 */
+          path: 'basket/typeset',
+          redirect: '/studio',
         },
         {
           path: 'papers/:id',

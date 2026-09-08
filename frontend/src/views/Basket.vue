@@ -17,6 +17,7 @@ import { useToast } from '@/composables/useToast'
 import { typeLabel, diffLabel } from '@/utils/questionDisplay'
 import { partsFromStructureJson } from '@/utils/questionParts'
 import { extractChoiceLetters, extractFillBlanks } from '@/utils/choiceAnswer'
+import { documentFromSections, saveDocumentToSession } from '@/types/publication'
 
 const router = useRouter()
 const toast = useToast()
@@ -374,9 +375,15 @@ function openTypeset() {
     toast.info('试题篮是空的，先去题库选题')
     return
   }
+  const pub = documentFromSections(sectionsPayload(groupedSections.value), {
+    title: '试题篮组卷',
+    kind: 'exam',
+  })
+  saveDocumentToSession(pub)
+  // 兼容旧 TypesetEditor / 直读 legacy keys
   sessionStorage.setItem('typeset_sections', JSON.stringify(sectionsPayload(groupedSections.value)))
-  sessionStorage.setItem('typeset_title', '试题篮组卷')
-  router.push('/basket/typeset')
+  sessionStorage.setItem('typeset_title', pub.title)
+  router.push('/studio')
 }
 
 const saving = ref(false)
@@ -636,7 +643,7 @@ function goDetail(id: string) {
               <div class="tool-icon-squircle">
                 <AppIcon name="layout" :size="18" />
               </div>
-              <span class="tool-title">排版预览</span>
+              <span class="tool-title">排版工作台</span>
             </button>
             <button type="button" class="apple-tool-tile" @click="openExport()">
               <div class="tool-icon-squircle">
