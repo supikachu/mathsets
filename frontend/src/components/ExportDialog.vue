@@ -69,8 +69,8 @@ const emit = defineEmits<{
 
 const toast = useToast()
 
-/** Word 导出暂时冻结（代码保留，UI 隐藏）——改为 true 即可恢复 */
-const DOCX_ENABLED = false
+/** Word 导出开关（代码路径始终保留；false 时 UI 隐藏 Word） */
+const DOCX_ENABLED = true
 
 const ALL_FORMATS: FormatOption[] = [
   { value: 'docx', label: 'Word', hint: '公式可编辑', icon: 'file-text' },
