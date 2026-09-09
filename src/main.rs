@@ -176,6 +176,9 @@ async fn main() {
     tokio::spawn(mathset::workers::ai_tagging_worker::start_worker(state.clone()));
     tracing::info!("🏷️ AI 打标 worker 已在后台启动");
 
+    tokio::spawn(mathset::workers::formula_convert_worker::start_worker(state.clone()));
+    tracing::info!("∫ MathType Formula Worker 已在后台启动（未配置则空转退出）");
+
     tokio::spawn(mathset::ai::embedding::start_backfill(state.pool.clone()));
     tracing::info!("🧭 知识树/标签 embedding 回填已在后台启动");
 

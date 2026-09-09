@@ -10,6 +10,8 @@ pub struct AppConfig {
     pub ai: AiConfig,
     /// 用户上传文件根目录（头像等），默认 ./uploads
     pub upload_dir: String,
+    /// MathType 转换 Worker（ole CLI + `/convert_batch`）
+    pub mathtype: crate::mathtype::MathTypeConvertConfig,
 }
 
 /// AI 服务配置（平台默认 Key + 加密密钥 + 默认模型）
@@ -39,7 +41,7 @@ pub struct AiConfig {
     pub doc2x_api_key: Option<String>,
     /// Doc2X OCR 引擎 base_url（默认官方 v2 端点，裸域名，路径需含 /api/v2 前缀）
     pub doc2x_base_url: String,
-    /// 打标向量召回。生产默认开；`TAGGING_VECTOR_RECALL=0` 关闭。测试默认关。
+    /// 打标向量召回。生产默认开；`TAGGING_VECTOR_RECALL=0` 运维硬关（优先于管理员 UI 开关）。
     pub tagging_vector_recall: bool,
 }
 
@@ -209,6 +211,7 @@ impl AppConfig {
             ai: AiConfig::from_env(),
             upload_dir: std::env::var("UPLOAD_DIR")
                 .unwrap_or_else(|_| "./uploads".to_string()),
+            mathtype: crate::mathtype::MathTypeConvertConfig::from_env(),
         }
     }
 }

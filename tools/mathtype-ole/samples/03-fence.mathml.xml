@@ -1,0 +1,14 @@
+<math xmlns="http://www.w3.org/1998/Math/MathML">
+  <mrow>
+    <mo fence="true" stretchy="true">{</mo>
+    <mtable>
+      <mtr>
+        <mtd><mi>x</mi></mtd>
+      </mtr>
+      <mtr>
+        <mtd><mi>y</mi></mtd>
+      </mtr>
+    </mtable>
+    <mo fence="true" stretchy="true">}</mo>
+  </mrow>
+</math>

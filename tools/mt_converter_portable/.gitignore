@@ -1,0 +1,10 @@
+# MathType proprietary / portable runtime (local only)
+# Do not commit Wiris MathType binaries without redistribution rights.
+/mathtype_core/
+/mt_converter.exe
+/samples_wmf/
+*.wmf
+/python/**/__pycache__/
+/python/**/*.pyc
+/python/build/
+/python/dist/

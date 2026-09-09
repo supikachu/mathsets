@@ -67,6 +67,24 @@ bench/eval/*
 /bindings/
 
 # ==========================================
+# 5b. Vendored VisualTeX full tree (reference only)
+# Use tools/mathtype-ole for MathML→ole.bin. Do not commit the full clone.
+# ==========================================
+/visualtex/
+
+# ==========================================
+# 5c. Portable MathType WMF converter runtime (local only)
+# Keep README under tools/mt_converter_portable/; do not commit MT6/MathType binaries.
+# ==========================================
+/tools/mt_converter_portable/mathtype_core/
+/tools/mt_converter_portable/mt_converter.exe
+/tools/mt_converter_portable/samples_wmf/
+/tools/mt_converter_portable/python/**/__pycache__/
+/tools/mt_converter_portable/python/**/*.pyc
+/tools/mt_converter_portable/python/build/
+/tools/mt_converter_portable/python/dist/
+
+# ==========================================
 # 6. 前端构建与依赖 (Frontend)
 # ==========================================
 /node_modules/

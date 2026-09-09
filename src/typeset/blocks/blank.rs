@@ -74,6 +74,7 @@ mod tests {
     use crate::export::model::{ExportOptions, QuestionKind};
     use crate::typeset::blocks::Registry;
     use crate::typeset::spec::LayoutSpec;
+    use uuid::Uuid;
 
     fn space(style: WireBlankStyle, height_cm: f64) -> Option<AnswerSpace> {
         Some(AnswerSpace { style, height_cm })
@@ -81,6 +82,7 @@ mod tests {
 
     fn question(answer_space: Option<AnswerSpace>) -> ExamQuestion {
         ExamQuestion {
+            id: Uuid::nil(),
             number: 18,
             score: 12.0,
             kind: QuestionKind::Solution,

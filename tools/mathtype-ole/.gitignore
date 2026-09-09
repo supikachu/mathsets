@@ -1,0 +1,8 @@
+# MathTypeOle.Cli build output
+**/bin/
+**/obj/
+*.user
+*.suo
+.vs/
+tmp-smoke/
+samples/out/

@@ -68,7 +68,7 @@ pub struct VectorRecallStats {
 }
 
 pub async fn vector_ready(pool: &PgPool) -> bool {
-    vector_recall_wanted() && embeddings_table_ready(pool).await
+    vector_recall_wanted(pool).await && embeddings_table_ready(pool).await
 }
 
 /// 为每个查询词做向量 top-k，返回待并入的 fuzzy 候选。

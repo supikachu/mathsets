@@ -65,6 +65,15 @@ pub struct AiSettingsResponse {
     /// 白名单模型列表；仅管理员
     #[serde(skip_serializing_if = "Option::is_none")]
     pub embedding_models: Option<Vec<String>>,
+    /// 全站向量召回开关；仅管理员
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vector_recall_enabled: Option<bool>,
+    /// 全站 embedding API Key 是否已在库中配置；仅管理员
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_embedding_api_key: Option<bool>,
+    /// 全站 embedding Base URL；仅管理员
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embedding_base_url: Option<String>,
 }
 
 /// 更新请求
@@ -95,6 +104,12 @@ pub struct UpdateAiSettingsRequest {
     pub tagging_concurrency: Option<i16>,
     /// 全站 embedding 模型；仅管理员写入，教师请求忽略
     pub embedding_model: Option<String>,
+    /// 全站向量召回开关；仅管理员写入，教师请求忽略
+    pub vector_recall_enabled: Option<bool>,
+    /// 全站 embedding API Key；仅管理员；空字符串=清除回退 env，None=不变
+    pub embedding_api_key: Option<String>,
+    /// 全站 embedding Base URL；仅管理员；空字符串=清除回退 env/默认，None=不变
+    pub embedding_base_url: Option<String>,
 }
 
 /// 从 base64 字符串解析 32 字节主密钥

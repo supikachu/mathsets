@@ -600,6 +600,7 @@ mod tests {
     use crate::models::question_structure::{AnalysisBlock, QuestionPart};
     use std::collections::HashMap;
     use std::io::Read;
+    use uuid::Uuid;
 
     fn bundle_1q(mode: ExportMode, q: ExamQuestion) -> ExamBundle {
         ExamBundle {
@@ -622,6 +623,7 @@ mod tests {
 
     fn choice_question(number: u32, stem: Vec<InlineNode>) -> ExamQuestion {
         ExamQuestion {
+            id: Uuid::nil(),
             number,
             score: 5.0,
             kind: QuestionKind::SingleChoice,
@@ -774,6 +776,7 @@ mod tests {
     #[test]
     fn solution_tree_answers_and_analysis() {
         let q = ExamQuestion {
+            id: Uuid::nil(),
             number: 2,
             score: 12.0,
             kind: QuestionKind::Solution,

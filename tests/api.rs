@@ -1046,6 +1046,9 @@ async fn test_ai_settings_default() {
     );
     assert!(body.get("embedding_dim").is_none());
     assert!(body.get("embedding_models").is_none());
+    assert!(body.get("vector_recall_enabled").is_none());
+    assert!(body.get("has_embedding_api_key").is_none());
+    assert!(body.get("embedding_base_url").is_none());
 }
 
 #[tokio::test]
@@ -1069,6 +1072,16 @@ async fn test_ai_settings_embedding_admin_only() {
         before["embedding_models"],
         json!(["text-embedding-v3", "qwen3.7-text-embedding"])
     );
+    assert_eq!(before["vector_recall_enabled"], true);
+    assert_eq!(before["has_embedding_api_key"], false);
+    assert!(
+        before["embedding_base_url"]
+            .as_str()
+            .unwrap_or("")
+            .contains("dashscope"),
+        "管理员应看到默认 embedding base URL: {:?}",
+        before
+    );
 
     let (status, body) = put_auth(
         &mut app,
@@ -1077,7 +1090,10 @@ async fn test_ai_settings_embedding_admin_only() {
             "provider": "deepseek",
             "api_key": "sk-teacher",
             "model_text": "deepseek-chat",
-            "embedding_model": "qwen3.7-text-embedding"
+            "embedding_model": "qwen3.7-text-embedding",
+            "vector_recall_enabled": false,
+            "embedding_api_key": "sk-teacher-should-ignore",
+            "embedding_base_url": "https://evil.example.com"
         }),
         &teacher,
     )
@@ -1088,6 +1104,7 @@ async fn test_ai_settings_embedding_admin_only() {
         "教师 PUT 响应不应带 embedding 字段: {:?}",
         body
     );
+    assert!(body.get("vector_recall_enabled").is_none());
 
     let (status, after_teacher) = get_auth(&mut app, "/api/v1/ai/settings", &admin).await;
     assert_eq!(status, StatusCode::OK);
@@ -1095,6 +1112,18 @@ async fn test_ai_settings_embedding_admin_only() {
         after_teacher["embedding_model"].as_str().unwrap_or(""),
         before_model,
         "教师不应改掉全站 embedding 模型"
+    );
+    assert_eq!(
+        after_teacher["vector_recall_enabled"], true,
+        "教师不应改掉向量召回开关"
+    );
+    assert_eq!(after_teacher["has_embedding_api_key"], false);
+    assert!(
+        after_teacher["embedding_base_url"]
+            .as_str()
+            .unwrap_or("")
+            .contains("dashscope"),
+        "教师不应改掉 embedding base URL"
     );
 
     let (status, body) = put_auth(
@@ -1123,7 +1152,10 @@ async fn test_ai_settings_embedding_admin_only() {
             "provider": "deepseek",
             "api_key": "sk-admin",
             "model_text": "deepseek-chat",
-            "embedding_model": other
+            "embedding_model": other,
+            "vector_recall_enabled": false,
+            "embedding_api_key": "sk-embedding-admin-test",
+            "embedding_base_url": "https://dashscope.aliyuncs.com/compatible-mode"
         }),
         &admin,
     )
@@ -1131,10 +1163,18 @@ async fn test_ai_settings_embedding_admin_only() {
     assert_eq!(status, StatusCode::OK, "管理员切换模型失败: {:?}", body);
     assert_eq!(body["embedding_model"], other);
     assert_eq!(body["embedding_dim"], 1024);
+    assert_eq!(body["vector_recall_enabled"], false);
+    assert_eq!(body["has_embedding_api_key"], true);
+    assert_eq!(
+        body["embedding_base_url"],
+        "https://dashscope.aliyuncs.com/compatible-mode"
+    );
 
     let (status, body) = get_auth(&mut app, "/api/v1/ai/settings", &admin).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["embedding_model"], other);
+    assert_eq!(body["vector_recall_enabled"], false);
+    assert_eq!(body["has_embedding_api_key"], true);
 
     let (status, body) = get_auth(&mut app, "/api/v1/ai/settings", &teacher).await;
     assert_eq!(status, StatusCode::OK);
@@ -1143,6 +1183,9 @@ async fn test_ai_settings_embedding_admin_only() {
         "教师 GET 仍不应看到全站 embedding 配置: {:?}",
         body
     );
+    assert!(body.get("vector_recall_enabled").is_none());
+    assert!(body.get("has_embedding_api_key").is_none());
+    assert!(body.get("embedding_base_url").is_none());
 
     let _ = put_auth(
         &mut app,
@@ -1151,7 +1194,9 @@ async fn test_ai_settings_embedding_admin_only() {
             "provider": "deepseek",
             "api_key": "sk-admin",
             "model_text": "deepseek-chat",
-            "embedding_model": "text-embedding-v3"
+            "embedding_model": "text-embedding-v3",
+            "vector_recall_enabled": true,
+            "embedding_api_key": ""
         }),
         &admin,
     )

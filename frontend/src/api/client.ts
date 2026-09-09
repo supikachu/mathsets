@@ -450,7 +450,7 @@ export const questionApi = {
     return client.delete(`/questions/${id}`)
   },
   submit(id: string, body?: { reviewer_id?: string; reviewer_ids?: string[]; comment?: string }) {
-    return client.post(`/questions/${id}/submit`, body || {})
+    return client.post(`/questions/${id}/submit`, body || {}, { timeout: 60000 })
   },
   approve(id: string, body?: { comment?: string }) {
     return client.post(`/questions/${id}/approve`, body || {})
@@ -489,7 +489,7 @@ export const questionApi = {
         code?: string
         missing?: string[]
       }>
-    }>('/questions/batch-submit', { question_ids: questionIds }).then((r) => r.data)
+    }>('/questions/batch-submit', { question_ids: questionIds }, { timeout: 60000 }).then((r) => r.data)
   },
 }
 
@@ -1283,6 +1283,12 @@ export interface AiSettings {
   embedding_dim?: number | null
   /** 白名单模型列表；仅管理员 */
   embedding_models?: string[] | null
+  /** 全站向量召回开关；仅管理员 */
+  vector_recall_enabled?: boolean | null
+  /** 全站 embedding API Key 是否已配置；仅管理员 */
+  has_embedding_api_key?: boolean | null
+  /** 全站 embedding Base URL；仅管理员 */
+  embedding_base_url?: string | null
 }
 
 export const aiApi = {
@@ -1306,6 +1312,9 @@ export const aiApi = {
     stage2_concurrency?: number
     tagging_concurrency?: number
     embedding_model?: string
+    vector_recall_enabled?: boolean
+    embedding_api_key?: string
+    embedding_base_url?: string
   }) {
     return client.put<AiSettings>('/ai/settings', data)
   },
@@ -2047,6 +2056,7 @@ export type {
   ExamQuestionRequest,
   ExportMode,
   ExportOptions,
+  DocxMathMode,
   Issue,
   IssueSeverity,
 } from './types/exam'

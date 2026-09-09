@@ -2,11 +2,11 @@
 //!
 //! 规则逐条对应微软官方 `MML2OMML.XSL` 的模板（下文每个函数都标了模板名）。按修订 R2，XSL 本体
 //! 不入库也不在运行时执行：`tests/snapshots/*.omml` 是开发期用外部 XSLT 引擎跑官方 XSL 得到的
-//! **事实输出**，[`to_omml`] 的产物必须在 XML 规范化后与之逐节点一致（见文件末尾的黄金快照测试）。
-//! 因此这里照抄 XSL 的判断顺序与默认值，包括它自身偏保守的取舍（颜色属性直接丢弃、`mspace`
-//! 整节点消失等）。
+//! **事实输出**（再经本管线有据差异修订），[`to_omml`] 的产物必须在 XML 规范化后与之逐节点一致
+//! （见文件末尾的黄金快照测试）。因此这里照抄 XSL 的判断顺序与默认值，包括它自身偏保守的取舍
+//! （颜色属性直接丢弃、`mspace` 整节点消失等），并在下列差异点显式偏离。
 //!
-//! 三处与 XSL 有据可查的差异，都不影响本管线可达的输入：
+//! 与 XSL 有据可查的差异：
 //!
 //! 1. **mglyph 分支未实现**：`latex2mathml` 不产 `mglyph`，凡带 `mml:*[child::mml:mglyph]` 的
 //!    模板与 `mglyph` 自身模板都不可达；真遇到了会走「未认出 → 递归子节点 + 警告」的降级路径。
@@ -17,6 +17,9 @@
 //!    name 匹配，一次查询即覆盖两种写法。两种情形会与 XSL 不同：同一节点两种拼法都写（本实现取
 //!    文档序第一个），以及只写 `mml:` 前缀（XSL 的部分选择器会取空、落个空串，本实现仍拿到真值）。
 //!    `latex2mathml` 产出的都是默认命名空间下的无 prefix 写法，两种情形都不可达。
+//! 4. **`\left`/`\right` / `cases` 的 stretchy `mo` 行 → `m:d`**：官方 XSL 把
+//!    `<mo stretchy>{</mo><mtable/>…` 拆成普通文字 `{` + 矩阵，Word 不会画出跨行大括号。
+//!    本管线把这类行收成与 `mfenced` 等价的 `m:d`（含单侧 `\right.` 空闭合）。
 
 use std::borrow::Cow;
 use std::io::Cursor;
@@ -445,6 +448,69 @@ fn is_func(n: Nd<'_>) -> bool {
             .eq([FUNCTION_APP])
 }
 
+/// `latex2mathml` 对 `\left`/`\right` / `cases` 产出的可伸缩定界符行（非 `mfenced`）。
+/// 返回 `(open, close, body…)`；`close`/`open` 可为 `""`（对应 `\right.` / `\left.`）。
+fn stretchy_fence_parts<'a>(children: &[Nd<'a>]) -> Option<(String, String, Vec<Nd<'a>>)> {
+    if children.len() < 3 {
+        return None;
+    }
+    let open = fence_mo_glyph(children[0], FenceSide::Open)?;
+    let close = fence_mo_glyph(children[children.len() - 1], FenceSide::Close)?;
+    let body = children[1..children.len() - 1].to_vec();
+    if body.is_empty() {
+        return None;
+    }
+    Some((open, close, body))
+}
+
+#[derive(Clone, Copy)]
+enum FenceSide {
+    Open,
+    Close,
+}
+
+fn fence_mo_glyph(n: Nd<'_>, side: FenceSide) -> Option<String> {
+    if local(n) != "mo" {
+        return None;
+    }
+    let stretchy = xsl_lower(attr_or(n, "stretchy")) == "true";
+    let fence = xsl_lower(attr_or(n, "fence")) == "true";
+    if !stretchy && !fence {
+        return None;
+    }
+    let form = xsl_lower(attr_or(n, "form"));
+    let glyph = token_text(n).trim().to_string();
+    match side {
+        FenceSide::Open => {
+            if form.as_ref() == "postfix" {
+                return None;
+            }
+            if glyph.is_empty() {
+                return (form.is_empty() || form.as_ref() == "prefix").then_some(glyph);
+            }
+            Some(normalize_fence_glyph(&glyph))
+        }
+        FenceSide::Close => {
+            if form.as_ref() == "prefix" {
+                return None;
+            }
+            if glyph.is_empty() {
+                return (form.is_empty() || form.as_ref() == "postfix").then_some(glyph);
+            }
+            Some(normalize_fence_glyph(&glyph))
+        }
+    }
+}
+
+fn normalize_fence_glyph(value: &str) -> String {
+    match value {
+        "." => String::new(),
+        "〈" | "〈" | "⟨" => "⟨".to_string(),
+        "〉" | "〉" | "⟩" => "⟩".to_string(),
+        other => other.to_string(),
+    }
+}
+
 /// XSL `FBar`：`linethickness` 是否仍表示「有线」
 fn has_bar(line_thickness: &str) -> bool {
     let t = xsl_lower(line_thickness);
@@ -811,6 +877,11 @@ impl Omml {
             self.close("m:func");
             return;
         }
+        // 偏离 XSL：latex2mathml 的 stretchy `\left`/`\right` 行收成 `m:d`
+        if let Some((open, close, body)) = stretchy_fence_parts(&children) {
+            self.delim(&open, &close, /* separators */ None, true, true, &body);
+            return;
+        }
         for child in children {
             self.element(child);
         }
@@ -1090,9 +1161,34 @@ impl Omml {
         let open = attr_or(n, "open");
         let close = attr_or(n, "close");
         let separators = attr_or(n, "separators");
+        let body: Vec<_> = kids(n);
+        self.delim(
+            &open,
+            &close,
+            if sep_valid { Some(separators.as_ref()) } else { None },
+            open_valid,
+            close_valid,
+            &body,
+        );
+    }
+
+    /// 写出 `m:d`（`mfenced` 与 stretchy `\left`/`\right` 行共用）。
+    /// `separators=None` 表示属性未给出（MathML 默认 `,`）；`Some("")` 表示显式空 separators。
+    fn delim(
+        &mut self,
+        open: &str,
+        close: &str,
+        separators: Option<&str>,
+        open_valid: bool,
+        close_valid: bool,
+        body: &[Nd<'_>],
+    ) {
         // MathML 可以有多个 separator，OMML 的 `m:d` 只认一个 —— 取首字符
-        let sep_chr = separators.chars().next().map(|c| c.to_string());
-        let sep_is_default = sep_chr.as_deref() == Some("|");
+        let sep_chr = separators.and_then(|s| s.chars().next().map(|c| c.to_string()));
+        let sep_is_default = match separators {
+            None => false, // 未给：MathML 默认 `,`，OMML 默认 `|`，必须写出
+            Some(_) => sep_chr.as_deref() == Some("|"),
+        };
 
         self.open("m:d");
         if (open_valid && open != "(") || (close_valid && close != ")") || !sep_is_default {
@@ -1101,8 +1197,7 @@ impl Omml {
                 self.empty_val("m:begChr", open);
             }
             if !sep_is_default {
-                if !sep_valid {
-                    // 未给 separators：MathML 的默认是 `,`，OMML 的是 `|`，必须写出来
+                if separators.is_none() {
                     self.empty_val("m:sepChr", ",");
                 } else {
                     self.empty_val("m:sepChr", sep_chr.as_deref().unwrap_or(""));
@@ -1113,10 +1208,10 @@ impl Omml {
             }
             self.close("m:dPr");
         }
-        for child in kids(n) {
+        for child in body {
             self.open("m:e");
-            self.arg_prop(child);
-            self.element(child);
+            self.arg_prop(*child);
+            self.element(*child);
             self.close("m:e");
         }
         self.close("m:d");
@@ -1306,7 +1401,10 @@ impl Omml {
                     continue;
                 }
                 let plain_group = matches!(local(child), "mrow" | "mstyle")
-                    && !(local(child) == "mrow" && (is_linear_frac(child) || is_func(child)));
+                    && !(local(child) == "mrow"
+                        && (is_linear_frac(child)
+                            || is_func(child)
+                            || stretchy_fence_parts(&kids(child)).is_some()));
                 if plain_group {
                     self.eq_array_row(&[child]);
                 } else {
@@ -1614,6 +1712,27 @@ mod golden {
             "n-ary 的 m:e 应吸收后续 mrow（含其 func 结构）: {omml}"
         );
         assert_eq!(texts(&omml), vec!["0", "1", "f", "(x)"], "{omml}");
+    }
+
+    #[test]
+    fn stretchy_cases_brace_becomes_delimiter() {
+        // latex2mathml 形态：不能落成普通文字 `{`，否则 Word 画不出跨行大括号
+        let omml = omml_of(
+            r#"<mrow><mo stretchy="true" form="prefix">{</mo><mtable><mtr><mtd><mi>x</mi></mtd></mtr><mtr><mtd><mi>y</mi></mtd></mtr></mtable><mo stretchy="true" form="postfix"></mo></mrow>"#,
+        );
+        assert!(omml.contains("<m:d>"), "应输出定界符: {omml}");
+        assert!(
+            omml.contains(r#"<m:begChr m:val="{"/>"#),
+            "左括号应是 begChr: {omml}"
+        );
+        assert!(
+            omml.contains(r#"<m:endChr m:val=""/>"#),
+            "\\right. 应是空 endChr: {omml}"
+        );
+        assert!(
+            !omml.contains("<m:t>{</m:t>"),
+            "不得把大括号写成普通文字: {omml}"
+        );
     }
 
     /// 由 MathML 片段构造整棵 `math` 并转换

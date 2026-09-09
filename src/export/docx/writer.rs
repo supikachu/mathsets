@@ -15,7 +15,7 @@
 //! **子元素顺序**：`w:pPr`、`w:tblPr`、`w:tcPr`、`w:trPr`、`w:rPr` 都有 schema 顺序，
 //! Word 宽容、WPS 不容，而 M2 的验收标准是两者都能打开 —— 顺序照抄 Word 自身产出。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use quick_xml::escape::escape;
@@ -27,15 +27,18 @@ use crate::export::assets::{FetchedImage, fetch_image};
 use crate::export::content::split_content;
 use crate::export::markdown::{collect_bundle_images, fmt_score};
 use crate::export::math::{MathOutcome, omml::to_omml, to_mathml};
+use crate::export::math::mathtype_ole;
 use crate::export::model::{
-    Callout, CalloutKind, ExamBundle, ExamOption, ExamQuestion, ExamSection, ExportOptions,
-    ImageAlign, InlineImage, InlineNode, Issue, IssueField, IssueSeverity, QuestionKind,
-    TableAlign,
+    Callout, CalloutKind, DocxMathMode, ExamBundle, ExamOption, ExamQuestion, ExamSection,
+    ExportOptions, ImageAlign, InlineImage, InlineNode, Issue, IssueField, IssueSeverity,
+    QuestionKind, TableAlign,
 };
 use crate::export::pdf::{profile_of, resolve_spec};
+use crate::mathtype::{MathTypeAssetKey, ReadyMathAsset};
 use crate::models::question_structure::{QuestionPart, walk_leaves};
 use crate::typeset::blocks::choice_grid;
 use crate::typeset::spec::LayoutSpec;
+use uuid::Uuid;
 
 // ── 版面常量（twips：1pt = 20tw）──
 
@@ -124,13 +127,16 @@ pub struct DocxResult {
 ///
 /// `request_spec` 是请求里的版面覆盖，与 `/export/pdf` 走同一个 [`resolve_spec`]：给了就按字段级
 /// 覆盖 mode 预设，没给就用预设。纸张、边距、装订位与栏数因此两边同源（T4.12）。
+///
+/// `mathtype_assets`：`docx_math=mathtype` 时按题嵌入 Equation.DSMT4；缺资产则降级 OMML。
 pub async fn generate_docx(
     bundle: &ExamBundle,
     options: &ExportOptions,
     request_spec: Option<&LayoutSpec>,
     upload_dir: &Path,
+    mathtype_assets: Option<HashMap<MathTypeAssetKey, ReadyMathAsset>>,
 ) -> DocxResult {
-    let mut w = Writer::new(bundle, options, request_spec);
+    let mut w = Writer::new(bundle, options, request_spec, mathtype_assets.unwrap_or_default());
     w.prefetch(upload_dir).await;
     w.render();
     w.finish()
@@ -175,6 +181,18 @@ struct Writer<'a> {
     next_rid: u32,
     /// `wp:docPr/@id` 计数器：同图复用同一 rId，但每次绘制都要独立 id
     next_draw: u32,
+    /// MathType 资产（按题 field+ordinal）；导出时按 latex 消费
+    mathtype_assets: HashMap<MathTypeAssetKey, ReadyMathAsset>,
+    /// 已消费的资产键
+    mathtype_used: HashSet<(Uuid, String, i32)>,
+    /// 当前题 UUID（渲染 question 时设置）
+    current_qid: Uuid,
+    /// MathType 对象序号（包内 image/ole 编号）
+    next_mt_index: usize,
+    /// 是否需要在 document 根声明 v:/o: 命名空间
+    needs_vml_ns: bool,
+    /// 是否已写入 `_x0000_t75` shapetype（全文仅一次）
+    mathtype_shapetype_emitted: bool,
 }
 
 impl<'a> Writer<'a> {
@@ -182,6 +200,7 @@ impl<'a> Writer<'a> {
         bundle: &'a ExamBundle,
         options: &'a ExportOptions,
         request_spec: Option<&LayoutSpec>,
+        mathtype_assets: HashMap<MathTypeAssetKey, ReadyMathAsset>,
     ) -> Self {
         Self {
             spec: resolve_spec(profile_of(bundle.mode), request_spec),
@@ -194,6 +213,12 @@ impl<'a> Writer<'a> {
             rels: Vec::new(),
             next_rid: 3,
             next_draw: 0,
+            mathtype_assets,
+            mathtype_used: HashSet::new(),
+            current_qid: Uuid::nil(),
+            next_mt_index: 0,
+            needs_vml_ns: false,
+            mathtype_shapetype_emitted: false,
         }
     }
 
@@ -337,6 +362,7 @@ impl<'a> Writer<'a> {
             }],
             extra_rels: std::mem::take(&mut self.rels),
             media: std::mem::take(&mut self.media),
+            need_mathtype_ns: self.needs_vml_ns,
         };
         DocxResult {
             bytes: build(&pkg),
@@ -457,6 +483,7 @@ impl<'a> Writer<'a> {
 
     /// 一道题：题号 + 分值 → 题干 → 选项网格 → 问树 → Callout → 按开关内嵌答案/解析
     fn question(&mut self, q: &ExamQuestion) {
+        self.current_qid = q.id;
         let slot = Slot::new(Some(q.number), IssueField::Stem);
         let lead = format!(
             "{}{}",
@@ -558,6 +585,7 @@ impl<'a> Writer<'a> {
                     display: false,
                 } => match self.fragment(latex, false, slot) {
                     Fragment::Omml(f) => out.push_str(&f),
+                    Fragment::MathType(r) => out.push_str(&r),
                     Fragment::Text(r) => out.push_str(&r),
                 },
                 // 多列路径不应出现块级节点；降级为可见原文，避免整行崩掉
@@ -598,6 +626,7 @@ impl<'a> Writer<'a> {
 
     /// 答案段：内嵌时首段挂「答案：」，卷末时首段挂题号
     fn answer_block(&mut self, q: &ExamQuestion, at_end: bool) {
+        self.current_qid = q.id;
         let items = answer_items(q);
         if items.is_empty() {
             return;
@@ -624,6 +653,7 @@ impl<'a> Writer<'a> {
     }
 
     fn analysis_block(&mut self, q: &ExamQuestion, at_end: bool) {
+        self.current_qid = q.id;
         let items = analysis_items(q);
         if items.is_empty() {
             return;
@@ -674,7 +704,12 @@ impl<'a> Writer<'a> {
         out: &mut String,
     ) {
         let ppr_owned = with_left_jc(ppr);
-        let ppr = ppr_owned.as_ref();
+        let ppr_auto = if self.options.docx_math == DocxMathMode::Mathtype {
+            with_mathtype_line_spacing(ppr_owned.as_ref())
+        } else {
+            ppr_owned
+        };
+        let ppr = ppr_auto.as_ref();
         let mut open = false;
         let mut lead_used = false;
         let mut i = 0usize;
@@ -733,6 +768,7 @@ impl<'a> Writer<'a> {
                     open_para(out, &mut open, &mut lead_used);
                     match self.fragment(latex, false, slot) {
                         Fragment::Omml(f) => out.push_str(&f),
+                        Fragment::MathType(r) => out.push_str(&r),
                         Fragment::Text(r) => out.push_str(&r),
                     }
                 }
@@ -740,12 +776,32 @@ impl<'a> Writer<'a> {
                     latex,
                     display: true,
                 } => {
-                    if !lead_used && !lead.is_empty() {
+                    // MathType：块级也按嵌入式 OLE 放进当前段，避免独占段 + 固定行距叠字
+                    if self.options.docx_math == DocxMathMode::Mathtype {
                         open_para(out, &mut open, &mut lead_used);
+                        match self.fragment(latex, true, slot) {
+                            Fragment::MathType(r) => out.push_str(&r),
+                            Fragment::Omml(f) => {
+                                // 无资产时仍用块级 OMML
+                                if open {
+                                    out.push_str("</w:p>");
+                                    open = false;
+                                }
+                                out.push_str(&format!(
+                                    "<w:p>{ppr}<m:oMathPara>{f}</m:oMathPara></w:p>"
+                                ));
+                                lead_used = true;
+                            }
+                            Fragment::Text(r) => out.push_str(&r),
+                        }
+                    } else {
+                        if !lead_used && !lead.is_empty() {
+                            open_para(out, &mut open, &mut lead_used);
+                        }
+                        let block = self.display_math(latex, ppr, slot);
+                        close_and_emit(out, ppr, &mut open, more, &block);
+                        lead_used = true;
                     }
-                    let block = self.display_math(latex, ppr, slot);
-                    close_and_emit(out, ppr, &mut open, more, &block);
-                    lead_used = true;
                 }
                 InlineNode::Image {
                     alt,
@@ -800,12 +856,18 @@ impl<'a> Writer<'a> {
     fn display_math(&mut self, latex: &str, ppr: &str, slot: Slot) -> String {
         match self.fragment(latex, true, slot) {
             Fragment::Omml(f) => format!("<w:p>{ppr}<m:oMathPara>{f}</m:oMathPara></w:p>"),
+            Fragment::MathType(r) => format!("<w:p>{ppr}{r}</w:p>"),
             Fragment::Text(r) => format!("<w:p>{ppr}{r}</w:p>"),
         }
     }
 
-    /// 公式：能转就出 OMML，转不出就地降级并记一条 Issue
+    /// 公式：MathType 优先（若启用且有资产），否则 OMML，再不行降级原文
     fn fragment(&mut self, latex: &str, display: bool, slot: Slot) -> Fragment {
+        if self.options.docx_math == DocxMathMode::Mathtype {
+            if let Some(run_xml) = self.try_mathtype_run(latex, slot) {
+                return Fragment::MathType(run_xml);
+            }
+        }
         match omml_of(latex, display) {
             Ok(omml) => Fragment::Omml(omml),
             Err(reason) => {
@@ -820,6 +882,87 @@ impl<'a> Writer<'a> {
                 Fragment::Text(run(latex, Some(RPR_DEGRADED)))
             }
         }
+    }
+
+    fn try_mathtype_run(&mut self, latex: &str, slot: Slot) -> Option<String> {
+        let qid = self.current_qid;
+        if qid.is_nil() {
+            return None;
+        }
+        let field = issue_field_to_asset_field(slot.field)?;
+        let key = self
+            .mathtype_assets
+            .keys()
+            .find(|k| {
+                k.question_id == qid
+                    && k.field == field
+                    && !self
+                        .mathtype_used
+                        .contains(&(k.question_id, k.field.clone(), k.ordinal))
+                    && self
+                        .mathtype_assets
+                        .get(*k)
+                        .is_some_and(|a| a.latex.trim() == latex.trim())
+            })
+            .cloned()
+            .or_else(|| {
+                self.mathtype_assets
+                    .keys()
+                    .find(|k| {
+                        k.question_id == qid
+                            && !self.mathtype_used.contains(&(
+                                k.question_id,
+                                k.field.clone(),
+                                k.ordinal,
+                            ))
+                            && self
+                                .mathtype_assets
+                                .get(*k)
+                                .is_some_and(|a| a.latex.trim() == latex.trim())
+                    })
+                    .cloned()
+            })?;
+
+        let asset = self.mathtype_assets.get(&key)?.clone();
+        self.mathtype_used
+            .insert((key.question_id, key.field.clone(), key.ordinal));
+
+        let idx = self.next_mt_index;
+        self.next_mt_index += 1;
+        let n = idx + 1;
+
+        let rid_img = format!("rId{}", self.next_rid);
+        self.next_rid += 1;
+        let rid_ole = format!("rId{}", self.next_rid);
+        self.next_rid += 1;
+
+        let wmf_name = format!("media/image{n}.wmf");
+        let ole_name = format!("embeddings/oleObject{n}.bin");
+        self.rels.push(ExtraRel {
+            id: rid_img.clone(),
+            kind: "image".into(),
+            target: wmf_name.clone(),
+        });
+        self.rels.push(ExtraRel {
+            id: rid_ole.clone(),
+            kind: "oleObject".into(),
+            target: ole_name.clone(),
+        });
+        self.media.push((wmf_name, asset.wmf.clone()));
+        self.media.push((ole_name, asset.ole_bin.clone()));
+        self.needs_vml_ns = true;
+        let include_shapetype = !self.mathtype_shapetype_emitted;
+        if include_shapetype {
+            self.mathtype_shapetype_emitted = true;
+        }
+
+        Some(mathtype_ole::equation_run(
+            &asset,
+            idx,
+            &rid_img,
+            &rid_ole,
+            include_shapetype,
+        ))
     }
 
     // ── 图片 ──
@@ -995,6 +1138,29 @@ fn with_left_jc(ppr: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Borrowed(ppr)
 }
 
+/// MathType OLE 较高：固定行距会叠字，强制 auto 行距
+fn with_mathtype_line_spacing(ppr: &str) -> std::borrow::Cow<'_, str> {
+    let auto = r#"<w:spacing w:lineRule="auto"/>"#;
+    if ppr.contains("w:lineRule") {
+        // 替换已有 spacing 里的 lineRule / 整段 spacing 太脆，直接在 </w:pPr> 前再插一条
+        // Word 取后者；若已是 auto 则保持
+        if ppr.contains(r#"w:lineRule="auto""#) {
+            return std::borrow::Cow::Borrowed(ppr);
+        }
+    }
+    if let Some(i) = ppr.find("</w:pPr>") {
+        let mut s = String::with_capacity(ppr.len() + auto.len());
+        s.push_str(&ppr[..i]);
+        s.push_str(auto);
+        s.push_str(&ppr[i..]);
+        return std::borrow::Cow::Owned(s);
+    }
+    if ppr.is_empty() {
+        return std::borrow::Cow::Owned(format!("<w:pPr>{auto}</w:pPr>"));
+    }
+    std::borrow::Cow::Borrowed(ppr)
+}
+
 /// 清掉会变成软换行的控制符；压缩连续 ASCII 空白；去掉 OCR「汉字间空格」。
 /// 全角空格 U+3000 保留（卷头用它做分隔），避免被误伤。
 fn normalize_run_text(text: &str) -> String {
@@ -1044,8 +1210,21 @@ fn is_cjk_char(c: char) -> bool {
 enum Fragment {
     /// 可直接进段落的 OMML 片段
     Omml(String),
+    /// 已含完整 `<w:r>…</w:r>` 的 MathType OLE
+    MathType(String),
     /// 降级：已成形的 run（红色等宽原文）
     Text(String),
+}
+
+fn issue_field_to_asset_field(field: IssueField) -> Option<&'static str> {
+    match field {
+        IssueField::Stem => Some("stem"),
+        IssueField::Choice => Some("options"),
+        IssueField::Answer => Some("correct_answer"),
+        IssueField::Analysis => Some("analysis"),
+        IssueField::Structure => Some("structure"),
+        IssueField::Image | IssueField::Other => None,
+    }
 }
 
 /// LaTeX → OMML。两级转换的失败原因都直接作为 Issue 的 reason
@@ -1507,6 +1686,7 @@ mod tests {
     }
     fn question(number: u32, stem: Vec<InlineNode>) -> ExamQuestion {
         ExamQuestion {
+            id: Uuid::nil(),
             number,
             score: 5.0,
             kind: QuestionKind::SingleChoice,
@@ -1556,7 +1736,7 @@ mod tests {
         spec: Option<&LayoutSpec>,
         dir: &Path,
     ) -> (DocxResult, Parts) {
-        let r = generate_docx(b, o, spec, dir).await;
+        let r = generate_docx(b, o, spec, dir, None).await;
         let parts = unzip(&r.bytes);
         assert_opc_invariants(&parts);
         (r, parts)
@@ -2270,7 +2450,7 @@ mod tests {
             })
             .collect();
         let b = bundle(questions);
-        let r = generate_docx(&b, &ExportOptions::default(), None, Path::new("./uploads")).await;
+        let r = generate_docx(&b, &ExportOptions::default(), None, Path::new("./uploads"), None).await;
         assert_opc_invariants(&unzip(&r.bytes));
         std::fs::write(&path, &r.bytes).expect("探针 docx 可写入");
         println!(
@@ -2305,6 +2485,7 @@ mod tests {
                 &ExportOptions::default(),
                 Some(&p.spec),
                 Path::new("./uploads"),
+                None,
             )
             .await;
             assert_opc_invariants(&unzip(&r.bytes));

@@ -163,6 +163,8 @@ pub struct Package {
     pub extra_rels: Vec<ExtraRel>,
     /// 媒体部件：`(相对 word/ 的路径, 字节)`，如 `("media/image1.png", …)`
     pub media: Vec<(String, Vec<u8>)>,
+    /// 是否声明 VML / Office 命名空间（MathType `w:object`）
+    pub need_mathtype_ns: bool,
 }
 
 impl Package {
@@ -177,6 +179,7 @@ impl Package {
             extra_parts: Vec::new(),
             extra_rels: Vec::new(),
             media: Vec::new(),
+            need_mathtype_ns: false,
         }
     }
 }
@@ -192,7 +195,7 @@ pub fn build(pkg: &Package) -> Vec<u8> {
         ("_rels/.rels".into(), root_rels_xml().into_bytes()),
         (
             "word/document.xml".into(),
-            document_xml(&pkg.body, &pkg.sect_pr).into_bytes(),
+            document_xml(&pkg.body, &pkg.sect_pr, pkg.need_mathtype_ns).into_bytes(),
         ),
         (
             "word/_rels/document.xml.rels".into(),
@@ -240,6 +243,8 @@ fn content_types_xml(extra: &[ExtraPart]) -> String {
             r#"<Default Extension="jpg" ContentType="image/jpeg"/>"#,
             r#"<Default Extension="jpeg" ContentType="image/jpeg"/>"#,
             r#"<Default Extension="gif" ContentType="image/gif"/>"#,
+            r#"<Default Extension="wmf" ContentType="image/x-wmf"/>"#,
+            r#"<Default Extension="bin" ContentType="application/vnd.openxmlformats-officedocument.oleObject"/>"#,
             r#"<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>"#,
             r#"<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>"#,
             r#"<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>"#,
@@ -304,18 +309,32 @@ fn document_rels_xml(extra: &[ExtraRel]) -> String {
 }
 
 /// 主文档部件：根元素声明 writer 会用到的全部前缀（含 `m:`，OMML 片段自身也带 `xmlns:m`）
-fn document_xml(body: &str, sect_pr: &str) -> String {
+fn document_xml(body: &str, sect_pr: &str, need_mathtype_ns: bool) -> String {
     let mut s = String::with_capacity(body.len() + 512);
     s.push_str(XML_DECL);
-    s.push_str(&format!(
-        concat!(r#"<w:document {w} {r} {m} {wp} {a} {pic}>"#,),
-        w = ns_decl("w", NS_W),
-        r = ns_decl("r", NS_R),
-        m = ns_decl("m", NS_M),
-        wp = ns_decl("wp", NS_WP),
-        a = ns_decl("a", NS_A),
-        pic = ns_decl("pic", NS_PIC)
-    ));
+    if need_mathtype_ns {
+        s.push_str(&format!(
+            concat!(r#"<w:document {w} {r} {m} {wp} {a} {pic} {v} {o}>"#,),
+            w = ns_decl("w", NS_W),
+            r = ns_decl("r", NS_R),
+            m = ns_decl("m", NS_M),
+            wp = ns_decl("wp", NS_WP),
+            a = ns_decl("a", NS_A),
+            pic = ns_decl("pic", NS_PIC),
+            v = ns_decl("v", "urn:schemas-microsoft-com:vml"),
+            o = ns_decl("o", "urn:schemas-microsoft-com:office:office"),
+        ));
+    } else {
+        s.push_str(&format!(
+            concat!(r#"<w:document {w} {r} {m} {wp} {a} {pic}>"#,),
+            w = ns_decl("w", NS_W),
+            r = ns_decl("r", NS_R),
+            m = ns_decl("m", NS_M),
+            wp = ns_decl("wp", NS_WP),
+            a = ns_decl("a", NS_A),
+            pic = ns_decl("pic", NS_PIC)
+        ));
+    }
     s.push_str("<w:body>");
     s.push_str(body);
     s.push_str(sect_pr);
@@ -792,6 +811,7 @@ mod tests {
                 target: "media/image1.png".into(),
             }],
             media: vec![("media/image1.png".into(), png.clone())],
+            need_mathtype_ns: false,
         });
         let parts = unzip(&bytes);
         assert_eq!(

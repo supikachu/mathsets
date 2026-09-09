@@ -17,6 +17,7 @@ import {
   type Binding,
   type BlankStyle,
   type ColorMode,
+  type DocxMathMode,
   type ExamRequest,
   type ExamSectionRequest,
   type ExportMode,
@@ -73,7 +74,7 @@ const toast = useToast()
 const DOCX_ENABLED = true
 
 const ALL_FORMATS: FormatOption[] = [
-  { value: 'docx', label: 'Word', hint: '公式可编辑', icon: 'file-text' },
+  { value: 'docx', label: 'Word', hint: '可选 Office / MathType 公式', icon: 'file-text' },
   { value: 'pdf', label: 'PDF', hint: '版面可控', icon: 'document' },
   { value: 'markdown', label: 'Markdown', hint: '纯文本 · 可移植', icon: 'download' },
 ]
@@ -150,6 +151,13 @@ const calloutKnowledge = ref(true)
 const calloutErrorProne = ref(true)
 const calloutAnalysis = ref(false)
 const bundle = ref(false)
+/** Word 公式：默认 Office OMML；MathType 需题目已有 ready 资产 + 本机 converter */
+const docxMath = ref<DocxMathMode>('omml')
+
+const DOCX_MATH_OPTIONS: { value: DocxMathMode; label: string; hint: string }[] = [
+  { value: 'omml', label: 'Office 公式', hint: 'OMML，Word 内可编辑' },
+  { value: 'mathtype', label: 'MathType', hint: 'Equation.DSMT4，需已转换资产' },
+]
 
 // ── 版面（T3.8；T4.12 起 PDF 与 Word 共用）：预设是整套 spec 的起点，微调只改本地这份副本
 const presets = ref<ProfilePreset[]>([])
@@ -329,6 +337,7 @@ function buildRequest(): ExamRequest {
         error_prone: isTeacher.value && calloutErrorProne.value,
         analysis: isTeacher.value && calloutAnalysis.value,
       },
+      ...(isDocx.value ? { docx_math: docxMath.value } : {}),
     },
     // spec.profile 由后端按 mode 回填（pdf.rs:130），这里带过去只是整套参数的一个字段
     spec: hasLayout.value ? (layout.value ?? undefined) : undefined,
@@ -441,6 +450,27 @@ function usePrintFallback() {
               @click="pickFormat(opt.value)"
             >
               <AppIcon :name="opt.icon" :size="15" />
+              <span class="ex-seg-label">{{ opt.label }}</span>
+              <span class="ex-seg-hint">{{ opt.hint }}</span>
+            </button>
+          </div>
+        </div>
+
+        <div v-if="isDocx" class="ex-field">
+          <span class="ex-label">
+            Word 公式
+            <span class="ex-note">MathType 需录入时已生成资产，且本机转换服务可用</span>
+          </span>
+          <div class="ex-seg" role="radiogroup" aria-label="Word 公式类型">
+            <button
+              v-for="opt in DOCX_MATH_OPTIONS"
+              :key="opt.value"
+              type="button"
+              class="ex-seg-btn"
+              :class="{ 'is-active': docxMath === opt.value }"
+              :title="opt.hint"
+              @click="docxMath = opt.value"
+            >
               <span class="ex-seg-label">{{ opt.label }}</span>
               <span class="ex-seg-hint">{{ opt.hint }}</span>
             </button>

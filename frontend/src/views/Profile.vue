@@ -586,14 +586,66 @@
                     <h2>向量召回（全站）</h2>
                     <p>知识树节点 embedding，全站共用</p>
                   </div>
+                  <span v-if="aiSettings?.has_embedding_api_key" class="apple-badge-success">Key 已配置</span>
                 </div>
 
                 <div class="apple-inset-card">
-                  <div class="apple-list-row">
+                  <div
+                    class="apple-list-row cursor-pointer"
+                    @click="aiForm.vectorRecallEnabled = !aiForm.vectorRecallEnabled"
+                  >
+                    <div class="flex flex-col gap-0.5">
+                      <span class="apple-row-label">启用向量召回</span>
+                      <span class="text-[12px] text-[var(--text-muted)]">关闭后仅字面召回，不调用 embedding</span>
+                    </div>
+                    <AppToggle v-model="aiForm.vectorRecallEnabled" @click.stop />
+                  </div>
+                  <div class="apple-list-row" :class="{ 'opacity-50 pointer-events-none': !aiForm.vectorRecallEnabled }">
+                    <span class="apple-row-label">API 地址</span>
+                    <div class="apple-input-wrap flex-1 max-w-[320px]">
+                      <input
+                        v-model="aiForm.embeddingBaseUrl"
+                        class="apple-control-input font-mono text-[13px]"
+                        placeholder="https://dashscope.aliyuncs.com/compatible-mode"
+                        spellcheck="false"
+                        autocomplete="off"
+                        :disabled="!aiForm.vectorRecallEnabled"
+                      />
+                    </div>
+                  </div>
+                  <div class="apple-list-row" :class="{ 'opacity-50 pointer-events-none': !aiForm.vectorRecallEnabled }">
+                    <div class="flex items-center gap-2 shrink-0">
+                      <span class="apple-row-label">API Key</span>
+                      <span v-if="aiSettings?.has_embedding_api_key" class="apple-badge-success">已配置</span>
+                      <span v-else class="text-[12px] text-[var(--text-muted)]">可留空回退 env</span>
+                    </div>
+                    <div class="apple-input-wrap flex-1 max-w-[280px]">
+                      <input
+                        v-model="aiForm.embeddingApiKey"
+                        :type="showEmbeddingApiKey ? 'text' : 'password'"
+                        class="apple-control-input"
+                        :class="{ 'font-mono text-[13px]': showEmbeddingApiKey, 'apple-password-input': !showEmbeddingApiKey }"
+                        placeholder="输入新 Key，留空保持不变"
+                        autocomplete="off"
+                        :disabled="!aiForm.vectorRecallEnabled"
+                      />
+                      <button
+                        type="button"
+                        class="apple-eye-btn"
+                        :aria-label="showEmbeddingApiKey ? '隐藏 API Key' : '显示 API Key'"
+                        :disabled="!aiForm.vectorRecallEnabled"
+                        @click="showEmbeddingApiKey = !showEmbeddingApiKey"
+                      >
+                        <AppIcon :name="showEmbeddingApiKey ? 'eye-off' : 'eye'" :size="15" />
+                      </button>
+                    </div>
+                  </div>
+                  <div class="apple-list-row" :class="{ 'opacity-50 pointer-events-none': !aiForm.vectorRecallEnabled }">
                     <span class="apple-row-label">模型</span>
                     <select
                       v-model="aiForm.embeddingModel"
                       class="apple-control-select"
+                      :disabled="!aiForm.vectorRecallEnabled"
                     >
                       <option
                         v-for="m in embeddingModelOptions"
@@ -608,7 +660,19 @@
                   </div>
                 </div>
                 <p class="apple-card-footer">
-                  密钥沿用服务器 QWEN_API_KEY，与上方解析/打标 Key 无关。换模型后会按新模型重嵌全部知识树节点。
+                  与上方解析/打标 Key 无关。可在
+                  <a
+                    href="https://bailian.console.aliyun.com/#/api-key"
+                    target="_blank"
+                    rel="noreferrer"
+                  >阿里云百炼控制台</a>
+                  创建 Key；模型说明见
+                  <a
+                    href="https://help.aliyun.com/zh/model-studio/developer-reference/text-embedding-api"
+                    target="_blank"
+                    rel="noreferrer"
+                  >文本向量 API</a>。
+                  未填 Key 时回退服务器 QWEN_API_KEY。换模型后会按新模型重嵌全部知识树节点。无 pgvector 或未配置 Key 时自动退回字面召回。
                 </p>
               </section>
 
@@ -872,6 +936,7 @@ const navTabs = [
 const showApiKey = ref(false)
 const showTaggingApiKey = ref(false)
 const showDoc2xApiKey = ref(false)
+const showEmbeddingApiKey = ref(false)
 const showMineruApiKey = ref(false)
 const showOldPassword = ref(false)
 const showNewPassword = ref(false)
@@ -954,6 +1019,9 @@ const aiForm = reactive({
   stage2Concurrency: 4,
   taggingConcurrency: 4,
   embeddingModel: 'text-embedding-v3',
+  vectorRecallEnabled: true,
+  embeddingApiKey: '',
+  embeddingBaseUrl: 'https://dashscope.aliyuncs.com/compatible-mode',
 })
 
 const llmProviderOptions = [
@@ -1082,6 +1150,13 @@ async function loadAiSettings() {
     if (res.data.embedding_model) {
       aiForm.embeddingModel = res.data.embedding_model
     }
+    if (typeof res.data.vector_recall_enabled === 'boolean') {
+      aiForm.vectorRecallEnabled = res.data.vector_recall_enabled
+    }
+    if (res.data.embedding_base_url) {
+      aiForm.embeddingBaseUrl = res.data.embedding_base_url
+    }
+    aiForm.embeddingApiKey = ''
     aiForm.apiKey = ''
     aiForm.doc2xApiKey = ''
     aiForm.mineruApiKey = ''
@@ -1131,6 +1206,9 @@ async function saveAiSettings() {
     }
     if (auth.isAdminUnified) {
       payload.embedding_model = aiForm.embeddingModel
+      payload.vector_recall_enabled = aiForm.vectorRecallEnabled
+      payload.embedding_base_url = aiForm.embeddingBaseUrl.trim()
+      if (aiForm.embeddingApiKey) payload.embedding_api_key = aiForm.embeddingApiKey
     }
     if (isCustomLlm.value) {
       payload.llm_base_url = aiForm.llmBaseUrl.trim() || DEFAULT_OPENROUTER_URL
@@ -1149,6 +1227,7 @@ async function saveAiSettings() {
     aiForm.doc2xApiKey = ''
     aiForm.mineruApiKey = ''
     aiForm.taggingApiKey = ''
+    aiForm.embeddingApiKey = ''
     if (res.data.llm_base_url) aiForm.llmBaseUrl = res.data.llm_base_url
     if (res.data.tagging_llm_base_url) aiForm.taggingLlmBaseUrl = res.data.tagging_llm_base_url
     aiForm.taggingIndependent = !!res.data.tagging_provider
@@ -1156,6 +1235,12 @@ async function saveAiSettings() {
     aiForm.stage2Concurrency = clampConcurrency(res.data.stage2_concurrency, 4)
     aiForm.taggingConcurrency = clampConcurrency(res.data.tagging_concurrency, 4)
     if (res.data.embedding_model) aiForm.embeddingModel = res.data.embedding_model
+    if (typeof res.data.vector_recall_enabled === 'boolean') {
+      aiForm.vectorRecallEnabled = res.data.vector_recall_enabled
+    }
+    if (res.data.embedding_base_url) {
+      aiForm.embeddingBaseUrl = res.data.embedding_base_url
+    }
     if (res.data.embedding_models?.length) {
       embeddingModelOptions.value = res.data.embedding_models
     }

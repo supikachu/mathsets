@@ -25,6 +25,7 @@
 //! 会让这串文本直接印进教师的 Word。故 [`to_mathml`] 把含有该标记的输出判为失败。
 
 pub mod omml;
+pub mod mathtype_ole;
 
 use std::borrow::Cow;
 

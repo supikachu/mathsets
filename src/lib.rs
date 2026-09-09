@@ -4,6 +4,7 @@ pub mod config;
 pub mod db;
 pub mod export;
 pub mod handlers;
+pub mod mathtype;
 pub mod models;
 pub mod testing;
 pub mod typeset;

@@ -604,6 +604,7 @@ mod tests {
     use crate::typeset::blocks::{BlockBuilder, Policy, Registry};
     use crate::typeset::ir::{BlankBlock, QuestionBlock};
     use crate::typeset::spec::{BlankSpec, Margins};
+    use uuid::Uuid;
 
     fn text(s: &str) -> InlineNode {
         InlineNode::Text { text: s.into() }
@@ -642,6 +643,7 @@ mod tests {
     /// 四个短选项的单选题（`letters` 是答案，长度 >1 即多选）
     fn choice(number: u32, letters: &[&str]) -> ExamQuestion {
         ExamQuestion {
+            id: Uuid::nil(),
             number,
             score: 5.0,
             kind: if letters.len() > 1 {
@@ -678,6 +680,7 @@ mod tests {
     /// 无选项的写作题（解答/综合题骨架）
     fn written(number: u32, kind: QuestionKind) -> ExamQuestion {
         ExamQuestion {
+            id: Uuid::nil(),
             number,
             score: 10.0,
             kind,
@@ -823,6 +826,7 @@ mod tests {
     #[test]
     fn fill_keeps_the_dug_stem_and_never_gets_a_slab_of_blank() {
         let q = ExamQuestion {
+            id: Uuid::nil(),
             stem: nodes("已知 $f(x)=x^2$，则 $f(2)=$ ______。"),
             ..written(3, QuestionKind::Fill)
         };
@@ -851,6 +855,7 @@ mod tests {
     #[test]
     fn solution_expands_the_tree_then_reserves_answer_space() {
         let q = ExamQuestion {
+            id: Uuid::nil(),
             stem: nodes("已知函数 $f(x)=x^3-3x$。"),
             structure_parts: vec![
                 part(
@@ -978,6 +983,7 @@ mod tests {
     #[test]
     fn teacher_callouts_follow_their_question() {
         let q = ExamQuestion {
+            id: Uuid::nil(),
             callouts: vec![
                 Callout {
                     kind: CalloutKind::Knowledge,
@@ -1093,6 +1099,7 @@ mod tests {
     #[test]
     fn question_level_space_overrides_the_request_level() {
         let q = ExamQuestion {
+            id: Uuid::nil(),
             answer_space: Some(space(WireBlankStyle::Dots, 2.0)),
             ..written(1, QuestionKind::Solution)
         };
@@ -1118,6 +1125,7 @@ mod tests {
 
     fn tree_question() -> ExamQuestion {
         ExamQuestion {
+            id: Uuid::nil(),
             structure_parts: vec![
                 part("a", "(1)", "求 $a_1$。", "$2$"),
                 part("b", "(2)", "求公比。", r"$\frac{1}{2}$"),
@@ -1425,6 +1433,7 @@ mod tests {
     fn sample_bundle(mode: ExportMode) -> ExamBundle {
         let mut questions = mode_questions(mode);
         let solution = ExamQuestion {
+            id: Uuid::nil(),
             number: 6,
             ..questions.pop().expect("共用内容里最后一题是解答题")
         };
@@ -1500,6 +1509,7 @@ mod tests {
                     title: "二、".into(),
                     instruction: None,
                     questions: vec![ExamQuestion {
+            id: Uuid::nil(),
                         stem: vec![],
                         structure_parts: vec![QuestionPart {
                             children: vec![part("c", "(1)", "有内容的小问。", "")],
@@ -1560,6 +1570,7 @@ mod tests {
     /// 单题卷子，题干按 markdown 图片语法写（`![alt](url)` 必须独占一行）
     fn image_doc(stem: &str) -> LayoutDoc {
         let q = ExamQuestion {
+            id: Uuid::nil(),
             stem: nodes(stem),
             ..choice(1, &["A"])
         };
@@ -1858,6 +1869,7 @@ mod tests {
                 "10 × 单选四选项·无公式",
                 (1..=10)
                     .map(|i| ExamQuestion {
+            id: Uuid::nil(),
                         stem: nodes("设集合 A，则（　）"),
                         ..medium_choice(i)
                     })
@@ -1867,6 +1879,7 @@ mod tests {
                 "10 × 填空·带公式",
                 (1..=10)
                     .map(|i| ExamQuestion {
+            id: Uuid::nil(),
                         stem: nodes("已知 $\\sin x = \\frac{1}{2}$，则 $x = $ ____。"),
                         ..written(i, QuestionKind::Fill)
                     })
@@ -1882,6 +1895,7 @@ mod tests {
                 "10 × 解答（10cm 留白）",
                 (1..=10)
                     .map(|i| ExamQuestion {
+            id: Uuid::nil(),
                         answer_space: Some(space(WireBlankStyle::Lines, 10.0)),
                         ..written(i, QuestionKind::Solution)
                     })
@@ -1944,6 +1958,7 @@ mod tests {
         // 同样四段八字，排在普通段落里而不是栅格里：区分「栅格贵」还是「文字贵」
         let runs = (1..=10)
             .map(|i| ExamQuestion {
+            id: Uuid::nil(),
                 stem: vec![
                     text("A. 甲乙丙丁戊己庚辛"),
                     text("B. 甲乙丙丁戊己庚辛"),
@@ -2005,6 +2020,7 @@ mod tests {
                 1 | 2 => medium_choice(i),
                 3 => written(i, QuestionKind::Fill),
                 _ => ExamQuestion {
+            id: Uuid::nil(),
                     answer_space: Some(space(WireBlankStyle::Lines, 6.0)),
                     ..written(i, QuestionKind::Solution)
                 },
@@ -2023,6 +2039,7 @@ mod tests {
             ExportMode::Student,
             (1..=n)
                 .map(|i| ExamQuestion {
+            id: Uuid::nil(),
                     answer_space: Some(space(WireBlankStyle::Lines, 10.0)),
                     ..written(i, QuestionKind::Solution)
                 })

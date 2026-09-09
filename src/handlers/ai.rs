@@ -719,6 +719,39 @@ pub async fn update_settings(
     })?;
 
     if is_admin_user(&auth) {
+        if let Some(enabled) = req.vector_recall_enabled {
+            crate::ai::embedding::save_vector_recall_enabled(&state.pool, enabled, auth.id)
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": format!("保存向量召回开关失败: {e}")})),
+                    )
+                })?;
+            if enabled {
+                tokio::spawn(crate::ai::embedding::start_backfill(state.pool.clone()));
+            }
+        }
+        if req.embedding_api_key.is_some() || req.embedding_base_url.is_some() {
+            crate::ai::embedding::save_embedding_credentials(
+                &state.pool,
+                req.embedding_api_key.as_deref(),
+                req.embedding_base_url.as_deref(),
+                &master_key,
+                auth.id,
+            )
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("保存 embedding 凭证失败: {e}")})),
+                )
+            })?;
+            // 新 Key 写入后尝试回填（无 Key / 开关关时内部会短路）
+            if req.embedding_api_key.as_deref().is_some_and(|k| !k.is_empty()) {
+                tokio::spawn(crate::ai::embedding::start_backfill(state.pool.clone()));
+            }
+        }
         if let Some(ref model) = req.embedding_model {
             let t = model.trim();
             if !t.is_empty() {
@@ -771,6 +804,9 @@ fn empty_ai_settings_response() -> AiSettingsResponse {
         embedding_model: None,
         embedding_dim: None,
         embedding_models: None,
+        vector_recall_enabled: None,
+        has_embedding_api_key: None,
+        embedding_base_url: None,
     }
 }
 
@@ -800,6 +836,9 @@ fn ai_settings_response(s: UserAiSetting) -> AiSettingsResponse {
         embedding_model: None,
         embedding_dim: None,
         embedding_models: None,
+        vector_recall_enabled: None,
+        has_embedding_api_key: None,
+        embedding_base_url: None,
     }
 }
 
@@ -811,9 +850,13 @@ async fn attach_embedding_admin_fields(
     if !is_admin_user(auth) {
         return resp;
     }
-    resp.embedding_model = Some(crate::ai::embedding::load_embedding_model(pool).await);
+    let emb = crate::ai::embedding::load_embedding_admin_settings(pool).await;
+    resp.embedding_model = Some(emb.model);
     resp.embedding_dim = Some(crate::ai::embedding::EMBEDDING_DIM as i32);
     resp.embedding_models = Some(crate::ai::embedding::embedding_model_ids());
+    resp.vector_recall_enabled = Some(emb.enabled);
+    resp.has_embedding_api_key = Some(emb.has_api_key);
+    resp.embedding_base_url = Some(emb.base_url);
     resp
 }
 

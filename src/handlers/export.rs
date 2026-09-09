@@ -23,7 +23,7 @@ use crate::auth::middleware::AuthUser;
 use crate::export::assembler::assemble_exam;
 use crate::export::docx::writer::generate_docx;
 use crate::export::markdown::generate_markdown;
-use crate::export::model::{ExamBundle, ExamRequest, Issue};
+use crate::export::model::{DocxMathMode, ExamBundle, ExamRequest, Issue};
 use crate::export::pdf::{build_layout_doc, generate_pdf};
 use crate::handlers::questions::db_err;
 use crate::AppState;
@@ -97,11 +97,31 @@ pub async fn export_docx(
         Err(e) => return db_err(e.to_string()).into_response(),
     };
 
+    let mathtype_assets = if req.options.docx_math == DocxMathMode::Mathtype {
+        let ids: Vec<_> = assembled
+            .bundle
+            .sections
+            .iter()
+            .flat_map(|s| s.questions.iter().map(|q| q.id))
+            .filter(|id| !id.is_nil())
+            .collect();
+        match crate::mathtype::load_ready_assets(&state.pool, &ids).await {
+            Ok(m) => Some(m),
+            Err(e) => {
+                tracing::warn!("加载 MathType 资产失败: {e}");
+                Some(Default::default())
+            }
+        }
+    } else {
+        None
+    };
+
     let result = generate_docx(
         &assembled.bundle,
         &req.options,
         req.spec.as_ref(),
         Path::new(&state.upload_dir),
+        mathtype_assets,
     )
     .await;
 

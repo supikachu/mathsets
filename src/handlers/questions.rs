@@ -35,6 +35,26 @@ use crate::models::user::{GlobalRole, User};
 use crate::models::PageResult;
 use crate::AppState;
 
+/// 异步登记/转换本题 MathType 公式资产（不阻塞 API）
+fn spawn_mathtype_sync(state: AppState, question_id: Uuid) {
+    tokio::spawn(async move {
+        let cfg = crate::mathtype::MathTypeConvertConfig::from_env();
+        match crate::mathtype::sync_question_math_assets(&state.pool, &cfg, question_id).await {
+            Ok(r) if r.total > 0 || r.ready > 0 => {
+                tracing::debug!(
+                    "MathType sync question={question_id} total={} ready={} failed={} skipped={}",
+                    r.total,
+                    r.ready,
+                    r.failed,
+                    r.skipped
+                );
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("MathType sync failed question={question_id}: {e}"),
+        }
+    });
+}
+
 // ---------------------------------------------------------------------------
 // 辅助函数
 // ---------------------------------------------------------------------------
@@ -1564,6 +1584,8 @@ pub async fn create_question(
         .await
         .map_err(|e| db_err(format!("查询题目失败: {}", e)))?;
 
+    spawn_mathtype_sync(state.clone(), id);
+
     let detail = build_detail(&state.pool, &auth_user, question, None)
         .await
         .map_err(|e| db_err(format!("构建详情失败: {}", e)))?;
@@ -1908,6 +1930,8 @@ pub async fn update_question(
         .fetch_one(&state.pool)
         .await
         .map_err(|e| db_err(format!("查询题目失败: {}", e)))?;
+
+    spawn_mathtype_sync(state.clone(), id);
 
     let detail = build_detail(&state.pool, &auth_user, question, None)
         .await
@@ -2315,6 +2339,34 @@ async fn submit_question_for_review(
             ));
         }
     };
+
+    // MathType：提交不阻塞转公式——登记槽位后后台转换；仅 REQUIRE_ON_SUBMIT 时同步等待
+    {
+        let cfg = crate::mathtype::MathTypeConvertConfig::from_env();
+        if cfg.require_on_submit && cfg.is_enabled() {
+            if let Err(e) =
+                crate::mathtype::sync_question_math_assets(&state.pool, &cfg, id).await
+            {
+                tracing::warn!("提交前 MathType 同步失败 question={id}: {e}");
+            }
+            if let Err(e) = crate::mathtype::sync::submit_gate(&state.pool, &cfg, id).await {
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "error": e,
+                        "code": "ERR_MATHTYPE_ASSETS_NOT_READY"
+                    })),
+                ));
+            }
+        } else {
+            if let Err(e) =
+                crate::mathtype::sync::mark_slots_from_question(&state.pool, &existing).await
+            {
+                tracing::warn!("提交时登记 MathType 槽位失败 question={id}: {e}");
+            }
+            spawn_mathtype_sync(state.clone(), id);
+        }
+    }
 
     // ── 事务内：FOR UPDATE 锁定 + 状态流转 + 审题人写入（GAP-4 修复） ──
     let mut tx = state

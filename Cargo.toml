@@ -46,7 +46,7 @@ dotenvy = "0.15"
 # M4：启用 multipart 特性以支持 MinerU 引擎的 multipart/form-data 文件上传
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
 aes-gcm = "0.10"
-base64 = "0.22"
+base64 = { version = "0.22", features = ["std"] }
 regex = "1"
 async-trait = "0.1"
 

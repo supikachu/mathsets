@@ -8,10 +8,14 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::models::ai_setting::{decrypt_api_key, encrypt_api_key, parse_master_key};
+
 pub const DEFAULT_EMBEDDING_MODEL: &str = "text-embedding-v3";
 /// 兼容旧调用；实际请求模型以 `EmbeddingClient.model` / 库表配置为准
 pub const EMBEDDING_MODEL: &str = DEFAULT_EMBEDDING_MODEL;
 pub const EMBEDDING_DIM: usize = 1024;
+pub const DEFAULT_EMBEDDING_BASE_URL: &str =
+    "https://dashscope.aliyuncs.com/compatible-mode";
 /// 仅 1024 维、DashScope OpenAI 兼容文本 embedding，禁止与库表 `vector(1024)` 混用其它维数
 pub const ALLOWED_EMBEDDING_MODELS: &[&str] = &[
     "text-embedding-v3",
@@ -53,8 +57,8 @@ pub async fn save_embedding_model(
     let prev = load_embedding_model(pool).await;
     sqlx::query(
         r#"
-        INSERT INTO app_embedding_settings (id, model, updated_at, updated_by)
-        VALUES (1, $1, NOW(), $2)
+        INSERT INTO app_embedding_settings (id, model, enabled, updated_at, updated_by)
+        VALUES (1, $1, true, NOW(), $2)
         ON CONFLICT (id) DO UPDATE SET
           model = EXCLUDED.model,
           updated_at = NOW(),
@@ -69,9 +73,242 @@ pub async fn save_embedding_model(
     Ok(prev != model)
 }
 
+/// 全站向量召回 DB 开关（不含 env 硬关）。无行时默认 true。
+pub async fn load_vector_recall_enabled(pool: &PgPool) -> bool {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT enabled FROM app_embedding_settings WHERE id = 1",
+    )
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(true)
+}
+
+pub async fn save_vector_recall_enabled(
+    pool: &PgPool,
+    enabled: bool,
+    updated_by: Uuid,
+) -> Result<(), String> {
+    sqlx::query(
+        r#"
+        INSERT INTO app_embedding_settings (id, model, enabled, updated_at, updated_by)
+        VALUES (1, $1, $2, NOW(), $3)
+        ON CONFLICT (id) DO UPDATE SET
+          enabled = EXCLUDED.enabled,
+          updated_at = NOW(),
+          updated_by = EXCLUDED.updated_by
+        "#,
+    )
+    .bind(DEFAULT_EMBEDDING_MODEL)
+    .bind(enabled)
+    .bind(updated_by)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct EmbeddingAdminSettings {
+    pub model: String,
+    pub enabled: bool,
+    pub has_api_key: bool,
+    pub base_url: String,
+}
+
+/// 管理员设置页用的全站 embedding 配置（脱敏）。
+pub async fn load_embedding_admin_settings(pool: &PgPool) -> EmbeddingAdminSettings {
+    let row = sqlx::query_as::<_, (String, bool, Option<Vec<u8>>, Option<String>)>(
+        r#"
+        SELECT model, enabled, api_key_enc, base_url
+        FROM app_embedding_settings WHERE id = 1
+        "#,
+    )
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+
+    match row {
+        Some((model, enabled, enc, base_url)) => EmbeddingAdminSettings {
+            model: if parse_embedding_model(&model).is_some() {
+                model
+            } else {
+                DEFAULT_EMBEDDING_MODEL.to_string()
+            },
+            enabled,
+            has_api_key: enc.as_ref().is_some_and(|b| !b.is_empty()),
+            base_url: base_url
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| DEFAULT_EMBEDDING_BASE_URL.to_string()),
+        },
+        None => EmbeddingAdminSettings {
+            model: DEFAULT_EMBEDDING_MODEL.to_string(),
+            enabled: true,
+            has_api_key: false,
+            base_url: DEFAULT_EMBEDDING_BASE_URL.to_string(),
+        },
+    }
+}
+
+fn master_key_from_env() -> Option<[u8; 32]> {
+    let b64 = std::env::var("AI_KEY_ENCRYPTION_KEY").ok()?;
+    parse_master_key(&b64).ok()
+}
+
+async fn load_db_api_key(pool: &PgPool) -> Option<String> {
+    let master = master_key_from_env()?;
+    let row = sqlx::query_as::<_, (Option<Vec<u8>>, Option<Vec<u8>>)>(
+        "SELECT api_key_enc, api_key_iv FROM app_embedding_settings WHERE id = 1",
+    )
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()?;
+    let (Some(enc), Some(iv)) = row else {
+        return None;
+    };
+    if enc.is_empty() || iv.is_empty() {
+        return None;
+    }
+    decrypt_api_key(&enc, &iv, &master).ok()
+}
+
+async fn load_db_base_url(pool: &PgPool) -> Option<String> {
+    sqlx::query_scalar::<_, Option<String>>(
+        "SELECT base_url FROM app_embedding_settings WHERE id = 1",
+    )
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .flatten()
+    .map(|s| s.trim().trim_end_matches('/').to_string())
+    .filter(|s| !s.is_empty())
+}
+
+/// 保存全站 embedding 凭证。
+/// `api_key`：`None` 不变；`Some("")` 清除；`Some(值)` 加密写入。
+/// `base_url`：`None` 不变；`Some("")` 清除（回退 env/默认）；`Some(值)` 写入。
+pub async fn save_embedding_credentials(
+    pool: &PgPool,
+    api_key: Option<&str>,
+    base_url: Option<&str>,
+    master_key: &[u8; 32],
+    updated_by: Uuid,
+) -> Result<(), String> {
+    if api_key.is_none() && base_url.is_none() {
+        return Ok(());
+    }
+
+    ensure_embedding_settings_row(pool, updated_by).await?;
+
+    if let Some(key) = api_key {
+        if key.is_empty() {
+            sqlx::query(
+                r#"
+                UPDATE app_embedding_settings
+                SET api_key_enc = NULL, api_key_iv = NULL,
+                    updated_at = NOW(), updated_by = $1
+                WHERE id = 1
+                "#,
+            )
+            .bind(updated_by)
+            .execute(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        } else {
+            let (enc, iv) = encrypt_api_key(key, master_key)?;
+            sqlx::query(
+                r#"
+                UPDATE app_embedding_settings
+                SET api_key_enc = $1, api_key_iv = $2,
+                    updated_at = NOW(), updated_by = $3
+                WHERE id = 1
+                "#,
+            )
+            .bind(&enc)
+            .bind(&iv)
+            .bind(updated_by)
+            .execute(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        }
+    }
+
+    if let Some(url) = base_url {
+        let stored = {
+            let t = url.trim().trim_end_matches('/');
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
+        };
+        sqlx::query(
+            r#"
+            UPDATE app_embedding_settings
+            SET base_url = $1, updated_at = NOW(), updated_by = $2
+            WHERE id = 1
+            "#,
+        )
+        .bind(stored)
+        .bind(updated_by)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+async fn ensure_embedding_settings_row(pool: &PgPool, updated_by: Uuid) -> Result<(), String> {
+    sqlx::query(
+        r#"
+        INSERT INTO app_embedding_settings (id, model, enabled, updated_at, updated_by)
+        VALUES (1, $1, true, NOW(), $2)
+        ON CONFLICT (id) DO NOTHING
+        "#,
+    )
+    .bind(DEFAULT_EMBEDDING_MODEL)
+    .bind(updated_by)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn resolve_embedding_base_url(db: Option<String>) -> String {
+    db.or_else(|| {
+        std::env::var("QWEN_BASE_URL")
+            .ok()
+            .map(|s| s.trim().trim_end_matches('/').to_string())
+            .filter(|s| !s.is_empty())
+    })
+    .unwrap_or_else(|| DEFAULT_EMBEDDING_BASE_URL.to_string())
+}
+
+fn build_embedding_client(api_key: String, base: &str, model: &str) -> Option<EmbeddingClient> {
+    let model = parse_embedding_model(model)
+        .unwrap_or(DEFAULT_EMBEDDING_MODEL)
+        .to_string();
+    let url = format!("{}/v1/embeddings", base.trim_end_matches('/'));
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .ok()?;
+    Some(EmbeddingClient {
+        http,
+        api_key,
+        url,
+        model,
+    })
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum EmbeddingError {
-    #[error("未配置 QWEN_API_KEY")]
+    #[error("未配置 embedding API Key（设置页或 QWEN_API_KEY）")]
     NoApiKey,
     #[error("embedding HTTP: {0}")]
     Http(String),
@@ -93,29 +330,19 @@ impl EmbeddingClient {
     }
 
     pub fn from_env_with_model(model: &str) -> Option<Self> {
-        let model = parse_embedding_model(model)
-            .unwrap_or(DEFAULT_EMBEDDING_MODEL)
-            .to_string();
         let api_key = std::env::var("QWEN_API_KEY").ok().filter(|s| !s.is_empty())?;
-        let base = std::env::var("QWEN_BASE_URL").unwrap_or_else(|_| {
-            "https://dashscope.aliyuncs.com/compatible-mode".into()
-        });
-        let url = format!("{}/v1/embeddings", base.trim_end_matches('/'));
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .ok()?;
-        Some(Self {
-            http,
-            api_key,
-            url,
-            model,
-        })
+        let base = resolve_embedding_base_url(None);
+        build_embedding_client(api_key, &base, model)
     }
 
+    /// 优先使用管理员在设置页配置的 Key / Base URL，未填时回退 `QWEN_API_KEY` / `QWEN_BASE_URL`。
     pub async fn from_pool(pool: &PgPool) -> Option<Self> {
         let model = load_embedding_model(pool).await;
-        Self::from_env_with_model(&model)
+        let api_key = load_db_api_key(pool)
+            .await
+            .or_else(|| std::env::var("QWEN_API_KEY").ok().filter(|s| !s.is_empty()))?;
+        let base = resolve_embedding_base_url(load_db_base_url(pool).await);
+        build_embedding_client(api_key, &base, &model)
     }
 
     fn cache_key(&self, text: &str) -> String {
@@ -208,11 +435,17 @@ fn query_cache() -> &'static DashMap<String, Vec<f32>> {
     CACHE.get_or_init(DashMap::new)
 }
 
-pub fn vector_recall_wanted() -> bool {
+/// 是否启用向量召回。
+/// 优先级：测试环境看 `TAGGING_VECTOR_RECALL_TEST`；
+/// 生产 `TAGGING_VECTOR_RECALL=0` 运维硬关；否则读 `app_embedding_settings.enabled`（默认开）。
+pub async fn vector_recall_wanted(pool: &PgPool) -> bool {
     if cfg!(test) {
         return std::env::var("TAGGING_VECTOR_RECALL_TEST").ok().as_deref() == Some("1");
     }
-    std::env::var("TAGGING_VECTOR_RECALL").ok().as_deref() != Some("0")
+    if std::env::var("TAGGING_VECTOR_RECALL").ok().as_deref() == Some("0") {
+        return false;
+    }
+    load_vector_recall_enabled(pool).await
 }
 
 pub async fn embeddings_table_ready(pool: &PgPool) -> bool {
@@ -368,7 +601,7 @@ pub async fn start_backfill(pool: PgPool) {
     static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
     let lock = LOCK.get_or_init(|| tokio::sync::Mutex::new(()));
     let _guard = lock.lock().await;
-    if !vector_recall_wanted() {
+    if !vector_recall_wanted(&pool).await {
         return;
     }
     match ensure_embedding_schema(&pool).await {
@@ -385,7 +618,7 @@ pub async fn start_backfill(pool: PgPool) {
         }
     }
     let Some(client) = EmbeddingClient::from_pool(&pool).await else {
-        tracing::info!("向量召回未启用：未配置 QWEN_API_KEY");
+        tracing::info!("向量召回未启用：未配置 embedding API Key（设置页或 QWEN_API_KEY）");
         return;
     };
     tracing::info!(model = %client.model, "开始知识树/标签 embedding 回填");
@@ -396,7 +629,7 @@ pub async fn start_backfill(pool: PgPool) {
 }
 
 pub async fn refresh_node_embedding(pool: &PgPool, node_id: Uuid) -> Result<(), String> {
-    if !vector_recall_wanted() || !embeddings_table_ready(pool).await {
+    if !vector_recall_wanted(pool).await || !embeddings_table_ready(pool).await {
         return Ok(());
     }
     let Some(client) = EmbeddingClient::from_pool(pool).await else {
@@ -427,7 +660,7 @@ pub async fn refresh_node_embedding(pool: &PgPool, node_id: Uuid) -> Result<(), 
 }
 
 pub async fn refresh_tag_embedding(pool: &PgPool, tag_id: Uuid) -> Result<(), String> {
-    if !vector_recall_wanted() || !embeddings_table_ready(pool).await {
+    if !vector_recall_wanted(pool).await || !embeddings_table_ready(pool).await {
         return Ok(());
     }
     let Some(client) = EmbeddingClient::from_pool(pool).await else {

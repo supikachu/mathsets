@@ -312,6 +312,7 @@ mod tests {
     use super::*;
     use crate::export::model::{AnswerSpace, BlankStyle as WireBlankStyle};
     use crate::typeset::spec::{BlankStyle, LayoutSpec};
+    use uuid::Uuid;
 
     fn split(s: &str) -> Vec<InlineNode> {
         vec![InlineNode::Text { text: s.into() }]
@@ -326,6 +327,7 @@ mod tests {
 
     fn q(kind: QuestionKind, options: Vec<ExamOption>) -> ExamQuestion {
         ExamQuestion {
+            id: Uuid::nil(),
             number: 7,
             score: 6.0,
             kind,

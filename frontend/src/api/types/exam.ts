@@ -142,6 +142,11 @@ export type ExamSectionRequest = { title: string, instruction?: string, question
 export type ExportMode = "student" | "teacher" | "exam";
 
 /**
+ * DOCX 公式输出形态：omml=Office 公式 / mathtype=Equation.DSMT4（需题目已有 ready 资产）
+ */
+export type DocxMathMode = "omml" | "mathtype";
+
+/**
  * 导出内容开关（§四 options）
  */
 export type ExportOptions = { 
@@ -161,7 +166,11 @@ answer_at_end: boolean, callouts: CalloutOptions,
  * 答题留白（B5：题级 → 本字段 → 版面 `spec.answer_blank` 三档取用，判据在
  * `typeset::blocks::blank`）
  */
-answer_space?: AnswerSpace, };
+answer_space?: AnswerSpace, 
+/**
+ * Word 公式形态；缺省 omml。仅 docx 导出使用。
+ */
+docx_math?: DocxMathMode, };
 
 /**
  * 图片对齐

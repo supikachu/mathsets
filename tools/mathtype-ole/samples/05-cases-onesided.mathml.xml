@@ -1,0 +1,18 @@
+<!-- latex2mathml shape for \begin{cases}...\end{cases} / \left\{...\right. -->
+<math xmlns="http://www.w3.org/1998/Math/MathML" display="block">
+  <mrow>
+    <mo stretchy="true" form="prefix">{</mo>
+    <mtable>
+      <mtr>
+        <mtd><mn>12</mn><mo>-</mo><mn>6</mn><mi>a</mi><mo>=</mo><mn>0</mn></mtd>
+      </mtr>
+      <mtr>
+        <mtd><mn>12</mn><mi>a</mi><mo>-</mo><mn>24</mn><mo>=</mo><mn>0</mn></mtd>
+      </mtr>
+      <mtr>
+        <mtd><mn>18</mn><mo>-</mo><mn>12</mn><mi>a</mi><mo>=</mo><mn>6</mn><mo>-</mo><mn>6</mn><mi>a</mi></mtd>
+      </mtr>
+    </mtable>
+    <mo stretchy="true" form="postfix"></mo>
+  </mrow>
+</math>

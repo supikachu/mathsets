@@ -109,6 +109,19 @@ pub struct ExportOptions {
     #[serde(default)]
     #[ts(optional)]
     pub answer_space: Option<AnswerSpace>,
+    /// Word 公式形态：OMML（默认）或 MathType OLE（需题目已有 ready 资产）
+    #[serde(default)]
+    pub docx_math: DocxMathMode,
+}
+
+/// DOCX 公式输出形态
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../frontend/src/api/types/exam.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum DocxMathMode {
+    #[default]
+    Omml,
+    Mathtype,
 }
 
 impl Default for ExportOptions {
@@ -119,6 +132,7 @@ impl Default for ExportOptions {
             answer_at_end: true,
             callouts: CalloutOptions::default(),
             answer_space: None,
+            docx_math: DocxMathMode::Omml,
         }
     }
 }
@@ -203,6 +217,9 @@ pub struct ExamSection {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../frontend/src/api/types/exam.ts")]
 pub struct ExamQuestion {
+    /// 源题目 UUID（装配自题库；测试夹具可用 Uuid::nil）
+    #[serde(default = "uuid::Uuid::nil")]
+    pub id: Uuid,
     /// 后端按请求顺序重排的连续题号（从 1 起、跨大题连续）
     pub number: u32,
     pub score: f64,
@@ -585,6 +602,7 @@ mod tests {
                 title: "一、解答题".into(),
                 instruction: None,
                 questions: vec![ExamQuestion {
+            id: Uuid::nil(),
                     number: 1,
                     score: 12.0,
                     kind: QuestionKind::Solution,

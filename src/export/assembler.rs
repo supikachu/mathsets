@@ -286,6 +286,7 @@ fn assemble_question(
         derive_callouts(mode, callout_opts, knowledge_names, error_prone_tags, q, &structure_parts);
 
     ExamQuestion {
+        id: q.id,
         number,
         score: resolve_score(default_score, q),
         kind,
