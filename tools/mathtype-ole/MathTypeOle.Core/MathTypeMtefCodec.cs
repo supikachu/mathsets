@@ -47,17 +47,27 @@ internal static partial class MathTypeMtefCodec
     private const byte TypefaceSymbol = 6;
     private const byte TypefaceVector = 7;
     private const byte TypefaceNumber = 8;
-    private const byte TypefaceMtExtra = 11;
-    // MathType 7 uses built-in typeface 12 for a small set of native glyphs
-    // such as reverse membership (\\ni) and \\bigcirc. These are not Adobe
-    // Symbol positions and carry no encoded8 byte.
-    private const byte TypefaceMathTypeSpecial12 = 12;
+    private const byte TypefaceMtExtra = 11; // Extra style → seed FONT_DEF "Euclid Extra"
+    // MTEF fnTEXT_FE (12): Far-East / CJK text. Standalone seed maps this style
+    // to 宋体 (SimSun). Also used by a few MathType-native glyphs (\\ni,
+    // \\bigcirc, \\heartsuit) that carry Unicode MTCode without encoded8.
+    private const byte TypefaceTextFe = 12;
+    private const byte TypefaceMathTypeSpecial12 = TypefaceTextFe;
     private const byte TypefaceMarker = 23;
     // MathType 7 persists expanding fence characters ((), [], {}, |, ...)
     // with typeface 22 and MTCode, not Symbol style. Using Symbol here makes
     // the same ASCII code point resolve to a different fence glyph.
     private const byte TypefaceFence = 22;
     private const byte TypefaceSpace = 24;
+
+    /// Nesting depth of subscript/superscript templates currently being written.
+    /// MathType SIZE records are absolute (FULL / SUB / SUB2). Emitting nested
+    /// <c>msub</c> as <c>RecordSub</c> + trailing <c>RecordFull</c> pops the outer
+    /// subscript back to FULL, so later siblings in <c>S_{A_1B_1}</c> / <c>V_{ABC-A_1}</c>
+    /// render at body size while the "1" stays tiny. Track depth and restore the
+    /// parent size; use SUB2 for the second nesting level.
+    [ThreadStatic]
+    private static int _scriptNestingDepth;
 
     private const int MathTypeAlignmentMarkerMtCode = 0xEF00;
     private const string VisualTexMtefRulerStopsAttribute =
@@ -177,8 +187,10 @@ internal static partial class MathTypeMtefCodec
         return new XDocument(math).ToString(SaveOptions.DisableFormatting);
     }
 
+    // Extra style font is Euclid Extra (portable: euextra.ttf). MT Extra
+    // (mtextra.ttf) shares the same 0x56 slot but a smaller triangle outline.
     private const string StandaloneMtefPrefixBase64 =
-        "BQEABwhEU01UNwAAE1dpbkFsbEJhc2ljQ29kZVBhZ2VzABEFVGltZXMgTmV3IFJvbWFuABEDU3ltYm9sABEFQ291cmllciBOZXcAEQRNVCBFeHRyYQATV2luQWxsQ29kZVBhZ2VzABEGy87M5QASAAghL0WPRC9BUPQQD0dfQVDyHx5BUPQVD0EA9EX0JfSPQl9BAPQQD0NfQQD0j0X0Kl9I9I9BAPQQD0D0j0F/SPQQD0EqX0RfRfRfRfRfQQ8MAQABAAECAgICAAIAAQEBAAMAAQAEAAUACg==";
+        "BQEABwhEU01UNwAAE1dpbkFsbEJhc2ljQ29kZVBhZ2VzABEFVGltZXMgTmV3IFJvbWFuABEDU3ltYm9sABEFQ291cmllciBOZXcAEQRFdWNsaWQgRXh0cmEAE1dpbkFsbENvZGVQYWdlcwARBsvOzOUAEgAIIS9Fj0QvQVD0EA9HX0FQ8h8eQVD0FQ9BAPRF9CX0j0JfQQD0EA9DX0EA9I9F9CpfSPSPQQD0EA9A9I9Bf0j0EA9BKl9EX0X0X0X0X0EPDAEAAQABAgICAgACAAEBAQADAAEABAAFAAo=";
 
     private static readonly byte[] StandaloneEquationNativeHeader =
     {
@@ -1338,6 +1350,7 @@ internal static partial class MathTypeMtefCodec
             requiredDefinitions.AddRange(new byte[] { RecordColorDef, 0, 0, 0, 0, 0, 0, 0 });
         prefixDefinitions = requiredDefinitions.ToArray();
         var preparedMath = PrepareMathForMathType(math);
+        _scriptNestingDepth = 0;
         var topLevelElements = SignificantChildren(preparedMath)
             .OfType<XElement>()
             .Where(element => element.Name.LocalName is not ("annotation" or "annotation-xml"))
@@ -2609,24 +2622,49 @@ internal static partial class MathTypeMtefCodec
         else
             EmitNode(children[0], output);
         output.AddRange(new byte[] { RecordTemplate, 0, selector, 0, 0 });
-        output.Add(RecordSub);
-        if (selector == TemplateSub)
+        EnterScriptSize(output);
+        try
         {
-            EmitLine(children[1], output);
-            output.AddRange(new byte[] { RecordLine, LineNull });
+            if (selector == TemplateSub)
+            {
+                EmitLine(children[1], output);
+                output.AddRange(new byte[] { RecordLine, LineNull });
+            }
+            else if (selector == TemplateSup)
+            {
+                output.AddRange(new byte[] { RecordLine, LineNull });
+                EmitLine(children[1], output);
+            }
+            else
+            {
+                EmitLine(children[1], output);
+                EmitLine(children[2], output);
+            }
+            output.Add(RecordEnd);
         }
-        else if (selector == TemplateSup)
+        finally
         {
-            output.AddRange(new byte[] { RecordLine, LineNull });
-            EmitLine(children[1], output);
+            LeaveScriptSize(output);
         }
-        else
-        {
-            EmitLine(children[1], output);
-            EmitLine(children[2], output);
-        }
-        output.Add(RecordEnd);
-        output.Add(RecordFull);
+    }
+
+    private static void EnterScriptSize(List<byte> output)
+    {
+        _scriptNestingDepth++;
+        output.Add(_scriptNestingDepth >= 2 ? RecordSub2 : RecordSub);
+    }
+
+    private static void LeaveScriptSize(List<byte> output)
+    {
+        if (_scriptNestingDepth > 0)
+            _scriptNestingDepth--;
+        output.Add(
+            _scriptNestingDepth switch
+            {
+                0 => RecordFull,
+                1 => RecordSub,
+                _ => RecordSub2,
+            });
     }
 
     private static void EmitOver(XElement element, List<byte> output)
@@ -3668,6 +3706,14 @@ internal static partial class MathTypeMtefCodec
                 effectiveVariant = normalizedVariant;
             }
 
+            if (IsCjkScalar(scalar))
+            {
+                // CJK must use fnTEXT_FE (宋体 in the standalone seed). Times
+                // New Roman Text/Variable has no Han glyphs → ◆/? boxes in WMF.
+                EmitScalar(scalar, TypefaceTextFe, output, includeEncoded8: false);
+                continue;
+            }
+
             if (scalar == 0x210F)
             {
                 // Genuine MathType 7 persists \hbar / U+210F as an MT Extra
@@ -4113,6 +4159,28 @@ internal static partial class MathTypeMtefCodec
             return true;
         }
 
+        if (mtCode == 0x25B3)
+        {
+            // latex2mathml \\triangle → U+25B3. Native MathType / Euclid Extra
+            // (and MT Extra) store the geometric triangle at font position 0x56
+            // on the Extra style (typeface 11). Prefer this over Upper Greek Δ
+            // so geometry △ stays distinct and subscript metrics match MathType UI.
+            typeface = TypefaceMtExtra;
+            encoded8 = 0x56;
+            return true;
+        }
+
+        if (mtCode is 0x00B7 or 0x2219)
+        {
+            // latex2mathml emits TeX \\cdot as U+00B7 MIDDLE DOT. The naive
+            // "BMP <= 0xFF → Symbol encoded8 = scalar" path would use Adobe
+            // Symbol 0xB7 = BULLET (oversized •). Remap to Symbol DOT OPERATOR
+            // (U+22C5 / position 0xD7), which is MathType's native \\cdot size.
+            mtCode = 0x22C5;
+            encoded8 = 0xD7;
+            return true;
+        }
+
         if (!TryGetAdobeSymbolEncoded8(mtCode, out encoded8)) return false;
         if (IsLowerGreek(mtCode)) typeface = TypefaceLowerGreek;
         else if (IsUpperGreek(mtCode)) typeface = TypefaceUpperGreek;
@@ -4322,6 +4390,13 @@ internal static partial class MathTypeMtefCodec
             case 0x22C4: // \\diamond: Symbol position 0xE0.
                 EmitScalar(0x22C4, TypefaceSymbol, output, includeEncoded8: true, encoded8Override: 0xE0);
                 return true;
+            case 0x25B3: // \\triangle → Extra / Euclid Extra glyph position 0x56.
+                EmitScalar(0x25B3, TypefaceMtExtra, output, includeEncoded8: true, encoded8Override: 0x56);
+                return true;
+            case 0x00B7: // latex2mathml \\cdot (MIDDLE DOT) → Symbol DOT OPERATOR, not BULLET.
+            case 0x2219: // BULLET OPERATOR → same native \\cdot glyph.
+                EmitScalar(0x22C5, TypefaceSymbol, output, includeEncoded8: true, encoded8Override: 0xD7);
+                return true;
             case 0x22B2: // MathType-side \\triangleleft scalar.
             case 0x25C3: // MathJax-side \\triangleleft scalar.
                 EmitScalar(0x22B2, TypefaceMtExtra, output, includeEncoded8: true, encoded8Override: 0x3C);
@@ -4409,6 +4484,11 @@ internal static partial class MathTypeMtefCodec
         if (value == "⁡") return;
         foreach (var scalar in EnumerateBmpScalars(value))
         {
+            if (IsCjkScalar(scalar))
+            {
+                EmitScalar(scalar, TypefaceTextFe, output, includeEncoded8: false);
+                continue;
+            }
             if (scalar is 0x223C or '~')
             {
                 // Genuine MathType 7 represents TeX \sim as ASCII '~' in the
@@ -4462,6 +4542,7 @@ internal static partial class MathTypeMtefCodec
         foreach (var scalar in EnumerateBmpScalars(value))
         {
             if (IsWhiteSpaceScalar(scalar)) EmitScalar(scalar, TypefaceSpace, output);
+            else if (IsCjkScalar(scalar)) EmitScalar(scalar, TypefaceTextFe, output);
             else EmitScalar(scalar, typeface, output);
         }
     }
@@ -4482,6 +4563,20 @@ internal static partial class MathTypeMtefCodec
 
     private static bool IsWhiteSpaceScalar(int scalar) =>
         scalar <= char.MaxValue && char.IsWhiteSpace((char)scalar);
+
+    /// <summary>
+    /// CJK (and related) scalars that require MathType fnTEXT_FE / 宋体 rather
+    /// than Times New Roman Text or Variable styles.
+    /// </summary>
+    private static bool IsCjkScalar(int scalar) =>
+        scalar is (>= 0x3000 and <= 0x303F) // CJK punctuation
+            or (>= 0x3040 and <= 0x30FF) // Hiragana / Katakana
+            or (>= 0x31F0 and <= 0x31FF) // Katakana phonetic extensions
+            or (>= 0x3400 and <= 0x4DBF) // CJK Ext-A
+            or (>= 0x4E00 and <= 0x9FFF) // CJK Unified
+            or (>= 0xF900 and <= 0xFAFF) // CJK compatibility ideographs
+            or (>= 0xFF00 and <= 0xFFEF) // Halfwidth / fullwidth forms
+            or (>= 0xAC00 and <= 0xD7AF); // Hangul syllables
 
     private static void EmitCharacter(char character, int typeface, List<byte> output) =>
         EmitScalar(character, typeface, output);

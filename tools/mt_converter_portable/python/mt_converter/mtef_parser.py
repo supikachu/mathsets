@@ -176,6 +176,45 @@ def parse_wmf_baseline(wmf_bytes: bytes) -> Optional[float]:
     return info.get("baseline_offset_pt")
 
 
+def rewrite_wmf_mt_extra_to_euclid(wmf_bytes: bytes) -> bytes:
+    """Rewrite CREATEFONTINDIRECT face ``MT Extra`` → ``Euclid Extra``.
+
+    MathType's WMF export / Toolbar defaults still emit ``MT Extra`` even when the
+    OLE FONT_DEF is Euclid Extra. Word then paints the preview with MT Extra,
+    so double-click (OLE) and on-page WMF disagree. Face name is a 32-byte
+    LOGFONT field — ``Euclid Extra`` fits.
+    """
+    if not wmf_bytes or len(wmf_bytes) < 40:
+        return wmf_bytes
+    META_CREATEFONTINDIRECT = 0x02FB
+    old = b"MT Extra"
+    new = b"Euclid Extra"
+    out = bytearray(wmf_bytes)
+    idx = 22 if wmf_bytes[:4] == b"\xd7\xcd\xc6\x9a" else 0
+    # standard metafile header is 9 WORDs / 18 bytes
+    idx += 18
+    changed = 0
+    while idx + 6 <= len(out):
+        size, func = struct.unpack_from("<IH", out, idx)
+        if size < 3:
+            break
+        nbytes = size * 2
+        if idx + nbytes > len(out):
+            break
+        if func == META_CREATEFONTINDIRECT:
+            # LOGFONT face name starts 18 bytes into the record payload
+            face_off = idx + 6 + 18
+            face_end = face_off + 32
+            if face_end <= idx + nbytes:
+                face = bytes(out[face_off:face_end]).split(b"\x00", 1)[0]
+                if face == old:
+                    padded = new + b"\x00" * (32 - len(new))
+                    out[face_off:face_end] = padded[:32]
+                    changed += 1
+        idx += nbytes
+    return bytes(out) if changed else wmf_bytes
+
+
 def create_placeable_wmf(
     raw_wmf_records: bytes,
     width_units: int,

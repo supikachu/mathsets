@@ -1,5 +1,6 @@
 //! MathType OLE `w:object` 片段（Equation.DSMT4 + placeable WMF）
 
+use crate::mathtype::wmf_meta::{prefer_wmf_metrics, wmf_size_pt};
 use crate::mathtype::ReadyMathAsset;
 
 /// VML shapetype `_x0000_t75`（整篇文档只应出现一次，避免 Word 叠绘）
@@ -28,25 +29,7 @@ pub const SHAPE_TYPE_75: &str = concat!(
 
 /// 从 placeable WMF 头读取宽高（pt）；失败则回退资产字段 / 默认值
 pub fn estimate_wmf_size_pt(wmf: &[u8], fallback_w: f64, fallback_h: f64) -> (f64, f64) {
-    if wmf.len() < 22 || wmf[0..4] != [0xD7, 0xCD, 0xC6, 0x9A] {
-        return (fallback_w.max(1.0), fallback_h.max(1.0));
-    }
-    let left = i16::from_le_bytes([wmf[6], wmf[7]]) as i32;
-    let top = i16::from_le_bytes([wmf[8], wmf[9]]) as i32;
-    let right = i16::from_le_bytes([wmf[10], wmf[11]]) as i32;
-    let bottom = i16::from_le_bytes([wmf[12], wmf[13]]) as i32;
-    let mut inch = u16::from_le_bytes([wmf[14], wmf[15]]) as f64;
-    if inch < 1.0 {
-        inch = 1440.0;
-    }
-    let mut width_pt = (right - left).unsigned_abs() as f64 / inch * 72.0;
-    let mut height_pt = (bottom - top).unsigned_abs() as f64 / inch * 72.0;
-    if width_pt < 1.0 || height_pt < 1.0 {
-        return (fallback_w.max(1.0), fallback_h.max(1.0));
-    }
-    width_pt = width_pt.min(468.0);
-    height_pt = height_pt.min(300.0);
-    (width_pt, height_pt)
+    wmf_size_pt(wmf).unwrap_or((fallback_w.max(1.0), fallback_h.max(1.0)))
 }
 
 /// 生成含 `w:object` 的 `w:r`（嵌入式行内 OLE）
@@ -69,8 +52,9 @@ pub fn equation_run(
     } else {
         18.0
     };
-    let (width, height) = estimate_wmf_size_pt(&asset.wmf, fw, fh);
-    let baseline = asset.baseline_offset_pt.max(0.0).min(height);
+    // 以 WMF 内嵌基线/尺寸为准（调用方应已 rewrite MT Extra → Euclid Extra）
+    let (baseline, width, height) =
+        prefer_wmf_metrics(&asset.wmf, asset.baseline_offset_pt, fw, fh);
 
     let n = index + 1;
     let shape_id = format!("_x0000_i{}", 1025 + index);

@@ -923,7 +923,9 @@ impl<'a> Writer<'a> {
                     .cloned()
             })?;
 
-        let asset = self.mathtype_assets.get(&key)?.clone();
+        let mut asset = self.mathtype_assets.get(&key)?.clone();
+        // Word 预览用 WMF 字体名；MathType 常写出 MT Extra，改成 Euclid Extra 与 OLE 一致
+        asset.wmf = crate::mathtype::wmf_meta::rewrite_wmf_mt_extra_to_euclid(&asset.wmf);
         self.mathtype_used
             .insert((key.question_id, key.field.clone(), key.ordinal));
 

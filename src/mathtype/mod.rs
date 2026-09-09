@@ -6,6 +6,7 @@
 pub mod convert;
 pub mod extract;
 pub mod sync;
+pub mod wmf_meta;
 
 pub use convert::MathTypeConvertConfig;
 pub use sync::{

@@ -1,7 +1,7 @@
 """MathType Core Conversion Engine.
 
 Implements:
-1. Dynamic session-level font loading via Windows GDI AddFontResourceExW (FR_PRIVATE).
+1. Session-wide font loading via Windows GDI AddFontResourceExW (visible to MathType.exe).
 2. Direct MT6.dll C-API transformation binding.
 3. Windows OLE Clipboard fallback transformation path.
 4. Baseline offset calculation and verification.
@@ -29,6 +29,7 @@ from .mtef_parser import (
     extract_mtef_from_bytes,
     parse_wmf_dimensions_and_baseline,
     create_placeable_wmf,
+    rewrite_wmf_mt_extra_to_euclid,
 )
 
 logger = logging.getLogger("MathTypeConverter")
@@ -145,6 +146,30 @@ MTDIM_WIDTH = 1
 MTDIM_HEIGHT = 2
 MTDIM_BASELINE = 3
 
+
+def _prefer_wmf_metrics(
+    wmf_bytes: bytes,
+    baseline_offset_pt: float,
+    width_pt: float,
+    height_pt: float,
+) -> tuple:
+    """Rewrite Extra face for Word, then prefer WMF-embedded metrics."""
+    wmf_bytes = rewrite_wmf_mt_extra_to_euclid(wmf_bytes)
+    meta = parse_wmf_dimensions_and_baseline(wmf_bytes)
+    w = meta.get("width_pt") or 0.0
+    h = meta.get("height_pt") or 0.0
+    bl = meta.get("baseline_offset_pt")
+    if w > 0:
+        width_pt = float(w)
+    if h > 0:
+        height_pt = float(h)
+    if bl is not None:
+        baseline_offset_pt = float(bl)
+    if height_pt > 0:
+        baseline_offset_pt = max(0.0, min(baseline_offset_pt, height_pt))
+    return wmf_bytes, baseline_offset_pt, width_pt, height_pt
+
+
 STATUS_DESCRIPTIONS = {
     MT_OK: "mtOK (Success)",
     MT_NOT_FOUND: "mtNOT_FOUND (MathType server/session not found)",
@@ -168,16 +193,21 @@ def describe_status(code: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Font Manager (Dynamic FR_PRIVATE Loading)
-# ---------------------------------------------------------------------------
+# Font Manager — load so MathType.exe child can CreateFont by family name.
+# FR_PRIVATE (0x10) only affects the calling process; MTXFormEqn spawns
+# MathType.exe which then falls back from "Euclid Extra" → "MT Extra" and the
+# Word-bound WMF preview no longer matches the OLE/editor.
+# flags=0: session-wide until RemoveFontResourceEx (visible to MathType.exe)
+FR_SESSION = 0
 
 class FontManager:
-    """Dynamically loads and unloads private session-level fonts without admin rights."""
+    """Load mathtype_core Fonts/ for this process and MathType child processes."""
 
     def __init__(self, fonts_dir: str):
         self.fonts_dir = os.path.abspath(fonts_dir)
         self.loaded_fonts: List[str] = []
         self._lock = threading.Lock()
+        self._load_flags = FR_SESSION
 
     def load_all(self) -> int:
         with self._lock:
@@ -194,21 +224,40 @@ class FontManager:
                     ext = os.path.splitext(f)[1].lower()
                     if ext in (".ttf", ".otf", ".fon"):
                         font_path = os.path.join(root, f)
-                        res = gdi32.AddFontResourceExW(font_path, FR_PRIVATE, None)
+                        res = gdi32.AddFontResourceExW(font_path, self._load_flags, None)
                         if res > 0:
                             self.loaded_fonts.append(font_path)
                             count += 1
                         else:
                             logger.debug(f"AddFontResourceExW returned 0 for: {font_path}")
 
-            logger.info(f"Loaded {count} private session fonts from {self.fonts_dir}")
+            # Notify other processes (MathType.exe) that the font table changed.
+            try:
+                HWND_BROADCAST = 0xFFFF
+                WM_FONTCHANGE = 0x001D
+                user32 = ctypes.WinDLL("user32", use_last_error=True)
+                user32.SendMessageTimeoutW(
+                    HWND_BROADCAST,
+                    WM_FONTCHANGE,
+                    0,
+                    0,
+                    0x0000,  # SMTO_NORMAL
+                    1000,
+                    ctypes.byref(ctypes.c_size_t()),
+                )
+            except Exception as e:
+                logger.debug(f"WM_FONTCHANGE broadcast failed: {e}")
+
+            logger.info(
+                f"Loaded {count} session fonts from {self.fonts_dir} (flags={self._load_flags})"
+            )
             return count
 
     def unload_all(self):
         with self._lock:
             for font_path in self.loaded_fonts:
                 try:
-                    gdi32.RemoveFontResourceExW(font_path, FR_PRIVATE, None)
+                    gdi32.RemoveFontResourceExW(font_path, self._load_flags, None)
                 except Exception:
                     pass
             self.loaded_fonts.clear()
@@ -582,15 +631,9 @@ class MathTypeConverter:
             with open(temp_wmf, "rb") as f:
                 wmf_bytes = f.read()
 
-            # Cross-verify baseline from WMF internal comment
-            wmf_meta = parse_wmf_dimensions_and_baseline(wmf_bytes)
-            if wmf_meta.get("baseline_offset_pt") is not None and baseline_offset_pt == 0.0:
-                baseline_offset_pt = wmf_meta["baseline_offset_pt"]
-
-            if width_pt == 0.0:
-                width_pt = wmf_meta.get("width_pt", 0.0)
-            if height_pt == 0.0:
-                height_pt = wmf_meta.get("height_pt", 0.0)
+            wmf_bytes, baseline_offset_pt, width_pt, height_pt = _prefer_wmf_metrics(
+                wmf_bytes, baseline_offset_pt, width_pt, height_pt
+            )
 
             return ConversionResult(
                 wmf_bytes=wmf_bytes,
@@ -657,15 +700,15 @@ class MathTypeConverter:
             with open(temp_wmf, "rb") as f:
                 wmf_bytes = f.read()
 
-            wmf_meta = parse_wmf_dimensions_and_baseline(wmf_bytes)
-            if wmf_meta.get("baseline_offset_pt") is not None and baseline_offset_pt == 0.0:
-                baseline_offset_pt = wmf_meta["baseline_offset_pt"]
+            wmf_bytes, baseline_offset_pt, width_pt, height_pt = _prefer_wmf_metrics(
+                wmf_bytes, baseline_offset_pt, width_pt, height_pt
+            )
 
             return ConversionResult(
                 wmf_bytes=wmf_bytes,
                 baseline_offset_pt=baseline_offset_pt,
-                width_pt=width_pt or wmf_meta.get("width_pt", 0.0),
-                height_pt=height_pt or wmf_meta.get("height_pt", 0.0),
+                width_pt=width_pt,
+                height_pt=height_pt,
                 method="clipboard_relay_to_file",
             )
         finally:
@@ -727,13 +770,11 @@ class MathTypeConverter:
             )
 
             baseline_offset_pt = round(b_val / 32.0, 4) if b_val != MT_ERROR else 0.0
-            wmf_meta = parse_wmf_dimensions_and_baseline(placeable_wmf)
-
-            if wmf_meta.get("baseline_offset_pt") is not None and baseline_offset_pt == 0.0:
-                baseline_offset_pt = wmf_meta["baseline_offset_pt"]
-
-            width_pt = round(w_val / 32.0, 4) if w_val > 0 else wmf_meta.get("width_pt", 0.0)
-            height_pt = round(h_val / 32.0, 4) if h_val > 0 else wmf_meta.get("height_pt", 0.0)
+            width_pt = round(w_val / 32.0, 4) if w_val > 0 else 0.0
+            height_pt = round(h_val / 32.0, 4) if h_val > 0 else 0.0
+            placeable_wmf, baseline_offset_pt, width_pt, height_pt = _prefer_wmf_metrics(
+                placeable_wmf, baseline_offset_pt, width_pt, height_pt
+            )
 
             return ConversionResult(
                 wmf_bytes=placeable_wmf,

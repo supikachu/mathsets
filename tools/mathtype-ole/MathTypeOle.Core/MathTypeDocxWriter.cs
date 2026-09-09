@@ -120,10 +120,12 @@ public static class MathTypeDocxWriter
     {
         if (part is null) throw new ArgumentNullException(nameof(part));
         var (widthPt, heightPt) = EstimateWmfSizePt(part.Wmf);
-        if (part.WidthPt.HasValue && part.WidthPt.Value > 0) widthPt = part.WidthPt.Value;
-        if (part.HeightPt.HasValue && part.HeightPt.Value > 0) heightPt = part.HeightPt.Value;
-
-        var baselinePt = part.BaselineOffsetPt ?? EstimateWmfBaselinePt(part.Wmf);
+        // Prefer WMF header / MFCOMMENT over MTGetLastDimension (can be stale under load).
+        var baselinePt = EstimateWmfBaselinePt(part.Wmf);
+        if (baselinePt <= 0.001 && part.BaselineOffsetPt.HasValue)
+            baselinePt = part.BaselineOffsetPt.Value;
+        if (widthPt < 1 && part.WidthPt.HasValue && part.WidthPt.Value > 0) widthPt = part.WidthPt.Value;
+        if (heightPt < 1 && part.HeightPt.HasValue && part.HeightPt.Value > 0) heightPt = part.HeightPt.Value;
         var n = index + 1;
         var shapeId = $"_x0000_i{1025 + index}";
         var objectId = $"_{unchecked((uint)(0x1A2B0000 + n)):X8}";

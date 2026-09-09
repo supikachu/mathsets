@@ -239,16 +239,25 @@ pub async fn convert_batch(
             continue;
         }
         match B64.decode(item.wmf_base64.trim()) {
-            Ok(wmf) if wmf.len() >= 22 => out.push((
-                item.id,
-                Ok(WmfResult {
-                    wmf,
-                    baseline_offset_pt: item.baseline_offset_pt,
-                    width_pt: item.width_pt,
-                    height_pt: item.height_pt,
-                    method: item.method,
-                }),
-            )),
+            Ok(wmf) if wmf.len() >= 22 => {
+                let wmf = super::wmf_meta::rewrite_wmf_mt_extra_to_euclid(&wmf);
+                let (baseline_offset_pt, width_pt, height_pt) = super::wmf_meta::prefer_wmf_metrics(
+                    &wmf,
+                    item.baseline_offset_pt,
+                    item.width_pt,
+                    item.height_pt,
+                );
+                out.push((
+                    item.id,
+                    Ok(WmfResult {
+                        wmf,
+                        baseline_offset_pt,
+                        width_pt,
+                        height_pt,
+                        method: item.method,
+                    }),
+                ));
+            }
             Ok(_) => out.push((item.id, Err("WMF too short".into()))),
             Err(e) => out.push((item.id, Err(format!("wmf base64: {e}")))),
         }
