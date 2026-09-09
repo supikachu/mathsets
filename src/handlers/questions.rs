@@ -55,6 +55,47 @@ fn spawn_mathtype_sync(state: AppState, question_id: Uuid) {
     });
 }
 
+/// AI 整卷落库：只登记 pending 槽位，不立刻调 OLE/WMF（避免短时打爆 MT6）。
+/// 转换交给 Formula Worker 后台慢慢消化。
+fn spawn_mathtype_slots_only(state: AppState, question_id: Uuid) {
+    tokio::spawn(async move {
+        let q: Result<Question, _> =
+            sqlx::query_as("SELECT * FROM questions WHERE id = $1")
+                .bind(question_id)
+                .fetch_optional(&state.pool)
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|o| o.ok_or_else(|| "题目不存在".to_string()));
+        match q {
+            Ok(question) => {
+                if let Err(e) =
+                    crate::mathtype::sync::mark_slots_ai_deferred(&state.pool, &question).await
+                {
+                    tracing::warn!(
+                        "MathType 槽位登记失败 question={question_id}: {e}"
+                    );
+                } else {
+                    tracing::debug!(
+                        "MathType 槽位已登记（AI 延后转换 priority=0）question={question_id}"
+                    );
+                }
+            }
+            Err(e) => tracing::warn!(
+                "MathType 槽位登记跳过 question={question_id}: {e}"
+            ),
+        }
+    });
+}
+
+/// AI 智能录入确认落库：携带 `ai_meta` 或 `input_method=ai_parse` 时延后转换。
+fn should_defer_mathtype_convert(req: &CreateQuestionRequest) -> bool {
+    req.ai_meta.is_some()
+        || req
+            .input_method
+            .as_deref()
+            .is_some_and(|m| m.eq_ignore_ascii_case("ai_parse"))
+}
+
 // ---------------------------------------------------------------------------
 // 辅助函数
 // ---------------------------------------------------------------------------
@@ -1584,7 +1625,11 @@ pub async fn create_question(
         .await
         .map_err(|e| db_err(format!("查询题目失败: {}", e)))?;
 
-    spawn_mathtype_sync(state.clone(), id);
+    if should_defer_mathtype_convert(&req) {
+        spawn_mathtype_slots_only(state.clone(), id);
+    } else {
+        spawn_mathtype_sync(state.clone(), id);
+    }
 
     let detail = build_detail(&state.pool, &auth_user, question, None)
         .await
@@ -1683,47 +1728,23 @@ pub async fn update_question(
     let new_version = old_version + 1;
 
     // ── 图片差集计算：找出被用户删除/替换的旧图片 ──
-    // 正则匹配 /uploads/questions/xxx.png 格式的文件名
-    let re = Regex::new(r"/uploads/questions/([a-zA-Z0-9_\-\.]+\.(?:png|jpg|jpeg|gif|webp))")
-        .map_err(|e| db_err(format!("正则编译失败: {}", e)))?;
+    let re = question_image_url_re().map_err(|e| db_err(format!("正则编译失败: {}", e)))?;
 
-    // 提取旧文本中的图片集合
     let mut old_images: HashSet<String> = HashSet::new();
-    for cap in re.captures_iter(&existing.stem) {
-        if let Some(f) = cap.get(1) { old_images.insert(f.as_str().to_string()); }
-    }
-    if let Some(ref analysis) = existing.analysis {
-        for cap in re.captures_iter(analysis) {
-            if let Some(f) = cap.get(1) { old_images.insert(f.as_str().to_string()); }
-        }
-    }
-    if let Some(ref options) = existing.options {
-        for cap in re.captures_iter(&options.to_string()) {
-            if let Some(f) = cap.get(1) { old_images.insert(f.as_str().to_string()); }
-        }
-    }
-    for cap in re.captures_iter(&structure_text_blobs(existing.structure.as_ref())) {
-        if let Some(f) = cap.get(1) { old_images.insert(f.as_str().to_string()); }
-    }
+    collect_question_image_filenames_into(
+        &existing.stem,
+        existing.analysis.as_deref(),
+        existing.options.as_ref(),
+        existing.structure.as_ref(),
+        existing.images.as_ref(),
+        existing.correct_answer.as_ref(),
+        &re,
+        &mut old_images,
+    );
 
-    // 提取新文本中的图片集合（COALESCE 语义：未提供的字段保留旧值）
     let new_stem = req.stem.as_deref().unwrap_or(&existing.stem);
-    let mut new_images: HashSet<String> = HashSet::new();
-    for cap in re.captures_iter(new_stem) {
-        if let Some(f) = cap.get(1) { new_images.insert(f.as_str().to_string()); }
-    }
     let new_analysis = req.analysis.as_deref().or(existing.analysis.as_deref());
-    if let Some(analysis) = new_analysis {
-        for cap in re.captures_iter(analysis) {
-            if let Some(f) = cap.get(1) { new_images.insert(f.as_str().to_string()); }
-        }
-    }
     let new_options = req.options.as_ref().or(existing.options.as_ref());
-    if let Some(options) = new_options {
-        for cap in re.captures_iter(&options.to_string()) {
-            if let Some(f) = cap.get(1) { new_images.insert(f.as_str().to_string()); }
-        }
-    }
     let effective_type = req.question_type.as_ref().unwrap_or(&existing.question_type);
     if req.parent_id.is_some() {
         reject_solution_parent_id(effective_type, req.parent_id)?;
@@ -1734,9 +1755,23 @@ pub async fn update_question(
     } else {
         None
     };
-    for cap in re.captures_iter(&structure_text_blobs(persist_structure.as_ref())) {
-        if let Some(f) = cap.get(1) { new_images.insert(f.as_str().to_string()); }
-    }
+    let new_images_col = req.images.as_ref().or(existing.images.as_ref());
+    let new_answer = req
+        .correct_answer
+        .as_ref()
+        .or(existing.correct_answer.as_ref());
+
+    let mut new_images: HashSet<String> = HashSet::new();
+    collect_question_image_filenames_into(
+        new_stem,
+        new_analysis,
+        new_options,
+        persist_structure.as_ref(),
+        new_images_col,
+        new_answer,
+        &re,
+        &mut new_images,
+    );
 
     // 差集：存在于旧文本中但已不存在于新文本中的图片 = 被遗弃的旧图片
     let orphaned_images: Vec<String> = old_images.difference(&new_images).cloned().collect();
@@ -2010,21 +2045,17 @@ pub async fn delete_question(
 
 /// 提取题目文本中所有引用 `/uploads/questions/` 的图片文件名。
 ///
-/// 扫描字段：stem / analysis / options(JSON 序列化后扫描)
+/// 扫描字段：stem / analysis / options / structure / images / correct_answer
 /// 兼容复合题：同时扫描 parent_id = question_id 的所有子题目
 fn extract_image_filenames(
     pool: &sqlx::PgPool,
     question_id: Uuid,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<String>, (StatusCode, Json<serde_json::Value>)>> + Send + '_>> {
     Box::pin(async move {
-        // 匹配 /uploads/questions/xxx.png 格式的图片文件名
-        // 安全：文件名字符集限制 [a-zA-Z0-9_\-\.]，防止路径穿越
-        let re = Regex::new(r"/uploads/questions/([a-zA-Z0-9_\-\.]+\.(?:png|jpg|jpeg|gif|webp))")
-            .map_err(|e| db_err(format!("正则编译失败: {}", e)))?;
+        let re = question_image_url_re().map_err(|e| db_err(format!("正则编译失败: {}", e)))?;
 
-        let mut filenames: Vec<String> = Vec::new();
+        let mut filenames: HashSet<String> = HashSet::new();
 
-        // 收集主题目 + 所有子题目
         let rows = sqlx::query_as::<_, Question>(
             "SELECT * FROM questions WHERE id = $1 OR parent_id = $1 ORDER BY sub_order NULLS FIRST",
         )
@@ -2034,42 +2065,79 @@ fn extract_image_filenames(
         .map_err(|e| db_err(format!("查询题目及子题目失败: {}", e)))?;
 
         for q in &rows {
-            // stem
-            for cap in re.captures_iter(&q.stem) {
-                if let Some(f) = cap.get(1) {
-                    filenames.push(f.as_str().to_string());
-                }
-            }
-            // analysis
-            if let Some(ref analysis) = q.analysis {
-                for cap in re.captures_iter(analysis) {
-                    if let Some(f) = cap.get(1) {
-                        filenames.push(f.as_str().to_string());
-                    }
-                }
-            }
-            // options (JSONB → 序列化后扫描)
-            if let Some(ref options) = q.options {
-                let options_str = options.to_string();
-                for cap in re.captures_iter(&options_str) {
-                    if let Some(f) = cap.get(1) {
-                        filenames.push(f.as_str().to_string());
-                    }
-                }
-            }
-            for cap in re.captures_iter(&structure_text_blobs(q.structure.as_ref())) {
-                if let Some(f) = cap.get(1) {
-                    filenames.push(f.as_str().to_string());
-                }
-            }
+            collect_question_image_filenames_into(
+                &q.stem,
+                q.analysis.as_deref(),
+                q.options.as_ref(),
+                q.structure.as_ref(),
+                q.images.as_ref(),
+                q.correct_answer.as_ref(),
+                &re,
+                &mut filenames,
+            );
         }
 
-        // 去重（同一张图可能被多次引用）
-        filenames.sort();
-        filenames.dedup();
-
-        Ok(filenames)
+        let mut list: Vec<String> = filenames.into_iter().collect();
+        list.sort();
+        Ok(list)
     })
+}
+
+fn question_image_url_re() -> Result<Regex, regex::Error> {
+    Regex::new(r"/uploads/questions/([a-zA-Z0-9_\-\.]+\.(?:png|jpg|jpeg|gif|webp))")
+}
+
+fn collect_filenames_from_blob(text: &str, re: &Regex, out: &mut HashSet<String>) {
+    for cap in re.captures_iter(text) {
+        if let Some(f) = cap.get(1) {
+            out.insert(f.as_str().to_string());
+        }
+    }
+}
+
+fn collect_question_image_filenames_into(
+    stem: &str,
+    analysis: Option<&str>,
+    options: Option<&serde_json::Value>,
+    structure: Option<&serde_json::Value>,
+    images: Option<&serde_json::Value>,
+    correct_answer: Option<&serde_json::Value>,
+    re: &Regex,
+    out: &mut HashSet<String>,
+) {
+    collect_filenames_from_blob(stem, re, out);
+    if let Some(a) = analysis {
+        collect_filenames_from_blob(a, re, out);
+    }
+    if let Some(o) = options {
+        collect_filenames_from_blob(&o.to_string(), re, out);
+    }
+    collect_filenames_from_blob(&structure_text_blobs(structure), re, out);
+    if let Some(img) = images {
+        collect_filenames_from_blob(&img.to_string(), re, out);
+    }
+    if let Some(ans) = correct_answer {
+        collect_filenames_from_blob(&ans.to_string(), re, out);
+    }
+}
+
+fn is_safe_question_image_filename(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    if bytes.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+        return false;
+    }
+    let (base, ext) = match name.rsplit_once('.') {
+        Some(p) => p,
+        None => return false,
+    };
+    if base.is_empty() {
+        return false;
+    }
+    let ext_ok = matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "png" | "jpg" | "jpeg" | "gif" | "webp"
+    );
+    ext_ok && base.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 /// 异步清理题目图片文件 —— spawn 隔离，失败仅 log，不阻断 API 响应。
@@ -2081,7 +2149,14 @@ fn cleanup_question_images(upload_dir: &str, filenames: &[String]) {
         return;
     }
     let dir = std::path::PathBuf::from(upload_dir).join("questions");
-    let to_delete: Vec<String> = filenames.to_vec();
+    let to_delete: Vec<String> = filenames
+        .iter()
+        .filter(|f| is_safe_question_image_filename(f))
+        .cloned()
+        .collect();
+    if to_delete.is_empty() {
+        return;
+    }
     tokio::spawn(async move {
         for filename in &to_delete {
             let file_path = dir.join(filename);
@@ -2089,15 +2164,143 @@ fn cleanup_question_images(upload_dir: &str, filenames: &[String]) {
                 Ok(()) => {
                     tracing::info!("已清理题目图片: {}", filename);
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    // 文件已不存在 — 静默忽略
-                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => {
                     tracing::warn!("清理题目图片失败 {}: {}", filename, e);
                 }
             }
         }
     });
+}
+
+/// 未引用图片宽限期：编辑器先上传再保存，此窗口内即使暂无 DB 引用也不删。
+const ORPHAN_IMAGE_GRACE_SECS: u64 = 24 * 3600;
+
+/// GC：删除 `{upload_dir}/questions/` 中已不被任何题目引用、且超过宽限期的文件。
+///
+/// 覆盖「上传后取消保存 / AI 解析落盘但未入题」等泄漏；宽限期避免删掉正在编辑中的新上传。
+pub async fn gc_orphaned_question_images(pool: &sqlx::PgPool, upload_dir: &str) {
+    let dir = std::path::PathBuf::from(upload_dir).join("questions");
+    if !dir.is_dir() {
+        return;
+    }
+
+    let re = match question_image_url_re() {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("[gc] 题目配图正则编译失败: {e}");
+            return;
+        }
+    };
+
+    let referenced = match collect_all_referenced_question_images(pool, &re).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("[gc] 扫描题目配图引用失败: {e}");
+            return;
+        }
+    };
+
+    let grace = std::time::Duration::from_secs(ORPHAN_IMAGE_GRACE_SECS);
+    let now = std::time::SystemTime::now();
+    let mut rd = match tokio::fs::read_dir(&dir).await {
+        Ok(rd) => rd,
+        Err(e) => {
+            tracing::warn!("[gc] 读取配图目录失败 {:?}: {e}", dir);
+            return;
+        }
+    };
+
+    let mut scanned = 0usize;
+    let mut deleted = 0usize;
+    let mut skipped_young = 0usize;
+    while let Ok(Some(entry)) = rd.next_entry().await {
+        let Ok(ft) = entry.file_type().await else {
+            continue;
+        };
+        if !ft.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !is_safe_question_image_filename(name) {
+            continue;
+        }
+        scanned += 1;
+        if referenced.contains(name) {
+            continue;
+        }
+        let meta = match entry.metadata().await {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let aged_out = meta
+            .modified()
+            .ok()
+            .and_then(|m| now.duration_since(m).ok())
+            .is_some_and(|age| age >= grace);
+        if !aged_out {
+            skipped_young += 1;
+            continue;
+        }
+        match tokio::fs::remove_file(entry.path()).await {
+            Ok(()) => {
+                deleted += 1;
+                tracing::info!("[gc] 已删除未引用配图: {name}");
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!("[gc] 删除未引用配图失败 {name}: {e}"),
+        }
+    }
+
+    if deleted > 0 || skipped_young > 0 {
+        tracing::info!(
+            "[gc] 题目配图孤儿清理：扫描 {scanned}，删除 {deleted}，宽限内保留 {skipped_young}，库内引用 {}",
+            referenced.len()
+        );
+    }
+}
+
+async fn collect_all_referenced_question_images(
+    pool: &sqlx::PgPool,
+    re: &Regex,
+) -> Result<HashSet<String>, String> {
+    #[derive(sqlx::FromRow)]
+    struct BlobRow {
+        stem: String,
+        analysis: Option<String>,
+        options: Option<serde_json::Value>,
+        structure: Option<serde_json::Value>,
+        images: Option<serde_json::Value>,
+        correct_answer: Option<serde_json::Value>,
+    }
+
+    let rows: Vec<BlobRow> = sqlx::query_as(
+        r#"
+        SELECT stem, analysis, options, structure, images, correct_answer
+        FROM questions
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let mut out = HashSet::new();
+    for r in &rows {
+        collect_question_image_filenames_into(
+            &r.stem,
+            r.analysis.as_deref(),
+            r.options.as_ref(),
+            r.structure.as_ref(),
+            r.images.as_ref(),
+            r.correct_answer.as_ref(),
+            re,
+            &mut out,
+        );
+    }
+    Ok(out)
 }
 
 /// GC：清理 AI 录题孤儿草稿（用户从未确认保存的 worker 落库题目）
@@ -2364,6 +2567,12 @@ async fn submit_question_for_review(
             {
                 tracing::warn!("提交时登记 MathType 槽位失败 question={id}: {e}");
             }
+            let _ = crate::mathtype::sync::bump_question_priority(
+                &state.pool,
+                &[id],
+                crate::mathtype::sync::PRIORITY_NORMAL,
+            )
+            .await;
             spawn_mathtype_sync(state.clone(), id);
         }
     }
@@ -3168,4 +3377,38 @@ async fn copy_question(
     save_version(&mut tx, id, 1, Some(creator_id)).await?;
     tx.commit().await?;
     Ok(id)
+}
+
+#[cfg(test)]
+mod image_gc_tests {
+    use super::*;
+
+    #[test]
+    fn safe_filename_rejects_path_tricks() {
+        assert!(is_safe_question_image_filename("abc_123.png"));
+        assert!(is_safe_question_image_filename("a-b.jpg"));
+        assert!(is_safe_question_image_filename("a-b.JPEG"));
+        assert!(!is_safe_question_image_filename("../x.png"));
+        assert!(!is_safe_question_image_filename("a/b.png"));
+        assert!(!is_safe_question_image_filename("x.exe"));
+    }
+
+    #[test]
+    fn collects_from_stem_and_images_json() {
+        let re = question_image_url_re().unwrap();
+        let mut out = HashSet::new();
+        let images = serde_json::json!([{"url": "/uploads/questions/from_col.webp"}]);
+        collect_question_image_filenames_into(
+            "见图 ![a](/uploads/questions/stem_img.png)",
+            None,
+            None,
+            None,
+            Some(&images),
+            None,
+            &re,
+            &mut out,
+        );
+        assert!(out.contains("stem_img.png"));
+        assert!(out.contains("from_col.webp"));
+    }
 }

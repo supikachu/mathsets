@@ -3,16 +3,19 @@
 ## 架构
 
 ```text
-录题 create/update/submit → 登记 question_math_assets（pending）并后台转换
-                 → Formula Worker 轮询补齐失败/过期：
+录题 create/update/submit → 登记 question_math_assets（pending，priority≈10）并后台转换
+                 → **AI 智能录入确认落库（带 ai_meta）**：只登记槽位 priority=0，不立刻 OLE/WMF
+                 → Formula Worker 按 priority 取最多 N 题并行：
                       LaTeX → MathML（Rust）
                       MathML → ole.bin（MATHTYPE_OLE_CLI）
-                      一题一批 POST /convert_batch → WMF+baseline
-导出 options.docx_math = "mathtype" → 嵌入 Equation.DSMT4
+                      POST /convert_batch（多 URL round-robin）→ WMF+baseline
+导出 options.docx_math = "mathtype" → bump priority=100 后嵌入 Equation.DSMT4
          缺省 / "omml" → 现有 OMML 路径
 ```
 
 资产按 **题目 + field + ordinal** 关联（非全局 hash）。提交审核默认不等待 `ready`（`MATHTYPE_REQUIRE_ON_SUBMIT=1` 才同步硬门槛）。
+
+**AI 整卷录入**：确认落库时若请求带 `ai_meta`（或 `input_method=ai_parse`），只写 pending 槽位（低优先级），**不**立刻调用 OLE CLI / `convert_batch`；由 Formula Worker 按优先级消化。吞吐扩展见 `docs/MathType多进程渲染农场与优先级队列.md`。
 
 ## 启动流程（重要）
 
@@ -28,9 +31,12 @@
      mathtype_core/        （含 MT6.dll + Fonts，本地）
 
 ② 启动 MathType WMF 微服务（单独终端，常驻）
+   # 单实例：
    cd tools\mt_converter_portable
    .\mt_converter.exe --serve --port 8099
-   探活：浏览器或 curl 访问 http://127.0.0.1:8099/health
+   # 或多进程农场（推荐）：
+   .\scripts\start-farm.ps1 -Count 4
+   探活：http://127.0.0.1:8091/health … 8094
 
 ③（可选）确认 MathML→bin CLI 已构建
    cd tools\mathtype-ole
@@ -47,25 +53,27 @@
 
 | 进程 | 谁启动 | 做什么 |
 |------|--------|--------|
-| `mt_converter.exe --serve` | **人工 / 脚本单独起** | bin/MTEF → WMF + baseline（STA） |
+| `mt_converter.exe --serve`（可多进程） | **人工 / `start-farm.ps1`** | bin/MTEF → WMF + baseline（STA） |
 | `MathTypeOle.Cli.exe` | 按需由题库子进程调用 | MathML → ole.bin |
 | `mathset`（`cargo run`） | 项目主启动 | 录题、轮询 pending、调上述 URL/CLI、导出 |
 
-未配置 `MATHTYPE_CONVERT_URL` / `MATHTYPE_OLE_CLI` 时：主站仍可启动；公式只登记槽位、不转 WMF；Word 默认仍走 OMML。
+未配置 `MATHTYPE_CONVERT_URL(S)` / `MATHTYPE_OLE_CLI` 时：主站仍可启动；公式只登记槽位、不转 WMF；Word 默认仍走 OMML。
 
-生产建议：转换服务跑在独立 Windows Worker，主站用 `MATHTYPE_CONVERT_URL` 指向该机；Linux 主站不要本机硬起 exe。
+生产建议：转换服务跑在独立 Windows Worker，主站用 `MATHTYPE_CONVERT_URLS` 指向该机多端口；Linux 主站不要本机硬起 exe。
 
 ## P0 工具就位
 
 1. 覆盖 `tools/mt_converter_portable/mt_converter.exe` + 本地 `mathtype_core/`
-2. 按上一节 **②** 启动 `--serve`
+2. 按上一节 **②** 启动 `--serve` 或农场脚本
 3. 构建 `tools/mathtype-ole` Release CLI（MathML→bin）
 
 ## 环境变量
 
 | 变量 | 说明 |
 |------|------|
-| `MATHTYPE_CONVERT_URL` | 例 `http://127.0.0.1:8099` |
+| `MATHTYPE_CONVERT_URL` | 单实例，例 `http://127.0.0.1:8099` |
+| `MATHTYPE_CONVERT_URLS` | 多实例（优先），逗号分隔 |
+| `MATHTYPE_WORKER_PARALLEL` | Worker 每轮并行题数；默认 = URL 个数 |
 | `MATHTYPE_OLE_CLI` | `MathTypeOle.Cli.exe` 绝对路径 |
 | `MATHTYPE_REQUIRE_ON_SUBMIT` | `1` 时提交审核**同步**等全部公式 `ready`（慢，易超时；默认关，提交只登记槽位并后台转） |
 | `MATHTYPE_CONVERT_TIMEOUT_SECS` | 默认 120 |
@@ -79,7 +87,7 @@ sqlx migrate run
 # 或你们现有的 migrate 流程
 ```
 
-表：`question_math_assets`
+表：`question_math_assets`（含 `priority`：0=AI 延后，10=编辑/提交，100=MathType 导出提权）
 
 ## 导出
 

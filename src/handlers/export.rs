@@ -105,6 +105,16 @@ pub async fn export_docx(
             .flat_map(|s| s.questions.iter().map(|q| q.id))
             .filter(|id| !id.is_nil())
             .collect();
+        // 导出急需：把未 ready 资产提权，让 Formula Worker 优先消化本卷
+        if let Err(e) = crate::mathtype::sync::bump_question_priority(
+            &state.pool,
+            &ids,
+            crate::mathtype::sync::PRIORITY_EXPORT,
+        )
+        .await
+        {
+            tracing::warn!("MathType 导出提权失败: {e}");
+        }
         match crate::mathtype::load_ready_assets(&state.pool, &ids).await {
             Ok(m) => Some(m),
             Err(e) => {

@@ -182,8 +182,9 @@ async fn main() {
     tokio::spawn(mathset::ai::embedding::start_backfill(state.pool.clone()));
     tracing::info!("🧭 知识树/标签 embedding 回填已在后台启动");
 
-    // 启动 AI 孤儿草稿 GC（每 6 小时一次，清理落库 72h 后用户从未保存的 worker 草稿；
-    // 兜底用户直接关闭浏览器导致前端"丢弃"通道未触达的场景）
+    // 启动孤儿资源 GC（每 6 小时）：
+    // - AI 录题从未保存的草稿（72h TTL）
+    // - uploads/questions 中未被任何题目引用、且超过 24h 宽限期的配图文件
     {
         let gc_state = state.clone();
         tokio::spawn(async move {
@@ -196,11 +197,18 @@ async fn main() {
                     &gc_state.upload_dir,
                 )
                 .await;
+                mathset::handlers::questions::gc_orphaned_question_images(
+                    &gc_state.pool,
+                    &gc_state.upload_dir,
+                )
+                .await;
                 mathset::handlers::documents::gc_abandoned_empty_parse_papers(&gc_state.pool)
                     .await;
             }
         });
-        tracing::info!("🧹 AI 孤儿草稿 GC 已启动 (6 小时间隔 / 72h TTL)");
+        tracing::info!(
+            "🧹 孤儿资源 GC 已启动 (6 小时间隔：AI 草稿 72h / 未引用配图 24h 宽限)"
+        );
     }
 
     // 启动 SSE 票据过期清理后台任务（每 5 分钟清理一次过期 ticket）

@@ -2,31 +2,59 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
+use tokio::sync::Semaphore;
 
 /// MathType 转换相关环境变量
 #[derive(Debug, Clone)]
 pub struct MathTypeConvertConfig {
-    /// 例如 `http://127.0.0.1:8099`；空则跳过 WMF 转换
-    pub convert_url: Option<String>,
+    /// WMF 微服务 base URL 列表（一进程一实例）；空则跳过 WMF
+    pub convert_urls: Vec<String>,
     /// `MathTypeOle.Cli.exe` 路径；空则跳过 ole.bin
     pub ole_cli: Option<PathBuf>,
     /// 提交审核时是否要求全部公式 `ready`（默认 false，避免 Linux CI 阻断）
     pub require_on_submit: bool,
     /// HTTP 超时
     pub timeout: Duration,
+    /// Formula Worker 每轮并行题目数（默认 = URL 数，至少 1）
+    pub worker_parallel: usize,
+    /// round-robin + 每 URL 串行信号量
+    routing: Option<Arc<ConvertRouting>>,
+}
+
+#[derive(Debug)]
+struct ConvertRouting {
+    urls: Vec<String>,
+    rr: AtomicUsize,
+    sems: Vec<Semaphore>,
 }
 
 impl MathTypeConvertConfig {
     pub fn from_env() -> Self {
-        let convert_url = std::env::var("MATHTYPE_CONVERT_URL")
+        let mut convert_urls: Vec<String> = std::env::var("MATHTYPE_CONVERT_URLS")
             .ok()
-            .map(|s| s.trim().trim_end_matches('/').to_string())
-            .filter(|s| !s.is_empty());
+            .map(|s| {
+                s.split(',')
+                    .map(|p| p.trim().trim_end_matches('/').to_string())
+                    .filter(|p| !p.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if convert_urls.is_empty() {
+            if let Ok(single) = std::env::var("MATHTYPE_CONVERT_URL") {
+                let u = single.trim().trim_end_matches('/').to_string();
+                if !u.is_empty() {
+                    convert_urls.push(u);
+                }
+            }
+        }
+
         let ole_cli = std::env::var("MATHTYPE_OLE_CLI")
             .ok()
             .map(|s| PathBuf::from(s.trim()))
@@ -42,16 +70,38 @@ impl MathTypeConvertConfig {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(120u64);
+        let worker_parallel = std::env::var("MATHTYPE_WORKER_PARALLEL")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| convert_urls.len().max(1));
+
+        let routing = if convert_urls.is_empty() {
+            None
+        } else {
+            Some(Arc::new(ConvertRouting {
+                urls: convert_urls.clone(),
+                rr: AtomicUsize::new(0),
+                sems: convert_urls.iter().map(|_| Semaphore::new(1)).collect(),
+            }))
+        };
+
         Self {
-            convert_url,
+            convert_urls,
             ole_cli,
             require_on_submit,
             timeout: Duration::from_secs(timeout_secs),
+            worker_parallel: worker_parallel.max(1),
+            routing,
         }
     }
 
     pub fn is_enabled(&self) -> bool {
-        self.convert_url.is_some() || self.ole_cli.is_some()
+        !self.convert_urls.is_empty() || self.ole_cli.is_some()
+    }
+
+    /// 兼容旧日志字段：首个 URL
+    pub fn primary_convert_url(&self) -> Option<&str> {
+        self.convert_urls.first().map(String::as_str)
     }
 }
 
@@ -105,9 +155,9 @@ pub struct WmfResult {
 }
 
 pub async fn health_ok(cfg: &MathTypeConvertConfig) -> bool {
-    let Some(base) = &cfg.convert_url else {
+    if cfg.convert_urls.is_empty() {
         return false;
-    };
+    }
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
@@ -115,10 +165,13 @@ pub async fn health_ok(cfg: &MathTypeConvertConfig) -> bool {
     let Some(client) = client else {
         return false;
     };
-    match client.get(format!("{base}/health")).send().await {
-        Ok(resp) => resp.status().is_success(),
-        Err(_) => false,
+    for base in &cfg.convert_urls {
+        match client.get(format!("{base}/health")).send().await {
+            Ok(resp) if resp.status().is_success() => return true,
+            _ => {}
+        }
     }
+    false
 }
 
 /// 批量 bin → WMF；`items` 为 `(id, ole_bin_bytes)`
@@ -126,13 +179,20 @@ pub async fn convert_batch(
     cfg: &MathTypeConvertConfig,
     items: &[(String, Vec<u8>)],
 ) -> Result<Vec<(String, Result<WmfResult, String>)>, String> {
-    let base = cfg
-        .convert_url
+    let routing = cfg
+        .routing
         .as_ref()
-        .ok_or_else(|| "MATHTYPE_CONVERT_URL 未配置".to_string())?;
+        .ok_or_else(|| "MATHTYPE_CONVERT_URL(S) 未配置".to_string())?;
     if items.is_empty() {
         return Ok(Vec::new());
     }
+
+    let idx = routing.rr.fetch_add(1, Ordering::Relaxed) % routing.urls.len();
+    let base = &routing.urls[idx];
+    let _permit = routing.sems[idx]
+        .acquire()
+        .await
+        .map_err(|e| format!("convert_batch semaphore: {e}"))?;
 
     let equations: Vec<BatchItemIn> = items
         .iter()
@@ -152,10 +212,10 @@ pub async fn convert_batch(
         .json(&ConvertBatchRequest { equations })
         .send()
         .await
-        .map_err(|e| format!("convert_batch 请求失败: {e}"))?;
+        .map_err(|e| format!("convert_batch 请求失败 ({base}): {e}"))?;
 
     if !resp.status().is_success() {
-        return Err(format!("convert_batch HTTP {}", resp.status()));
+        return Err(format!("convert_batch HTTP {} ({base})", resp.status()));
     }
 
     let body: ConvertBatchResponse = resp

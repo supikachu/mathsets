@@ -42,10 +42,28 @@ struct AssetRow {
     width_pt: Option<f64>,
     height_pt: Option<f64>,
     status: String,
+    priority: i32,
 }
 
 /// 题目内容变更后：对齐槽位，未变且 ready 的保留，其余 pending/stale
 pub async fn mark_slots_from_question(pool: &PgPool, q: &Question) -> Result<usize, String> {
+    mark_slots_from_question_with_priority(pool, q, PRIORITY_NORMAL).await
+}
+
+/// AI 延后转换：只登记槽位，低优先级
+pub async fn mark_slots_ai_deferred(pool: &PgPool, q: &Question) -> Result<usize, String> {
+    mark_slots_from_question_with_priority(pool, q, PRIORITY_AI_DEFER).await
+}
+
+pub const PRIORITY_AI_DEFER: i32 = 0;
+pub const PRIORITY_NORMAL: i32 = 10;
+pub const PRIORITY_EXPORT: i32 = 100;
+
+pub async fn mark_slots_from_question_with_priority(
+    pool: &PgPool,
+    q: &Question,
+    priority: i32,
+) -> Result<usize, String> {
     let slots = extract_slots(
         &q.stem,
         q.options.as_ref(),
@@ -53,16 +71,47 @@ pub async fn mark_slots_from_question(pool: &PgPool, q: &Question) -> Result<usi
         q.analysis.as_deref(),
         q.structure.as_ref(),
     );
-    replace_slots(pool, q.id, &slots).await
+    replace_slots(pool, q.id, &slots, priority).await
 }
 
-async fn replace_slots(pool: &PgPool, question_id: Uuid, slots: &[FormulaSlot]) -> Result<usize, String> {
+/// 将题目未 ready 资产的优先级至少提升到 `min_priority`（不降低已有更高优先级）
+pub async fn bump_question_priority(
+    pool: &PgPool,
+    question_ids: &[Uuid],
+    min_priority: i32,
+) -> Result<u64, String> {
+    if question_ids.is_empty() {
+        return Ok(0);
+    }
+    let r = sqlx::query(
+        r#"
+        UPDATE question_math_assets
+        SET priority = GREATEST(priority, $2), updated_at = $3
+        WHERE question_id = ANY($1)
+          AND status IN ('pending', 'stale', 'failed')
+        "#,
+    )
+    .bind(question_ids)
+    .bind(min_priority)
+    .bind(chrono::Utc::now())
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(r.rows_affected())
+}
+
+async fn replace_slots(
+    pool: &PgPool,
+    question_id: Uuid,
+    slots: &[FormulaSlot],
+    priority: i32,
+) -> Result<usize, String> {
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
     let existing: Vec<AssetRow> = sqlx::query_as(
         r#"
         SELECT field, ordinal, latex, display, ole_bin, wmf,
-               baseline_offset_pt, width_pt, height_pt, status
+               baseline_offset_pt, width_pt, height_pt, status, priority
         FROM question_math_assets
         WHERE question_id = $1
         "#,
@@ -99,6 +148,13 @@ async fn replace_slots(pool: &PgPool, question_id: Uuid, slots: &[FormulaSlot]) 
             }
         });
 
+        // 同槽位公式未变时保留更高优先级（避免 sync/mark 冲掉导出提权）
+        let slot_priority = keep
+            .get(&key)
+            .filter(|old| old.latex == slot.latex && old.display == slot.display)
+            .map(|old| old.priority.max(priority))
+            .unwrap_or(priority);
+
         let id = Uuid::new_v4();
         if let Some(old) = reuse {
             sqlx::query(
@@ -106,11 +162,11 @@ async fn replace_slots(pool: &PgPool, question_id: Uuid, slots: &[FormulaSlot]) 
                 INSERT INTO question_math_assets (
                     id, question_id, field, ordinal, latex, display, mathml,
                     ole_bin, wmf, baseline_offset_pt, width_pt, height_pt,
-                    status, error, engine, created_at, updated_at
+                    status, error, engine, priority, created_at, updated_at
                 ) VALUES (
                     $1,$2,$3,$4,$5,$6,NULL,
                     $7,$8,$9,$10,$11,
-                    'ready', NULL, 'reuse', $12, $12
+                    'ready', NULL, 'reuse', $12, $13, $13
                 )
                 "#,
             )
@@ -125,6 +181,7 @@ async fn replace_slots(pool: &PgPool, question_id: Uuid, slots: &[FormulaSlot]) 
             .bind(old.baseline_offset_pt)
             .bind(old.width_pt)
             .bind(old.height_pt)
+            .bind(slot_priority)
             .bind(now)
             .execute(&mut *tx)
             .await
@@ -134,8 +191,8 @@ async fn replace_slots(pool: &PgPool, question_id: Uuid, slots: &[FormulaSlot]) 
                 r#"
                 INSERT INTO question_math_assets (
                     id, question_id, field, ordinal, latex, display,
-                    status, created_at, updated_at
-                ) VALUES ($1,$2,$3,$4,$5,$6,'pending',$7,$7)
+                    status, priority, created_at, updated_at
+                ) VALUES ($1,$2,$3,$4,$5,$6,'pending',$7,$8,$8)
                 "#,
             )
             .bind(id)
@@ -144,6 +201,7 @@ async fn replace_slots(pool: &PgPool, question_id: Uuid, slots: &[FormulaSlot]) 
             .bind(slot.ordinal)
             .bind(&slot.latex)
             .bind(slot.display)
+            .bind(slot_priority)
             .bind(now)
             .execute(&mut *tx)
             .await
@@ -247,14 +305,14 @@ pub async fn sync_question_math_assets(
         }
     }
 
-    if bins.is_empty() || cfg.convert_url.is_none() {
-        if cfg.convert_url.is_none() {
+    if bins.is_empty() || cfg.convert_urls.is_empty() {
+        if cfg.convert_urls.is_empty() {
             skipped += bins.len();
             for (_, bin, id, _) in &bins {
                 sqlx::query(
                     r#"
                     UPDATE question_math_assets
-                    SET ole_bin = $2, status = 'pending', error = '等待 WMF：未配置 MATHTYPE_CONVERT_URL',
+                    SET ole_bin = $2, status = 'pending', error = '等待 WMF：未配置 MATHTYPE_CONVERT_URL(S)',
                         updated_at = $3
                     WHERE id = $1
                     "#,

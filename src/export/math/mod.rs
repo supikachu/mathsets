@@ -5,7 +5,7 @@
 //! 这一层的职责只有一个：让 `latex2mathml` 吃得下教辅里的实际写法。三件事都做在进库转换之前，
 //! 因此 Word / PDF 两条公式管线共享同一份归一结果。
 //!
-//! 1. **参数级改写**：`\textcolor{red}{x}` / `\boxed{…}` 取参数内容、`\phantom{…}` 整段删除、
+//! 1. **参数级改写**：`\textcolor{red}{x}` / `\boxed{…}` 取参数内容、`\phantom{…}` / `\tag{…}` 整段删除、
 //!    `\substack{a\\b}` 改写为 matrix —— 这些 crate 完全不认，但不改写会把排版信息一起丢掉。
 //! 2. **命令别名**：crate 认 `\geq` 不认 `\ge`、认 `\emptyset` 不认 `\varnothing`（方向与前端的
 //!    KaTeX 相反），\dfrac/\tfrac/\dots/\lg/… 一律折算成 crate 支持的等价写法，语义不变。
@@ -158,6 +158,10 @@ const ARG_RULES: &[(&str, ArgRule)] = &[
     ("phantom", ArgRule::Drop(1)),
     ("hphantom", ArgRule::Drop(1)),
     ("vphantom", ArgRule::Drop(1)),
+    // 教辅/OCR 常把方程编号写成 \tag{①}；crate 不认，删掉编号保留公式本体
+    ("tag", ArgRule::Drop(1)),
+    ("tag*", ArgRule::Drop(1)),
+    ("notag", ArgRule::Drop(0)),
     ("mathstrut", ArgRule::Drop(0)),
     ("hspace", ArgRule::Drop(1)),
     ("kern", ArgRule::Drop(1)),
@@ -824,6 +828,24 @@ mod tests {
         assert!(to_mathml(r"\textcolor{red}{x+1}", true).is_ok());
         // 参数形态不合预期时原样交下去（不 panic、不误删）
         assert_eq!(normalize(r"\boxed").as_ref(), r"\boxed");
+        // 方程编号：OCR 常见 \tag{②}，剥离后可转 MathML
+        assert_eq!(
+            normalize(r"(a+b)^2=0,\tag{②}").as_ref(),
+            r"(a+b)^2=0,"
+        );
+        assert_eq!(
+            normalize(r"f(x)=\sin x\tag*{②}").as_ref(),
+            r"f(x)=\sin x"
+        );
+        assert!(
+            to_mathml(r"(a + b + c) ^ {2} - 6 (a + b + c) + (1 8 - k) = 0, \tag {②}", true)
+                .is_ok()
+        );
+        assert!(to_mathml(
+            r"f (x) + \left[ h _ {1} (x) \right] = \sin x \tag {②}",
+            true
+        )
+        .is_ok());
     }
 
     #[test]

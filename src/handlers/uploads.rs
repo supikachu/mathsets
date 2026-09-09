@@ -7,7 +7,7 @@
 // 设计差异（对比 /users/avatar）：
 //   - 题目配图常含坐标系/几何大图，限制放宽至 10 MB
 //   - 无 DB 关联，不绑定到具体用户记录（题目图片可在多题间复用）
-//   - 不自动清理旧文件（无单一所有者，由独立 GC 机制处理）
+//   - 上传当下不删旧文件；未引用文件由 `gc_orphaned_question_images` 定期回收（24h 宽限）
 //   - 复用 users.rs 的零信任校验：Magic Bytes + MIME 白名单
 // ============================================================
 
@@ -51,7 +51,7 @@ pub struct ImageUploadResponse {
 ///
 /// 不做的事：
 ///   - 不写入 DB（图片可被多题复用，无单一所有者）
-///   - 不清理旧文件（无 GC 上下文，留待后续定期清理任务）
+///   - 不在本接口删除旧文件（由 `gc_orphaned_question_images` + 题目更新/删除差集清理）
 pub async fn upload_image(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthUser>,
