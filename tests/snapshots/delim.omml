@@ -1,7 +1,7 @@
-<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:mml="http://www.w3.org/1998/Math/MathML">
+﻿<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:mml="http://www.w3.org/1998/Math/MathML">
   <m:d>
     <m:dPr>
-      <m:sepChr m:val=","/>
+      <m:sepChr m:val=""/>
     </m:dPr>
     <m:e>
       <m:f>

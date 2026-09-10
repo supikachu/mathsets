@@ -2267,7 +2267,16 @@ internal static partial class MathTypeMtefCodec
                 EmitText(element.Value, TypefaceText, output);
                 break;
             case "mspace":
-                EmitCharacter(' ', TypefaceSpace, output);
+                // latex2mathml turns \hspace{2em}/\quad into <mspace width="1em"/>×N.
+                // Do NOT emit U+2003/U+3000: MathType Text has no glyph → �◆ in Word.
+                // TypefaceSpace collapses inside "()". ASCII '_' is in every MathType font
+                // and keeps answer-blank width (2em ≈ "____" inside parens).
+                {
+                    var widthEm = ParseMspaceWidthEm(element);
+                    var gaps = widthEm <= 0 ? 0 : Math.Max(1, (int)Math.Floor(widthEm));
+                    for (var i = 0; i < gaps * 2; i++)
+                        EmitCharacter('_', TypefaceText, output);
+                }
                 break;
             case "mfrac":
                 EmitFraction(element, output);
@@ -3732,6 +3741,12 @@ internal static partial class MathTypeMtefCodec
                 continue;
             }
 
+            // latex2mathml emits \\because as <mi mathvariant="normal">∵</mi>
+            // (and similar upright symbols). Reuse operator special glyphs so
+            // they are not dumped into Unicode Text → ◆/? boxes in Word.
+            if (TryEmitMathTypeSpecialOperator(scalar, output))
+                continue;
+
             if (effectiveVariant.Contains("double-struck")
                 && TryMtExtraDoubleStruck(scalar, out var mtExtraCode, out var mtExtraPosition))
             {
@@ -4474,6 +4489,9 @@ internal static partial class MathTypeMtefCodec
             case 0x22F1: // \\ddots
                 EmitScalar(0x22F1, TypefaceMtExtra, output, includeEncoded8: true, encoded8Override: 0x4F);
                 return true;
+            case 0x2235: // \\because: not in Adobe Symbol; MT Extra / Euclid Extra 0x51
+                EmitScalar(0x2235, TypefaceMtExtra, output, includeEncoded8: true, encoded8Override: 0x51);
+                return true;
             default:
                 return false;
         }
@@ -4535,6 +4553,38 @@ internal static partial class MathTypeMtefCodec
             // fallback for symbols not present in the legacy Symbol encoding.
             EmitScalar(NormalizeMathTypeMtCode(scalar), TypefaceText, output);
         }
+    }
+
+    private static double ParseMspaceWidthEm(XElement element)
+    {
+        var raw = ((string?)element.Attribute("width") ?? string.Empty).Trim().ToLowerInvariant();
+        if (raw.Length == 0) return 0.2; // MathML default-ish thin gap
+        var unitStart = 0;
+        while (unitStart < raw.Length
+               && (char.IsDigit(raw[unitStart]) || raw[unitStart] == '.' || raw[unitStart] == '+' || raw[unitStart] == '-'))
+        {
+            unitStart++;
+        }
+        if (unitStart == 0
+            || !double.TryParse(
+                raw.Substring(0, unitStart),
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var value))
+        {
+            return 0;
+        }
+        var unit = raw.Substring(unitStart).Trim();
+        return unit switch
+        {
+            "" or "em" => value,
+            "ex" => value * 0.5,
+            "mu" => value / 18.0,
+            "pt" => value / 10.0, // ~10pt ≈ 1em at MathType default
+            "mm" => value / 3.5,
+            "cm" => value * 10.0 / 3.5,
+            _ => value,
+        };
     }
 
     private static void EmitText(string value, int typeface, List<byte> output)

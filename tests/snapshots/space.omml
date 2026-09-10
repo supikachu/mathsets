@@ -5,6 +5,16 @@
   <m:r>
     <m:t>b</m:t>
   </m:r>
+  <m:phant>
+    <m:phantPr>
+      <m:show m:val="off"/>
+    </m:phantPr>
+    <m:e>
+      <m:r>
+        <m:t>M</m:t>
+      </m:r>
+    </m:e>
+  </m:phant>
   <m:r>
     <m:t>c</m:t>
   </m:r>

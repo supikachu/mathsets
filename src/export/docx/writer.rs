@@ -2049,6 +2049,32 @@ mod tests {
         assert!(xml_of(&parts, "word/document.xml").contains(r#"<w:color w:val="C00000"/>"#));
     }
 
+    #[tokio::test]
+    async fn absolute_value_and_answer_blank_reach_document_xml() {
+        // 线上反馈的两个 word 缺陷断在真部件上，而不是转换器中间产物上：
+        // office 公式模式下 \left|z\right| 里的 z 曾整个消失，题干末尾的答案空位曾塌成 ()
+        let q = question(
+            1,
+            vec![t("设 "), math(r"\left|z\right| = (\hspace{2em})", false)],
+        );
+        let (r, parts) = render(&one(q), &ExportOptions::default()).await;
+        assert!(r.issues.is_empty(), "{:?}", r.issues);
+        let xml = xml_of(&parts, "word/document.xml");
+        assert!(
+            xml.contains(r#"<m:begChr m:val="|"/>"#)
+                && xml.contains("<m:e><m:r><m:t>z</m:t></m:r></m:e>"),
+            "定界符里只剩竖线，z 丢了: {xml}"
+        );
+        assert!(
+            !xml.contains(r#"m:sepChr m:val=",""#),
+            "|z| 不应带逗号 sepChr: {xml}"
+        );
+        assert!(
+            xml.contains("<m:m>") || xml.contains("<m:eqArr>"),
+            "2em 空位应是 OMML 矩阵/eqArr: {xml}"
+        );
+    }
+
     // ── 图片 ──
 
     #[tokio::test]

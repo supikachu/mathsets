@@ -311,6 +311,66 @@ pub async fn mathml_to_ole_bin(cfg: &MathTypeConvertConfig, mathml: &str) -> Res
     Ok(bytes)
 }
 
+/// 本地 CLI：`ole.bin` → WMF（`--from-ole`）。farm 崩溃时的回退路径。
+pub async fn ole_bin_to_wmf(cfg: &MathTypeConvertConfig, ole: &[u8]) -> Result<WmfResult, String> {
+    let cli = cfg
+        .ole_cli
+        .as_ref()
+        .ok_or_else(|| "MATHTYPE_OLE_CLI 未配置".to_string())?;
+    if !cli.exists() {
+        return Err(format!("MATHTYPE_OLE_CLI 不存在: {}", cli.display()));
+    }
+
+    let temp = std::env::temp_dir().join(format!("mathset-mt-wmf-{}", uuid::Uuid::new_v4()));
+    tokio::fs::create_dir_all(&temp)
+        .await
+        .map_err(|e| e.to_string())?;
+    let ole_path = temp.join("in.ole.bin");
+    let wmf_path = temp.join("out.wmf");
+    tokio::fs::write(&ole_path, ole)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let output = Command::new(cli)
+        .arg("--from-ole")
+        .arg(&ole_path)
+        .arg("-o")
+        .arg(&wmf_path)
+        .arg("--quiet")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| format!("启动 MathTypeOle.Cli --from-ole 失败: {e}"))?;
+
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        let _ = tokio::fs::remove_dir_all(&temp).await;
+        return Err(format!(
+            "MathTypeOle.Cli --from-ole exit {:?}: {err}",
+            output.status.code()
+        ));
+    }
+
+    let wmf = tokio::fs::read(&wmf_path)
+        .await
+        .map_err(|e| format!("读取 WMF 失败: {e}"))?;
+    let _ = tokio::fs::remove_dir_all(&temp).await;
+    if wmf.len() < 22 {
+        return Err("WMF too short".into());
+    }
+    let wmf = super::wmf_meta::rewrite_wmf_mt_extra_to_euclid(&wmf);
+    let (baseline_offset_pt, width_pt, height_pt) =
+        super::wmf_meta::prefer_wmf_metrics(&wmf, 0.0, 0.0, 0.0);
+    Ok(WmfResult {
+        wmf,
+        baseline_offset_pt,
+        width_pt,
+        height_pt,
+        method: Some("ole_cli_wmf".into()),
+    })
+}
+
 /// 解析默认 CLI 路径：仓库内 Release 构建产物
 pub fn default_ole_cli_hint(repo_root: &Path) -> PathBuf {
     repo_root.join(

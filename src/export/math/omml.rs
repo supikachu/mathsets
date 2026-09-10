@@ -4,7 +4,7 @@
 //! 不入库也不在运行时执行：`tests/snapshots/*.omml` 是开发期用外部 XSLT 引擎跑官方 XSL 得到的
 //! **事实输出**（再经本管线有据差异修订），[`to_omml`] 的产物必须在 XML 规范化后与之逐节点一致
 //! （见文件末尾的黄金快照测试）。因此这里照抄 XSL 的判断顺序与默认值，包括它自身偏保守的取舍
-//! （颜色属性直接丢弃、`mspace` 整节点消失等），并在下列差异点显式偏离。
+//! （颜色属性直接丢弃等），并在下列差异点显式偏离。
 //!
 //! 与 XSL 有据可查的差异：
 //!
@@ -20,7 +20,12 @@
 //! 4. **`\left`/`\right` / `cases` 的 stretchy `mo` 行 → `m:d`**：官方 XSL 把
 //!    `<mo stretchy>{</mo><mtable/>…` 拆成普通文字 `{` + 矩阵，Word 不会画出跨行大括号。
 //!    本管线把这类行收成与 `mfenced` 等价的 `m:d`（含单侧 `\right.` 空闭合）。
-
+//! 5. **`mspace` → 隐藏宽度的 `m:phant`（体内 `M×N`）**：官方 XSL 把 `<mspace/>` 整节点丢弃，
+//!    选择题答案空位 `$(\hspace{2em})$` 会塌成 `()`。U+2003/`preserve` 在部分 Word 仍几乎不可见；
+//!    全角空格在回退的 Office 公式里可用，但这里统一走 phantom，占宽与 MathType 侧 TypefaceSpace
+//!    一致。不足 1em 的薄空位（`\,` / `\;`）仍照 XSL 丢弃。
+//! 6. **stretchy `\left…\right` 的 `m:d` 使用空 `sepChr`**：序列定界只有一个 `m:e`，
+//!    若按 mfenced 默认写出 `sepChr=","`，Word 在 `|…|` 上常把体内画成虚线占位（表现为丢 z）。
 use std::borrow::Cow;
 use std::io::Cursor;
 
@@ -39,6 +44,8 @@ type Nd<'a> = Node<'a, 'a>;
 const OMML_NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/math";
 /// MathML 命名空间，官方 XSL 在根节点上连带声明（即使片段里没有 `mml:` 节点）
 const MATHML_NS: &str = "http://www.w3.org/1998/Math/MathML";
+/// `xml:space` 等 XML 保留属性的命名空间
+const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
 /// function-app 算符（U+2061）：XSL 用它识别 omml 的 `m:func`
 const FUNCTION_APP: char = '\u{2061}';
 
@@ -511,6 +518,27 @@ fn normalize_fence_glyph(value: &str) -> String {
     }
 }
 
+fn text_needs_xml_space_preserve(text: &str) -> bool {
+    text.chars().any(|c| {
+        matches!(
+            c,
+            ' ' | '\t'
+                | '\u{00A0}' // nbsp
+                | '\u{2002}' // en space
+                | '\u{2003}' // em space
+                | '\u{2004}'
+                | '\u{2005}'
+                | '\u{2006}'
+                | '\u{2007}'
+                | '\u{2008}'
+                | '\u{2009}' // thin space
+                | '\u{200A}'
+                | '\u{202F}'
+                | '\u{3000}' // ideographic space（答案空位）
+        )
+    })
+}
+
 /// XSL `FBar`：`linethickness` 是否仍表示「有线」
 fn has_bar(line_thickness: &str) -> bool {
     let t = xsl_lower(line_thickness);
@@ -588,6 +616,19 @@ impl Omml {
 
     fn open(&mut self, name: &str) {
         self.write(Event::Start(BytesStart::new(name)));
+    }
+
+    /// 打开 `m:t`；若内容含空白（含 U+2003 / U+3000），带 `xml:space="preserve"`。
+    /// 全角空格本身不是 XML 空白，但与 ASCII/em 空格混排时仍保留 preserve 更稳妥。
+    fn open_t(&mut self, text: &str) {
+        if text_needs_xml_space_preserve(text) {
+            self.write(Event::Start(BytesStart::from_content(
+                r#"m:t xml:space="preserve""#,
+                3,
+            )));
+        } else {
+            self.open("m:t");
+        }
     }
 
     fn close(&mut self, name: &str) {
@@ -682,9 +723,9 @@ impl Omml {
             "mtable" => self.mtable(n),
             "mpadded" => self.mpadded(n),
             "mphantom" => self.mphantom(n),
-            // XSL 无模板且无元素子节点：catch-all 递归后自然消失。mspace 因此整节点丢失，
-            // 与官方输出一致（见 space.omml）。
-            "mspace" | "none" | "mprescripts" => {}
+            "mspace" => self.mspace(n),
+            // XSL 无模板且无元素子节点：catch-all 递归后自然消失。
+            "none" | "mprescripts" => {}
             other => {
                 tracing::warn!(
                     "OMML 转换：未认出的 MathML 元素 <{other}>，按 catch-all 递归子节点"
@@ -692,6 +733,28 @@ impl Omml {
                 self.children(n);
             }
         }
+    }
+
+    /// 偏离 XSL（模块头第 5 条）：`<mspace width="…"/>` → `m:phant`（show=off，体内 `M×N`）。
+    ///
+    /// 官方 XSL 丢弃 mspace；U+2003 在部分 Word 几乎不可见。隐藏的 M 只占宽不着墨，
+    /// 与 MathType TypefaceSpace 空位观感接近。不足 1em 仍丢弃。
+    fn mspace(&mut self, n: Nd<'_>) {
+        let gaps = super::length_em(&attr_or(n, "width")).floor().max(0.0) as usize;
+        if gaps == 0 {
+            return;
+        }
+        let text = "M".repeat(gaps);
+        self.open("m:phant");
+        self.phant_properties_core(false, &[true, true, true]);
+        self.open("m:e");
+        self.open("m:r");
+        self.open_t(&text);
+        self.output_text(&text);
+        self.close("m:t");
+        self.close("m:r");
+        self.close("m:e");
+        self.close("m:phant");
     }
 
     // -----------------------------------------------------------------------
@@ -813,7 +876,7 @@ impl Omml {
                 }
             })
             .collect();
-        self.open("m:t");
+        self.open_t(&raw);
         self.output_text(&raw);
         self.close("m:t");
         self.close("m:r");
@@ -879,7 +942,7 @@ impl Omml {
         }
         // 偏离 XSL：latex2mathml 的 stretchy `\left`/`\right` 行收成 `m:d`
         if let Some((open, close, body)) = stretchy_fence_parts(&children) {
-            self.delim(&open, &close, /* separators */ None, true, true, &body);
+            self.stretchy_delim(&open, &close, &body);
             return;
         }
         for child in children {
@@ -1161,27 +1224,78 @@ impl Omml {
         let open = attr_or(n, "open");
         let close = attr_or(n, "close");
         let separators = attr_or(n, "separators");
-        let body: Vec<_> = kids(n);
-        self.delim(
-            &open,
-            &close,
-            if sep_valid { Some(separators.as_ref()) } else { None },
+        let body = kids(n);
+
+        self.open("m:d");
+        self.delim_prop(
+            open,
+            close,
+            if sep_valid { Some(separators) } else { None },
             open_valid,
             close_valid,
-            &body,
         );
+        // `mfenced` 的每个子节点都是被 `separators` 隔开的一个独立参数，各出一个 `m:e`
+        for child in body {
+            self.open("m:e");
+            self.arg_prop(child);
+            self.element(child);
+            self.close("m:e");
+        }
+        self.close("m:d");
     }
 
-    /// 写出 `m:d`（`mfenced` 与 stretchy `\left`/`\right` 行共用）。
+    /// 偏离 XSL（模块头第 4 条）：stretchy `\left`/`\right` 行收成 `m:d`。
+    /// 与 `mfenced` 的区别是体内是**一段序列**而非多个参数，故整段只出一个 `m:e`。
+    /// `body` 至少一个元素由 [`stretchy_fence_parts`] 保证。
+    fn stretchy_delim(&mut self, open: &str, close: &str, body: &[Nd<'_>]) {
+        self.open("m:d");
+        // 序列定界（\left…\right）只有一个 m:e，不能按 mfenced 默认写 sepChr=","。
+        // Word 在 beg/end 同为 `|` 且带逗号分隔符时，常把体内格子画成虚线占位，表现为 |z| 丢 z。
+        self.delim_prop(open, close, Some(""), true, true);
+        self.open("m:e");
+        self.arg_prop(body[0]);
+        self.delim_body(body);
+        self.close("m:e");
+        self.close("m:d");
+    }
+
+    /// 写出被搬进 `m:d` 的 `m:e` 的那段连续兄弟。
+    ///
+    /// token 不能交给 [`element`]：`token()` 的合流范围取的是节点在 **MathML 父节点**下的全部
+    /// 元素子节点，而 stretchy 行两端的定界符 `mo` 已被摘去当 `begChr`/`endChr`。体内的首个
+    /// token 于是按 XSL 的 `FStartOfRun` 判定「前一个兄弟会替我写整段」直接返回，而那个兄弟
+    /// 永远不会再被写出 —— `\left|z\right|` 在 Word 里只剩一对竖线。这里把合流范围收窄到切片
+    /// 自身，其余口径与 `token()` 一致。
+    ///
+    /// 此路径的父节点必为 `mrow`/`mstyle`（[`row_body`] 已先排除线性分数与 func 两种形态），
+    /// 即 XSL `fShouldCollect` 恒真，故无需再判合流资格。
+    fn delim_body(&mut self, body: &[Nd<'_>]) {
+        let mut i = 0;
+        while i < body.len() {
+            if !is_token(body[i]) {
+                self.element(body[i]);
+                i += 1;
+                continue;
+            }
+            // XSL `CreateRunWithSameProp`：贪心吃掉后续同属性 token
+            let mut end = i + 1;
+            while end < body.len() && self.compatible(body[i], body[end]) {
+                end += 1;
+            }
+            self.write_run(body[i], &body[i..end], true);
+            i = end;
+        }
+    }
+
+    /// XSL `CreateDelimProp`：`m:d` 的 `m:dPr`。
     /// `separators=None` 表示属性未给出（MathML 默认 `,`）；`Some("")` 表示显式空 separators。
-    fn delim(
+    fn delim_prop(
         &mut self,
         open: &str,
         close: &str,
         separators: Option<&str>,
         open_valid: bool,
         close_valid: bool,
-        body: &[Nd<'_>],
     ) {
         // MathML 可以有多个 separator，OMML 的 `m:d` 只认一个 —— 取首字符
         let sep_chr = separators.and_then(|s| s.chars().next().map(|c| c.to_string()));
@@ -1190,7 +1304,6 @@ impl Omml {
             Some(_) => sep_chr.as_deref() == Some("|"),
         };
 
-        self.open("m:d");
         if (open_valid && open != "(") || (close_valid && close != ")") || !sep_is_default {
             self.open("m:dPr");
             if open_valid && open != "(" {
@@ -1208,13 +1321,6 @@ impl Omml {
             }
             self.close("m:dPr");
         }
-        for child in body {
-            self.open("m:e");
-            self.arg_prop(*child);
-            self.element(*child);
-            self.close("m:e");
-        }
-        self.close("m:d");
     }
 
     /// XSL `match mml:mmultiscripts`。
@@ -1557,6 +1663,77 @@ mod golden {
     use super::*;
     use std::path::Path;
 
+    #[test]
+    fn stretchy_delim_keeps_token_body() {
+        // 定界符被摘成 begChr/endChr 后，体内的 token 不能再按整个 mrow 合流：
+        // 首个 mi 会去等一个永不写出的兄弟，整段内容就此消失
+        let omml = omml_of(
+            r#"<mrow><mo stretchy="true" form="prefix">|</mo><mi>z</mi><mo stretchy="true" form="postfix">|</mo></mrow>"#,
+        );
+        assert_eq!(texts(&omml), vec!["z"], "定界符内容不得丢: {omml}");
+
+        // token 与非 token 交错：合流止于切片边界，非 token 另起结构
+        let omml = omml_of(
+            r#"<mrow><mo stretchy="true" form="prefix">(</mo><mi>a</mi><mo>+</mo><mfrac><mn>1</mn><mn>2</mn></mfrac><mo stretchy="true" form="postfix">)</mo></mrow>"#,
+        );
+        assert_eq!(texts(&omml), vec!["a+", "1", "2"], "{omml}");
+    }
+
+    #[test]
+    fn stretchy_delim_is_one_sequence_not_separated_args() {
+        // 多个 `m:e` 会被 sepChr 读成参数列表，`\left(a+b\right)` 就多出逗号
+        let omml = omml_of(
+            r#"<mrow><mo stretchy="true" form="prefix">(</mo><mi>a</mi><mo>+</mo><mi>b</mi><mo stretchy="true" form="postfix">)</mo></mrow>"#,
+        );
+        assert_eq!(
+            omml.matches("<m:e>").count(),
+            1,
+            "一段序列只应有一个 m:e: {omml}"
+        );
+        assert_eq!(texts(&omml), vec!["a+b"], "{omml}");
+    }
+
+    #[test]
+    fn stretchy_abs_has_no_comma_sep() {
+        let omml = omml_of(
+            r#"<mrow><mo stretchy="true" form="prefix">|</mo><mi>z</mi><mo stretchy="true" form="postfix">|</mo></mrow>"#,
+        );
+        assert!(omml.contains(r#"<m:begChr m:val="|"/>"#), "{omml}");
+        assert!(omml.contains("<m:t>z</m:t>"), "{omml}");
+        assert!(
+            !omml.contains(r#"m:sepChr m:val=",""#),
+            "绝对值不应写逗号 sepChr: {omml}"
+        );
+    }
+
+    #[test]
+    fn teacher_reported_blank_survives_to_omml() {
+        // 线上真实题干：竖线里的 z 曾整体丢失，2em 的答案空位曾塌成看着像 0 的 ()
+        let MathOutcome::Ok(mathml) =
+            crate::export::math::to_mathml(r"\left|z\right| = (\hspace{2em})", false)
+        else {
+            panic!("该题干不该降级");
+        };
+        let MathOutcome::Ok(omml) = to_omml(&mathml) else {
+            panic!("转换降级: {mathml}");
+        };
+        // 体内只剩 z；2em 空位 → 空 1×2 矩阵（MathType 一行两列槽）
+        assert!(
+            mathml.contains("<mtable") && mathml.contains("<mtd"),
+            "hspace 应落成 mtable: {mathml}"
+        );
+        assert!(
+            omml.contains("<m:m>") || omml.contains("<m:eqArr>") || omml.contains("<m:matrix"),
+            "2em 空位应是 OMML 矩阵: {omml}"
+        );
+        assert!(omml.contains("<m:t>z</m:t>") || omml.contains(">z<"), "{omml}");
+        assert!(omml.contains(r#"<m:begChr m:val="|"/>"#), "{omml}");
+        assert!(
+            omml.contains(r#"m:sepChr m:val="""#) || !omml.contains("m:sepChr"),
+            "序列 |z| 不应带逗号分隔符: {omml}"
+        );
+    }
+
     /// 规范化：命名空间前缀按 URI 统一 → 属性按名排序 → 空白归一，然后重序列化
     fn canon(xml: &str) -> String {
         let doc =
@@ -1570,6 +1747,7 @@ mod golden {
         match uri {
             Some(OMML_NS) => Some("m"),
             Some(MATHML_NS) => Some("mml"),
+            Some(XML_NS) => Some("xml"),
             Some(_) => Some("?ns"),
             None => None,
         }

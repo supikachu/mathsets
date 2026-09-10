@@ -6,7 +6,8 @@
 //! 因此 Word / PDF 两条公式管线共享同一份归一结果。
 //!
 //! 1. **参数级改写**：`\textcolor{red}{x}` / `\boxed{…}` 取参数内容、`\phantom{…}` / `\tag{…}` 整段删除、
-//!    `\substack{a\\b}` 改写为 matrix —— 这些 crate 完全不认，但不改写会把排版信息一起丢掉。
+//!    `\hspace{Nem}` → 空 1×2 矩阵（答案空位）、`\substack{a\\b}` 改写为 matrix ——
+//!    这些要么 crate 不认，要么需要落到下游可占宽的形态。
 //! 2. **命令别名**：crate 认 `\geq` 不认 `\ge`、认 `\emptyset` 不认 `\varnothing`（方向与前端的
 //!    KaTeX 相反），\dfrac/\tfrac/\dots/\lg/… 一律折算成 crate 支持的等价写法，语义不变。
 //! 3. **环境改写**：crate 支持 `matrix`/`pmatrix`/`bmatrix`/`vmatrix`/`align`（且 `matrix` 接受 `&`
@@ -138,8 +139,10 @@ const COMMAND_ALIASES: &[(&str, &str)] = &[
 enum ArgRule {
     /// 读 `n` 个参数，用第 `i` 个的内容替换整段（`\textcolor{red}{x}` → `x`）
     KeepArg(usize, usize),
-    /// 读 `n` 个参数后整段删除（`\hspace{1mm}`）
+    /// 读 `n` 个参数后整段删除（`\phantom{…}`）
     Drop(usize),
+    /// 读 1 个长度参数，改写为答案空位（空 1×2 矩阵）
+    ToSpace,
     /// 读 1 个参数改写为 `\begin{matrix}…\end{matrix}`（`\substack{a\\b}`）
     ToMatrix,
 }
@@ -163,8 +166,8 @@ const ARG_RULES: &[(&str, ArgRule)] = &[
     ("tag*", ArgRule::Drop(1)),
     ("notag", ArgRule::Drop(0)),
     ("mathstrut", ArgRule::Drop(0)),
-    ("hspace", ArgRule::Drop(1)),
-    ("kern", ArgRule::Drop(1)),
+    ("hspace", ArgRule::ToSpace),
+    ("kern", ArgRule::ToSpace),
 ];
 
 /// 公式转换结果
@@ -200,7 +203,13 @@ pub fn to_mathml(latex: &str, display: bool) -> MathOutcome {
     match latex2mathml::latex_to_mathml(src.as_ref(), style) {
         Ok(mathml) => match parse_error_reason(&mathml) {
             Some(reason) => MathOutcome::Failed(reason),
-            None => MathOutcome::Ok(escape_stray_markup(&mathml).into_owned()),
+            None => {
+                let escaped = escape_stray_markup(&mathml);
+                // latex2mathml 会把 `C_3^1` / `x_i^2` 建成嵌套
+                // `<msub>…<msup>…</msup></msub>`（≈ C_{3^1}），而 TeX/KaTeX 语义是
+                // 同一基元上的 msubsup。不拍平则 Word OMML / MathType 都会错位。
+                MathOutcome::Ok(fix_nested_scripts(&escaped).into_owned())
+            }
         },
         // crate 的错误串两端带裸引号，且不带任何中文上下文；这条要直接给教师看
         Err(e) => MathOutcome::Failed(format!(
@@ -246,6 +255,140 @@ fn escape_stray_markup(mathml: &str) -> Cow<'_, str> {
             Cow::Owned(buf)
         }
         None => Cow::Borrowed(mathml),
+    }
+}
+
+/// 把 latex2mathml 的嵌套脚标拍成 `msubsup`（TeX `base_sub^sup` 语义）。
+///
+/// 识别两种错误嵌套：
+/// - `<msub><base/><msup><sub/><sup/></msup></msub>` → `msubsup`
+/// - `<msup><msub><base/><sub/></msub><sup/></msup>` → `msubsup`
+fn fix_nested_scripts(mathml: &str) -> Cow<'_, str> {
+    let Ok(doc) = roxmltree::Document::parse(mathml) else {
+        return Cow::Borrowed(mathml);
+    };
+    let mut changed = false;
+    let mut out = String::with_capacity(mathml.len() + 16);
+    write_mathml_node(doc.root_element(), &mut out, &mut changed);
+    if changed {
+        Cow::Owned(out)
+    } else {
+        Cow::Borrowed(mathml)
+    }
+}
+
+fn mathml_element_kids<'a, 'input>(
+    n: roxmltree::Node<'a, 'input>,
+) -> Vec<roxmltree::Node<'a, 'input>> {
+    n.children().filter(|c| c.is_element()).collect()
+}
+
+/// 若 `n` 是可拍平的嵌套脚标，返回 `(base, sub, sup)`。
+fn nested_script_parts<'a, 'input>(
+    n: roxmltree::Node<'a, 'input>,
+) -> Option<(
+    roxmltree::Node<'a, 'input>,
+    roxmltree::Node<'a, 'input>,
+    roxmltree::Node<'a, 'input>,
+)> {
+    let kids = mathml_element_kids(n);
+    if kids.len() != 2 {
+        return None;
+    }
+    match n.tag_name().name() {
+        "msub" => {
+            let inner = kids[1];
+            if inner.tag_name().name() != "msup" {
+                return None;
+            }
+            let ik = mathml_element_kids(inner);
+            (ik.len() == 2).then_some((kids[0], ik[0], ik[1]))
+        }
+        "msup" => {
+            let inner = kids[0];
+            if inner.tag_name().name() != "msub" {
+                return None;
+            }
+            let ik = mathml_element_kids(inner);
+            (ik.len() == 2).then_some((ik[0], ik[1], kids[1]))
+        }
+        _ => None,
+    }
+}
+
+fn write_mathml_node(n: roxmltree::Node<'_, '_>, out: &mut String, changed: &mut bool) {
+    if !n.is_element() {
+        if n.is_text() {
+            xml_push_escaped_text(out, n.text().unwrap_or(""));
+        }
+        return;
+    }
+
+    if let Some((base, sub, sup)) = nested_script_parts(n) {
+        *changed = true;
+        out.push_str("<msubsup>");
+        write_mathml_node(base, out, changed);
+        write_mathml_node(sub, out, changed);
+        write_mathml_node(sup, out, changed);
+        out.push_str("</msubsup>");
+        return;
+    }
+
+    let name = n.tag_name().name();
+    out.push('<');
+    out.push_str(name);
+    for attr in n.attributes() {
+        out.push(' ');
+        if let Some(ns) = attr.namespace() {
+            // latex2mathml 根上只有默认 xmlns；其它命名空间属性极少见，原样带前缀写不了，
+            // 这里只保证默认属性与 xmlns。
+            let _ = ns;
+        }
+        out.push_str(attr.name());
+        out.push_str("=\"");
+        xml_push_escaped_attr(out, attr.value());
+        out.push('"');
+    }
+    // 保留根 math 的默认命名空间声明（roxmltree 可能不作为普通 attribute 暴露）
+    if name == "math"
+        && n.attribute("xmlns").is_none()
+        && n.namespaces().find(|ns| ns.name().is_none()).is_some()
+    {
+        out.push_str(" xmlns=\"http://www.w3.org/1998/Math/MathML\"");
+    }
+
+    if !n.has_children() {
+        out.push_str("/>");
+        return;
+    }
+    out.push('>');
+    for child in n.children() {
+        write_mathml_node(child, out, changed);
+    }
+    out.push_str("</");
+    out.push_str(name);
+    out.push('>');
+}
+
+fn xml_push_escaped_text(out: &mut String, s: &str) {
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(ch),
+        }
+    }
+}
+
+fn xml_push_escaped_attr(out: &mut String, s: &str) {
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(ch),
+        }
     }
 }
 
@@ -442,6 +585,7 @@ fn apply_arg_rule(s: &str, from: usize, rule: ArgRule) -> Option<(String, usize)
         ArgRule::KeepArg(argc, keep) => (argc, Some(keep)),
         ArgRule::Drop(argc) => (argc, None),
         ArgRule::ToMatrix => (1, Some(0)),
+        ArgRule::ToSpace => (1, Some(0)),
     };
     let (span_end, args) = read_braced_args(s, from, argc)?;
     let replacement = match keep {
@@ -450,12 +594,54 @@ fn apply_arg_rule(s: &str, from: usize, rule: ArgRule) -> Option<(String, usize)
             let body = &s[a..b];
             match rule {
                 ArgRule::ToMatrix => format!(r"\begin{{{MATRIX}}}{body}\end{{{MATRIX}}}"),
+                ArgRule::ToSpace => em_space_text(body),
                 _ => body.to_string(),
             }
         }
         None => String::new(),
     };
     Some((replacement, span_end))
+}
+
+/// LaTeX 长度参数 → 答案空位（整 em 部分才保留）。空串表示整段消失。
+///
+/// 满 1em 及以上改成空的 **1×2 矩阵**（`\begin{matrix} & \end{matrix}`）：
+/// MathType 原生一行两列空槽占宽，避免 U+2003 缺字（�）与 TypefaceSpace / `_` 方案的观感问题。
+/// OMML 侧同样走 `mtable` → 矩阵/eqArr。
+///
+/// 不足 1em 的是排版微调（`a\hspace{2mm}b`），历来直接丢弃。
+fn em_space_text(len: &str) -> String {
+    let gaps = length_em(len).floor().max(0.0) as usize;
+    if gaps == 0 {
+        return String::new();
+    }
+    format!(r"\begin{{{MATRIX}}} & \end{{{MATRIX}}}")
+}
+
+/// 把 LaTeX / MathML 长度按 `1em = 10.5pt` 折成 em；认不出的写法按 0 处理
+fn length_em(raw: &str) -> f64 {
+    let s = raw.trim();
+    let digits: String = s
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+'))
+        .collect();
+    let Ok(v) = digits.parse::<f64>() else {
+        return 0.0;
+    };
+    let unit: String = s[digits.len()..]
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace())
+        .collect();
+    match unit.as_str() {
+        "" | "em" | "ex" => v,
+        "pt" => v / 10.5,
+        "mm" => v / 3.7,
+        "cm" => v / 0.37,
+        "in" => v / 9.4,
+        "px" => v / 14.0,
+        "mu" => v / 18.0,
+        _ => v,
+    }
 }
 
 /// 从 `from` 起读 `argc` 个 `{…}`（允许参数间空白），返回（结束位置, 各参数内容区间）
@@ -763,6 +949,34 @@ mod tests {
     }
 
     #[test]
+    fn because_emits_unicode_because_glyph() {
+        let m = mathml_of(r"\because 0 < p < q");
+        assert!(
+            m.contains('\u{2235}'),
+            "\\because 应落到 U+2235，实际: {m}"
+        );
+    }
+
+    #[test]
+    fn consecutive_scripts_become_msubsup() {
+        // latex2mathml 原生会嵌套成 msub>msup（≈ C_{3^1}）；拍平后 OMML/MathType 才正确
+        for latex in [r"C_3^1", r"C_3^2", r"C_n^k", r"x_i^2", r"C_{3}^{1}"] {
+            let mml = mathml_of(latex);
+            assert!(
+                mml.contains("<msubsup>") && !mml.contains("</msup></msub>"),
+                "{latex} 应产出扁平 msubsup，实际: {mml}"
+            );
+            match crate::export::math::omml::to_omml(&mml) {
+                MathOutcome::Ok(omml) => assert!(
+                    omml.contains("m:sSubSup") && !omml.contains("</m:sSup></m:sub>"),
+                    "{latex} OMML 应为 sSubSup 而非嵌套 sSub: {omml}"
+                ),
+                MathOutcome::Failed(e) => panic!("{latex} OMML 失败: {e}"),
+            }
+        }
+    }
+
+    #[test]
     fn emptyset_matches_the_mathml_backend() {
         // crate 认 \emptyset 与 U+2205，不认 \varnothing（与前端的 KaTeX 方向相反）
         assert_eq!(normalize(r"A=\varnothing").as_ref(), r"A=\emptyset");
@@ -816,6 +1030,10 @@ mod tests {
         assert_eq!(normalize(r"\textcolor{red}{x+1}").as_ref(), "x+1");
         assert_eq!(normalize(r"\boxed{S_n}").as_ref(), "S_n");
         assert_eq!(normalize(r"a\hspace{2mm}b").as_ref(), "ab");
+        // 答案空位：满 1em 换成空 1×2 矩阵（MathType 一行两列槽）
+        let blank = format!(r"a\begin{{{MATRIX}}} & \end{{{MATRIX}}}b");
+        assert_eq!(normalize(r"a\hspace{2em}b").as_ref(), blank);
+        assert_eq!(normalize(r"a\hspace{1cm}b").as_ref(), blank);
         assert_eq!(
             normalize(r"\sum_{\substack{1\le i\le n\\ i\in A}}a_i").as_ref(),
             r"\sum_{\begin{matrix}1\leq i\leq n\\ i\in A\end{matrix}}a_i"

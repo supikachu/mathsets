@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::export::math::{MathOutcome, to_mathml};
 use crate::mathtype::convert::{
-    convert_batch, mathml_to_ole_bin, MathTypeConvertConfig, WmfResult,
+    convert_batch, mathml_to_ole_bin, ole_bin_to_wmf, MathTypeConvertConfig, WmfResult,
 };
 use crate::mathtype::extract::{extract_slots, FormulaSlot};
 use crate::models::question::Question;
@@ -337,12 +337,30 @@ pub async fn sync_question_math_assets(
         .iter()
         .map(|(id, bin, _, _)| (id.clone(), bin.clone()))
         .collect();
-    let results = convert_batch(cfg, &batch_in).await?;
+    let results = match convert_batch(cfg, &batch_in).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "convert_batch 失败，逐条走 CLI WMF 回退");
+            Vec::new()
+        }
+    };
     let mut by_id: HashMap<String, Result<WmfResult, String>> = results.into_iter().collect();
 
     for (batch_id, bin, asset_id, _) in bins {
-        match by_id.remove(&batch_id) {
-            Some(Ok(wmf)) => {
+        let wmf_outcome = match by_id.remove(&batch_id) {
+            Some(Ok(wmf)) => Ok(wmf),
+            Some(Err(e)) => match ole_bin_to_wmf(cfg, &bin).await {
+                Ok(wmf) => Ok(wmf),
+                Err(e2) => Err(format!("{e}; CLI WMF 回退失败: {e2}")),
+            },
+            None => match ole_bin_to_wmf(cfg, &bin).await {
+                Ok(wmf) => Ok(wmf),
+                Err(e2) => Err(format!("convert_batch 未返回该 id; CLI WMF 回退失败: {e2}")),
+            },
+        };
+
+        match wmf_outcome {
+            Ok(wmf) => {
                 sqlx::query(
                     r#"
                     UPDATE question_math_assets SET
@@ -370,7 +388,7 @@ pub async fn sync_question_math_assets(
                 .await
                 .map_err(|e| e.to_string())?;
             }
-            Some(Err(e)) => {
+            Err(e) => {
                 sqlx::query(
                     r#"
                     UPDATE question_math_assets SET
@@ -385,10 +403,6 @@ pub async fn sync_question_math_assets(
                 .execute(pool)
                 .await
                 .map_err(|e| e.to_string())?;
-                failed += 1;
-            }
-            None => {
-                set_failed(pool, asset_id, "convert_batch 未返回该 id").await?;
                 failed += 1;
             }
         }
